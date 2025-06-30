@@ -1,0 +1,240 @@
+import MetaBot, { MetaBotOptions } from './metaHelper'
+import {
+  dcaBotDb,
+  comboBotDb,
+  comboDealsDb,
+  dcaDealsDb,
+  hedgeComboBotDb,
+  hedgeDCABotDb,
+} from '../db/dbInit'
+import { IdMute, IdMutex } from '../utils/mutex'
+
+import {
+  BotType,
+  ClearComboBotSchema,
+  ClearDCABotSchema,
+  StrategyEnum,
+  HedgeBotSchema,
+  BotStatusEnum,
+  CloseDCATypeEnum,
+  ActionsEnum,
+  DCADealStatusEnum,
+  DCACloseTriggerEnum,
+} from '../../types'
+
+const mutex = new IdMutex()
+
+class HedgeBot extends MetaBot<
+  HedgeBotSchema,
+  ClearComboBotSchema | ClearDCABotSchema
+> {
+  private checkTpSlTimer: NodeJS.Timeout | null = null
+  private checkTpSlInterval = 1000 * 30
+  constructor(options: MetaBotOptions) {
+    super(
+      options,
+      options.botType === BotType.hedgeCombo ? hedgeComboBotDb : hedgeDCABotDb,
+    )
+    this.checkTpSl = this.checkTpSl.bind(this)
+  }
+
+  private resetTimers() {
+    if (this.checkTpSlTimer) {
+      clearInterval(this.checkTpSlTimer)
+      this.checkTpSlTimer = null
+    }
+  }
+
+  get long() {
+    return [...this.bots.values()].find(
+      (bot) => bot.data?.settings?.strategy === StrategyEnum.long,
+    )
+  }
+
+  get short() {
+    return [...this.bots.values()].find(
+      (bot) => bot.data?.settings?.strategy === StrategyEnum.short,
+    )
+  }
+
+  override async init() {
+    await super.init()
+    if (!this.long) {
+      this.handleError('Long bot not found')
+    }
+    if (!this.short) {
+      this.handleError('Short bot not found')
+    }
+  }
+
+  private setTpSlTimer() {
+    if (this.data?.sharedSettings?.useSl || this.data?.sharedSettings?.useTp) {
+      this.handleLog(`Set TP/SL timer`)
+      if (this.checkTpSlTimer) {
+        clearInterval(this.checkTpSlTimer)
+      }
+      this.checkTpSlTimer = setInterval(() => {
+        this.data && this.checkTpSl(this.data?._id)
+      }, this.checkTpSlInterval)
+    }
+  }
+
+  private async getDeals(
+    strategy?: StrategyEnum,
+  ): Promise<
+    { id: string; unrealizedProfit: number; usage: number; botId: string }[]
+  > {
+    if (!strategy) {
+      return [
+        ...(await this.getDeals(StrategyEnum.long)),
+        ...(await this.getDeals(StrategyEnum.short)),
+      ]
+    }
+    const bot = strategy === StrategyEnum.long ? this.long : this.short
+    if (!bot) {
+      this.handleError(`${strategy} bot not found`)
+      return []
+    }
+    const db =
+      this.options.botType === BotType.hedgeCombo ? comboDealsDb : dcaDealsDb
+    return (
+      (
+        await db.aggregate<{
+          deals: {
+            id: string
+            unrealizedProfit: number
+            usage: number
+            botId: string
+          }[]
+        }>([
+          {
+            $match: {
+              botId: bot?.data._id,
+              status: DCADealStatusEnum.open,
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              deals: {
+                $push: {
+                  id: '$_id',
+                  unrealizedProfit: '$stats.unrealizedProfit',
+                  usage: '$stats.usage',
+                  botId: '$botId',
+                },
+              },
+            },
+          },
+        ])
+      )?.data?.result?.[0]?.deals ?? []
+    )
+  }
+
+  @IdMute(mutex, (botId: string) => `checkTpSl${botId}`)
+  private async checkTpSl(_botId: string) {
+    this.handleLog(`Check TP/SL`)
+    const deals = await this.getDeals()
+    const totalUnrealized = deals.reduce(
+      (acc, v) => acc + v.unrealizedProfit,
+      0,
+    )
+
+    const totalUsage = deals.reduce((acc, v) => acc + v.usage, 0)
+    let total = (totalUnrealized / totalUsage) * 100
+    const prevTotal = total
+    if (isNaN(total) || !isFinite(total)) {
+      total = 0
+    }
+    const slTrigger =
+      this.data?.sharedSettings?.useSl && this.data.sharedSettings.slPerc
+        ? total <= +this.data.sharedSettings.slPerc
+        : false
+    const tpTrigger =
+      this.data?.sharedSettings?.useTp && this.data.sharedSettings.tpPerc
+        ? total >= +this.data.sharedSettings.tpPerc
+        : false
+    this.handleLog(
+      `Total deal ${deals.length}, unrealized ${totalUnrealized}, usage ${totalUsage}, total ${total} (${prevTotal}), slTrigger ${slTrigger}, tpTrigger ${tpTrigger}`,
+    )
+    if (slTrigger || tpTrigger) {
+      deals.forEach((deal) => {
+        this.sendMessageToBotService(
+          this.options.botType === BotType.hedgeCombo
+            ? 'closeComboDeal'
+            : 'closeDCADeal',
+          this.options.botType === BotType.hedgeCombo
+            ? BotType.combo
+            : BotType.dca,
+          this.data?.userId,
+          deal.botId,
+          deal.id,
+          CloseDCATypeEnum.closeByMarket,
+          undefined,
+          this.data?.paperContext,
+          DCACloseTriggerEnum.combined,
+        )
+      })
+    }
+  }
+
+  @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
+  override async setStatus(
+    _botId: string,
+    status: BotStatusEnum,
+    closeType?: CloseDCATypeEnum,
+    serverRestart?: boolean,
+    hedgeConfig?: { [x in StrategyEnum]: ActionsEnum },
+  ) {
+    if (!this.initDone) {
+      this.queueAfterInit.push(() =>
+        this.setStatus.bind(this)(
+          _botId,
+          status,
+          closeType,
+          serverRestart,
+          hedgeConfig,
+        ),
+      )
+      return
+    }
+    if (status === BotStatusEnum.open && hedgeConfig) {
+      if (this.options.botType === BotType.hedgeCombo) {
+        await comboBotDb.updateData(
+          { _id: this.long?.data._id },
+          { $set: { action: hedgeConfig[StrategyEnum.long] } },
+        )
+        await comboBotDb.updateData(
+          { _id: this.short?.data._id },
+          { $set: { action: hedgeConfig[StrategyEnum.short] } },
+        )
+      }
+      if (this.options.botType === BotType.hedgeDca) {
+        await dcaBotDb.updateData(
+          { _id: this.long?.data._id },
+          { $set: { action: hedgeConfig[StrategyEnum.long] } },
+        )
+        await dcaBotDb.updateData(
+          { _id: this.short?.data._id },
+          { $set: { action: hedgeConfig[StrategyEnum.short] } },
+        )
+      }
+    }
+    if (status === BotStatusEnum.closed) {
+      this.resetTimers()
+    }
+    super.setStatus(_botId, status, closeType, serverRestart).then(() => {
+      if (status === BotStatusEnum.open) {
+        this.setTpSlTimer()
+      }
+    })
+  }
+
+  @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
+  public async reload(_botId: string) {
+    this.resetTimers()
+    super.reload(_botId)
+  }
+}
+
+export default HedgeBot

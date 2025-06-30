@@ -1,0 +1,17688 @@
+import Big from 'big.js'
+import { v4 } from 'uuid'
+import type DB from '../db'
+import {
+  OrderSideEnum,
+  StatusEnum,
+  BotStatusEnum,
+  TypeOrderEnum,
+  DCADealStatusEnum,
+  OrderTypeEnum,
+  StrategyEnum,
+  StartConditionEnum,
+  BotType,
+  CloseDCATypeEnum,
+  ExchangeEnum,
+  IndicatorEnum,
+  rsiValueEnum,
+  rsiValue2Enum,
+  IndicatorStartConditionEnum,
+  TradingviewAnalysisConditionEnum,
+  TradingviewAnalysisSignalEnum,
+  DCATypeEnum,
+  MAEnum,
+  OrderSizeTypeEnum,
+  BBCrossingEnum,
+  SRCrossingEnum,
+  TrailingModeEnum,
+  IndicatorAction,
+  CloseConditionEnum,
+  TerminalDealTypeEnum,
+  IndicatorSection,
+  BOT_STATUS_EVENT,
+  BotMarginTypeEnum,
+  PositionSide,
+  ExcludeDoc,
+  StochRangeEnum,
+  DCAConditionEnum,
+  BotStartTypeEnum,
+  ECDTriggerEnum,
+  DivTypeEnum,
+  TrendFilterOperatorEnum,
+  STConditionEnum,
+  timeIntervalMap,
+  SettingsIndicators,
+  CooldownOptionsEnum,
+  BotParentIndicatorEventDto,
+  BotParentUnsubscribeIndicatorEventDto,
+  PCConditionEnum,
+  IndicatorsData,
+  DynamicPriceFilterPriceTypeEnum,
+  LastPricesPerSymbols,
+  PairPrioritizationEnum,
+  BotStats,
+  BotSymbolsStats,
+  ComboTpBase,
+  ppValueEnum,
+  ppValueTypeEnum,
+  Symbols,
+  RiskSlTypeEnum,
+  DynamicArPrices,
+  ScaleDcaTypeEnum,
+  BotFlags,
+  BaseSlOnEnum,
+  RangeType,
+  IndicatorsLogicEnum,
+  Sizes,
+  BotParentProcessStatsEventDtoDcaCombo,
+  rabbitIndicatorsKey,
+  setToRedisDelay,
+  DCADealFlags,
+  AddFundsTypeEnum,
+  DCAVolumeType,
+  OrderStatusType,
+  DcaVolumeRequiredChangeRef,
+  DynamicPriceFilterDirectionEnum,
+  DCValueEnum,
+  ActionsEnum,
+  DCACustom,
+  MultiTP,
+} from '../../types'
+import { MathHelper } from '../utils/math'
+import MainBot, { notEnoughErrors } from './main'
+import utils from '../utils'
+import { gt, lt, lte, gte, eq } from '@gainium/indicators'
+import { IdMute, IdMutex } from '../utils/mutex'
+import {
+  DCABotSchema,
+  PriceMessage,
+  Order,
+  CleanDCADealsSchema,
+  Grid,
+  ExecutionReport,
+  IndicatorHistory,
+  IndicatorConfig,
+  MAResult,
+  UnPromise,
+  AddFundsSettings,
+  PositionInBot,
+  DealStopLossCombo,
+  CleanMainBot,
+  SettingsIndicatorGroup,
+  CleanComboDealsSchema,
+  DCACloseTriggerEnum,
+} from '../../types'
+import { ExchangeIntervals } from '../../types'
+import { convertDCABot, convertComboBot } from './utils'
+import DCAUtils from './dca/utils'
+import Bot from './index'
+import { getIntersection } from '../utils/set'
+import { removePaperFormExchangeName } from '../exchange/helpers'
+import logger from '../utils/logger'
+import { botProfitChartDb, dcaBotDb, dcaDealsDb } from '../db/dbInit'
+import { RunWithDelay } from '../utils/delay'
+import { DealStats } from './worker/statsService'
+import RedisClient from '../db/redis'
+import {
+  BandsResult,
+  DIVResult,
+  PCResult,
+  PivotResult,
+  PriorPivotResult,
+  QFLResult,
+  SuperTrendResult,
+} from '@gainium/indicators'
+
+export type PercentileResult = {
+  percentile?: number
+  value: number
+}
+
+const { sleep, checkNumber, mapToArray } = utils
+
+export type FullDeal<Deal extends CleanDCADealsSchema> = {
+  deal: Deal
+  initialOrders: Grid[]
+  currentOrders: Grid[]
+  previousOrders: Grid[]
+  closeBySl: boolean
+  notCheckSl: boolean
+}
+
+const mutex = new IdMutex()
+
+const mutexIndicators = new IdMutex(100)
+
+const mutexConcurrently = new IdMutex(30)
+
+const mutexPriceConcurrently = new IdMutex(30)
+
+const mutexOpenDealBySignal = new IdMutex(15)
+
+const notionalReasons = ['The order funds should be more than', 'NOTIONAL']
+
+const maxTimeout = 2 ** 31 - 1
+
+type LocalIndicators = {
+  uuid: string
+  id: string
+  room: string
+  status: boolean
+  statusTo?: number
+  statusSince?: number
+  numberOfSignals?: number
+  data: boolean
+  history: IndicatorHistory[]
+  symbol: string
+  key: string
+  action: IndicatorAction
+  maCross: boolean
+  childIndicator: string
+  parentIndicator: string
+  section?: IndicatorSection
+  interval: ExchangeIntervals
+  cb?: (_msg: string) => void
+  groupId: string
+}
+
+type TrailingDeal = {
+  trailingTp: boolean
+  skipTp: boolean
+  trailingSl: boolean
+  skipSl: boolean
+  trailingTpPrice: number
+}
+
+type DealIndicatorUnpnlVal = {
+  min: number
+  max: number
+}
+
+/**
+ * Class for operate DCA bot functions
+ */
+class DCABotHelper<
+  Schema extends DCABotSchema = DCABotSchema,
+  Deal extends CleanDCADealsSchema = CleanDCADealsSchema,
+> extends MainBot<Schema> {
+  indicatorGroupsToUse: SettingsIndicatorGroup[] = []
+  botProfitDb = botProfitChartDb
+  /** Bot deals */
+  deals: Map<string, FullDeal<ExcludeDoc<Deal>>> = new Map()
+  /** Map status to deal */
+  dealStatusMap: Map<DCADealStatusEnum, Set<string>> = new Map()
+  /** Map symbol to deal */
+  dealSymbolMap: Map<string, Set<string>> = new Map()
+  /** DB instance to work with deals */
+  dealsDb: DB<Deal>
+  /** Close after TP filled */
+  closeAfterTpFilled: boolean
+  /** Timer for time base trigger */
+  timer: NodeJS.Timeout | null
+  /** Timeout first time */
+  startTimeoutTime: Map<string, number>
+  /** Indicators */
+  indicators: Map<string, LocalIndicators> = new Map()
+  indicatorsIntervalActionMap: Map<string, number> = new Map()
+  /** indicator actions */
+  indicatorActions = {
+    startDeal: new Map<string, number>(),
+    stopBot: new Map<string, number>(),
+    startBot: new Map<string, number>(),
+    closeDealTp: new Map<string, number>(),
+    closeDealSl: new Map<string, number>(),
+    dcaOrder: new Map<string, number>(),
+  }
+  dcaOrdersBySignal = new Set<string>()
+  /** Processed filled list */
+  processedFilled: Map<string, Set<string>> = new Map()
+  /** Processed deal update list */
+  dealUpdateOrders: Map<string, Set<string>> = new Map()
+  feeProcessed: Map<string, Set<string>> = new Map()
+  /** Lock sl check */
+  lockSLCheck = false
+  /** Pending deals */
+  pendingDeals = 0
+  /** Pending deals per pair */
+  pendingDealsPerPair: Map<string, number> = new Map()
+  /** Last indicators data map */
+  lastIndicatorsDataMap: Map<string, number> = new Map()
+  /** Initial all deals value */
+  allDeals = 0
+  /** Allow to place orders by deal*/
+  allowToPlaceOrders: Map<string, boolean> = new Map()
+  /** Open new deal timer */
+  openNewDealTimer: Map<string, NodeJS.Timeout> = new Map()
+  /** Close deal timers */
+  closeDealTimer: Map<string, NodeJS.Timeout | null> = new Map()
+
+  blockCheck = false
+
+  utils: DCAUtils = new DCAUtils()
+  stopList: Set<string> = new Set()
+
+  pendingOrdersList: Map<string, Grid[]> = new Map()
+  runAfterRestartQueue: (() => Promise<void>)[] = []
+  ignoreStats = false
+  saveIndicatorTimer: NodeJS.Timeout | null = null
+  saveIndicatorTimeout = 20 * 1000
+  openAtStartTriggered = false
+  checkIndicatorsQueue: Map<
+    string,
+    {
+      data: IndicatorHistory[]
+      uuid: string
+      symbol: string
+    }[]
+  > = new Map()
+  equityTimer: NodeJS.Timeout | null = null
+  indicatorCheckTimers: { [x: string]: NodeJS.Timeout | null | undefined } = {}
+  indicatorCheckTimersFired: {
+    [x: string]: boolean | undefined
+  } = {}
+  coinsMemory: Set<string> = new Set()
+  coinsLastRequest = 0
+  relativeCoinsMemory: Set<string> = new Set()
+  relativeCoinsLastRequest = 0
+  coinsTimeout = 60 * 60 * 1000
+  ignoreRestartStats = false
+  saveIndicators = false
+  slippageRetry = 5
+  profitBaseDealMap: Map<string, boolean> = new Map()
+  leverageMap: Map<string, number> = new Map()
+  baseSlOnMap: Map<string, BaseSlOnEnum> = new Map()
+  minigridDealMap: Map<string, Set<string>> = new Map()
+  combo = false
+  scaleAr = false
+  useCompountReduce = false
+  tpAr = false
+  isMonitoring = false
+  useMonitoring = false
+  slAr = false
+  isLong = true
+  dealTimersMap: Map<
+    string,
+    {
+      limitTimer: NodeJS.Timeout | null
+      enterMarketTimer: NodeJS.Timeout | null
+    }
+  > = new Map()
+  dealsForMoveSl: Map<string, number> = new Map()
+  dealsForTrailing: Map<string, TrailingDeal> = new Map()
+  dealsForStopLoss: Map<string, number> = new Map()
+  dealsForIndicatorUnpnl: Map<string, DealIndicatorUnpnlVal> = new Map()
+  dealsForStopLossCombo: Map<string, DealStopLossCombo> = new Map()
+  dealsDCALevelCheck: Map<string, number> = new Map()
+  startSent = false
+  stopSent = false
+  private defaultUnpnl = 2
+  private defaultUnpnlCondition = IndicatorStartConditionEnum.gt
+  private afterIndicatorsConnected: (() => void | Promise<void>)[] = []
+  ordersInBetweenUpdates: Set<string> = new Set()
+  private pendingClose: Set<string> = new Set()
+  /**
+   * Prepare DB instaces
+   *
+   * Connect to socket io streams
+   *
+   * Set initial values
+   * @param {string} id Id of the bot
+   * @param {boolean} log Enable/disable logging
+   */
+  constructor(
+    id: string,
+    exchange: ExchangeEnum,
+    log = true,
+    serviceRestart = false,
+    ignoreStats = false,
+  ) {
+    super(id, exchange, log)
+    this.ignoreStats = ignoreStats
+    this.db = dcaBotDb
+    //@ts-ignore
+    this.dealsDb = dcaDealsDb
+    this.math = new MathHelper()
+    this.runAfterIndicatorsConnected =
+      this.runAfterIndicatorsConnected.bind(this)
+    this.priceUpdateCallback = this.priceUpdateCallback.bind(this)
+    this.processFilledOrder = this.processFilledOrder.bind(this)
+    this.processPartiallyFilledOrder =
+      this.processPartiallyFilledOrder.bind(this)
+    this.processCanceledOrder = this.processCanceledOrder.bind(this)
+    this.processNewOrder = this.processNewOrder.bind(this)
+    this.processLiquidationOrder = this.processLiquidationOrder.bind(this)
+    this.sortQueue = this.sortQueue.bind(this)
+    this.botType = BotType.dca
+    this.cbFunctions = {
+      sort: this.sortQueue,
+      onFilled: this.processFilledOrder,
+      onPartiallyFilled: this.processPartiallyFilledOrder,
+      onCanceled: this.processCanceledOrder,
+      onNew: this.processNewOrder,
+      onLiquidation: this.processLiquidationOrder,
+    }
+    this.closeAfterTpFilled = false
+    this.timer = null
+    this.orderLimitRepositionTimeout = 10000
+    this.enterMarketTimeout = 35000
+    this.startTimeoutTime = new Map()
+    this.openDealByTimer = this.openDealByTimer.bind(this)
+    this.startTimeBasedTrigger = this.startTimeBasedTrigger.bind(this)
+    this.checkIndicatorConditions = this.checkIndicatorConditions.bind(this)
+    this.checkTPOrder = this.checkTPOrder.bind(this)
+    this.checkBaseOrder = this.checkBaseOrder.bind(this)
+    this.serviceRestart = serviceRestart
+    this.callbackAfterUserStream = this.checkOrdersAfterReconnect.bind(this)
+    this.closeByTimer = this.closeByTimer.bind(this)
+    this.setCloseByTimer = this.setCloseByTimer.bind(this)
+    this.priceTimerFn = this.priceTimerFn.bind(this)
+    this.openDealAfterTimer = this.openDealAfterTimer.bind(this)
+    this.indicatorCheckTimeout = this.indicatorCheckTimeout.bind(this)
+    this.indicatorDataCb = this.indicatorDataCb.bind(this)
+    this.indicatorDataCbRedis = this.indicatorDataCbRedis.bind(this)
+    this.triggerMoveSl = this.triggerMoveSl.bind(this)
+    this.triggerTrailing = this.triggerTrailing.bind(this)
+    this.triggerStopLoss = this.triggerStopLoss.bind(this)
+    this.isDealForStopLoss = this.isDealForStopLoss.bind(this)
+    this.isDealForMoveSl = this.isDealForMoveSl.bind(this)
+    this.isDealForTrailing = this.isDealForTrailing.bind(this)
+  }
+
+  removeDealByStatus(id: string) {
+    for (const s of [...this.dealStatusMap.keys()]) {
+      const get = this.dealStatusMap.get(s)
+      if (get) {
+        get.delete(id)
+      }
+    }
+  }
+
+  removeDealBySymbol(symbol: string, id: string) {
+    const get = this.dealSymbolMap.get(symbol)
+    if (get) {
+      get.delete(id)
+    }
+  }
+
+  setDealByStatus(status: DCADealStatusEnum, id: string) {
+    if (!id) {
+      return
+    }
+    this.removeDealByStatus(id)
+    this.dealStatusMap.set(
+      status,
+      (this.dealStatusMap.get(status) ?? new Set()).add(id),
+    )
+  }
+
+  setDealBySymbol(symbol: string, id: string) {
+    if (!id) {
+      return
+    }
+    this.removeDealBySymbol(symbol, id)
+    this.dealSymbolMap.set(
+      symbol,
+      (this.dealSymbolMap.get(symbol) ?? new Set()).add(id),
+    )
+  }
+
+  @RunWithDelay(
+    (botId: string) => `${botId}setDealToRedis`,
+    (_botId: string, restart: boolean) => setToRedisDelay * (restart ? 5 : 2),
+  )
+  setDealToRedis(_botId: string, _restart: boolean) {
+    this.setToRedis('deals', [...this.deals.values()])
+  }
+
+  setDeal(deal: FullDeal<ExcludeDoc<Deal>>, save = true) {
+    const key = `${deal.deal._id}`
+    this.deals.set(key, deal)
+    this.setDealByStatus(deal.deal.status, key)
+    this.setDealBySymbol(deal.deal.symbol.symbol, key)
+    if (save) {
+      this.setDealToRedis(
+        this.botId,
+        this.serviceRestart && !this.secondRestart,
+      )
+    }
+  }
+
+  getDeal(key?: string) {
+    if (!key) {
+      return
+    }
+    return this.deals.get(key)
+  }
+
+  deleteDeal(id: string) {
+    const key = `${id}`
+    const get = this.deals.get(key)
+    this.deals.delete(key)
+    this.removeDealByStatus(key)
+    if (get) {
+      this.removeDealBySymbol(get.deal.symbol.symbol, key)
+    }
+  }
+
+  getDealsByStatusAndSymbol({
+    status,
+    symbol,
+  }: {
+    symbol?: string | string[]
+    status?: DCADealStatusEnum | DCADealStatusEnum[]
+  }) {
+    const statusIds: Set<string> = new Set()
+
+    if (status) {
+      for (const s of [status].flat()) {
+        const getByStatus = this.dealStatusMap.get(s)
+        if (getByStatus) {
+          for (const id of getByStatus) {
+            statusIds.add(id)
+          }
+        }
+      }
+    }
+
+    const symbolIds: Set<string> = new Set()
+
+    if (symbol) {
+      for (const s of [symbol].flat()) {
+        const getBySymbol = this.dealSymbolMap.get(s)
+        if (getBySymbol) {
+          for (const id of getBySymbol) {
+            symbolIds.add(id)
+          }
+        }
+      }
+    }
+
+    const ids =
+      symbol && status
+        ? getIntersection(symbolIds, statusIds)
+        : symbol
+          ? symbolIds
+          : status
+            ? statusIds
+            : new Set<string>()
+
+    const result: FullDeal<ExcludeDoc<Deal>>[] = []
+    for (const id of ids) {
+      const deal = this.deals.get(id)
+      if (deal) {
+        result.push(deal)
+      }
+    }
+    return result
+  }
+
+  get allDealsData() {
+    return [...this.deals.values()]
+  }
+
+  private indicatorDataCbRedis(room: string) {
+    return (_msg: string) => {
+      try {
+        const msg = JSON.parse(_msg) as {
+          data: IndicatorHistory[]
+          price: number
+        }
+        const response = room.split('@')
+        this.indicatorDataCb(this.botId, {
+          ...msg,
+          responseParams: { uuid: response[1], symbol: response[2] },
+        })
+      } catch (e) {
+        this.handleErrors(
+          `Catch error ${e}`,
+          'indicatorDataCbRedis',
+          '',
+          false,
+          false,
+          false,
+        )
+      }
+    }
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}indicatorDataCb`)
+  private async indicatorDataCb(
+    _botId: string,
+    msg: {
+      data: IndicatorHistory[]
+      price: number
+      responseParams: { uuid: string; symbol: string }
+    },
+  ) {
+    const settings = await this.getAggregatedSettings()
+
+    let done = false
+    if (
+      settings.pairPrioritization === PairPrioritizationEnum.alphabetical &&
+      settings.useMulti
+    ) {
+      const keyI = `${msg.responseParams.uuid}@${msg.responseParams.symbol}`
+      const find = this.indicators.get(keyI)
+      if (
+        find &&
+        find.action === IndicatorAction.startDeal &&
+        this.pairs?.has(msg.responseParams.symbol)
+      ) {
+        const last = this.lastIndicatorsDataMap.get(keyI)
+        const lastTime = [...msg.data].sort((a, b) => b.time - a.time)?.[0]
+          ?.time
+        const isNotLatest = last && lastTime && last >= lastTime
+        if (
+          !isNotLatest &&
+          lastTime &&
+          lastTime + timeIntervalMap[find.interval] > this.startTime
+        ) {
+          const key = `${find.action}@${find.interval}@${lastTime}`
+          done = true
+          const get = this.checkIndicatorsQueue.get(key) ?? []
+          get.push({ data: msg.data, uuid: find.uuid, symbol: find.symbol })
+          if (
+            get.length ===
+            (this.indicatorsIntervalActionMap.get(
+              `${find.interval}@${find.action}`,
+            ) ?? 0)
+          ) {
+            const timer = this.indicatorCheckTimers[key]
+            if (timer) {
+              clearTimeout(timer)
+            }
+            delete this.indicatorCheckTimers[key]
+            delete this.indicatorCheckTimersFired[key]
+            this.checkIndicatorsQueue.delete(key)
+            for (const d of get.sort((a, b) =>
+              `${a.symbol}`.localeCompare(`${b.symbol}`),
+            )) {
+              this.checkIndicatorConditions(
+                this.botId,
+                d.uuid,
+                d.data,
+                d.symbol,
+              )
+              await sleep(0)
+            }
+          } else {
+            this.checkIndicatorsQueue.set(key, get)
+            if (!this.indicatorCheckTimersFired[key]) {
+              const timer = this.indicatorCheckTimers[key]
+              if (timer) {
+                clearTimeout(timer)
+              }
+              this.indicatorCheckTimers[key] = setTimeout(
+                () => this.indicatorCheckTimeout(key),
+                30 * 1000,
+              )
+              this.indicatorCheckTimersFired[key] = false
+            }
+          }
+        }
+      }
+    }
+    if (
+      !settings.pairPrioritization ||
+      settings.pairPrioritization === PairPrioritizationEnum.random ||
+      !done
+    ) {
+      this.checkIndicatorConditions(
+        this.botId,
+        msg.responseParams.uuid,
+        msg.data,
+        msg.responseParams.symbol,
+      )
+    }
+  }
+
+  private async indicatorCheckTimeout(key: string) {
+    this.indicatorCheckTimersFired[key] = true
+    const get = this.checkIndicatorsQueue.get(key) ?? []
+    delete this.indicatorCheckTimers[key]
+    delete this.indicatorCheckTimersFired[key]
+    for (const d of get.sort((a, b) =>
+      `${a.symbol}`.localeCompare(`${b.symbol}`),
+    )) {
+      this.checkIndicatorConditions(this.botId, d.uuid, d.data, d.symbol)
+      await sleep(0)
+    }
+    this.checkIndicatorsQueue.delete(key)
+  }
+
+  async profitBase(deal?: ExcludeDoc<Deal>) {
+    const key = deal?._id ?? 'bot'
+    if (this.profitBaseDealMap.has(key)) {
+      return this.profitBaseDealMap.get(key)
+    }
+    const settings = await this.getAggregatedSettings(deal)
+    const result =
+      (this.futures && this.coinm) ||
+      (!this.futures && settings.profitCurrency === 'base')
+    this.profitBaseDealMap.set(key, result)
+    return result
+  }
+
+  async getAggregatedSettings(deal?: ExcludeDoc<Deal>) {
+    const botSettings = await this.replaceBotSettings(
+      (this.data?.settings ?? {}) as Schema['settings'],
+    )
+
+    const settings = {
+      ...botSettings,
+      ...(deal?.settings ?? {}),
+    }
+    return {
+      ...settings,
+      useFixedTPPrices:
+        (this.botType === BotType.dca &&
+          settings.type === DCATypeEnum.terminal &&
+          settings.useTp &&
+          settings.useFixedTPPrices) ||
+        (this.botType === BotType.dca &&
+          settings.useRiskReward &&
+          settings.riskUseTpRatio),
+      useFixedSLPrices:
+        (this.botType === BotType.dca &&
+          settings.type === DCATypeEnum.terminal &&
+          settings.useSl &&
+          !settings.trailingSl &&
+          !settings.moveSL &&
+          settings.useFixedSLPrices) ||
+        (this.botType === BotType.dca && settings.useRiskReward),
+    }
+  }
+
+  getInitalDealSettings(): Deal['settings'] | undefined {
+    if (this.data) {
+      return this.utils.getInitalDealSettings(BotType.dca, this.data.settings)
+    }
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}updateDealLastPrices`)
+  async updateDealLastPrices(
+    _botId: string,
+    override?: LastPricesPerSymbols,
+    removeSymbol?: string,
+  ) {
+    if (!this.data) {
+      return
+    }
+    if (removeSymbol) {
+      this.data.lastPricesPerSymbol = (
+        this.data.lastPricesPerSymbol ?? []
+      ).filter((d) => d.symbol !== removeSymbol)
+    }
+    if (!override) {
+      const deals = this.getDealsByStatusAndSymbol({
+        status: DCADealStatusEnum.open,
+      }).reduce(
+        (acc, v) =>
+          acc.set(
+            v.deal.symbol.symbol,
+            (acc.get(v.deal.symbol.symbol) ?? []).concat(v),
+          ),
+        new Map() as Map<string, FullDeal<ExcludeDoc<Deal>>[]>,
+      )
+      this.data.lastPricesPerSymbol = (
+        this.data.lastPricesPerSymbol ?? []
+      ).filter((p) => [...deals.keys()].includes(p.symbol))
+      for (const [symbol, _deals] of deals) {
+        const last = _deals.sort(
+          (a, b) => b.deal.createTime - a.deal.createTime,
+        )[0]
+        if (last) {
+          let found = false
+          this.data.lastPricesPerSymbol = (
+            this.data.lastPricesPerSymbol ?? []
+          ).map((p) => {
+            if (p.symbol === symbol) {
+              found = true
+              if ((p.time && p.time <= last.deal.createTime) || !p.time) {
+                return {
+                  symbol,
+                  avg: last.deal.avgPrice,
+                  entry: last.deal.initialPrice,
+                  time: last.deal.createTime,
+                }
+              }
+            }
+            return p
+          })
+          if (!found) {
+            this.data.lastPricesPerSymbol.push({
+              symbol,
+              avg: last.deal.avgPrice,
+              entry: last.deal.initialPrice,
+              time: last.deal.createTime,
+            })
+          }
+        }
+      }
+    }
+    if (override) {
+      this.data.lastPricesPerSymbol = [
+        ...(this.data.lastPricesPerSymbol ?? []).filter(
+          (d) => d.symbol !== override.symbol,
+        ),
+        override,
+      ]
+    }
+    this.updateData({
+      lastPricesPerSymbol: this.data.lastPricesPerSymbol,
+    })
+  }
+  @IdMute(mutex, (botId: string) => `${botId}checkCooldownStart`)
+  updateDealLastTime(
+    _botId: string,
+    type: 'opened' | 'closed',
+    time: number,
+    symbol: string,
+  ) {
+    if (this.data) {
+      if (type === 'opened') {
+        this.data.lastOpenedDeal = time
+        this.data.lastOpenedDealPerSymbol = [
+          ...(this.data.lastOpenedDealPerSymbol ?? []).filter(
+            (d) => d.symbol !== symbol,
+          ),
+          { symbol, time },
+        ]
+        this.updateData({
+          lastOpenedDeal: time,
+          lastOpenedDealPerSymbol: this.data.lastOpenedDealPerSymbol,
+        })
+      }
+      if (type === 'closed') {
+        this.data.lastClosedDeal = time
+        this.data.lastClosedDealPerSymbol = [
+          ...(this.data.lastClosedDealPerSymbol ?? []).filter(
+            (d) => d.symbol !== symbol,
+          ),
+          { symbol, time },
+        ]
+        this.updateData({
+          lastClosedDeal: time,
+          lastClosedDealPerSymbol: this.data.lastClosedDealPerSymbol,
+        })
+      }
+    }
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}checkCooldownStart`)
+  async checkCooldownStart(_botId: string, symbol: string) {
+    const settings = await this.getAggregatedSettings()
+    const cooldownAfterDealStartOption =
+      settings?.cooldownAfterDealStartOption && settings?.useMulti
+        ? settings?.cooldownAfterDealStartOption
+        : CooldownOptionsEnum.bot
+    const lastTime =
+      cooldownAfterDealStartOption === CooldownOptionsEnum.bot
+        ? this.data?.lastOpenedDeal
+        : this.data?.lastOpenedDealPerSymbol?.find((d) => d.symbol === symbol)
+            ?.time
+    return this.utils.checkCooldownStart(settings, lastTime ?? 0)
+  }
+  @IdMute(mutex, (botId: string) => `${botId}checkCooldownStop`)
+  async checkCooldownStop(_botId: string, symbol: string) {
+    const settings = await this.getAggregatedSettings()
+    const cooldownAfterDealStartOption =
+      settings?.cooldownAfterDealStopOption && settings?.useMulti
+        ? settings?.cooldownAfterDealStopOption
+        : CooldownOptionsEnum.bot
+    const lastTime =
+      cooldownAfterDealStartOption === CooldownOptionsEnum.bot
+        ? this.data?.lastClosedDeal
+        : this.data?.lastClosedDealPerSymbol?.find((d) => d.symbol === symbol)
+            ?.time
+    return this.utils.checkCooldownStop(settings, lastTime ?? 0)
+  }
+
+  async comboBasedOn(deal?: ExcludeDoc<Deal>) {
+    const settings = await this.getAggregatedSettings(deal)
+    return settings.comboTpBase && !settings.useTp && !settings.useSl
+      ? ComboTpBase.filled
+      : !settings.comboTpBase || settings.comboTpBase === ComboTpBase.full
+        ? ComboTpBase.full
+        : ComboTpBase.filled
+  }
+
+  /**
+   * Read orders from {@link MainBot#_loadOrders}<br />
+   *
+   */
+
+  async loadOrders(): Promise<void> {
+    const _id = this.startMethod('loadOrders')
+    if (this.serviceRestart && !this.secondRestart) {
+      const fromRedis =
+        await this.getFromRedis<FullDeal<ExcludeDoc<Deal>>[]>('deals')
+      if (fromRedis?.length) {
+        this.handleLog(`Found in redis ${fromRedis.length} deals`)
+        const checkAvg = fromRedis.some(
+          (d) => typeof d.deal.avgPrice !== 'number',
+        )
+        if (!checkAvg) {
+          for (const d of fromRedis) {
+            if (
+              d.deal.status !== DCADealStatusEnum.closed &&
+              d.deal.status !== DCADealStatusEnum.canceled
+            ) {
+              const initialOrders: Grid[] = []
+              const currentOrders: Grid[] = []
+              for (const o of d.initialOrders) {
+                initialOrders.push({
+                  ...o,
+                  qty: this.math.round(
+                    o.qty,
+                    await this.baseAssetPrecision(d.deal.symbol.symbol),
+                  ),
+                  newClientOrderId:
+                    o.type === TypeOrderEnum.dealRegular
+                      ? this.combo
+                        ? this.getOrderId('CMB-RO')
+                        : this.getOrderId('D-RO')
+                      : this.getOrderId('D-TP'),
+                })
+              }
+              for (const o of d.currentOrders) {
+                currentOrders.push({
+                  ...o,
+                  qty: this.math.round(
+                    o.qty,
+                    await this.baseAssetPrecision(d.deal.symbol.symbol),
+                  ),
+                  newClientOrderId:
+                    o.type === TypeOrderEnum.dealRegular
+                      ? this.combo
+                        ? this.getOrderId('CMB-RO')
+                        : this.getOrderId('D-RO')
+                      : o.tpSlTarget
+                        ? o.sl
+                          ? this.getOrderId('D-MSL')
+                          : this.getOrderId('D-MTP')
+                        : this.getOrderId('D-TP'),
+                })
+              }
+              this.setDeal(
+                {
+                  ...d,
+                  closeBySl: false,
+                  notCheckSl: false,
+                  initialOrders,
+                  currentOrders,
+                },
+                false,
+              )
+            }
+          }
+        }
+      }
+    }
+    const loadFromDb =
+      !(this.serviceRestart && !this.secondRestart) || !this.deals.size
+    let deals: ExcludeDoc<Deal>[] = []
+    if (loadFromDb) {
+      this.handleLog(`Get deals from DB`)
+      const dealData = await this.dealsDb.readData(
+        {
+          botId: this.botId,
+          status: {
+            $in: [
+              DCADealStatusEnum.error,
+              DCADealStatusEnum.open,
+              DCADealStatusEnum.start,
+            ],
+          },
+        } as any,
+        {},
+        {},
+        true,
+      )
+
+      if (dealData.status === StatusEnum.notok) {
+        this.loadingComplete = true
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Error getting deals from DB: ${dealData.reason}`,
+          'loadOrders()',
+          'reading deals',
+        )
+      }
+      deals = dealData.data.result
+    }
+    const keys = loadFromDb
+      ? deals.map((d) => `${d._id}`)
+      : [...this.deals.keys()]
+    const orders = await this._loadOrders({
+      $or: [
+        {
+          dealId: { $in: keys },
+          status: { $nin: ['CANCELED', 'EXPIRED'] },
+        },
+        {
+          status: { $nin: ['CANCELED', 'EXPIRED', 'FILLED'] },
+        },
+      ],
+      botId: this.botId,
+      typeOrder: { $nin: [TypeOrderEnum.liquidation, TypeOrderEnum.br] },
+    })
+    orders
+      .filter(
+        (o) =>
+          o.status !== 'FILLED' ||
+          (keys.includes(`${o.dealId}`) && o.status === 'FILLED'),
+      )
+      .map((o) => this.setOrder(o, false))
+    this.setOrdersToRedis(
+      this.botId,
+      this.serviceRestart && !this.secondRestart,
+    )
+    if (loadFromDb) {
+      deals.map((d) =>
+        this.setDeal(
+          {
+            deal: { ...d, _id: `${d._id}` },
+            initialOrders: [],
+            currentOrders: [],
+            previousOrders: [],
+            closeBySl: false,
+            notCheckSl: false,
+          },
+          false,
+        ),
+      )
+      const openDeals = deals.filter((d) => d.status === DCADealStatusEnum.open)
+      for (const deal of openDeals) {
+        let initialOrders: Grid[] = []
+        let currentOrders: Grid[] = []
+        const safeDealId = `${deal._id}`
+        if (
+          deal.initialPrice !== 0 &&
+          deal.lastPrice !== 0 &&
+          deal.settings.avgPrice !== 0
+        ) {
+          initialOrders = await this.createInitialDealOrders(
+            deal.symbol.symbol,
+            deal.initialPrice,
+            safeDealId,
+            deal,
+          )
+          currentOrders = await this.createCurrentDealOrders(
+            deal.symbol.symbol,
+            deal.lastPrice,
+            initialOrders,
+            deal.settings.avgPrice || deal.avgPrice,
+            deal.initialPrice,
+            safeDealId,
+            false,
+            deal,
+            false,
+          )
+          const tempInitOrders = this.getDealInitialOrders(safeDealId)
+          initialOrders =
+            tempInitOrders.length > 0 ? tempInitOrders : initialOrders
+        }
+        deal.fullFee = await this.getCommDeal(deal)
+        const fullDeal = {
+          initialOrders,
+          currentOrders,
+          previousOrders: [],
+          deal: {
+            ...deal,
+            _id: safeDealId,
+          },
+          limitTimer: null,
+          enterMarketTimer: null,
+          closeBySl: false,
+          notCheckSl: false,
+        }
+        this.setDeal(fullDeal, false)
+      }
+      this.setDealToRedis(
+        this.botId,
+        this.serviceRestart && !this.secondRestart,
+      )
+    }
+    const count = await this.dealsDb.countData({
+      botId: this.botId,
+    } as any)
+    this.handleLog(`Get deals count ${count?.data?.result ?? 0}`)
+    this.allDeals = count?.data?.result ?? this.deals.size
+
+    this.handleLog(`Check exchange info and user fee to be in the bot`)
+    if (this.deals.size) {
+      const newSymbols: string[] = []
+      const toSearch: Set<string> = new Set()
+      for (const d of this.allDealsData) {
+        if (!(await this.getExchangeInfo(d.deal.symbol.symbol))) {
+          this.handleLog(
+            `Cannot find exchange info for ${d.deal.symbol.symbol}`,
+          )
+          toSearch.add(d.deal.symbol.symbol)
+        }
+        if (!(await this.getUserFee(d.deal.symbol.symbol))) {
+          this.handleLog(`Cannot find fee for ${d.deal.symbol.symbol}`)
+          toSearch.add(d.deal.symbol.symbol)
+        }
+        if (!this.pairs.has(d.deal.symbol.symbol)) {
+          this.handleLog(`Deal symbol ${d.deal.symbol.symbol} not in pairs`)
+          newSymbols.push(d.deal.symbol.symbol)
+        }
+      }
+      if (!this.combo) {
+        if (toSearch.size) {
+          await this.fillExchangeInfo([...toSearch])
+          await this.getUserFees([...toSearch])
+          for (const s of toSearch) {
+            if (!(await this.getExchangeInfo(s))) {
+              this.handleLog(`Push ${s} to not found`)
+              this.pairsNotFound.add(s)
+            }
+            if (!(await this.getUserFee(s))) {
+              this.handleLog(`Push ${s} to not found`)
+              this.pairsNotFound.add(s)
+            }
+          }
+        }
+        if (newSymbols.length) {
+          if (this.redisSubGlobal) {
+            for (const pair of this.redisSubKeys(newSymbols)) {
+              this.redisSubGlobal.subscribe(pair, this.redisSubCb)
+            }
+          }
+        }
+      }
+    }
+    this.endMethod(_id)
+  }
+
+  override async afterUpdateExchangeInfo(pairs: Set<string>): Promise<void> {
+    for (const o of pairs) {
+      const getOld = this.precisions.get(o)
+      const newData = await this.getExchangeInfo(o)
+      const newBaseAssetPrecision = await this.baseAssetPrecision(o)
+      const oldBaseAssetPrecision = this.basePrecisions.get(o)
+      let updateDeals = false
+      if (
+        newData &&
+        typeof getOld !== 'undefined' &&
+        newData.priceAssetPrecision < getOld
+      ) {
+        this.precisions.set(o, newData.priceAssetPrecision)
+        const deals = this.getDealsByStatusAndSymbol({ symbol: o })
+        updateDeals = !!deals.length
+        for (const d of deals) {
+          d.currentOrders = d.currentOrders.map((co) => {
+            co.price = this.math.round(co.price, newData.priceAssetPrecision)
+            return co
+          })
+          d.initialOrders = d.initialOrders.map((io) => {
+            io.price = this.math.round(io.price, newData.priceAssetPrecision)
+            return io
+          })
+          this.saveDeal(d)
+        }
+      }
+      if (
+        typeof newBaseAssetPrecision !== 'undefined' &&
+        typeof oldBaseAssetPrecision !== 'undefined' &&
+        newBaseAssetPrecision < oldBaseAssetPrecision
+      ) {
+        this.basePrecisions.set(o, newBaseAssetPrecision)
+        const deals = this.getDealsByStatusAndSymbol({ symbol: o })
+        updateDeals = !!deals.length
+        for (const d of deals) {
+          d.currentOrders = d.currentOrders.map((co) => {
+            co.qty = this.math.round(co.price, newBaseAssetPrecision)
+            return co
+          })
+          d.initialOrders = d.initialOrders.map((io) => {
+            io.qty = this.math.round(io.price, newBaseAssetPrecision)
+            return io
+          })
+          this.saveDeal(d)
+        }
+      }
+      if (updateDeals) {
+        this.setDealToRedis(this.botId, false)
+      }
+    }
+  }
+  /**
+   * Save deal after changes
+   * @param {FullDeal} FullDeal
+   * @param {Partial<ExcludeDoc<Deal>} changed
+   */
+  @IdMute(
+    mutex,
+    (fullDeal: FullDeal<ExcludeDoc<Deal>>) =>
+      `${fullDeal.deal._id}@${fullDeal.deal.botId}saveDeal`,
+  )
+  async saveDeal(
+    fullDeal: FullDeal<ExcludeDoc<Deal>>,
+    deal?: Partial<any>,
+    send = true,
+  ) {
+    const dealId = fullDeal.deal._id
+    let fullResult: FullDeal<ExcludeDoc<Deal>> = fullDeal
+    const get = this.getDeal(dealId)
+    if (get) {
+      const result = {
+        ...fullDeal,
+        deal: {
+          ...get.deal,
+          ...deal,
+        },
+      }
+      fullResult = result
+      this.setDeal(fullResult)
+    }
+
+    if (deal && Object.entries(deal).length) {
+      this.dealsDb
+        .updateData({ _id: dealId }, { $set: { ...deal } as any })
+        .then((res) => {
+          if (res.status === StatusEnum.notok) {
+            this.handleErrors(
+              `Error saving deal: ${dealId}. Reason: ${res.reason}`,
+              '',
+              '',
+              false,
+              false,
+              false,
+            )
+          }
+        })
+      if (send) {
+        this.emit('bot deal update', {
+          ...fullResult.deal,
+          botName: this.data?.settings.name ?? '',
+          combo: this.combo,
+        })
+      }
+    }
+  }
+  /**
+   * Create deal record in db
+   *
+   * Push new deal to {@link DCABotHelper#deals} array
+   *
+   * @returns {Promise<string | undefined>} Id of the deal or null if error
+   */
+
+  async createDeal(
+    symbol: string,
+    fixSl = 0,
+    fixTp = 0,
+    fixSize = 0,
+    dynamicAr: DynamicArPrices[] = [],
+    sizes?: Sizes | null,
+    orderSizeType?: OrderSizeTypeEnum,
+  ): Promise<string | undefined> {
+    const _id = this.startMethod('createDeal')
+    const time = new Date().getTime()
+    let symbolData: Symbols | undefined
+    try {
+      const ed = await this.getExchangeInfo(symbol)
+      if (!ed) {
+        this.handleLog(`Cannot create deal for ${symbol}. ED not found`)
+        this.endMethod(_id)
+        return
+      }
+      symbolData = {
+        symbol: ed.pair,
+        baseAsset: ed.baseAsset.name,
+        quoteAsset: ed.quoteAsset.name,
+      }
+    } catch (e) {
+      this.handleLog(
+        `Cannot create deal for ${symbol}. Catch error in reading exchange data: ${
+          (e as Error)?.message ?? e
+        }`,
+      )
+      this.endMethod(_id)
+      return
+    }
+    if (!symbolData) {
+      this.handleLog(
+        `Cannot create deal for ${symbol}. Symbol data not found. Data size ${this.data?.symbol?.size}`,
+      )
+      this.endMethod(_id)
+      return
+    }
+    const dealSettings = this.getInitalDealSettings()
+    if (this.data && symbolData && dealSettings) {
+      const flags: DCADealFlags[] = [DCADealFlags.newMultiTp]
+      if (this.data.flags?.includes(BotFlags.externalSl)) {
+        flags.push(DCADealFlags.externalSl)
+      }
+      if (this.data.flags?.includes(BotFlags.externalTp)) {
+        flags.push(DCADealFlags.externalTp)
+      }
+      const record = await this.dealsDb.createData({
+        flags,
+        botId: this.botId,
+        userId: this.userId,
+        status: DCADealStatusEnum.start,
+        initialBalances: {
+          base: 0,
+          quote: 0,
+        },
+        currentBalances: {
+          base: 0,
+          quote: 0,
+        },
+        initialPrice: 0,
+        avgPrice: 0,
+        displayAvg: 0,
+        profit: {
+          total: 0,
+          totalUsd: 0,
+          pureBase: 0,
+          pureQuote: 0,
+        },
+        feePaid: {
+          base: 0,
+          quote: 0,
+        },
+        lastPrice: 0,
+        commission: 0,
+        createTime: time,
+        updateTime: time,
+        levels: {
+          all: this.data.settings.useDca
+            ? this.data.settings.dcaCondition === DCAConditionEnum.indicators
+              ? this.data.settings.indicators.filter(
+                  (si) => si.indicatorAction === IndicatorAction.startDca,
+                ).length + 1
+              : this.data.settings.dcaCondition === DCAConditionEnum.custom
+                ? (this.data.settings.dcaCustom ?? []).length + 1
+                : this.data.settings.ordersCount + 1
+            : 1,
+          complete: 0,
+        },
+        usage: {
+          current: {
+            base: 0,
+            quote: 0,
+          },
+          max: {
+            base: 0,
+            quote: 0,
+          },
+        },
+        assets: {
+          used: {
+            base: 0,
+            quote: 0,
+          },
+          required: {
+            base: 0,
+            quote: 0,
+          },
+        },
+        settings: {
+          ...dealSettings,
+          fixedSlPrice: this.data.settings.useRiskReward
+            ? fixSl
+              ? fixSl
+              : undefined
+            : this.data.settings.fixedSlPrice,
+          fixedTpPrice:
+            this.data.settings.useRiskReward &&
+            this.data.settings.riskUseTpRatio
+              ? fixTp
+                ? fixTp
+                : undefined
+              : this.data.settings.fixedTpPrice,
+          useTp:
+            this.data.settings.useRiskReward &&
+            fixTp &&
+            this.data.settings.riskUseTpRatio
+              ? true
+              : this.data.settings.useTp,
+          useSl: this.data.settings.useRiskReward
+            ? true
+            : this.data.settings.useSl,
+          dealCloseCondition:
+            this.data.settings.useRiskReward &&
+            fixTp &&
+            this.data.settings.riskUseTpRatio
+              ? CloseConditionEnum.tp
+              : this.data.settings.dealCloseCondition,
+          dealCloseConditionSL:
+            this.data.settings.useRiskReward && fixSl
+              ? CloseConditionEnum.tp
+              : this.data.settings.dealCloseConditionSL,
+        },
+        parentId: null,
+        childIds: [],
+        parent: false,
+        child: false,
+        gridBreakpoints: [],
+        paperContext: this.data.paperContext,
+        type: this.data.settings.type,
+        symbol: symbolData,
+        exchange: this.data.exchange,
+        exchangeUUID: this.data.exchangeUUID,
+        strategy: this.data.settings.strategy,
+        stats: {
+          drawdownPercent: 0,
+          runUpPercent: 0,
+          timeInProfit: 0,
+          timeInLoss: 0,
+          trackTime: 0,
+          timeCountStart: Date.now(),
+        },
+        dynamicAr,
+        sizes: sizes || undefined,
+        fixSize,
+        orderSizeType,
+        parentBotId: this.data.parentBotId,
+        action: this.data.settings.futures ? undefined : this.data.action,
+      } as any)
+      if (record.status === StatusEnum.notok) {
+        this.handleErrors(
+          `Cannot create deal: ${record.reason}`,
+          'createDeal()',
+          'create deal',
+        )
+        this.endMethod(_id)
+        return
+      }
+      const dealId = `${record.data._id}`
+      this.handleLog(`Deal created with id ${dealId}`)
+      this.setDeal({
+        deal: { ...record.data, _id: dealId },
+        initialOrders: [],
+        currentOrders: [],
+        previousOrders: [],
+        closeBySl: false,
+        notCheckSl: false,
+      })
+      this.resetPending(this.botId, symbol)
+      this.emit('bot deal update', record.data)
+      this.updateBotDeals(this.botId, true)
+      this.endMethod(_id)
+      return dealId
+    }
+    this.handleLog(
+      `Cannot create deal for ${symbol}, data: ${!!this
+        .data}, symbolData: ${!!symbolData}, dealSettings: ${!!dealSettings}`,
+    )
+    this.endMethod(_id)
+    return
+  }
+  /**
+   * Clear deal timer
+   */
+
+  async clearDealTimer(dealId: string) {
+    const findDeal = this.dealTimersMap.get(dealId)
+    if (findDeal) {
+      if (findDeal.limitTimer) {
+        clearTimeout(findDeal.limitTimer)
+        findDeal.limitTimer = null
+      }
+      if (findDeal.enterMarketTimer) {
+        clearTimeout(findDeal.enterMarketTimer)
+        findDeal.enterMarketTimer = null
+      }
+      this.startTimeoutTime.delete(dealId)
+      this.dealTimersMap.set(dealId, findDeal)
+    }
+  }
+
+  async getCommDeal(findDeal: ExcludeDoc<Deal>) {
+    const fee = await this.getUserFee(findDeal.symbol.symbol)
+    const profitBase = await this.profitBase(findDeal)
+    return this.getOrdersByStatusAndDealId({
+      status: 'FILLED',
+      dealId: `${findDeal._id}`,
+    }).reduce(
+      (acc, v) =>
+        acc +
+        (profitBase
+          ? parseFloat(v.executedQty) *
+            (v.type === 'MARKET' ? (fee?.taker ?? 0) : (fee?.maker ?? 0))
+          : parseFloat(v.executedQty) *
+            parseFloat(v.price) *
+            (v.type === 'MARKET' ? (fee?.taker ?? 0) : (fee?.maker ?? 0))),
+      0,
+    )
+  }
+  /**
+   * Close deal when TP is filled
+   *
+   * @param {Order} tpOrder Order which close the deal
+   *
+   */
+  @IdMute(
+    mutex,
+    (botId: string, order: Order) => `${botId}${order.clientOrderId}`,
+  )
+  async closeDeal(
+    _botId: string,
+    dealId: string,
+    tpOrder?: Order,
+    liquidationPrice?: number,
+  ) {
+    const _id = this.startMethod('closeDeal')
+    let stop = false
+    const findDeal = this.getDeal(dealId)
+    if (
+      findDeal &&
+      findDeal.deal.status === DCADealStatusEnum.open &&
+      this.data &&
+      this.orders &&
+      dealId
+    ) {
+      const profitBase = await this.profitBase(findDeal.deal)
+      if (tpOrder) {
+        this.handleLog('TP order FILLED')
+        this.pendingClose.add(dealId)
+        const fee = await this.getUserFee(tpOrder.symbol)
+        const orderPrice = parseFloat(tpOrder.price)
+        const orderQty = parseFloat(tpOrder.executedQty)
+        const filledTp = (findDeal.deal.tpHistory ?? []).filter(
+          (d) => d.id !== tpOrder.clientOrderId,
+        )
+        const qty = orderQty + filledTp.reduce((acc, d) => acc + d.qty, 0)
+        const price =
+          (orderPrice * orderQty +
+            filledTp.reduce((acc, d) => acc + d.qty * d.price, 0)) /
+          qty
+
+        findDeal.deal.status = DCADealStatusEnum.closed
+        findDeal.deal.lastPrice = parseFloat(tpOrder.price)
+        findDeal.deal.currentBalances = {
+          base:
+            findDeal.deal.currentBalances.base +
+            qty * (tpOrder.side === OrderSideEnum.buy ? 1 : -1),
+          quote:
+            findDeal.deal.currentBalances.quote +
+            qty * price * (tpOrder.side === OrderSideEnum.sell ? 1 : -1),
+        }
+        findDeal.deal.updateTime = tpOrder.updateTime
+        const dealOrders = this.getOrdersByStatusAndDealId({
+          dealId,
+          status: ['FILLED', 'CANCELED'],
+        }).filter(
+          (o) =>
+            +o.executedQty > 0 &&
+            ![TypeOrderEnum.br, TypeOrderEnum.rebalance].includes(o.typeOrder),
+        )
+        const commDeal = await this.getCommDeal(findDeal.deal)
+        let feeBaseFull = 0
+        let feeQuoteFull = 0
+        for (const o of dealOrders) {
+          if (o.side === OrderSideEnum.buy) {
+            feeBaseFull +=
+              +o.executedQty *
+              (o.type === 'MARKET' ? (fee?.taker ?? 0) : (fee?.maker ?? 0))
+          } else {
+            feeQuoteFull +=
+              +o.executedQty *
+              +o.price *
+              (o.type === 'MARKET' ? (fee?.taker ?? 0) : (fee?.maker ?? 0))
+          }
+        }
+
+        const pureQuote =
+          findDeal.deal.currentBalances.quote -
+          (findDeal.deal.initialBalances.quote +
+            (this.combo ? (findDeal.deal.profit.pureQuote ?? 0) : 0)) -
+          feeQuoteFull
+        const pureBase =
+          findDeal.deal.currentBalances.base -
+          (findDeal.deal.initialBalances.base +
+            (this.combo ? (findDeal.deal.profit.pureBase ?? 0) : 0)) -
+          feeBaseFull
+
+        const total =
+          (!profitBase
+            ? findDeal.deal.currentBalances.quote -
+              (findDeal.deal.initialBalances.quote +
+                (this.combo ? findDeal.deal.profit.total : 0)) +
+              (findDeal.deal.currentBalances.base -
+                findDeal.deal.initialBalances.base) *
+                findDeal.deal.lastPrice
+            : findDeal.deal.currentBalances.base -
+              (findDeal.deal.initialBalances.base +
+                (this.combo ? findDeal.deal.profit.total : 0)) +
+              (findDeal.deal.currentBalances.quote -
+                findDeal.deal.initialBalances.quote) /
+                findDeal.deal.lastPrice) - commDeal
+        const rate = await this.getUsdRate(tpOrder.symbol)
+        const totalUsd =
+          total * (!profitBase ? 1 : findDeal.deal.lastPrice) * rate
+        findDeal.deal.profit = {
+          ...findDeal.deal.profit,
+          pureBase: (findDeal.deal.profit.pureBase ?? 0) + pureBase,
+          pureQuote: (findDeal.deal.profit.pureQuote ?? 0) + pureQuote,
+          total: (this.combo ? findDeal.deal.profit.total : 0) + total,
+          totalUsd: (this.combo ? findDeal.deal.profit.totalUsd : 0) + totalUsd,
+        }
+        findDeal.deal.feeBalance = 0
+        findDeal.deal.closeTrigger =
+          findDeal.deal.closeTrigger &&
+          findDeal.deal.closeTrigger !== DCACloseTriggerEnum.base
+            ? findDeal.deal.closeTrigger
+            : tpOrder.sl
+              ? DCACloseTriggerEnum.sl
+              : DCACloseTriggerEnum.tp
+        const usdUpdate = this.combo ? findDeal.deal.profit.totalUsd : totalUsd
+        this.saveProfitToDb(usdUpdate, findDeal.deal.closeTime ?? +new Date())
+        this.data.profit = {
+          freeTotal: 0,
+          freeTotalUsd: 0,
+          total: this.data.profit.total + findDeal.deal.profit.total,
+          totalUsd: this.data.profit.totalUsd + usdUpdate,
+          pureBase:
+            (this.data.profit.pureBase ?? 0) +
+            (findDeal.deal.profit.pureBase ?? 0),
+          pureQuote:
+            (this.data.profit.pureQuote ?? 0) +
+            (findDeal.deal.profit.pureQuote ?? 0),
+        }
+        const longBase = this.isLong && (await this.profitBase())
+        const shortQuote = !this.isLong && !(await this.profitBase())
+        if (
+          this.data.flags?.includes(BotFlags.newBaseProfit) &&
+          this.data.settings.useMulti &&
+          (longBase || shortQuote)
+        ) {
+          const { baseAsset, quoteAsset } = findDeal.deal.symbol
+          const findBase = (this.data.profitByAssets ?? []).find(
+            (p) => p.asset === baseAsset,
+          )
+          const findQuote = (this.data.profitByAssets ?? []).find(
+            (p) => p.asset === quoteAsset,
+          )
+          this.data.profitByAssets = (this.data.profitByAssets ?? []).filter(
+            (p) => p.asset !== baseAsset && p.asset !== quoteAsset,
+          )
+          const price = findDeal.deal.avgPrice || findDeal.deal.lastPrice
+          this.data.profitByAssets.push({
+            asset: baseAsset,
+            total:
+              (findBase?.total ?? 0) + (findDeal.deal.profit.pureBase ?? 0),
+            totalUsd: longBase
+              ? (findBase?.totalUsd ?? 0) +
+                (findDeal.deal.profit.pureBase ?? 0) * rate * price
+              : (findBase?.totalUsd ?? 0) + pureBase * rate * price,
+          })
+          this.data.profitByAssets.push({
+            asset: quoteAsset,
+            total:
+              (findQuote?.total ?? 0) + (findDeal.deal.profit.pureQuote ?? 0),
+            totalUsd: shortQuote
+              ? (findQuote?.totalUsd ?? 0) +
+                (findDeal.deal.profit.pureQuote ?? 0) * rate
+              : (findQuote?.totalUsd ?? 0) + pureQuote * rate,
+          })
+        }
+        findDeal.deal.feePaid = {
+          base: feeBaseFull,
+          quote: feeQuoteFull,
+        }
+        findDeal.deal.commission += commDeal
+        if (tpOrder.acBefore && tpOrder.acAfter) {
+          findDeal.deal.ac = {
+            before: tpOrder.acBefore,
+            after: tpOrder.acAfter,
+          }
+        }
+        this.saveDeal(findDeal, {
+          commission: findDeal.deal.commission,
+          profit: findDeal.deal.profit,
+          updateTime: findDeal.deal.updateTime,
+          status: findDeal.deal.status,
+          lastPrice: findDeal.deal.lastPrice,
+          currentBalances: findDeal.deal.currentBalances,
+          tpHistory: filledTp,
+          feePaid: findDeal.deal.feePaid,
+          feeBalance: findDeal.deal.feeBalance,
+          ac: findDeal.deal.ac,
+          closeTrigger: findDeal.deal.closeTrigger,
+        })
+        this.handleLog(
+          `Deal closed with profit ${total} ${totalUsd} (${findDeal.deal.profit.total} ${findDeal.deal.profit.totalUsd})`,
+        )
+        const botUpdate = {
+          profit: { ...this.data.profit },
+          profitByAssets: [
+            ...((this.data.profitByAssets ?? []) as NonNullable<
+              CleanMainBot['profitByAssets']
+            >),
+          ],
+        }
+
+        this.updateData(botUpdate)
+        this.emit('bot settings update', botUpdate)
+        const remainder =
+          (this.isLong
+            ? findDeal.deal.currentBalances.base
+            : findDeal.deal.initialBalances.base -
+              findDeal.deal.currentBalances.base) -
+          (profitBase ? findDeal.deal.profit.total : 0)
+        const ed = await this.getExchangeInfo(findDeal.deal.symbol.symbol)
+        if (
+          ed &&
+          remainder > ed.baseAsset.minAmount &&
+          remainder * findDeal.deal.avgPrice > ed.quoteAsset.minAmount
+        ) {
+          await this.sellRemainder(
+            dealId,
+            remainder,
+            findDeal.deal.avgPrice,
+            true,
+            findDeal,
+            undefined,
+            true,
+          )
+        }
+        stop = await this.processDealClose(
+          this.botId,
+          dealId,
+          { total, totalUsd },
+          undefined,
+          undefined,
+          tpOrder,
+        )
+        this.updateUserProfitStep()
+      } else if (liquidationPrice) {
+        this.handleLog('Liquidation order FILLED')
+        const price = liquidationPrice
+        findDeal.deal.status = DCADealStatusEnum.closed
+        findDeal.deal.lastPrice = price
+        findDeal.deal.currentBalances = {
+          base: this.isLong
+            ? 0
+            : findDeal.deal.currentBalances.base +
+              findDeal.deal.currentBalances.quote / liquidationPrice,
+          quote: this.isLong
+            ? findDeal.deal.currentBalances.quote +
+              findDeal.deal.currentBalances.base * liquidationPrice
+            : 0,
+        }
+        findDeal.deal.updateTime = +new Date()
+
+        const pureQuote =
+          findDeal.deal.currentBalances.quote -
+          (findDeal.deal.initialBalances.quote +
+            (findDeal.deal.profit.pureQuote ?? 0))
+        const pureBase =
+          findDeal.deal.currentBalances.base -
+          (findDeal.deal.initialBalances.base +
+            (findDeal.deal.profit.pureBase ?? 0))
+        const total = !profitBase
+          ? findDeal.deal.currentBalances.quote -
+            (findDeal.deal.initialBalances.quote + findDeal.deal.profit.total) +
+            (findDeal.deal.currentBalances.base -
+              findDeal.deal.initialBalances.base) *
+              findDeal.deal.lastPrice
+          : findDeal.deal.currentBalances.base -
+            findDeal.deal.initialBalances.base +
+            (findDeal.deal.currentBalances.quote -
+              findDeal.deal.initialBalances.quote) /
+              findDeal.deal.lastPrice
+        const rate = await this.getUsdRate(findDeal.deal.symbol.symbol)
+        const totalUsd =
+          total * (!profitBase ? 1 : findDeal.deal.lastPrice) * rate
+        findDeal.deal.profit = {
+          ...findDeal.deal.profit,
+          pureBase: (findDeal.deal.profit.pureBase ?? 0) + pureBase,
+          pureQuote: (findDeal.deal.profit.pureQuote ?? 0) + pureQuote,
+          total: findDeal.deal.profit.total + total,
+          totalUsd: findDeal.deal.profit.totalUsd + totalUsd,
+        }
+        this.data.profit = {
+          freeTotal: 0,
+          freeTotalUsd: 0,
+          total: this.data.profit.total + total,
+          totalUsd: this.data.profit.totalUsd + totalUsd,
+          pureBase: (this.data.profit.pureBase ?? 0) + pureBase,
+          pureQuote: (this.data.profit.pureQuote ?? 0) + pureQuote,
+        }
+        this.saveProfitToDb(totalUsd, findDeal.deal.closeTime ?? +new Date())
+        this.saveDeal(findDeal, {
+          profit: findDeal.deal.profit,
+          updateTime: findDeal.deal.updateTime,
+          status: findDeal.deal.status,
+          lastPrice: findDeal.deal.lastPrice,
+          currentBalances: findDeal.deal.currentBalances,
+        })
+        this.updateData({ profit: { ...this.data.profit } })
+        this.emit('bot settings update', { profit: this.data.profit })
+        stop = await this.processDealClose(
+          this.botId,
+          dealId,
+          { total, totalUsd },
+          undefined,
+          undefined,
+          tpOrder,
+        )
+        this.updateUserProfitStep()
+      } else {
+        this.handleLog('Close without TP order')
+        const rate = await this.getUsdRate(findDeal.deal.symbol.symbol)
+        findDeal.deal.status = DCADealStatusEnum.closed
+        findDeal.deal.updateTime = +new Date()
+        const commDeal = await this.getCommDeal(findDeal.deal)
+        const commUsd =
+          commDeal * (!profitBase ? 1 : findDeal.deal.lastPrice) * rate
+        findDeal.deal.profit.total -= commDeal
+        findDeal.deal.profit.totalUsd -= commUsd
+        findDeal.deal.commission = commDeal
+        this.data.profit.total += findDeal.deal.profit.total
+        this.data.profit.totalUsd += findDeal.deal.profit.totalUsd
+        this.saveProfitToDb(
+          findDeal.deal.profit.totalUsd,
+          findDeal.deal.closeTime ?? +new Date(),
+        )
+        this.updateData({ profit: this.data.profit })
+        this.emit('bot settings update', { profit: this.data.profit })
+        this.saveDeal(findDeal, {
+          updateTime: findDeal.deal.updateTime,
+          status: findDeal.deal.status,
+          profit: findDeal.deal.profit,
+          commission: findDeal.deal.commission,
+        })
+        stop = await this.processDealClose(
+          this.botId,
+          dealId,
+          {
+            total: 0,
+            totalUsd: 0,
+          },
+          undefined,
+          undefined,
+          tpOrder,
+        )
+      }
+
+      if (stop) {
+        this.stop()
+      }
+    }
+    this.endMethod(_id)
+  }
+  /** Check closed deals */
+
+  async checkClosedDeals() {
+    if (!this.data || !this.allowedMethods.has('checkClosedDeals')) {
+      return
+    }
+
+    const {
+      useCloseAfterX,
+      closeAfterX,
+      useBotController,
+      useCloseAfterXloss,
+      closeAfterXloss,
+      useCloseAfterXwin,
+      closeAfterXwin,
+      useCloseAfterXprofit,
+      closeAfterXprofitCond,
+      closeAfterXprofitValue,
+    } = await this.getAggregatedSettings()
+    if (
+      ((!useCloseAfterX || !closeAfterX || !checkNumber(closeAfterX)) &&
+        (!useCloseAfterXloss ||
+          !closeAfterXloss ||
+          !checkNumber(closeAfterXloss)) &&
+        (!useCloseAfterXwin ||
+          !closeAfterXwin ||
+          !checkNumber(closeAfterXwin)) &&
+        (!useCloseAfterXprofit ||
+          !closeAfterXprofitValue ||
+          !checkNumber(closeAfterXprofitValue) ||
+          !closeAfterXprofitCond)) ||
+      !useBotController
+    ) {
+      return
+    }
+    if (
+      useCloseAfterXprofit &&
+      closeAfterXprofitValue &&
+      checkNumber(closeAfterXprofitValue) &&
+      closeAfterXprofitCond
+    ) {
+      const val = this.data?.profit?.totalUsd ?? 0
+      const close =
+        closeAfterXprofitCond === IndicatorStartConditionEnum.gt
+          ? val > +closeAfterXprofitValue
+          : val < +closeAfterXprofitValue
+      if (close) {
+        this.handleLog(
+          `Close deal after X profit accumulated, profit: ${val}, trigger: ${closeAfterXprofitValue}`,
+        )
+        await this.stop(CloseDCATypeEnum.leave)
+      }
+    }
+    if (useCloseAfterX && closeAfterX && checkNumber(closeAfterX)) {
+      const deals = await this.dealsDb.countData({
+        status: DCADealStatusEnum.closed,
+        botId: this.botId,
+      } as any)
+      if (deals.status === StatusEnum.notok) {
+        return this.handleErrors(
+          `Error reading deals x close ${deals.reason}`,
+          'checkClosedDeals',
+          undefined,
+          false,
+          false,
+          false,
+        )
+      }
+      if (
+        deals.data.result >= +closeAfterX &&
+        this.data.status !== BotStatusEnum.closed
+      ) {
+        this.handleLog(
+          `Close deal after X trigger, closed: ${deals.data.result}, trigger: ${closeAfterX}`,
+        )
+        await this.stop(CloseDCATypeEnum.leave)
+      }
+    }
+    if (useCloseAfterXloss && closeAfterXloss && checkNumber(closeAfterXloss)) {
+      const deals = await this.dealsDb.countData({
+        status: DCADealStatusEnum.closed,
+        botId: this.botId,
+        'profit.totalUsd': { $lte: 0 },
+      } as any)
+      if (deals.status === StatusEnum.notok) {
+        return this.handleErrors(
+          `Error reading deals x loss ${deals.reason}`,
+          'checkClosedDeals',
+          undefined,
+          false,
+          false,
+          false,
+        )
+      }
+      if (
+        deals.data.result >= +closeAfterXloss &&
+        this.data.status !== BotStatusEnum.closed
+      ) {
+        this.handleLog(
+          `Close deal after X loss trigger, closed in loss: ${deals.data.result}, trigger: ${closeAfterXloss}`,
+        )
+        await this.stop(CloseDCATypeEnum.leave)
+      }
+    }
+    if (useCloseAfterXwin && closeAfterXwin && checkNumber(closeAfterXwin)) {
+      const deals = await this.dealsDb.countData({
+        status: DCADealStatusEnum.closed,
+        botId: this.botId,
+        'profit.totalUsd': { $gt: 0 },
+      } as any)
+      if (deals.status === StatusEnum.notok) {
+        return this.handleErrors(
+          `Error reading deals x win ${deals.reason}`,
+          'checkClosedDeals',
+          undefined,
+          false,
+          false,
+          false,
+        )
+      }
+      if (
+        deals.data.result >= +closeAfterXwin &&
+        this.data.status !== BotStatusEnum.closed
+      ) {
+        this.handleLog(
+          `Close deal after X win trigger, closed in profit: ${deals.data.result}, trigger: ${closeAfterXwin}`,
+        )
+        await this.stop(CloseDCATypeEnum.leave)
+      }
+    }
+  }
+
+  async afterDealClose(
+    _dealId: string,
+    _profit: { total: number; totalUsd: number },
+  ) {
+    return
+  }
+
+  removeOrdersByDeal(dealId: string) {
+    const get = this.getOrdersByStatusAndDealId({ dealId })
+    for (const o of get) {
+      this.deleteOrder(o.clientOrderId)
+    }
+  }
+  /**
+   * Process deal close
+   *
+   * @param {string} dealId Id of the deal
+   * @param {boolean} [reopen] Required to reopen deal. Default = true
+   * @param {boolean} [cancel] Cancel deal orders. Default = true
+   * @param {Order} [tpOrder] Take profit order to close deal
+   */
+  @IdMute(mutex, (botId: string) => `${botId}processDealClose`)
+  async processDealClose(
+    _botId: string,
+    dealId: string,
+    profit: { total: number; totalUsd: number },
+    reopen = true,
+    cancel = true,
+    order?: Order,
+  ): Promise<boolean> {
+    this.removeDealFromStopLossMethods(dealId)
+    DealStats.getInstance().removeStats({ event: 'removeStats', dealId })
+    const deal = this.getDeal(dealId)
+    this.pendingClose.delete(dealId)
+    if (!deal) {
+      this.handleLog(`Deal ${dealId} not found in local deals`)
+      return false
+    }
+    if (!this.combo) {
+      const botUpdate = {
+        dealsReduceForBot:
+          this.data?.dealsReduceForBot?.filter((d) => d.id !== deal.deal._id) ??
+          [],
+      }
+      if (this.data) {
+        this.data.dealsReduceForBot = botUpdate.dealsReduceForBot
+      }
+      this.updateData(botUpdate)
+      this.emit('bot settings update', botUpdate)
+    }
+    if (
+      this.combo &&
+      (deal.deal.status === DCADealStatusEnum.canceled || profit.total === 0) &&
+      deal.deal.feeBalance &&
+      deal.deal.feeBalance > 0 &&
+      !this.futures &&
+      this.data
+    ) {
+      this.data.feeBalance = Math.max(0, deal.deal.feeBalance)
+      this.updateData({ feeBalance: this.data.feeBalance })
+    }
+    const { symbol } = deal.deal.symbol
+
+    if (!this.data?.settings.pair.includes(symbol)) {
+      this.handleLog(`Symbol ${symbol} not in settings. Unsubscribe`)
+      const openDeals = this.getOpenDeals(false, symbol)
+      if (!openDeals.length) {
+        for (const [_, indicator] of this.indicators) {
+          if (indicator.symbol === symbol) {
+            this.sendIndicatorUnsubscribeEvent(
+              indicator.id,
+              indicator.room,
+              indicator.cb,
+            )
+            this.indicators.delete(indicator.key)
+          }
+        }
+        this.pairs.delete(symbol)
+        this.unsubscribeFromExchangeInfo(symbol)
+        this.unsubscribeFromUserFee(symbol)
+        if (this.redisSubGlobal) {
+          for (const pair of this.redisSubKeys([symbol])) {
+            this.redisSubGlobal.unsubscribe(pair, this.redisSubCb)
+          }
+        }
+      }
+    }
+
+    const timer = this.closeDealTimer.get(dealId)
+    if (timer) {
+      clearTimeout(timer)
+      this.closeDealTimer.delete(dealId)
+    }
+    this.deleteDeal(dealId)
+    this.botUpdateStats(this.botId, deal)
+    this.resetAssets()
+    await this.updateBotDeals(this.botId, false)
+    this.updateUsage(dealId || '', true)
+    await this.checkDealsAllowedMethods()
+    if (this.data) {
+      if (this.data.notEnoughBalance?.orders) {
+        for (const o of Object.keys(this.data.notEnoughBalance.orders)) {
+          if (o.startsWith(dealId)) {
+            delete this.data.notEnoughBalance.orders[o]
+          }
+        }
+        this.checkNotEnoughBalanceErrors(this.botId)
+      }
+      if (cancel) {
+        await this.cancelAllOrder(deal.deal.lastPrice, dealId, true)
+        for (const o of this.getOrdersByStatusAndDealId({ dealId })) {
+          this.partiallyFilledFilledSet.delete(o.clientOrderId)
+        }
+        this.removeOrdersByDeal(dealId)
+      }
+      if (
+        this.data.status === BotStatusEnum.error &&
+        this.data.previousStatus !== BotStatusEnum.closed
+      ) {
+        this.restoreFromRangeOrError()
+      }
+      if (deal) {
+        this.updateDealLastTime(
+          this.botId,
+          'closed',
+          +new Date(),
+          deal.deal.symbol.symbol,
+        )
+        deal.deal.closeTime = order ? order.updateTime : +new Date()
+        const set = await this.getAggregatedSettings(deal.deal)
+        const read = await this.dealsDb.readData(
+          { _id: deal.deal._id },
+          { stats: 1 },
+        )
+        if (
+          read.status === StatusEnum.ok &&
+          read.data.result &&
+          read.data.result.stats.trackTime !== 0
+        ) {
+          deal.deal.stats = read.data.result.stats
+          let profitPerc =
+            ((deal.deal.lastPrice - deal.deal.avgPrice) / deal.deal.avgPrice) *
+            (set.futures
+              ? set.marginType !== BotMarginTypeEnum.inherit
+                ? (set.leverage ?? 1)
+                : 1
+              : 1)
+          profitPerc =
+            profitPerc *
+            (1 -
+              ((await this.getUserFee(deal.deal.symbol.symbol))?.taker ?? 0) *
+                2 *
+                (profitPerc > 0 ? 1 : -1))
+          if (deal.deal.strategy === StrategyEnum.long) {
+            if (
+              profitPerc < 0 &&
+              Math.abs(profitPerc) > deal.deal.stats.drawdownPercent
+            ) {
+              deal.deal.stats.drawdownPercent = Math.abs(profitPerc)
+            }
+            if (profitPerc > 0 && profitPerc > deal.deal.stats.runUpPercent) {
+              deal.deal.stats.runUpPercent = profitPerc
+            }
+          } else {
+            if (
+              profitPerc < 0 &&
+              Math.abs(profitPerc) > deal.deal.stats.runUpPercent
+            ) {
+              deal.deal.stats.runUpPercent = Math.abs(profitPerc)
+            }
+            if (
+              profitPerc > 0 &&
+              profitPerc > deal.deal.stats.drawdownPercent
+            ) {
+              deal.deal.stats.drawdownPercent = profitPerc
+            }
+          }
+          this.saveDeal(deal, {
+            closeTime: +new Date(),
+            stats: deal.deal.stats,
+          })
+        } else {
+          this.saveDeal(deal, {
+            closeTime: +new Date(),
+          })
+        }
+
+        this.botEventDb.createData({
+          userId: this.userId,
+          botId: this.botId,
+          event: 'Deal',
+          botType: this.botType,
+          description: `Deal closed, id: ${deal.deal._id}, profit: ${deal.deal.profit.totalUsd}$`,
+          paperContext: !!this.data?.paperContext,
+          deal: deal.deal._id,
+          symbol: deal.deal.symbol.symbol,
+        })
+      }
+      this.deleteDeal(dealId)
+
+      this.updateDealLastPrices(this.botId, undefined, deal.deal.symbol.symbol)
+      const openDeals = this.getOpenDeals()
+      await this.checkClosedDeals()
+      await this.afterDealClose(dealId, profit)
+      this.handleLog(`Closed after TP is: ${this.closeAfterTpFilled}`)
+      this.processedFilled.delete(dealId)
+      this.feeProcessed.delete(dealId)
+      if (openDeals.length === 0) {
+        this.updateData({ unrealizedProfit: 0 })
+      }
+      if (this.closeAfterTpFilled) {
+        if (openDeals.length === 0) {
+          return true
+        } else {
+          return false
+        }
+      }
+      if (!reopen) {
+        this.handleLog(`Not reopen after ${dealId}`)
+      }
+      if (reopen) {
+        const settings = await this.getAggregatedSettings(deal.deal)
+        const inRange = await this.checkInRange(deal.deal.symbol.symbol)
+        if (inRange) {
+          if (settings.startCondition === StartConditionEnum.asap) {
+            if (
+              !settings.useMulti &&
+              openDeals.length !== 0 &&
+              !settings.useDynamicPriceFilter
+            ) {
+              this.handleLog(`Not open new ASAP deal ${dealId}`)
+            } else {
+              const filtered = await this.filterCoinsByVolume(
+                this.botId,
+                settings.useMulti
+                  ? (await this.getSymbolsToOpenAsapDeals()).filter(
+                      (s) =>
+                        !openDeals.map((d) => d.deal.symbol.symbol).includes(s),
+                    )
+                  : [deal.deal.symbol.symbol],
+              )
+              if (filtered.length) {
+                if (!settings.useMulti && openDeals.length === 0) {
+                  this.openNewDeal(this.botId, filtered[0])
+                }
+                if (
+                  !settings.useMulti &&
+                  openDeals.length !== 0 &&
+                  settings.useDynamicPriceFilter
+                ) {
+                  this.openNewDeal(this.botId, filtered[0])
+                }
+                if (settings.useMulti) {
+                  for (const s of filtered) {
+                    this.openNewDeal(this.botId, s)
+                  }
+                }
+              }
+            }
+          }
+        } else if (
+          !inRange &&
+          !settings.useMulti &&
+          settings.useStaticPriceFilter &&
+          (!settings.useDynamicPriceFilter ||
+            (settings.useDynamicPriceFilter && openDeals.length === 0))
+        ) {
+          this.handleLog(`Set range after ${dealId}`)
+          this.setRangeOrError()
+        }
+      }
+    }
+    return false
+  }
+
+  private async checkInDynamicRange(
+    symbol: string,
+    price?: number,
+  ): Promise<boolean> {
+    if (!this.allowedMethods.has('checkInDynamicRange')) {
+      return true
+    }
+    const settings = await this.getAggregatedSettings()
+    if (!settings.useDynamicPriceFilter) {
+      return true
+    }
+
+    const overValue =
+      parseFloat(settings.dynamicPriceFilterOverValue || '') ||
+      parseFloat(settings.dynamicPriceFilterDeviation || '') ||
+      0
+    const underValue =
+      parseFloat(settings.dynamicPriceFilterUnderValue || '') ||
+      parseFloat(settings.dynamicPriceFilterDeviation || '') ||
+      0
+
+    if (
+      isNaN(overValue) ||
+      !isFinite(overValue) ||
+      isNaN(underValue) ||
+      !isFinite(underValue)
+    ) {
+      return true
+    }
+    let lastData = (this.data?.lastPricesPerSymbol ?? []).find(
+      (d) => d.symbol === symbol,
+    )
+    if (!lastData) {
+      return true
+    }
+    const lastStart = this.getDealsByStatusAndSymbol({
+      symbol,
+      status: DCADealStatusEnum.start,
+    }).sort((a, b) => b.deal.createTime - a.deal.createTime)[0]
+    if (
+      lastStart &&
+      lastData.time &&
+      lastStart.deal.createTime > lastData.time
+    ) {
+      const findOrder = this.getOrdersByStatusAndDealId({
+        dealId: lastStart.deal._id,
+        status: ['NEW', 'PARTIALLY_FILLED'],
+      })
+        .filter((o) => o.typeOrder === TypeOrderEnum.dealStart)
+        .sort((a, b) => b.updateTime - a.updateTime)[0]
+      if (
+        findOrder &&
+        +findOrder.price &&
+        !isNaN(+findOrder.price) &&
+        isFinite(+findOrder.price)
+      ) {
+        lastData = {
+          symbol,
+          entry: +findOrder.price,
+          avg: +findOrder.price,
+          time: lastStart.deal.createTime,
+        }
+      }
+    }
+    const latestPrice = price || (await this.getLatestPrice(symbol))
+    if (!latestPrice) {
+      return true
+    }
+    const referencePrice =
+      settings.dynamicPriceFilterPriceType ===
+      DynamicPriceFilterPriceTypeEnum.avg
+        ? lastData.avg
+        : lastData.entry
+    const calculatedOverValue =
+      referencePrice + (referencePrice * overValue) / 100
+    const calculatedUnderValue =
+      referencePrice - (referencePrice * underValue) / 100
+    if (settings.useNoOverlapDeals) {
+      const openDeals = this.getDealsByStatusAndSymbol({
+        symbol: symbol,
+        status: DCADealStatusEnum.open,
+      })
+      if (openDeals.length > 0) {
+        const ranges = openDeals.map((d) => ({
+          start:
+            (settings.dynamicPriceFilterPriceType ===
+            DynamicPriceFilterPriceTypeEnum.avg
+              ? d.deal.avgPrice ||
+                d.deal.settings.avgPrice ||
+                d.deal.initialPrice
+              : d.deal.initialPrice) *
+            (this.isLong
+              ? settings.dynamicPriceFilterDirection ===
+                  DynamicPriceFilterDirectionEnum.over ||
+                settings.dynamicPriceFilterDirection ===
+                  DynamicPriceFilterDirectionEnum.overAndUnder
+                ? 1 + overValue / 100
+                : 1
+              : settings.dynamicPriceFilterDirection ===
+                    DynamicPriceFilterDirectionEnum.under ||
+                  settings.dynamicPriceFilterDirection ===
+                    DynamicPriceFilterDirectionEnum.overAndUnder
+                ? 1 - underValue / 100
+                : 1),
+          end:
+            (settings.dynamicPriceFilterPriceType ===
+            DynamicPriceFilterPriceTypeEnum.avg
+              ? d.deal.avgPrice ||
+                d.deal.settings.avgPrice ||
+                d.deal.initialPrice
+              : d.deal.initialPrice) *
+            (this.isLong
+              ? settings.dynamicPriceFilterDirection ===
+                  DynamicPriceFilterDirectionEnum.under ||
+                settings.dynamicPriceFilterDirection ===
+                  DynamicPriceFilterDirectionEnum.overAndUnder
+                ? 1 - underValue / 100
+                : 1
+              : settings.dynamicPriceFilterDirection ===
+                    DynamicPriceFilterDirectionEnum.over ||
+                  settings.dynamicPriceFilterDirection ===
+                    DynamicPriceFilterDirectionEnum.overAndUnder
+                ? 1 + overValue / 100
+                : 1),
+        }))
+        const currentRange = {
+          start: latestPrice,
+          end: latestPrice,
+        }
+        const isCurrentDealRangeIsInRanges = ranges.some((r) => {
+          const isInRange = this.isLong
+            ? (currentRange.start <= r.start && currentRange.start >= r.end) ||
+              (currentRange.end <= r.start && currentRange.end >= r.end)
+            : (currentRange.start >= r.start && currentRange.start <= r.end) ||
+              (currentRange.end >= r.start && currentRange.end <= r.end)
+          return isInRange
+        })
+        if (isCurrentDealRangeIsInRanges) {
+          this.handleLog(
+            `Dynamic range overlap with existing deals ${symbol} ${latestPrice} ${currentRange.start} ${currentRange.end}`,
+          )
+          return false
+        }
+      }
+    }
+
+    if (
+      settings.dynamicPriceFilterDirection ===
+        DynamicPriceFilterDirectionEnum.overAndUnder ||
+      !settings.dynamicPriceFilterDirection
+    ) {
+      return (
+        latestPrice > calculatedOverValue || latestPrice < calculatedUnderValue
+      )
+    } else if (
+      settings.dynamicPriceFilterDirection ===
+      DynamicPriceFilterDirectionEnum.over
+    ) {
+      return latestPrice > calculatedOverValue
+    } else if (
+      settings.dynamicPriceFilterDirection ===
+      DynamicPriceFilterDirectionEnum.under
+    ) {
+      return latestPrice < calculatedUnderValue
+    }
+    return false
+  }
+
+  /**
+   * Check if deal in range
+   * @param {number} [price] Price to check. Optional
+   */
+
+  async checkInRange(symbol: string, price?: number) {
+    if (!this.data) {
+      return false
+    }
+    if (!this.allowedMethods.has('checkInRange')) {
+      return true
+    }
+    const settings = await this.getAggregatedSettings()
+
+    if (settings.useMulti && !settings.useDynamicPriceFilter) {
+      return true
+    }
+    const dynamic = await this.checkInDynamicRange(symbol, price)
+    let staticResult = true
+    if (settings.useStaticPriceFilter) {
+      let minOpenDeal = parseFloat(settings.minOpenDeal || '0')
+      let maxOpenDeal = parseFloat(settings.maxOpenDeal || '0')
+      minOpenDeal = isNaN(minOpenDeal) ? 0 : minOpenDeal
+      maxOpenDeal = isNaN(maxOpenDeal) ? 0 : maxOpenDeal
+      if (minOpenDeal === 0 && maxOpenDeal === 0) {
+        return true
+      }
+      const latestPrice =
+        price || (await this.getLatestPrice(this.data.settings.pair[0]))
+      staticResult =
+        (minOpenDeal !== 0 && maxOpenDeal === 0 && latestPrice > minOpenDeal) ||
+        (maxOpenDeal !== 0 && minOpenDeal === 0 && latestPrice < maxOpenDeal) ||
+        (minOpenDeal !== 0 &&
+          maxOpenDeal !== 0 &&
+          latestPrice > minOpenDeal &&
+          latestPrice < maxOpenDeal) ||
+        (minOpenDeal === 0 && maxOpenDeal === 0)
+    }
+    return dynamic && staticResult
+  }
+
+  private getIndicatorSignature(ind: SettingsIndicators) {
+    return Object.entries(ind)
+      .map(([k, v]) =>
+        k === '_id' ? '' : `${k}: ${Array.isArray(v) ? v.join(', ') : v}`,
+      )
+      .join(', ')
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}saveIndicatorsData`)
+  private async saveIndicatorsData(_botId: string, run = false) {
+    if (!run) {
+      if (this.saveIndicatorTimer) {
+        clearTimeout(this.saveIndicatorTimer)
+      }
+      this.saveIndicatorTimer = setTimeout(
+        () => this.saveIndicatorsData.bind(this)(this.botId, true),
+        this.saveIndicatorTimeout,
+      )
+      return
+    }
+    const data: IndicatorsData[] = []
+    const settings = await this.getAggregatedSettings()
+    if (settings.startCondition !== StartConditionEnum.ti) {
+      return
+    }
+    const sd = (settings?.indicators ?? []).filter(
+      (i) => i.indicatorAction === IndicatorAction.startDeal,
+    )
+    if (sd.length === 0) {
+      return
+    }
+    const intervals = sd.reduce(
+      (acc, v) => acc.add(v.indicatorInterval),
+      new Set<ExchangeIntervals>(),
+    )
+    const useMaxDealsPerSignal =
+      intervals.size > 1
+        ? typeof settings.useMaxDealsPerHigherTimeframe !== 'undefined'
+          ? !!settings.useMaxDealsPerHigherTimeframe
+          : true
+        : false
+    if (useMaxDealsPerSignal) {
+      const highestInterval = Array.from(intervals).sort(
+        (a, b) => timeIntervalMap[b] - timeIntervalMap[a],
+      )?.[0]
+      const indicatorsWithHighestInterval = sd.filter(
+        (i) => i.indicatorInterval === highestInterval,
+      )
+      if (indicatorsWithHighestInterval.length * this.pairs.size <= 1000) {
+        for (const i of indicatorsWithHighestInterval) {
+          for (const symbol of this.pairs) {
+            const ind = this.indicators.get(`${i.uuid}@${symbol}`)
+            if (ind) {
+              data.push({
+                signature: this.getIndicatorSignature(i),
+                uuid: i.uuid,
+                symbol,
+                status: ind.status,
+                statusSince: ind.statusSince,
+                statusTo: ind.statusTo,
+                numberOfSignals: ind.numberOfSignals,
+              })
+            }
+            await sleep(0)
+          }
+          await sleep(0)
+        }
+      }
+    }
+    if (this.data) {
+      this.data.indicatorsData = data
+    }
+    this.updateData({ indicatorsData: data })
+  }
+
+  async replaceBotSettings(botSettings: Schema['settings']) {
+    if (this.data?.vars?.list?.length && this.data?.vars?.paths?.length) {
+      for (const path of this.data.vars.paths) {
+        const isIndicatorsPath = path.path.includes('indicators')
+        const isDcaCustomPath = path.path.includes('dcaCustom')
+        const isMultiTpPath = path.path.includes('multiTp')
+        const isMultiSlPath = path.path.includes('multiSl')
+        if (
+          !isIndicatorsPath &&
+          !isDcaCustomPath &&
+          !isMultiTpPath &&
+          !isMultiSlPath
+        ) {
+          const p = path.path as keyof Schema['settings']
+          const v = botSettings[p]
+          if (typeof v !== 'undefined') {
+            botSettings[p] = await this.replaceInputVars(
+              this.data.vars ?? { list: [], paths: [] },
+              String(p),
+              v,
+            )
+          }
+        } else {
+          const split = path.path.split('.')
+          if (split.length === 3) {
+            if (isIndicatorsPath) {
+              const find = botSettings.indicators.find(
+                (i) => i.uuid === split[1],
+              )
+              if (find) {
+                const p = split[2] as keyof SettingsIndicators
+                let v = find[p]
+                if (typeof v !== 'undefined') {
+                  v = await this.replaceInputVars(this.data.vars, path.path, v)
+                  //@ts-ignore
+                  find[p] = v
+                  botSettings.indicators = botSettings.indicators.map((i) =>
+                    i.uuid === find.uuid ? find : i,
+                  )
+                }
+              }
+            }
+            if (isDcaCustomPath) {
+              const find = (botSettings.dcaCustom ?? []).find(
+                (i) => i.uuid === split[1],
+              )
+              if (find) {
+                const p = split[2] as keyof DCACustom
+                let v = find[p]
+                if (typeof v !== 'undefined') {
+                  v = await this.replaceInputVars(this.data.vars, path.path, v)
+                  //@ts-ignore
+                  find[p] = v
+                  botSettings.dcaCustom = (botSettings.dcaCustom ?? []).map(
+                    (i) => (i.uuid === find.uuid ? find : i),
+                  )
+                }
+              }
+            }
+            if (isMultiTpPath) {
+              const find = (botSettings.multiTp ?? []).find(
+                (i) => i.uuid === split[1],
+              )
+              if (find) {
+                const p = split[2] as keyof MultiTP
+                let v = find[p]
+                if (typeof v !== 'undefined') {
+                  v = await this.replaceInputVars(this.data.vars, path.path, v)
+                  //@ts-ignore
+                  find[p] = v
+                  botSettings.multiTp = (botSettings.multiTp ?? []).map((i) =>
+                    i.uuid === find.uuid ? find : i,
+                  )
+                }
+              }
+            }
+            if (isMultiSlPath) {
+              const find = (botSettings.multiSl ?? []).find(
+                (i) => i.uuid === split[1],
+              )
+              if (find) {
+                const p = split[2] as keyof MultiTP
+                let v = find[p]
+                if (typeof v !== 'undefined') {
+                  v = await this.replaceInputVars(this.data.vars, path.path, v)
+                  //@ts-ignore
+                  find[p] = v
+                  botSettings.multiSl = (botSettings.multiSl ?? []).map((i) =>
+                    i.uuid === find.uuid ? find : i,
+                  )
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return botSettings
+  }
+  @RunWithDelay(
+    (
+      botId: string,
+      symbol: string,
+      _lastData: IndicatorHistory,
+      section?: IndicatorSection,
+      action?: IndicatorAction,
+    ) => `${botId}${symbol}${section}${action}checkIndicatorStatus`,
+    500,
+  )
+  @IdMute(
+    mutex,
+    (botId: string, symbol: string) => `${botId}${symbol}checkIndicatorStatus`,
+  )
+  async checkIndicatorStatus(
+    _botId: string,
+    symbol: string,
+    lastData: IndicatorHistory,
+    section?: IndicatorSection,
+    action?: IndicatorAction,
+  ) {
+    if (!this.data) {
+      return
+    }
+    const settings = await this.getAggregatedSettings()
+    const ps = settings.indicators
+      ?.map((i) => this.indicators.get(`${i.uuid}@${symbol}`))
+      .filter((i) => !!i) as LocalIndicators[]
+    const allForSymbol = ps.filter(
+      (i) =>
+        !i.maCross &&
+        i.action !== IndicatorAction.riskReward &&
+        (this.scaleAr
+          ? i.action !== IndicatorAction.startDca
+          : this.tpAr
+            ? !(
+                i.action === IndicatorAction.closeDeal &&
+                i.section !== IndicatorSection.sl
+              )
+            : this.slAr
+              ? !(
+                  i.action === IndicatorAction.closeDeal &&
+                  i.section === IndicatorSection.sl
+                )
+              : true),
+    )
+    const allForSymbolCloseSl =
+      action === IndicatorAction.closeDeal && section === IndicatorSection.sl
+        ? allForSymbol.filter(
+            (i) =>
+              i.action === IndicatorAction.closeDeal &&
+              i.section === IndicatorSection.sl,
+          )
+        : []
+    const allForSymbolCloseTp =
+      action === IndicatorAction.closeDeal && section !== IndicatorSection.sl
+        ? allForSymbol.filter(
+            (i) =>
+              i.action === IndicatorAction.closeDeal &&
+              i.section !== IndicatorSection.sl,
+          )
+        : []
+    const allForSymbolStopBot =
+      action === IndicatorAction.stopBot
+        ? allForSymbol.filter((i) => i.action === IndicatorAction.stopBot)
+        : []
+    const allForSymbolStartBot =
+      action === IndicatorAction.startBot
+        ? allForSymbol.filter((i) => i.action === IndicatorAction.startBot)
+        : []
+    const allForSymbolOpen =
+      action === IndicatorAction.startDeal
+        ? allForSymbol.filter((i) => i.action === IndicatorAction.startDeal)
+        : []
+    const all = allForSymbol.filter(
+      (i) => i.status && (i.statusTo ? i.statusTo >= +new Date() : true),
+    )
+    const allCloseSl =
+      action === IndicatorAction.closeDeal && section === IndicatorSection.sl
+        ? all.filter(
+            (i) =>
+              i.action === IndicatorAction.closeDeal &&
+              i.section === IndicatorSection.sl,
+          )
+        : []
+    const allCloseTp =
+      action === IndicatorAction.closeDeal && section !== IndicatorSection.sl
+        ? all.filter(
+            (i) =>
+              i.action === IndicatorAction.closeDeal &&
+              i.section !== IndicatorSection.sl,
+          )
+        : []
+    const allStopBot =
+      action === IndicatorAction.stopBot
+        ? all.filter((i) => i.action === IndicatorAction.stopBot)
+        : []
+    const allStartBot =
+      action === IndicatorAction.startBot
+        ? all.filter((i) => i.action === IndicatorAction.startBot)
+        : []
+    const allOpen =
+      action === IndicatorAction.startDeal
+        ? all.filter((i) => i.action === IndicatorAction.startDeal)
+        : []
+    const allOpenDCA =
+      action === IndicatorAction.startDca
+        ? all.filter((i) => i.action === IndicatorAction.startDca)
+        : []
+    const closeDealSlGroupsStatus = !allCloseSl.length
+      ? []
+      : this.indicatorGroupsToUse
+          .filter(
+            (ig) =>
+              ig.action === IndicatorAction.closeDeal &&
+              ig.section === IndicatorSection.sl,
+          )
+          .map((ig) => {
+            const findAll = allForSymbolCloseSl.filter(
+              (i) => i.groupId === ig.id,
+            )
+            const findAllStatus = allCloseSl.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
+    if (
+      (settings.stopDealSlLogic === IndicatorsLogicEnum.and ||
+      !settings.stopDealSlLogic
+        ? closeDealSlGroupsStatus.every((r) => !!r)
+        : closeDealSlGroupsStatus.some((r) => !!r)) &&
+      closeDealSlGroupsStatus.length !== 0
+    ) {
+      for (const ai of allForSymbolCloseSl) {
+        const i = this.indicators.get(ai.key)
+        if (i) {
+          this.indicators.set(ai.key, {
+            ...i,
+            status: i.statusTo ? i.status : false,
+          })
+        }
+      }
+      if (
+        (this.indicatorActions.closeDealSl.get(symbol) ?? 0) < lastData.time
+      ) {
+        this.indicatorActions.closeDealSl.set(symbol, lastData.time)
+        this.closeAllDeals(
+          settings.closeDealType ?? CloseDCATypeEnum.closeByMarket,
+          symbol,
+          false,
+          true,
+          undefined,
+          true,
+          undefined,
+          DCACloseTriggerEnum.sl,
+        )
+      }
+    }
+    const closeDealTpGroupsStatus = !allCloseTp.length
+      ? []
+      : this.indicatorGroupsToUse
+          .filter(
+            (ig) =>
+              ig.action === IndicatorAction.closeDeal &&
+              ig.section !== IndicatorSection.sl,
+          )
+          .map((ig) => {
+            const findAll = allForSymbolCloseTp.filter(
+              (i) => i.groupId === ig.id,
+            )
+            const findAllStatus = allCloseTp.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
+    if (
+      (settings.stopDealLogic === IndicatorsLogicEnum.and ||
+      !settings.stopDealLogic
+        ? closeDealTpGroupsStatus.every((r) => !!r)
+        : closeDealTpGroupsStatus.some((r) => !!r)) &&
+      closeDealTpGroupsStatus.length !== 0
+    ) {
+      for (const ai of allForSymbolCloseTp) {
+        const i = this.indicators.get(ai.key)
+        if (i) {
+          this.indicators.set(ai.key, {
+            ...i,
+            status: i.statusTo ? i.status : false,
+          })
+        }
+      }
+      if (
+        (this.indicatorActions.closeDealTp.get(symbol) ?? 0) < lastData.time
+      ) {
+        this.indicatorActions.closeDealTp.set(symbol, lastData.time)
+        this.closeAllDeals(
+          settings.closeDealType ?? CloseDCATypeEnum.closeByMarket,
+          symbol,
+          true,
+          true,
+          undefined,
+          undefined,
+          undefined,
+          DCACloseTriggerEnum.tp,
+        )
+      }
+    }
+    const stopBotGroupsStatus = !allStopBot.length
+      ? []
+      : this.indicatorGroupsToUse
+          .filter((ig) => ig.action === IndicatorAction.stopBot)
+          .map((ig) => {
+            const findAll = allForSymbolStopBot.filter(
+              (i) => i.groupId === ig.id,
+            )
+            const findAllStatus = allStopBot.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
+    if (
+      (settings.stopBotLogic === IndicatorsLogicEnum.and ||
+      !settings.stopBotLogic
+        ? stopBotGroupsStatus.every((r) => !!r)
+        : stopBotGroupsStatus.some((r) => !!r)) &&
+      stopBotGroupsStatus.length !== 0 &&
+      this.data.status !== BotStatusEnum.monitoring
+    ) {
+      for (const ai of allForSymbolStopBot) {
+        const i = this.indicators.get(ai.key)
+        if (i) {
+          this.indicators.set(ai.key, {
+            ...i,
+            status: i.statusTo ? i.status : false,
+          })
+        }
+      }
+      if ((this.indicatorActions.stopBot.get(symbol) ?? 0) < lastData.time) {
+        this.indicatorActions.stopBot.set(symbol, lastData.time)
+        await this.setStatus(
+          this.botId,
+          BotStatusEnum.closed,
+          undefined,
+          undefined,
+          undefined,
+          true,
+        )
+        if (
+          this.data.settings.stopStatus === BotStatusEnum.monitoring &&
+          (this.data.settings.botActualStart === BotStartTypeEnum.indicators ||
+            this.data.settings.botActualStart === BotStartTypeEnum.price)
+        ) {
+          this.setStatus(this.botId, BotStatusEnum.open)
+        }
+      }
+    }
+    const startBotGroupsStatus = !allStartBot.length
+      ? []
+      : this.indicatorGroupsToUse
+          .filter((ig) => ig.action === IndicatorAction.startBot)
+          .map((ig) => {
+            const findAll = allForSymbolStartBot.filter(
+              (i) => i.groupId === ig.id,
+            )
+            const findAllStatus = allStartBot.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
+    if (
+      (settings.startBotLogic === IndicatorsLogicEnum.and ||
+      !settings.startBotLogic
+        ? startBotGroupsStatus.every((r) => !!r)
+        : startBotGroupsStatus.some((r) => !!r)) &&
+      startBotGroupsStatus.length !== 0 &&
+      this.data.status === BotStatusEnum.monitoring
+    ) {
+      for (const ai of allForSymbolStartBot) {
+        const i = this.indicators.get(ai.key)
+        if (i) {
+          this.indicators.set(ai.key, {
+            ...i,
+            status: i.statusTo ? i.status : false,
+          })
+        }
+      }
+      if ((this.indicatorActions.startBot.get(symbol) ?? 0) < lastData.time) {
+        this.indicatorActions.startBot.set(symbol, lastData.time)
+        this.setStatus(this.botId, BotStatusEnum.open)
+      }
+    }
+    const openDealGroupsStatus = !allOpen.length
+      ? []
+      : this.indicatorGroupsToUse
+          .filter((ig) => ig.action === IndicatorAction.startDeal)
+          .map((ig) => {
+            const findAll = allForSymbolOpen.filter((i) => i.groupId === ig.id)
+            const findAllStatus = allOpen.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
+    if (
+      (settings.startDealLogic === IndicatorsLogicEnum.and ||
+      !settings.startDealLogic
+        ? openDealGroupsStatus.every((r) => !!r)
+        : openDealGroupsStatus.some((r) => !!r)) &&
+      openDealGroupsStatus.length !== 0 &&
+      !(
+        this.data?.status === BotStatusEnum.archive ||
+        this.data.status === BotStatusEnum.closed ||
+        (this.data?.status === BotStatusEnum.error &&
+          this.data.previousStatus === BotStatusEnum.closed)
+      )
+    ) {
+      const useMaxDealsPerSignal =
+        (settings?.indicators ?? [])
+          .filter((i) => i.indicatorAction === IndicatorAction.startDeal)
+          .reduce(
+            (acc, v) => acc.add(v.indicatorInterval),
+            new Set<ExchangeIntervals>(),
+          ).size > 1
+          ? typeof settings.useMaxDealsPerHigherTimeframe !== 'undefined'
+            ? !!settings.useMaxDealsPerHigherTimeframe
+            : true
+          : false
+      const maxDealsPerSignal =
+        typeof settings.useMaxDealsPerHigherTimeframe !== 'undefined'
+          ? !settings.useMaxDealsPerHigherTimeframe
+            ? Infinity
+            : +(settings.maxDealsPerHigherTimeframe ?? '1')
+          : 1
+      const highestInterval = (settings.indicators ?? [])
+        .filter((i) => i.indicatorAction === IndicatorAction.startDeal)
+        .map((i) => i.indicatorInterval)
+        .sort((a, b) => timeIntervalMap[b] - timeIntervalMap[a])?.[0]
+      for (const ai of allForSymbolOpen) {
+        const i = this.indicators.get(ai.key)
+        if (i) {
+          const maxNumberExceed =
+            i.interval === highestInterval &&
+            useMaxDealsPerSignal &&
+            (i.numberOfSignals ?? 0) + 1 >= maxDealsPerSignal
+          this.indicators.set(ai.key, {
+            ...i,
+            status: maxNumberExceed ? false : i.statusTo ? i.status : false,
+            numberOfSignals: maxNumberExceed
+              ? 0
+              : i.interval === highestInterval
+                ? (i.numberOfSignals ?? 0) + 1
+                : i.numberOfSignals,
+          })
+        }
+      }
+      if ((this.indicatorActions.startDeal.get(symbol) ?? 0) < lastData.time) {
+        const cbIfNotOpened = () => {
+          for (const ai of allForSymbolOpen) {
+            const i = this.indicators.get(ai.key)
+            if (i) {
+              const maxNumberExceed =
+                i.interval === highestInterval &&
+                useMaxDealsPerSignal &&
+                Math.max(0, (i.numberOfSignals ?? 0) - 1) >= maxDealsPerSignal
+              this.indicators.set(ai.key, {
+                ...i,
+                status: maxNumberExceed
+                  ? false
+                  : i.statusTo
+                    ? i.statusTo > +new Date()
+                      ? true
+                      : i.status
+                    : false,
+                numberOfSignals: maxNumberExceed
+                  ? 0
+                  : i.interval === highestInterval
+                    ? Math.max(0, (i.numberOfSignals ?? 0) - 1)
+                    : i.numberOfSignals,
+              })
+            }
+          }
+        }
+        this.indicatorActions.startDeal.set(symbol, lastData.time)
+        if ((await this.filterCoinsByVolume(this.botId, [symbol])).length) {
+          this.openNewDeal(
+            this.botId,
+            symbol,
+            undefined,
+            undefined,
+            undefined,
+            cbIfNotOpened,
+          )
+        }
+      }
+    }
+    if (allOpenDCA.length) {
+      const key = `${symbol}`
+      if ((this.indicatorActions.dcaOrder.get(key) ?? 0) < lastData.time) {
+        this.indicatorActions.dcaOrder.set(key, lastData.time)
+        for (const i of allOpenDCA) {
+          const ind = this.indicators.get(i.key)
+          if (ind) {
+            this.indicators.set(i.key, {
+              ...ind,
+              status: false,
+            })
+          }
+          const index = (settings.indicators ?? [])
+            .filter((ind) => ind.indicatorAction === IndicatorAction.startDca)
+            .findIndex((si) => si.uuid === i.uuid)
+          this.addDCAOrderByIndicator(
+            this.botId,
+            index,
+            i.symbol,
+            lastData.time,
+          )
+        }
+      }
+    }
+    this.saveIndicatorsData(this.botId)
+  }
+
+  /**
+   * Check indicator condition
+   */
+  @IdMute(
+    mutex,
+    (botId: string, _uuid: string, _data: IndicatorHistory[], symbol: string) =>
+      `${botId}${symbol}checkIndicatorConditions`,
+  )
+  @IdMute(
+    mutexIndicators,
+    (botId: string) => `${botId}checkIndicatorConditions`,
+  )
+  async checkIndicatorConditions(
+    _botId: string,
+    uuid: string,
+    data: IndicatorHistory[],
+    symbol: string,
+  ) {
+    if (data.length === 0) {
+      return
+    }
+    const key = `${uuid}@${symbol}`
+    if (
+      this.pairs.size < 100 &&
+      this.indicators.size < 1000 &&
+      !this.indicators.has(key) &&
+      (this.data?.settings?.pair?.includes(symbol) || this.pairs.has(symbol))
+    ) {
+      this.handleLog(
+        `Indicator ${uuid}@${symbol} not connected yet, will be processed after`,
+      )
+      this.afterIndicatorsConnected.push(() =>
+        this.checkIndicatorConditions(_botId, uuid, data, symbol),
+      )
+
+      if (this.scaleAr) {
+        const find = this.data?.settings.indicators?.find(
+          (ind) => ind.uuid === uuid,
+        )
+        if (find?.indicatorAction === IndicatorAction.startDca) {
+          this.handleLog(
+            `AFTER | Scale DCA ${uuid}@${symbol} action: ${
+              find?.indicatorAction
+            }, data: ${data?.[(data?.length ?? 0) - 1]?.value}`,
+          )
+        }
+      }
+      return
+    }
+    const sortedByTime = [...data].sort((a, b) => b.time - a.time)
+    const lastTime = sortedByTime[0].time
+
+    if (this.lastIndicatorsDataMap.has(key)) {
+      if ((this.lastIndicatorsDataMap.get(key) ?? lastTime) >= lastTime) {
+        return
+      }
+    }
+    let risk = false
+    let dcaAr = false
+    this.lastIndicatorsDataMap.set(key, lastTime)
+    const settings = await this.getAggregatedSettings()
+    if (this.data) {
+      const [lastData, prevData] = sortedByTime
+      const i = this.indicators.get(key)
+      let action = false
+      let skipAction = false
+      let trendFilterAction = false
+      let lastDataString = ''
+      let prevDataString = ''
+      let trendValue: number | undefined
+      let cont = false
+      if (i) {
+        i.data = true
+        i.history = data
+        this.indicators.set(key, i)
+        if (i.maCross) {
+          const parentIndicator = this.indicators.get(
+            `${i.parentIndicator}@${symbol}`,
+          )
+          if (
+            !parentIndicator ||
+            !parentIndicator.history?.length ||
+            !parentIndicator.data
+          ) {
+            cont = true
+          } else {
+            this.lastIndicatorsDataMap.delete(`${i.parentIndicator}@${symbol}`)
+            this.checkIndicatorConditions(
+              this.botId,
+              i.parentIndicator,
+              parentIndicator.history,
+              symbol,
+            )
+            cont = true
+          }
+        }
+        if (i.childIndicator) {
+          const childIndicator = this.indicators.get(
+            `${i.childIndicator}@${symbol}`,
+          )
+          if (
+            !childIndicator ||
+            !childIndicator.history?.length ||
+            !childIndicator.data
+          ) {
+            cont = true
+          }
+        }
+        if (
+          i.action !== IndicatorAction.riskReward &&
+          !(this.scaleAr && i.action === IndicatorAction.startDca) &&
+          !(
+            this.tpAr &&
+            i.action === IndicatorAction.closeDeal &&
+            i.section !== IndicatorSection.sl
+          ) &&
+          !(
+            this.slAr &&
+            i.action === IndicatorAction.closeDeal &&
+            i.section === IndicatorSection.sl
+          ) &&
+          !cont
+        ) {
+          i.data = false
+          i.history = []
+        }
+
+        const find = settings.indicators?.find((ind) => ind.uuid === uuid)
+        const showLog = this.indicators.size < 100
+        if (find) {
+          const {
+            indicatorValue,
+            indicatorCondition,
+            type,
+            checkLevel,
+            signal,
+            maUUID,
+            maCrossingValue,
+            maType,
+            indicatorInterval,
+            bbCrossingValue,
+            stochUpper,
+            stochLower,
+            srCrossingValue,
+            indicatorAction,
+            stochRange,
+            keepConditionBars,
+            ecdTrigger,
+            xoUUID,
+            xOscillator1,
+            percentile,
+            divMinCount,
+            divType,
+            trendFilter,
+            trendFilterType,
+            stCondition,
+            pcValue,
+            ppValue,
+            ppType,
+            section,
+            dcValue,
+          } = find
+          if (indicatorAction === IndicatorAction.riskReward) {
+            risk = true
+            cont = true
+          }
+          if (this.scaleAr && indicatorAction === IndicatorAction.startDca) {
+            this.handleLog(
+              `Scale DCA ${uuid}@${symbol} action: ${indicatorAction}, data: ${
+                data?.[(data?.length ?? 0) - 1]?.value
+              }`,
+            )
+            dcaAr = true
+            cont = true
+          }
+          if (
+            this.tpAr &&
+            indicatorAction === IndicatorAction.closeDeal &&
+            section !== IndicatorSection.sl
+          ) {
+            dcaAr = true
+            cont = true
+          }
+          if (
+            this.slAr &&
+            indicatorAction === IndicatorAction.closeDeal &&
+            section === IndicatorSection.sl
+          ) {
+            dcaAr = true
+            cont = true
+          }
+          if (!cont) {
+            let { rsiValue, rsiValue2, valueInsteadof } = find
+            rsiValue = rsiValue ?? rsiValueEnum.k
+            rsiValue2 = rsiValue2 ?? rsiValue2Enum.d
+            valueInsteadof = valueInsteadof ?? 1
+            let value = indicatorValue !== undefined ? +indicatorValue : 0
+            let prevValue = value
+            if (type === IndicatorEnum.pc) {
+              const pcCondition =
+                +(pcValue ?? '5') > 0
+                  ? PCConditionEnum.up
+                  : PCConditionEnum.down
+              const [last] = [...data].sort((a, b) => b.time - a.time)
+              action =
+                (pcCondition === PCConditionEnum.down &&
+                  (last.value as PCResult).down) ||
+                (pcCondition === PCConditionEnum.up &&
+                  (last.value as PCResult).up)
+              if (action && showLog) {
+                this.handleLog(
+                  `${uuid}@${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger action: up: ${
+                    (last.value as PCResult).up
+                  }, down: ${
+                    (last.value as PCResult).down
+                  }, condition: ${pcCondition}, last time ${new Date(
+                    lastTime,
+                  )?.toISOString()}`,
+                )
+              }
+            } else if (type === IndicatorEnum.st) {
+              const [ld, pd] = sortedByTime
+              const lastData = ld?.value as SuperTrendResult
+              const prevData = pd?.value as SuperTrendResult
+              action =
+                (stCondition === STConditionEnum.up &&
+                  lastData?.direction === -1) ||
+                (stCondition === STConditionEnum.down &&
+                  lastData?.direction === 1) ||
+                (stCondition === STConditionEnum.upToDown &&
+                  prevData?.direction === -1 &&
+                  lastData?.direction === 1) ||
+                (stCondition === STConditionEnum.downToUp &&
+                  prevData?.direction === 1 &&
+                  lastData?.direction === -1)
+              if (action && showLog) {
+                this.handleLog(
+                  `${uuid}@${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger action: ${indicatorAction}. ${
+                    prevData.direction
+                  }, ${lastData.direction}, ${prevData.value}, ${
+                    lastData.value
+                  }, last time ${new Date(lastTime)?.toISOString()}`,
+                )
+              }
+            } else if (type === IndicatorEnum.div) {
+              const [lastData] = sortedByTime
+              const result = lastData.value as DIVResult
+              const min = +(divMinCount ?? 2)
+              action = action =
+                ((divType === DivTypeEnum.bear ||
+                  divType === DivTypeEnum.abear) &&
+                  result.negdivergence >= min) ||
+                ((divType === DivTypeEnum.hbear ||
+                  divType === DivTypeEnum.abear) &&
+                  result.negdivergencehidden >= min) ||
+                ((divType === DivTypeEnum.bull ||
+                  divType === DivTypeEnum.abull) &&
+                  result.posdivergence >= min) ||
+                ((divType === DivTypeEnum.hbull ||
+                  divType === DivTypeEnum.abull) &&
+                  result.posdivergencehidden >= min)
+              if (action && showLog) {
+                this.handleLog(
+                  `${uuid}@${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger action: ${indicatorAction}. ${
+                    result.negdivergence
+                  }, ${result.negdivergencehidden}, ${result.posdivergence}, ${
+                    result.posdivergencehidden
+                  }, last time ${new Date(lastTime)?.toISOString()}`,
+                )
+              }
+            } else if (type === IndicatorEnum.qfl) {
+              action = (lastData.value as QFLResult).action
+              if (action && showLog) {
+                this.handleLog(
+                  `${uuid}@${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger action: ${indicatorAction}, last time ${new Date(
+                    lastTime,
+                  )?.toISOString()}`,
+                )
+              }
+            } else if (type === IndicatorEnum.tv && checkLevel && signal) {
+              /**
+               * TradingViews Technical Analysis
+               *
+               * Result:
+               *  - 0 - neutral
+               *
+               *  - 1 - Buy
+               *
+               *  - 2 - Strong buy
+               *
+               *  - 3 - Sell
+               *
+               *  - 4 - Strong sell
+               *
+               *  - 5 - No action (for useEntryExitPoints)
+               */
+              const tvta = lastData.value as number
+              if (signal === TradingviewAnalysisSignalEnum.buy && tvta === 1) {
+                action = true
+              } else if (
+                signal === TradingviewAnalysisSignalEnum.strongBuy &&
+                tvta === 2
+              ) {
+                action = true
+              } else if (
+                signal === TradingviewAnalysisSignalEnum.bothBuy &&
+                (tvta === 2 || tvta === 1)
+              ) {
+                action = true
+              } else if (
+                signal === TradingviewAnalysisSignalEnum.sell &&
+                tvta === 3
+              ) {
+                action = true
+              } else if (
+                signal === TradingviewAnalysisSignalEnum.strongSell &&
+                tvta === 4
+              ) {
+                action = true
+              } else if (
+                signal === TradingviewAnalysisSignalEnum.bothSell &&
+                (tvta === 3 || tvta === 4)
+              ) {
+                action = true
+              }
+              if (action && showLog) {
+                this.handleLog(
+                  `${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger. ${
+                    tvta === 0
+                      ? 'Neutral'
+                      : tvta === 1
+                        ? 'Buy'
+                        : tvta === 2
+                          ? 'Strong Buy'
+                          : tvta === 3
+                            ? 'Sell'
+                            : tvta === 4
+                              ? 'Strong Sell'
+                              : 'No action'
+                  } action: ${indicatorAction}, last time ${new Date(
+                    lastTime,
+                  )?.toISOString()}`,
+                )
+              }
+            } else if (type === IndicatorEnum.ecd && ecdTrigger) {
+              /**
+               * Engulfing candle detector
+               *
+               * Result:
+               *  - 0 - na
+               *
+               *  - 1 - Bearish
+               *
+               *  - 2 - Bullish
+               *
+               */
+              const [lastData] = sortedByTime
+              const ecd = lastData.value as number
+              if (
+                ecd === 1 &&
+                [ECDTriggerEnum.bearish, ECDTriggerEnum.both].includes(
+                  ecdTrigger,
+                )
+              ) {
+                action = true
+              } else if (
+                ecd === 2 &&
+                [ECDTriggerEnum.bullish, ECDTriggerEnum.both].includes(
+                  ecdTrigger,
+                )
+              ) {
+                action = true
+              }
+              if (action && showLog) {
+                this.handleLog(
+                  `${uuid}@${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger. ${
+                    ecd === 1 ? 'Bearish' : ecd === 2 ? 'Bullish' : 'No action'
+                  } action: ${indicatorAction}, last time ${new Date(
+                    lastTime,
+                  )?.toISOString()}`,
+                )
+              }
+            } else if (
+              (indicatorValue !== undefined || type === IndicatorEnum.ma) &&
+              indicatorCondition &&
+              prevData
+            ) {
+              let last = 0
+              let prev = 0
+              let checkValue = true
+              if (
+                (lastData.type === IndicatorEnum.rsi ||
+                  lastData.type === IndicatorEnum.ao ||
+                  lastData.type === IndicatorEnum.cci ||
+                  lastData.type === IndicatorEnum.uo ||
+                  lastData.type === IndicatorEnum.mom ||
+                  lastData.type === IndicatorEnum.wr ||
+                  lastData.type === IndicatorEnum.mfi ||
+                  lastData.type === IndicatorEnum.adx ||
+                  lastData.type === IndicatorEnum.bbw ||
+                  lastData.type === IndicatorEnum.bbpb ||
+                  lastData.type === IndicatorEnum.kcpb ||
+                  lastData.type === IndicatorEnum.vo ||
+                  lastData.type === IndicatorEnum.mar) &&
+                (prevData.type === IndicatorEnum.rsi ||
+                  prevData.type === IndicatorEnum.ao ||
+                  prevData.type === IndicatorEnum.cci ||
+                  prevData.type === IndicatorEnum.uo ||
+                  prevData.type === IndicatorEnum.mom ||
+                  prevData.type === IndicatorEnum.wr ||
+                  prevData.type === IndicatorEnum.mfi ||
+                  prevData.type === IndicatorEnum.adx ||
+                  prevData.type === IndicatorEnum.bbw ||
+                  prevData.type === IndicatorEnum.bbpb ||
+                  prevData.type === IndicatorEnum.kcpb ||
+                  prevData.type === IndicatorEnum.vo ||
+                  prevData.type === IndicatorEnum.mar)
+              ) {
+                last = lastData.value.value
+                prev = prevData.value.value
+                if (percentile) {
+                  const tmpValue = lastData.value.percentile
+                  const tmpPrevValue = prevData.value.percentile
+                  if (
+                    typeof tmpValue === 'undefined' ||
+                    typeof tmpPrevValue === 'undefined'
+                  ) {
+                    last = 0
+                    prev = 0
+                    value = 0
+                    prevValue = 0
+                  } else {
+                    value = tmpValue
+                    prevValue = tmpPrevValue
+                  }
+                }
+                if (trendFilter) {
+                  trendFilterAction =
+                    (trendFilterType === TrendFilterOperatorEnum.lower &&
+                      lastData.value.trend === 1) ||
+                    (trendFilterType === TrendFilterOperatorEnum.higher &&
+                      lastData.value.trend === 2) ||
+                    (trendFilterType === TrendFilterOperatorEnum.between &&
+                      lastData.value.trend === 3)
+                  trendValue = lastData.value.trend
+                }
+              }
+              if (
+                lastData.type === IndicatorEnum.dc &&
+                prevData.type === IndicatorEnum.dc
+              ) {
+                last = lastData.value.price
+                prev = prevData.value.price
+                value =
+                  dcValue === DCValueEnum.lower
+                    ? lastData.value.low
+                    : dcValue === DCValueEnum.upper
+                      ? lastData.value.high
+                      : lastData.value.basis
+                prevValue =
+                  dcValue === DCValueEnum.lower
+                    ? prevData.value.low
+                    : dcValue === DCValueEnum.upper
+                      ? prevData.value.high
+                      : prevData.value.basis
+              }
+              if (
+                lastData.type === IndicatorEnum.bbwp &&
+                prevData?.type === IndicatorEnum.bbwp
+              ) {
+                last = lastData.value
+                prev = prevData.value
+              }
+              if (
+                lastData.type === IndicatorEnum.atr &&
+                prevData?.type === IndicatorEnum.atr
+              ) {
+                last = lastData.value
+                prev = prevData.value
+              }
+              if (
+                lastData.type === IndicatorEnum.adr &&
+                prevData?.type === IndicatorEnum.adr
+              ) {
+                last = lastData.value
+                prev = prevData.value
+              }
+              if (
+                lastData.type === IndicatorEnum.ath &&
+                prevData.type === IndicatorEnum.ath
+              ) {
+                last = lastData.value
+                prev = prevData.value
+                value = Math.abs(+(indicatorValue ?? '70')) * -1
+                prevValue = value
+              }
+              if (
+                lastData.type === IndicatorEnum.macd &&
+                prevData?.type === IndicatorEnum.macd
+              ) {
+                last = lastData.value.histogram
+                prev = prevData.value.histogram
+              }
+              if (
+                lastData.type === IndicatorEnum.ma &&
+                prevData?.type === IndicatorEnum.ma
+              ) {
+                last = lastData.value.ma
+                prev = prevData.value.ma
+                if (maCrossingValue === MAEnum.price) {
+                  value = lastData.value.price
+                  prevValue = prevData.value.price
+                } else if (lastData.value.maType === maType) {
+                  const maKey = `${maUUID}@${symbol}`
+                  const findMA = this.indicators.get(maKey)
+                  if (findMA) {
+                    const data = [...findMA.history].sort(
+                      (a, b) => b.time - a.time,
+                    )
+                    const prevMAData =
+                      findMA.interval === i.interval
+                        ? data.find((d) => d.time === prevData.time) ||
+                          data[1] ||
+                          0
+                        : data[1]
+                    const dataMA =
+                      findMA.interval === i.interval
+                        ? data.find((d) => d.time === lastData.time) ||
+                          data[0] ||
+                          0
+                        : data[0]
+                    prevValue = prevMAData
+                      ? (prevMAData.value as MAResult).ma
+                      : 0
+                    findMA.data =
+                      findMA.interval === i.interval ||
+                      timeIntervalMap[findMA.interval] <
+                        timeIntervalMap[i.interval]
+                        ? false
+                        : findMA.data
+                    this.indicators.set(maKey, findMA)
+                    value = dataMA ? (dataMA.value as MAResult).ma : 0
+                    if (
+                      (eq(prevValue, 0) && !eq(value, 0)) ||
+                      (eq(value, 0) && !eq(prevValue, 0))
+                    ) {
+                      this.handleLog(
+                        `Indicator ${maKey} some values are zero: ${value} value, ${prevValue} prevValue | ${new Date(
+                          lastData.time,
+                        )}`,
+                      )
+                      value = 0
+                      prevValue = 0
+                    }
+                  } else {
+                    this.handleLog(
+                      `Indicator ${maKey} not found | ${new Date(
+                        lastData.time,
+                      )}`,
+                    )
+                    value = 0
+                    prevValue = 0
+                    last = 0
+                    prev = 0
+                  }
+                } else {
+                  value = 0
+                  prevValue = 0
+                  last = 0
+                  prev = 0
+                }
+              }
+              if (
+                find.type === IndicatorEnum.xo &&
+                lastData.type === xOscillator1 &&
+                prevData?.type === xOscillator1
+              ) {
+                last = lastData.value.value
+                prev = prevData.value.value
+                const xoKey = `${xoUUID}@${symbol}`
+                const findXO = this.indicators.get(xoKey)
+                if (findXO) {
+                  const [dataXO, prevXOData] = [...findXO.history].sort(
+                    (a, b) => b.time - a.time,
+                  )
+                  prevValue = prevXOData
+                    ? (prevXOData.value as PercentileResult).value
+                    : 0
+                  value = dataXO ? (dataXO.value as PercentileResult).value : 0
+                  findXO.data =
+                    findXO.interval === i.interval ||
+                    timeIntervalMap[findXO.interval] <
+                      timeIntervalMap[i.interval]
+                      ? false
+                      : findXO.data
+                  this.indicators.set(xoKey, findXO)
+                } else {
+                  last = 0
+                  prev = 0
+                  value = 0
+                  prevValue = 0
+                }
+              }
+              if (
+                lastData.type === IndicatorEnum.psar &&
+                prevData.type === IndicatorEnum.psar
+              ) {
+                last = lastData.value.price
+                prev = prevData.value.price
+                value = lastData.value.psar
+                prevValue = prevData.value.psar
+              }
+              if (
+                (lastData.type === IndicatorEnum.bb ||
+                  lastData.type === IndicatorEnum.kc) &&
+                (prevData.type === IndicatorEnum.bb ||
+                  prevData.type === IndicatorEnum.kc)
+              ) {
+                last = lastData.value.price
+                prev = prevData.value.price
+                value =
+                  bbCrossingValue === BBCrossingEnum.lower
+                    ? lastData.value.result.lower
+                    : bbCrossingValue === BBCrossingEnum.middle
+                      ? lastData.value.result.middle
+                      : lastData.value.result.upper
+                prevValue =
+                  bbCrossingValue === BBCrossingEnum.lower
+                    ? prevData.value.result.lower
+                    : bbCrossingValue === BBCrossingEnum.middle
+                      ? prevData.value.result.middle
+                      : prevData.value.result.upper
+              }
+              if (type === IndicatorEnum.pp) {
+                const [ld, pd] = sortedByTime
+                const lastData = ld.value as PriorPivotResult
+                const prevData = pd.value as PriorPivotResult
+                if (!ppType || ppType === ppValueTypeEnum.price) {
+                  last = lastData.price
+                  prev = prevData.price
+                  value =
+                    ppValue === ppValueEnum.anyH
+                      ? isNaN(lastData.hh)
+                        ? lastData.lh
+                        : lastData.hh
+                      : ppValue === ppValueEnum.anyL
+                        ? isNaN(lastData.ll)
+                          ? lastData.hl
+                          : lastData.ll
+                        : ppValue === ppValueEnum.hh
+                          ? lastData.hh
+                          : ppValue === ppValueEnum.hl
+                            ? lastData.hl
+                            : ppValue === ppValueEnum.ll
+                              ? lastData.ll
+                              : lastData.lh
+                  prevValue =
+                    ppValue === ppValueEnum.anyH
+                      ? isNaN(prevData.hh)
+                        ? prevData.lh
+                        : prevData.hh
+                      : ppValue === ppValueEnum.anyL
+                        ? isNaN(prevData.ll)
+                          ? prevData.hl
+                          : prevData.ll
+                        : ppValue === ppValueEnum.hh
+                          ? prevData.hh
+                          : ppValue === ppValueEnum.hl
+                            ? prevData.hl
+                            : ppValue === ppValueEnum.ll
+                              ? prevData.ll
+                              : prevData.lh
+                  if (isNaN(value) || isNaN(prevValue)) {
+                    last = 0
+                    prev = 0
+                    value = 0
+                    prevValue = 0
+                  }
+                }
+                if (ppType === ppValueTypeEnum.event) {
+                  skipAction = true
+                  action =
+                    ((ppValue === ppValueEnum.sBullCHoCH ||
+                      ppValue === ppValueEnum.SanyBull ||
+                      ppValue === ppValueEnum.bullAnyCHoCH) &&
+                      lastData.sBullCHoCH) ||
+                    ((ppValue === ppValueEnum.sBearCHoCH ||
+                      ppValue === ppValueEnum.SanyBear ||
+                      ppValue === ppValueEnum.bearAnyCHoCH) &&
+                      lastData.sBearCHoCH) ||
+                    ((ppValue === ppValueEnum.sBullBoS ||
+                      ppValue === ppValueEnum.SanyBull ||
+                      ppValue === ppValueEnum.bullAnyBoS) &&
+                      lastData.sBullBoS) ||
+                    ((ppValue === ppValueEnum.sBearBoS ||
+                      ppValue === ppValueEnum.SanyBear ||
+                      ppValue === ppValueEnum.bearAnyBoS) &&
+                      lastData.sBearBoS) ||
+                    ((ppValue === ppValueEnum.iBullCHoCH ||
+                      ppValue === ppValueEnum.IanyBull ||
+                      ppValue === ppValueEnum.bullAnyCHoCH) &&
+                      lastData.iBullCHoCH) ||
+                    ((ppValue === ppValueEnum.iBearCHoCH ||
+                      ppValue === ppValueEnum.IanyBear ||
+                      ppValue === ppValueEnum.bearAnyCHoCH) &&
+                      lastData.iBearCHoCH) ||
+                    ((ppValue === ppValueEnum.iBullBoS ||
+                      ppValue === ppValueEnum.IanyBull ||
+                      ppValue === ppValueEnum.bullAnyBoS) &&
+                      lastData.iBullBoS) ||
+                    ((ppValue === ppValueEnum.iBearBoS ||
+                      ppValue === ppValueEnum.IanyBear ||
+                      ppValue === ppValueEnum.bearAnyBoS) &&
+                      lastData.iBearBoS)
+                  if (action && showLog) {
+                    this.handleLog(
+                      `${uuid}@${type}@${indicatorInterval}@${this.data.exchange}@${symbol} trigger. Action: ${ppValue}`,
+                    )
+                  }
+                }
+                if (ppType === ppValueTypeEnum.market) {
+                  skipAction = true
+                  action =
+                    (ppValue === ppValueEnum.bullMarket &&
+                      lastData.market === 'bull') ||
+                    (ppValue === ppValueEnum.bearMarket &&
+                      lastData.market === 'bear')
+                  if (action && showLog) {
+                    this.handleLog(
+                      `${uuid}@${type}@${indicatorInterval}@${this.data.exchange}@${symbol} trigger. Action: ${ppValue}`,
+                    )
+                  }
+                }
+              }
+              if (
+                (lastData.type === IndicatorEnum.stoch &&
+                  prevData.type === IndicatorEnum.stoch) ||
+                (lastData.type === IndicatorEnum.stochRSI &&
+                  prevData.type === IndicatorEnum.stochRSI)
+              ) {
+                if (rsiValue === rsiValueEnum.k) {
+                  last = lastData.value.stochK
+                  prev = prevData.value.stochK
+                } else if (rsiValue === rsiValueEnum.d) {
+                  last = lastData.value.stochD
+                  prev = prevData.value.stochD
+                }
+                if (rsiValue2 === rsiValue2Enum.d) {
+                  value = lastData.value.stochD
+                  prevValue = prevData.value.stochD
+                } else if (rsiValue2 === rsiValue2Enum.k) {
+                  value = lastData.value.stochK
+                  prevValue = prevData.value.stochK
+                } else if (rsiValue2 === rsiValue2Enum.custom) {
+                  value = valueInsteadof
+                  prevValue = valueInsteadof
+                  checkValue = false
+                }
+              }
+              if (
+                lastData.type === IndicatorEnum.sr &&
+                prevData.type === IndicatorEnum.sr
+              ) {
+                last = lastData.value.price
+                prev = prevData.value.price
+                value =
+                  srCrossingValue === SRCrossingEnum.resistance
+                    ? lastData.value.high
+                    : lastData.value.low
+                prevValue =
+                  srCrossingValue === SRCrossingEnum.resistance
+                    ? lastData.value.high
+                    : lastData.value.low
+              }
+              lastDataString = `${last}`
+              prevDataString = `${prev}`
+              if (
+                (indicatorCondition === IndicatorStartConditionEnum.cu ||
+                  indicatorCondition === IndicatorStartConditionEnum.cd) &&
+                data.length < 2
+              ) {
+                this.handleLog(
+                  `Not enough data to count crossing down/up. Wait for next tick`,
+                )
+              }
+
+              if (
+                (indicatorCondition === IndicatorStartConditionEnum.cu ||
+                  indicatorCondition === IndicatorStartConditionEnum.cd) &&
+                data.length >= 2 &&
+                !skipAction
+              ) {
+                if (indicatorCondition === IndicatorStartConditionEnum.cd) {
+                  action =
+                    (gt(value, last) && lt(prevValue, prev)) ||
+                    (gt(value, last) && lte(prevValue, prev))
+                }
+                if (indicatorCondition === IndicatorStartConditionEnum.cu) {
+                  action =
+                    (lt(value, last) && gt(prevValue, prev)) ||
+                    (lt(value, last) && gte(prevValue, prev))
+                }
+              }
+              if (
+                indicatorCondition === IndicatorStartConditionEnum.gt &&
+                !skipAction
+              ) {
+                action = gt(last, value)
+              }
+              if (
+                indicatorCondition === IndicatorStartConditionEnum.lt &&
+                !skipAction
+              ) {
+                action = lt(last, value)
+              }
+
+              if (
+                ((lastData.type === IndicatorEnum.stoch &&
+                  prevData.type === IndicatorEnum.stoch) ||
+                  (lastData.type === IndicatorEnum.stochRSI &&
+                    prevData.type === IndicatorEnum.stochRSI)) &&
+                action &&
+                checkValue &&
+                stochRange !== StochRangeEnum.none
+              ) {
+                const upper =
+                  stochRange === StochRangeEnum.lower
+                    ? 100
+                    : stochRange === StochRangeEnum.upper
+                      ? +(stochLower ?? '')
+                      : +(stochUpper ?? '')
+                const lower =
+                  stochRange === StochRangeEnum.upper
+                    ? 0
+                    : stochRange === StochRangeEnum.lower
+                      ? +(stochUpper ?? '')
+                      : +(stochLower ?? '')
+                action =
+                  !isNaN(upper) &&
+                  !isNaN(lower) &&
+                  ((last > upper &&
+                    value > upper &&
+                    prev > upper &&
+                    prevValue > upper) ||
+                    (last < lower &&
+                      value < lower &&
+                      prev < lower &&
+                      prevValue < lower))
+              }
+              if (trendFilter) {
+                action = trendFilterAction && action
+              }
+              if (action && !trendFilter && !skipAction && showLog) {
+                this.handleLog(
+                  `${uuid}@${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger. ${type} prev: ${prevDataString}, value prev: ${prevValue}, ${type} last: ${lastDataString}, value last: ${value} action: ${indicatorAction}, last time ${new Date(
+                    lastTime,
+                  )?.toISOString()}`,
+                )
+              }
+              if (action && trendFilter && !skipAction && showLog) {
+                this.handleLog(
+                  `${uuid}@${type}@${indicatorInterval}@${
+                    this.data.exchange
+                  }@${symbol} trigger. ${type} prev: ${prevDataString}, value prev: ${prevValue}, ${type} last: ${lastDataString}, value last: ${value} action: ${indicatorAction} ${type} trend value ${trendValue}, type: ${trendFilterType}, last time ${new Date(
+                    lastTime,
+                  )?.toISOString()}`,
+                )
+              }
+            }
+            const toMultiplier = this.convertToMultiplier(keepConditionBars)
+            const step = timeIntervalMap[indicatorInterval]
+            if (i.statusTo && i.statusTo < lastData.time + step) {
+              i.statusTo = undefined
+              i.statusSince = undefined
+            }
+            if (toMultiplier !== 0) {
+              if (action) {
+                i.statusSince = lastData.time + step
+                i.statusTo = lastData.time + step * (2 + toMultiplier) - 1
+                if (i.statusTo < +new Date()) {
+                  this.handleLog(
+                    `Indicator ${uuid}@${symbol} statusTo (${new Date(
+                      i.statusTo,
+                    )}) < now (${new Date()}). Adding step (${step}) to statusTo`,
+                  )
+                  i.statusTo += step
+                }
+                i.status = true
+              } else {
+                if (i.statusSince && i.statusTo) {
+                  i.statusSince += step
+                  if (i.statusSince > i.statusTo) {
+                    i.status = false
+                    i.statusSince = undefined
+                    i.statusTo = undefined
+                    i.statusTo = i.statusSince
+                  } else {
+                    i.status = true
+                  }
+                } else {
+                  i.status = action
+                  i.statusTo = lastData.time + step * 2 - 1
+                }
+              }
+            } else {
+              i.status = action
+              i.statusTo = lastData.time + step * 2 - 1
+            }
+            this.indicators.set(key, i)
+          }
+        }
+      }
+
+      if (
+        this.data.settings.useRiskReward &&
+        this.indicators.get(key) &&
+        this.data.settings.startCondition === StartConditionEnum.asap &&
+        risk
+      ) {
+        return this.openNewDeal(this.botId, symbol)
+      }
+      if (
+        (this.scaleAr || this.tpAr || this.slAr) &&
+        this.indicators.get(key) &&
+        this.data.settings.startCondition === StartConditionEnum.asap &&
+        dcaAr &&
+        (this.data.settings.type !== DCATypeEnum.terminal
+          ? this.getOpenDeals(false, symbol).length === 0
+          : this.data.deals.all === 0)
+      ) {
+        return this.openNewDeal(this.botId, symbol)
+      }
+      this.checkIndicatorStatus(
+        this.botId,
+        symbol,
+        lastData,
+        i?.section,
+        i?.action,
+      )
+    }
+  }
+
+  private async addDCAOrderByIndicator(
+    _botId: string,
+    index: number,
+    symbol: string,
+    time: number,
+  ) {
+    const key = `${symbol}@${index}@${time}`
+    if (this.dcaOrdersBySignal.has(key)) {
+      this.handleLog(
+        `DCA Signals | Received add DCA signal for index ${index}@${symbol}@${new Date(
+          time,
+        ).toISOString()}, key already processed `,
+      )
+      return
+    }
+    const deals = this.getDealsByStatusAndSymbol({
+      status: DCADealStatusEnum.open,
+      symbol,
+    }).filter((d) => d.deal.levels.complete === index + 1)
+    this.handleLog(
+      `DCA Signals | Received add DCA signal for index ${index}@${symbol}@${new Date(
+        time,
+      ).toISOString()}, found ${deals.length} deals`,
+    )
+    if (deals.length) {
+      const others = this.dcaOrdersBySignal.keys()
+      for (const k of others) {
+        if (!k.startsWith(`${symbol}@${index}`)) {
+          continue
+        }
+        const [s, i, t] = k.split('@')
+        if (s === symbol && +i === index) {
+          if (+t < time) {
+            this.dcaOrdersBySignal.delete(k)
+          }
+        }
+      }
+      this.dcaOrdersBySignal.add(key)
+    }
+    for (const d of deals) {
+      const settings = await this.getAggregatedSettings(d.deal)
+      if (settings.dcaCondition !== DCAConditionEnum.indicators) {
+        this.handleLog(
+          `DCA Signals | deal ${d.deal._id} not started dca orders by signal`,
+        )
+        continue
+      }
+      const ind = (this.data?.settings?.indicators ?? []).filter(
+        (i) => i.indicatorAction === IndicatorAction.startDca,
+      )[index]
+      const price = await this.getLatestPrice(symbol)
+      if (ind) {
+        const { minPercFromLast } = ind
+        if (minPercFromLast && !isNaN(+minPercFromLast)) {
+          const diff = this.isLong
+            ? d.deal.lastPrice - price
+            : price - d.deal.lastPrice
+          const absDiff = diff / d.deal.lastPrice
+
+          if (absDiff >= +minPercFromLast / 100) {
+            const orders = await this.createInitialDealOrders(
+              symbol,
+              d.deal.initialPrice,
+              d.deal._id,
+              d.deal,
+              price,
+            )
+            const dcaOrder = orders.find((o) => o.levelNumber === index + 1)
+            const ed = await this.getExchangeInfo(symbol)
+            if (dcaOrder && ed) {
+              if (!this.futures) {
+                const quote = dcaOrder.qty * price
+                if (quote < ed.quoteAsset.minAmount) {
+                  dcaOrder.qty = this.math.round(
+                    ed.quoteAsset.minAmount / price,
+                    await this.baseAssetPrecision(ed.pair),
+                    false,
+                    true,
+                  )
+                }
+                dcaOrder.price = this.math.round(price, ed.priceAssetPrecision)
+              }
+              const order = await this.sendGridToExchange(
+                dcaOrder,
+                {
+                  dealId: d.deal._id,
+                  type: 'MARKET',
+                  positionSide: this.hedge
+                    ? this.isLong
+                      ? PositionSide.LONG
+                      : PositionSide.SHORT
+                    : PositionSide.BOTH,
+                },
+                ed,
+              )
+              if (
+                order &&
+                (order.status === 'FILLED' ||
+                  (order.exchange === ExchangeEnum.bybit &&
+                    (order.status === 'CANCELED' ||
+                      order.status === 'PARTIALLY_FILLED')))
+              ) {
+                this.processFilledOrder(order)
+              }
+            }
+          } else {
+            this.handleLog(
+              `DCA Signals | calculated precent ${
+                absDiff * 100
+              } less than target ${minPercFromLast}`,
+            )
+          }
+        }
+      } else {
+        this.handleLog(`DCA Signals | Cannot find indicator ${index}@${symbol}`)
+      }
+    }
+  }
+
+  async checkMaxDealsPerPair(symbol: string) {
+    if (!this.allowedMethods.has('checkMaxDealsPerPair')) {
+      return true
+    }
+    const settings = await this.getAggregatedSettings()
+    if (
+      settings.useMulti &&
+      settings.maxDealsPerPair &&
+      settings.maxDealsPerPair !== ''
+    ) {
+      const max = +settings.maxDealsPerPair
+      if (!isNaN(max) && max >= 0) {
+        const deals = this.getOpenDeals(false, symbol)
+        const symbolDealsLength = deals.length
+        const pendingDeals = this.pendingDealsPerPair.get(symbol) ?? 0
+        if (symbolDealsLength + pendingDeals < max) {
+          this.pendingDealsPerPair.set(symbol, (pendingDeals ?? 0) + 1)
+          return true
+        }
+        this.handleLog(
+          `Exceed max amount of active deals by max deals per pair ${symbol}`,
+        )
+        return false
+      }
+    }
+    return true
+  }
+  /**
+   * Check max amount of active deals
+   */
+  @IdMute(mutex, (botId: string) => `checkMaxDeals${botId}`)
+  async checkMaxDeals(_botId: string, symbol: string) {
+    if (!this.allowedMethods.has('checkMaxDeals')) {
+      return true
+    }
+    const settings = await this.getAggregatedSettings()
+    if (settings.maxNumberOfOpenDeals && settings.maxNumberOfOpenDeals !== '') {
+      const max = +settings.maxNumberOfOpenDeals
+      if (!isNaN(max) && max >= 0) {
+        const deals = this.getOpenDeals(settings.ignoreStartDeals)
+        const dealsLength = deals.length
+        if (dealsLength + this.pendingDeals < max) {
+          if (await this.checkMaxDealsPerPair(symbol)) {
+            this.pendingDeals += 1
+            return true
+          } else {
+            return false
+          }
+        }
+        this.handleLog(
+          `Exceed max amount of active deals by max deals ${symbol}`,
+        )
+        return false
+      }
+    }
+    if (await this.checkMaxDealsPerPair(symbol)) {
+      this.pendingDeals += 1
+      return true
+    } else {
+      return false
+    }
+  }
+
+  private isNotionalReason(text: string): boolean {
+    for (const r of notionalReasons) {
+      if (text.toLowerCase().indexOf(r.toLowerCase()) !== -1) {
+        return true
+      }
+    }
+    return false
+  }
+
+  async prepareTpOrder(
+    findDeal: FullDeal<ExcludeDoc<Deal>>,
+    slSource = false,
+    sl = false,
+  ) {
+    const symbol = await this.getExchangeInfo(findDeal.deal.symbol.symbol)
+    const priceRequest = await this.getLatestPrice(symbol?.pair ?? '')
+    if (priceRequest === 0) {
+      return this.handleErrors(
+        'Latest price = 0',
+        'placeBaseOrder()',
+        'Get latest price',
+        false,
+        false,
+        false,
+      )
+    }
+    const tpOrder = (
+      await this.getTPOrder(
+        findDeal.deal.symbol.symbol,
+        priceRequest,
+        findDeal.initialOrders,
+        findDeal.deal.avgPrice,
+        findDeal.deal.initialPrice,
+        findDeal.deal._id,
+        findDeal.deal,
+        !slSource,
+        slSource,
+        priceRequest,
+      )
+    )?.sort((a, b) =>
+      this.isLong ? b.price - a.price : a.price - b.price,
+    )?.[0]
+    if (tpOrder) {
+      const symbol = await this.getExchangeInfo(findDeal.deal.symbol.symbol)
+      if (symbol) {
+        if (
+          this.combo &&
+          this.coinm &&
+          !this.isBitget &&
+          Math.max(
+            1,
+            this.math.round(
+              (tpOrder.qty * tpOrder.price) /
+                (symbol?.quoteAsset?.minAmount ?? 1),
+              0,
+            ),
+          ) < 1
+        ) {
+          return this.handleLog(
+            `Combo coinm TP order less than 1 contract, skipping`,
+          )
+        }
+        if (!this.isLong && !this.futures) {
+          const fee =
+            (await this.getUserFee(findDeal.deal.symbol.symbol))?.taker ?? 0
+          const precision = await this.baseAssetPrecision(
+            findDeal.deal.symbol.symbol,
+          )
+          const quote = this.math.round(
+            findDeal.deal.currentBalances.quote * (1 - fee),
+            (await this.getExchangeInfo(findDeal.deal.symbol.symbol))
+              ?.priceAssetPrecision,
+            true,
+          )
+          if (tpOrder.qty * tpOrder.price > quote && quote) {
+            tpOrder.qty = this.math.round(
+              quote / tpOrder.price,
+              precision,
+              true,
+            )
+            if (
+              (tpOrder.qty < symbol.baseAsset.minAmount ||
+                tpOrder.qty * tpOrder.price < symbol.quoteAsset.minAmount) &&
+              this.botType !== BotType.combo
+            ) {
+              return this.handleErrors(
+                `Cannot place TP order, because its amount would be lower than exchange minimum`,
+                'prepate close order',
+              )
+            }
+          }
+        }
+        tpOrder.sl = sl
+        return tpOrder
+      }
+    }
+  }
+
+  async closeByTimer(d: ExcludeDoc<Deal>) {
+    const oldTimer = this.closeDealTimer.get(d._id)
+    if (oldTimer) {
+      clearTimeout(oldTimer)
+      this.closeDealTimer.set(d._id, null)
+    }
+    const settings = await this.getAggregatedSettings(d)
+    if (settings.closeByTimer && settings.closeByTimerUnits && settings.useTp) {
+      this.handleLog(`Timer | Close by timer deal ${d._id}`)
+      this.closeDealById(
+        this.botId,
+        d._id,
+        settings.closeDealType,
+        undefined,
+        true,
+        false,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        DCACloseTriggerEnum.timer,
+      )
+    }
+  }
+
+  async setCloseByTimer(d: ExcludeDoc<Deal>) {
+    const settings = await this.getAggregatedSettings(d)
+    if (settings.closeByTimer && settings.closeByTimerUnits && settings.useTp) {
+      if (d.status !== DCADealStatusEnum.open) {
+        this.handleLog(`Timer | Deal ${d._id} is not open`)
+      }
+      this.handleLog(`Timer | Set close by timer for deal ${d._id}`)
+      const closeByTimerValue = settings.closeByTimerValue ?? 1
+      const value = this.utils.convertCooldown(
+        closeByTimerValue,
+        settings.closeByTimerUnits,
+      )
+      this.handleLog(
+        `Timer | Deal ${d._id} value is ${value} (${closeByTimerValue} ${settings.closeByTimerUnits})`,
+      )
+      const baseOrder = this.findBaseOrderByDeal(d._id)
+      const closeTime = baseOrder
+        ? baseOrder.updateTime + value - +new Date()
+        : d.createTime + value - +new Date()
+      if (baseOrder) {
+        this.handleLog(
+          `Timer | Deal ${d._id} base order update time ${baseOrder.updateTime}, creation time ${d.createTime}`,
+        )
+      }
+      if (closeTime < 0) {
+        this.handleLog(
+          `Timer | Deal ${d._id} will be closed immediately close time (${closeTime}) is lower than 0`,
+        )
+        return await this.closeByTimer(d)
+      }
+      this.handleLog(
+        `Timer | Deal ${d._id} will be closed after ${closeTime} at ${new Date(
+          +new Date() + closeTime,
+        ).toUTCString()}`,
+      )
+      const timer =
+        closeTime > maxTimeout
+          ? setTimeout(async () => await this.setCloseByTimer(d), maxTimeout)
+          : setTimeout(async () => await this.closeByTimer(d), closeTime)
+      const oldTimer = this.closeDealTimer.get(d._id)
+      if (oldTimer) {
+        clearTimeout(oldTimer)
+        this.closeDealTimer.set(d._id, null)
+      }
+      this.closeDealTimer.set(d._id, timer)
+    } else {
+      const oldTimer = this.closeDealTimer.get(d._id)
+      if (oldTimer) {
+        clearTimeout(oldTimer)
+        this.closeDealTimer.set(d._id, null)
+      }
+    }
+  }
+
+  override allowToProcessBr(id: string, type?: TypeOrderEnum) {
+    return (
+      type === TypeOrderEnum.dealTP ||
+      this.allowToPlaceOrders.get(this.getOrderFromMap(id)?.dealId ?? '') !==
+        false
+    )
+  }
+  /**
+   * Manualy close deal by id
+   *
+   * @param {string} dealId Id of the deal
+   * @param {CloseDCATypeEnum} [closeType] Close type. Default = leave
+   */
+  @IdMute(
+    mutex,
+    (botId: string, dealId: string) => `${botId}${dealId ?? 'closeById'}`,
+  )
+  async closeDealById(
+    _botId: string,
+    dealId: string,
+    closeType: CloseDCATypeEnum = CloseDCATypeEnum.leave,
+    reopen = true,
+    forceMarket = false,
+    slSource = false,
+    checkProfit = false,
+    price = '',
+    liquidationPrice?: number,
+    sl = false,
+    closeTrigger?: DCACloseTriggerEnum,
+    count = 0,
+  ) {
+    if (!this.loadingComplete) {
+      this.runAfterLoadingQueue.push(() =>
+        this.closeDealById.bind(this)(
+          this.botId,
+          dealId,
+          closeType,
+          reopen,
+          forceMarket,
+          slSource,
+          checkProfit,
+          price,
+          liquidationPrice,
+          sl,
+          closeTrigger,
+          count,
+        ),
+      )
+      return this.handleLog('Loading not complete yet')
+    }
+    const _id = this.startMethod('closeDealById')
+    let stop = false
+    await this.clearDealTimer(dealId)
+    this.handleLog(`Сlose deal ${dealId}`)
+    let findDeal = this.getDeal(dealId)
+    if (!findDeal) {
+      this.endMethod(_id)
+      return this.handleLog(`Deal ${dealId} not found when close`)
+    }
+    if (
+      checkProfit &&
+      !(await this.checkMinTp(
+        findDeal,
+        findDeal.deal.symbol.symbol,
+        sl ? 'sl' : 'tp',
+      ))
+    ) {
+      this.endMethod(_id)
+      return this.handleLog(`Deal ${dealId} not fit min profit`)
+    }
+
+    if (findDeal && closeType === CloseDCATypeEnum.leave) {
+      await this.cancelAllOrder(findDeal.deal._id)
+      this.endMethod(_id)
+      return
+    }
+    if (
+      findDeal &&
+      (findDeal.deal.status === DCADealStatusEnum.start ||
+        closeType === CloseDCATypeEnum.cancel)
+    ) {
+      const settings = await this.getAggregatedSettings(findDeal.deal)
+      const status =
+        settings.terminalDealType === TerminalDealTypeEnum.simple &&
+        findDeal.deal.levels.complete === 1
+          ? DCADealStatusEnum.closed
+          : DCADealStatusEnum.canceled
+      findDeal.deal.status = status
+      findDeal.deal.closeTrigger = closeTrigger
+      this.saveDeal(findDeal, {
+        status,
+        closeTrigger: findDeal.deal.closeTrigger,
+      })
+      stop = await this.processDealClose(
+        this.botId,
+        dealId,
+        { total: 0, totalUsd: 0 },
+        reopen,
+        closeType !== CloseDCATypeEnum.leave,
+      )
+      if (stop) {
+        this.endMethod(_id)
+        return this.stop()
+      }
+    }
+    if (
+      findDeal &&
+      findDeal.deal.status === DCADealStatusEnum.open &&
+      this.data &&
+      this.orders &&
+      this.exchange
+    ) {
+      this.allowToPlaceOrders.set(dealId, false)
+      const fastClose =
+        this.combo &&
+        this.futures &&
+        !liquidationPrice &&
+        closeType === CloseDCATypeEnum.closeByMarket
+      const closeSell = async () =>
+        await this.cancelAllOrder(
+          findDeal?.deal.lastPrice,
+          dealId,
+          true,
+          undefined,
+          this.isLong ? OrderSideEnum.sell : OrderSideEnum.buy,
+        )
+      const closeBuy = async () =>
+        await this.cancelAllOrder(findDeal?.deal.lastPrice, dealId, true).then(
+          () => this.allowToPlaceOrders.delete(dealId),
+        )
+      if (fastClose) {
+        await closeSell()
+      } else {
+        await this.cancelAllOrder(0, dealId, true)
+        this.allowToPlaceOrders.delete(dealId)
+      }
+      findDeal = this.getDeal(dealId)
+      if (findDeal && findDeal.deal.status === DCADealStatusEnum.open) {
+        if (closeTrigger) {
+          findDeal.deal.closeTrigger = closeTrigger
+          this.saveDeal(findDeal, { closeTrigger })
+        }
+        if (liquidationPrice) {
+          this.handleLog(`Close deal ${dealId} order by liquidation price`)
+          this.endMethod(_id)
+          return this.closeDeal(this.botId, dealId, undefined, liquidationPrice)
+        }
+        await sleep(100)
+        if (
+          [
+            ExchangeEnum.bybit,
+            ExchangeEnum.bybitCoinm,
+            ExchangeEnum.bybitUsdm,
+          ].includes(this.data.exchange)
+        ) {
+          await sleep(500)
+        }
+        const tpOrder = await this.prepareTpOrder(findDeal, slSource, sl)
+        if (tpOrder) {
+          if (tpOrder.qty <= 0) {
+            if (fastClose) {
+              await closeBuy()
+            }
+            this.handleLog(`Tp order qty less than 0 ${tpOrder.qty}`)
+            return await this.closeDeal(this.botId, dealId)
+          }
+          if (this.combo && count === this.slippageRetry) {
+            if (fastClose) {
+              await closeBuy()
+            }
+            this.handleLog(`Close combo deal ${dealId} without order`)
+            this.endMethod(_id)
+            return await this.closeDeal(this.botId, dealId)
+          }
+          const symbol = await this.getExchangeInfo(findDeal.deal.symbol.symbol)
+          if (symbol) {
+            let result = await this.sendGridToExchange(
+              {
+                ...tpOrder,
+                price: price
+                  ? this.math.round(+price, symbol.priceAssetPrecision)
+                  : tpOrder.price,
+              },
+              {
+                dealId: findDeal.deal._id,
+                type:
+                  count === this.slippageRetry
+                    ? OrderTypeEnum.limit
+                    : forceMarket
+                      ? OrderTypeEnum.market
+                      : closeType === CloseDCATypeEnum.closeByLimit
+                        ? OrderTypeEnum.limit
+                        : OrderTypeEnum.market,
+                reduceOnly: !!this.futures,
+                positionSide: this.hedge
+                  ? this.isLong
+                    ? PositionSide.LONG
+                    : PositionSide.SHORT
+                  : PositionSide.BOTH,
+              },
+              symbol,
+              true,
+            )
+            if (result) {
+              if (
+                typeof result === 'string' &&
+                this.data.settings.adaptiveClose &&
+                notEnoughErrors.some((s) =>
+                  `${result}`.toLowerCase().includes(s.toLowerCase()),
+                )
+              ) {
+                this.handleLog(
+                  `TP order got not enough balance, but adaptive close is on`,
+                )
+                const balances = await this.checkAssets(true)
+                const asset = symbol.baseAsset.name
+                const find = balances?.get(asset)
+                if (!find) {
+                  this.handleLog(`Asset ${asset} not found in user balances`)
+                } else {
+                  const toPlace = Math.min(
+                    this.math.round(
+                      find.free,
+                      await this.baseAssetPrecision(symbol.pair),
+                      true,
+                    ),
+                    tpOrder.qty,
+                  )
+                  this.handleLog(`Found free ${find.free}, to place ${toPlace}`)
+                  if (
+                    toPlace < symbol.baseAsset.minAmount ||
+                    toPlace * tpOrder.price < symbol.quoteAsset.minAmount
+                  ) {
+                    this.handleLog(
+                      `Asset ${asset} free amount ${toPlace} is lower than exchange requirements base ${toPlace}, ${
+                        symbol.baseAsset.minAmount
+                      }, quote - ${toPlace * tpOrder.price}, ${
+                        symbol.quoteAsset.minAmount
+                      }`,
+                    )
+                  } else {
+                    this.handleLog(
+                      `Place new TP order with amount ${toPlace} ${asset} (tp order was ${tpOrder.qty} ${asset})`,
+                    )
+                    result = await this.sendGridToExchange(
+                      {
+                        ...tpOrder,
+                        qty: toPlace,
+                        price: price
+                          ? this.math.round(+price, symbol.priceAssetPrecision)
+                          : tpOrder.price,
+                        newClientOrderId: `${tpOrder.newClientOrderId.slice(
+                          0,
+                          tpOrder.newClientOrderId.length - 2,
+                        )}ac`,
+                      },
+                      {
+                        dealId: findDeal.deal._id,
+                        type:
+                          count === this.slippageRetry
+                            ? OrderTypeEnum.limit
+                            : forceMarket
+                              ? OrderTypeEnum.market
+                              : closeType === CloseDCATypeEnum.closeByLimit
+                                ? OrderTypeEnum.limit
+                                : OrderTypeEnum.market,
+                        reduceOnly: !!this.futures,
+                        positionSide: this.hedge
+                          ? this.isLong
+                            ? PositionSide.LONG
+                            : PositionSide.SHORT
+                          : PositionSide.BOTH,
+                        acBefore: tpOrder.qty,
+                        acAfter: toPlace,
+                      },
+                      symbol,
+                      true,
+                    )
+                  }
+                }
+              }
+              if (result) {
+                if (typeof result === 'string') {
+                  if (
+                    this.isNotionalReason(result) &&
+                    count < this.slippageRetry
+                  ) {
+                    this.handleLog(
+                      `Cannot place take profit due to slippage ${
+                        tpOrder.newClientOrderId
+                      }, attempt ${count + 1}`,
+                    )
+                    await sleep(250)
+                    this.closeDealById(
+                      this.botId,
+                      dealId,
+                      closeType,
+                      reopen,
+                      forceMarket,
+                      slSource,
+                      checkProfit,
+                      price,
+                      liquidationPrice,
+                      sl,
+                      closeTrigger,
+                      count + 1,
+                    )
+                  } else {
+                    this.handleOrderErrors(
+                      result,
+                      {
+                        symbol: symbol.pair,
+                        orderId: '0',
+                        clientOrderId: tpOrder.newClientOrderId,
+                        transactTime: +new Date(),
+                        updateTime: +new Date(),
+                        price: `${tpOrder.price}`,
+                        origQty: `${tpOrder.qty}`,
+                        executedQty: '0',
+                        cummulativeQuoteQty: '0',
+                        status: 'CANCELED',
+                        type: 'MARKET',
+                        side: tpOrder.side,
+                        quoteAsset: symbol.quoteAsset.name,
+                        baseAsset: symbol.baseAsset.name,
+                        typeOrder: tpOrder.type,
+                        exchange: this.data.exchange,
+                        exchangeUUID: this.data.exchangeUUID,
+                        botId: this.botId,
+                        userId: this.userId,
+                        origPrice: `${tpOrder.price}`,
+                      },
+                      'limitOrders()',
+                      `Send new order request ${tpOrder.newClientOrderId}, qty ${tpOrder.qty}, price ${tpOrder.price}, side ${tpOrder.side}`,
+                    )
+                    if (fastClose) {
+                      await closeBuy()
+                    }
+                  }
+                } else {
+                  if (result.status === 'FILLED') {
+                    this.processFilledOrder(result)
+                  }
+                  if (
+                    result.status !== 'FILLED' &&
+                    closeType === CloseDCATypeEnum.closeByLimit
+                  ) {
+                    const deal = this.getDeal(dealId)
+                    if (deal && !price && count < this.slippageRetry) {
+                      const dealTimer = this.dealTimersMap.get(
+                        deal.deal._id,
+                      ) ?? {
+                        limitTimer: null,
+                        enterMarketTimer: null,
+                      }
+                      if (
+                        this.orderLimitRepositionTimeout !== 0 &&
+                        !this.data.settings.notUseLimitReposition
+                      ) {
+                        if (!this.startTimeoutTime.get(deal.deal._id)) {
+                          this.startTimeoutTime.set(
+                            deal.deal._id,
+                            new Date().getTime(),
+                          )
+                        }
+
+                        if (
+                          this.enterMarketTimeout === 0 ||
+                          (this.enterMarketTimeout !== 0 &&
+                            new Date().getTime() +
+                              this.orderLimitRepositionTimeout >
+                              (this.startTimeoutTime.get(deal.deal._id) ??
+                                new Date().getTime()) +
+                                this.enterMarketTimeout)
+                        ) {
+                          dealTimer.limitTimer = setTimeout(
+                            () =>
+                              this.checkTPOrder(
+                                this.botId,
+                                tpOrder.newClientOrderId,
+                                dealId,
+                                closeType,
+                                reopen,
+                                undefined,
+                                checkProfit,
+                              ),
+                            this.orderLimitRepositionTimeout,
+                          )
+                        }
+                      }
+                      if (
+                        this.enterMarketTimeout !== 0 &&
+                        !dealTimer.enterMarketTimer &&
+                        (!this.data.settings.notUseLimitReposition ||
+                          (this.data.settings.notUseLimitReposition &&
+                            this.data.settings.useLimitTimeout))
+                      ) {
+                        dealTimer.limitTimer = setTimeout(
+                          () =>
+                            this.checkTPOrder(
+                              this.botId,
+                              tpOrder.newClientOrderId,
+                              dealId,
+                              closeType,
+                              reopen,
+                              true,
+                              checkProfit,
+                            ),
+                          this.orderLimitRepositionTimeout,
+                        )
+                      }
+                      this.dealTimersMap.set(deal.deal._id, dealTimer)
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            if (fastClose) {
+              await closeBuy()
+            }
+            this.handleLog(
+              `No symbol found. Close ${dealId} ${findDeal.deal.symbol.symbol}`,
+            )
+          }
+        } else {
+          if (fastClose) {
+            await closeBuy()
+          }
+          this.handleLog(`No tp order. Close without order`)
+          return this.closeDeal(this.botId, dealId)
+        }
+      } else {
+        this.handleLog(
+          findDeal
+            ? `Deal found with status ${findDeal.deal.status}. Close ${dealId}`
+            : `Deal not found with. Close ${dealId}`,
+        )
+      }
+    }
+    this.endMethod(_id)
+  }
+
+  async checkMinTp(
+    d: FullDeal<ExcludeDoc<Deal>>,
+    symbol: string,
+    section: 'sl' | 'tp',
+  ) {
+    if (!this.data || !this.allowedMethods.has('checkMinTp')) {
+      return true
+    }
+    const settings = await this.getAggregatedSettings(d.deal)
+    let value: number | undefined
+    let isGt = true
+    if (
+      section !== 'sl' &&
+      settings.useMinTP &&
+      settings.dealCloseCondition &&
+      [CloseConditionEnum.techInd, CloseConditionEnum.webhook].includes(
+        settings.dealCloseCondition,
+      ) &&
+      settings.minTp &&
+      checkNumber(settings.minTp)
+    ) {
+      value = +(settings.minTp ?? '0') / 100
+    }
+    if (section === 'sl') {
+      const foundUnpnl =
+        this.data?.settings.dealCloseConditionSL === CloseConditionEnum.techInd
+          ? (this.data?.settings.indicators ?? []).find(
+              (i) =>
+                i.type === IndicatorEnum.unpnl &&
+                i.section === IndicatorSection.sl,
+            )
+          : undefined
+      if (foundUnpnl) {
+        isGt =
+          (foundUnpnl.unpnlCondition ?? this.defaultUnpnlCondition) ===
+          IndicatorStartConditionEnum.gt
+        value = (foundUnpnl.unpnlValue ?? this.defaultUnpnl) / 100
+      }
+    }
+    if (
+      section === 'tp' &&
+      (this.data.settings.stopDealLogic === IndicatorsLogicEnum.and ||
+        !this.data.settings.stopDealLogic)
+    ) {
+      const foundUnpnl =
+        this.data?.settings.dealCloseCondition === CloseConditionEnum.techInd
+          ? (this.data?.settings.indicators ?? []).find(
+              (i) =>
+                i.type === IndicatorEnum.unpnl &&
+                i.section !== IndicatorSection.sl,
+            )
+          : undefined
+      if (foundUnpnl) {
+        isGt =
+          (foundUnpnl.unpnlCondition ?? this.defaultUnpnlCondition) ===
+          IndicatorStartConditionEnum.gt
+        value = (foundUnpnl.unpnlValue ?? this.defaultUnpnl) / 100
+      }
+    }
+    if (typeof value !== 'undefined') {
+      const price = await this.getLatestPrice(symbol)
+      const fee = await this.getUserFee(symbol)
+      if (price === 0) {
+        return false
+      }
+      const diff = this.isLong
+        ? price - d.deal.avgPrice
+        : d.deal.avgPrice - price
+      const current = diff / d.deal.avgPrice - (fee?.taker ?? 0.001) * 2
+      if (isNaN(current) || !isFinite(current)) {
+        return false
+      }
+      this.handleLog(
+        `Check minimum profit: deal ${
+          d.deal._id
+        }, current profit: ${current}, min profit: ${value}${
+          !isGt ? ' (lt)' : ''
+        }`,
+      )
+      return isGt ? current >= value : current <= value
+    }
+    return true
+  }
+  /**
+   * Close all deals
+   */
+
+  async closeAllDeals(
+    closeType: CloseDCATypeEnum = CloseDCATypeEnum.closeByMarket,
+    symbol?: string,
+    checkProfit = false,
+    ignoreStart = false,
+    force = false,
+    slSource = false,
+    liquidationPrice?: number,
+    closeTrigger?: DCACloseTriggerEnum,
+  ) {
+    if (!this.loadingComplete) {
+      this.runAfterLoadingQueue.push(() =>
+        this.closeAllDeals.bind(this)(
+          closeType,
+          symbol,
+          checkProfit,
+          ignoreStart,
+          force,
+          slSource,
+          liquidationPrice,
+          closeTrigger,
+        ),
+      )
+      return this.handleLog('Loading not complete yet')
+    }
+    const active: FullDeal<ExcludeDoc<Deal>>[] = []
+    for (const d of this.getOpenDeals(ignoreStart, symbol)) {
+      const settings = await this.getAggregatedSettings(d.deal)
+      if (
+        force ||
+        (settings.dealCloseCondition &&
+          [CloseConditionEnum.techInd, CloseConditionEnum.webhook].includes(
+            settings.dealCloseCondition,
+          )) ||
+        (settings.dealCloseConditionSL &&
+          [CloseConditionEnum.techInd, CloseConditionEnum.webhook].includes(
+            settings.dealCloseConditionSL,
+          ))
+      ) {
+        active.push(d)
+      }
+    }
+    for (const f of active) {
+      if (
+        (checkProfit &&
+          (await this.checkMinTp(
+            f,
+            f.deal.symbol.symbol,
+            slSource ? 'sl' : 'tp',
+          ))) ||
+        !checkProfit
+      ) {
+        await this.closeDealById(
+          this.botId,
+          f.deal._id,
+          closeType,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          liquidationPrice,
+          slSource,
+          closeTrigger,
+        )
+      }
+    }
+  }
+  /**
+   * Is this bot used LONG strategy
+   */
+
+  /**
+   * Start deal when BO is filled
+   *
+   * @param {Order} orderBo Base order
+   */
+  @IdMute(mutex, (order: Order) => `${order.botId}${order.clientOrderId}`)
+  async startDeal(orderBo: Order) {
+    const _id = this.startMethod('startDeal')
+    const { dealId } = orderBo
+    const get = this.getDeal(dealId)
+    const findDeal = get && get.initialOrders.length === 0 ? get : undefined
+    if (
+      findDeal &&
+      dealId &&
+      findDeal.deal.status === DCADealStatusEnum.start
+    ) {
+      const settings = await this.getAggregatedSettings(findDeal.deal)
+      this.handleLog('Base order FILLED')
+      const initialPrice = parseFloat(orderBo.price)
+      const qty = parseFloat(orderBo.executedQty)
+      await this.clearDealTimer(dealId)
+      const long = this.isLong
+      this.handleLog('Update deal')
+      findDeal.initialOrders = await this.createInitialDealOrders(
+        findDeal.deal.symbol.symbol,
+        initialPrice,
+        dealId,
+        findDeal.deal,
+      )
+      findDeal.currentOrders = await this.createCurrentDealOrders(
+        findDeal.deal.symbol.symbol,
+        initialPrice,
+        findDeal.initialOrders,
+        initialPrice,
+        initialPrice,
+        dealId,
+        false,
+        findDeal.deal,
+        false,
+      )
+      findDeal.previousOrders = []
+      findDeal.deal.initialBalances = {
+        base: long
+          ? 0
+          : findDeal.initialOrders
+              .filter((o) => o.side === OrderSideEnum.sell)
+              .reduce((acc, v) => acc + v.qty, 0) + qty,
+        quote: long
+          ? findDeal.initialOrders
+              .filter((o) => o.side === OrderSideEnum.buy)
+              .reduce((acc, v) => acc + v.qty * v.price, 0) +
+            initialPrice * qty
+          : 0,
+      }
+      findDeal.deal.currentBalances = {
+        base: long ? qty : findDeal.deal.initialBalances.base - qty,
+        quote: long
+          ? findDeal.deal.initialBalances.quote - qty * initialPrice
+          : qty * initialPrice,
+      }
+      findDeal.deal.initialPrice = initialPrice
+      findDeal.deal.lastPrice = initialPrice
+      const avgs = await this.getAvgPrice(dealId)
+      findDeal.deal.avgPrice = avgs.avg || initialPrice
+      findDeal.deal.settings.avgPrice = avgs.avg || initialPrice
+      this.handleLog(
+        `Set deal avg prices ${findDeal.deal.avgPrice}, ${findDeal.deal.settings.avgPrice} (display ${findDeal.deal.displayAvg})`,
+      )
+      findDeal.deal.status =
+        settings.terminalDealType === TerminalDealTypeEnum.simple
+          ? DCADealStatusEnum.closed
+          : DCADealStatusEnum.open
+      findDeal.deal.updateTime = orderBo.updateTime
+      findDeal.deal.levels.complete = findDeal.deal.levels.complete + 1
+
+      this.saveDeal(findDeal, {
+        initialBalances: findDeal.deal.initialBalances,
+        currentBalances: findDeal.deal.currentBalances,
+        initialPrice: findDeal.deal.initialPrice,
+        lastPrice: findDeal.deal.lastPrice,
+        avgPrice: findDeal.deal.avgPrice,
+        'settings.avgPrice': findDeal.deal.settings.avgPrice,
+        updateTime: findDeal.deal.updateTime,
+        levels: findDeal.deal.levels,
+        status: findDeal.deal.status,
+      }).then(async () => {
+        await this.checkDealSlMethods(findDeal)
+        await this.checkDealsAllowedMethods()
+        await this.setCloseByTimer(findDeal.deal)
+        this.updateUsage(dealId)
+        this.updateAssets(dealId)
+      })
+      await this.placeOrders(
+        this.botId,
+        orderBo.symbol,
+        dealId,
+        this.findDiff(findDeal.currentOrders, []),
+      )
+      await this.checkOpenedDeals()
+      if (settings.terminalDealType === TerminalDealTypeEnum.simple) {
+        await this.processDealClose(
+          this.botId,
+          dealId,
+          { total: 0, totalUsd: 0 },
+          false,
+          true,
+        )
+        this.stop()
+      }
+      await this.updateDealLastPrices(this.botId)
+    }
+    if (
+      (!findDeal && dealId) ||
+      (findDeal &&
+        dealId &&
+        (findDeal.deal.status === DCADealStatusEnum.closed ||
+          findDeal.deal.status === DCADealStatusEnum.canceled))
+    ) {
+      await this.sellRemainder(
+        dealId,
+        +orderBo.executedQty,
+        +orderBo.price,
+        false,
+        findDeal,
+      )
+    }
+    this.endMethod(_id)
+  }
+  /** Sell remainder for deal */
+
+  @IdMute(mutex, (dealId: string) => `${dealId}sellRemainder`)
+  async sellRemainder(
+    dealId: string,
+    _qty: number,
+    _price?: number,
+    sellNotByOrder = false,
+    findDeal?: FullDeal<ExcludeDoc<Deal>>,
+    updateBalances = true,
+    force = false,
+  ) {
+    if (
+      this.data?.settings.type === DCATypeEnum.terminal &&
+      this.data.settings.terminalDealType === TerminalDealTypeEnum.simple
+    ) {
+      return
+    }
+    this.handleLog(
+      `Sell remainder | Deal ${dealId}, qty ${_qty}, price ${_price}, sellNotByOrder ${sellNotByOrder}, findDeal ${!!findDeal}, updateBalances ${updateBalances}`,
+    )
+    const _id = this.startMethod('sellRemainder')
+    let dealData = findDeal?.deal
+    if (!dealData) {
+      this.handleLog(`Sell remainder | Deal not found, check in DB`)
+      const realDeal = await this.dealsDb.readData({ _id: dealId } as any)
+      if (realDeal.status === StatusEnum.notok) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Cannot read deal ${dealId} ${realDeal.reason}`,
+          'updateDeal',
+          'read deal',
+          false,
+          false,
+          false,
+        )
+      }
+      if (!realDeal.data.result) {
+        this.endMethod(_id)
+        return this.handleLog(`Sell remainder | Deal ${dealId} not found in DB`)
+      }
+      dealData = realDeal.data.result
+      dealData._id = `${dealData._id}`
+    }
+    if (dealData.sellRemainder) {
+      this.handleLog(`Sell remainder | Deal ${dealId} already sold`)
+      this.endMethod(_id)
+      return
+    }
+    if (
+      dealData.status === DCADealStatusEnum.closed ||
+      (dealData.status === DCADealStatusEnum.canceled &&
+        dealData.levels.complete === 0) ||
+      force
+    ) {
+      if (await this.profitBase(findDeal?.deal)) {
+        this.handleLog(
+          `Sell remainder | Deal ${dealId} is profit in base, skipping`,
+        )
+        this.endMethod(_id)
+        return
+      }
+      const { symbol } = dealData.symbol
+      if (!symbol) {
+        this.handleLog(`Sell remainder | Symbol not found`)
+        this.endMethod(_id)
+        return
+      }
+      const ed = await this.getExchangeInfo(symbol)
+      const _fee = await this.getUserFee(symbol)
+      if (!ed || !_fee) {
+        this.handleLog(
+          `Sell remainder | ${!ed ? 'Exchange info' : 'Fee'} not found`,
+        )
+        this.endMethod(_id)
+        return
+      }
+      const qty = _qty
+      const orderPrice = _price ?? (await this.getLatestPrice(symbol))
+      const long = this.isLong
+      let qtyWithoutFee =
+        +qty * (1 - (this.futures ? 0 : long ? _fee.taker : 0))
+      if (sellNotByOrder) {
+        const allDealOrders = await this.ordersDb.readData(
+          {
+            dealId,
+            status: 'FILLED',
+            side: this.isLong ? 'BUY' : 'SELL',
+            botId: this.botId,
+          },
+          {},
+          {},
+          true,
+        )
+        const totalFee = this.futures
+          ? 0
+          : (allDealOrders.data?.result ?? []).reduce(
+              (acc, v) => acc + +v.executedQty * _fee.taker,
+              0,
+            )
+        qtyWithoutFee = +qty - totalFee
+      }
+      const price = await this.getLatestPrice(symbol)
+      if (
+        qtyWithoutFee >= ed.baseAsset.minAmount &&
+        qtyWithoutFee * price >= ed.quoteAsset.minAmount
+      ) {
+        const result = await this.sendGridToExchange(
+          {
+            price: this.math.round(price, ed.priceAssetPrecision),
+            number: 0,
+            side: !long ? OrderSideEnum.buy : OrderSideEnum.sell,
+            qty: this.math.round(
+              qtyWithoutFee,
+              await this.baseAssetPrecision(symbol),
+              !this.futures,
+            ),
+            type: TypeOrderEnum.dealTP,
+            newClientOrderId: this.getOrderId(`D-SR`),
+            dealId,
+          },
+          {
+            dealId,
+            type: 'MARKET',
+            reduceOnly: true,
+            positionSide: this.hedge
+              ? this.isLong
+                ? PositionSide.LONG
+                : PositionSide.SHORT
+              : PositionSide.BOTH,
+          },
+          ed,
+        )
+        if (result) {
+          const srQty = +result.executedQty
+          const srPrice = +result.price
+          this.handleLog(
+            `Sell remainder order filled for deal ${dealId} ${
+              result.clientOrderId
+            }, price: ${srPrice}, base: ${srQty}, quote: ${
+              srPrice * srQty
+            }, time: ${result.updateTime}`,
+          )
+          dealData.updateTime = result.updateTime
+          dealData.lastPrice = srPrice
+          dealData.levels.complete += updateBalances
+            ? sellNotByOrder
+              ? 0
+              : 1
+            : 0
+          dealData.currentBalances = updateBalances
+            ? {
+                base:
+                  dealData.currentBalances.base +
+                  srQty * (result.side === OrderSideEnum.buy ? 1 : -1) +
+                  qtyWithoutFee * (sellNotByOrder ? 0 : long ? 1 : -1),
+                quote:
+                  dealData.currentBalances.quote +
+                  srQty *
+                    srPrice *
+                    (result.side === OrderSideEnum.sell ? 1 : -1) +
+                  qtyWithoutFee *
+                    orderPrice *
+                    (sellNotByOrder ? 0 : long ? 1 : -1),
+              }
+            : dealData.currentBalances
+          const fee = (await this.profitBase(dealData))
+            ? (qty * _fee.maker * (sellNotByOrder ? 0 : 1) +
+                srQty * _fee.taker) *
+              _fee.maker
+            : qty * orderPrice * _fee.maker * (sellNotByOrder ? 0 : 1) +
+              srQty * srPrice * _fee.taker
+          const feeBase =
+            result.side === OrderSideEnum.buy || (this.futures && this.coinm)
+              ? +result.executedQty * (fee ?? 0)
+              : 0
+          const feeQuote =
+            result.side === OrderSideEnum.sell || (this.futures && !this.coinm)
+              ? +result.executedQty * +result.price * (fee ?? 0)
+              : 0
+          const pureQuote =
+            dealData.currentBalances.quote -
+            (dealData.initialBalances.quote +
+              (dealData.profit.pureQuote ?? 0)) -
+            feeQuote
+          const pureBase =
+            dealData.currentBalances.base -
+            (dealData.initialBalances.base + (dealData.profit.pureBase ?? 0)) -
+            feeBase
+          const total =
+            (!(await this.profitBase(findDeal?.deal))
+              ? srQty * srPrice -
+                qtyWithoutFee * orderPrice +
+                (qtyWithoutFee - srQty) * orderPrice
+              : srQty -
+                qtyWithoutFee +
+                (srQty * srPrice - qtyWithoutFee * orderPrice) / orderPrice) -
+            fee
+          const rate = await this.getUsdRate(symbol)
+          const totalUsd =
+            total *
+            (!(await this.profitBase(findDeal?.deal)) ? 1 : srPrice) *
+            rate
+          dealData.profit.total += updateBalances ? total : 0
+          dealData.profit.totalUsd += updateBalances ? totalUsd : 0
+          dealData.profit.pureBase = updateBalances
+            ? (dealData.profit.pureBase ?? 0) + pureBase
+            : 0
+          dealData.profit.pureQuote = updateBalances
+            ? (dealData.profit.pureQuote ?? 0) + pureQuote
+            : 0
+          if (this.data && updateBalances) {
+            this.data.profit = {
+              ...this.data.profit,
+              total: this.data.profit.total + total,
+              totalUsd: this.data.profit.totalUsd + totalUsd,
+              freeTotal: 0,
+              freeTotalUsd: 0,
+              pureBase: (this.data.profit.pureBase ?? 0) + pureBase,
+              pureQuote: (this.data.profit.pureQuote ?? 0) + pureQuote,
+            }
+            this.saveProfitToDb(totalUsd, dealData.closeTime ?? +new Date())
+            this.updateData({ profit: { ...this.data.profit } })
+            this.emit('bot settings update', { profit: this.data.profit })
+          }
+          dealData.commission += fee
+          dealData.assets.used = updateBalances
+            ? {
+                base:
+                  dealData.assets.used.base +
+                  qtyWithoutFee * (sellNotByOrder ? 0 : long ? 1 : -1),
+                quote:
+                  dealData.assets.used.quote +
+                  qtyWithoutFee *
+                    orderPrice *
+                    (sellNotByOrder ? 0 : long ? -1 : 1),
+              }
+            : dealData.assets.used
+          dealData.assets.required = updateBalances
+            ? {
+                base:
+                  dealData.assets.required.base +
+                  qtyWithoutFee * (sellNotByOrder ? 0 : long ? 1 : -1),
+                quote:
+                  dealData.assets.required.quote +
+                  qtyWithoutFee *
+                    orderPrice *
+                    (sellNotByOrder ? 0 : long ? -1 : 1),
+              }
+            : dealData.assets.required
+
+          this.dealsDb
+            .updateData({ _id: dealId } as any, {
+              $set: {
+                commission: dealData.commission,
+                profit: dealData.profit,
+                updateTime: dealData.updateTime,
+                lastPrice: dealData.lastPrice,
+                currentBalances: dealData.currentBalances,
+                'levels.complete': dealData.levels.complete,
+                assets: dealData.assets,
+              },
+            })
+            .then((res) => {
+              if (res.status === StatusEnum.notok) {
+                this.handleLog(
+                  `Error saving deal: ${dealId}. Reason: ${res.reason}`,
+                )
+              }
+            })
+        }
+        const getDeal = this.deals.get(`${dealId}`)
+        if (getDeal && getDeal.deal.status === DCADealStatusEnum.open) {
+          getDeal.deal.sellRemainder = true
+          this.setDeal(getDeal)
+        }
+        this.dealsDb.updateData({ _id: dealId } as any, {
+          $set: { sellRemainder: true },
+        })
+      } else {
+        this.handleLog(
+          `Sell remainder | qty less than minimals qty: ${qtyWithoutFee},min: ${
+            ed.baseAsset.minAmount
+          }, quote: ${qtyWithoutFee * price}, min ${ed.quoteAsset.minAmount} `,
+        )
+      }
+    }
+    this.endMethod(_id)
+  }
+
+  private async getAvgPrice(
+    dealId: string,
+  ): Promise<{ avg: number; display: number }> {
+    if (this.futures) {
+      let filledDealOrder = this.getOrdersByStatusAndDealId({
+        status: 'FILLED',
+        dealId,
+      })
+      filledDealOrder = [...filledDealOrder].sort(
+        (a, b) => a.updateTime - b.updateTime,
+      )
+      let pos: PositionInBot = {
+        price: 0,
+        side: PositionSide.LONG,
+        qty: 0,
+      }
+      for (const o of filledDealOrder) {
+        pos = await this.calculateAbstractPosition(
+          {
+            qty: +(o.executedQty ?? '0') || +o.origQty,
+            price: +o.price,
+            side: o.side,
+            symbol: o.symbol,
+          },
+          pos,
+        )
+      }
+      return { avg: pos.price, display: pos.price }
+    }
+    const filledDealOrder = this.getOrdersByStatusAndDealId({
+      status: 'FILLED',
+      dealId,
+    }).filter((o) => o.side === (this.isLong ? 'BUY' : 'SELL'))
+    const base = filledDealOrder.reduce(
+      (acc, v) => acc + parseFloat(v.executedQty),
+      0,
+    )
+    const quote = filledDealOrder.reduce(
+      (acc, v) => acc + parseFloat(v.executedQty) * parseFloat(v.price),
+      0,
+    )
+    let avg = quote / base
+    if (isNaN(avg)) {
+      avg = 0
+    }
+    let display = avg
+    if (!isNaN(avg)) {
+      const d = this.getDeal(dealId)
+      if (d) {
+        const profitBase = await this.profitBase(d.deal)
+        const qty = this.isLong
+          ? d.deal.currentBalances.base
+          : d.deal.initialBalances.base - d.deal.currentBalances.base
+        const quote =
+          (this.isLong
+            ? d.deal.initialBalances.quote - d.deal.currentBalances.quote
+            : d.deal.currentBalances.quote) +
+          (profitBase ? 0 : d.deal.profit.total * (this.isLong ? 1 : -1))
+        const fee = (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0
+        if (profitBase) {
+          display =
+            quote /
+            (qty -
+              (qty * fee - d.deal.profit.total) / (this.isLong ? 1 : -1) -
+              d.deal.profit.total * (this.isLong ? 1 : -1))
+        } else {
+          display =
+            (quote * (this.isLong ? 1 : -1) - d.deal.profit.total) /
+            (((this.isLong ? 1 : -1) - fee) * qty)
+        }
+        if (isNaN(display) || !isFinite(display) || display < 0) {
+          display = avg
+        }
+      }
+    }
+    return { avg, display }
+  }
+  /**
+   * Update deal when Regular order is filled
+   *
+   * @param {Order} order Base order
+   */
+  @IdMute(
+    mutex,
+    (botId: string, order: Order) => `${botId}${order?.dealId}update`,
+  )
+  async updateDeal(_botId: string, order: Order) {
+    const _id = this.startMethod('updateDeal')
+    this.ordersInBetweenUpdates.delete(order.clientOrderId)
+    const { dealId, clientOrderId } = order
+    const getSet = dealId
+      ? (this.dealUpdateOrders.get(dealId) ?? new Set<string>())
+      : new Set<string>()
+    if (getSet.has(clientOrderId)) {
+      this.endMethod(_id)
+      return this.handleLog(
+        `Order ${clientOrderId} already processed in update deal`,
+      )
+    }
+    if (!dealId) {
+      this.endMethod(_id)
+      return this.handleLog(`Order ${clientOrderId} has no dealId`)
+    }
+
+    this.dealUpdateOrders.set(dealId, getSet.add(clientOrderId))
+    const price = parseFloat(order.price)
+    const qty = parseFloat(order.executedQty)
+    const findDeal = this.getDeal(dealId)
+    if (
+      findDeal &&
+      dealId &&
+      this.orders &&
+      findDeal.deal.status === DCADealStatusEnum.open
+    ) {
+      const roa =
+        order.clientOrderId.indexOf('-ROA-') !== -1 ||
+        order.clientOrderId.indexOf('ROA') !== -1
+      findDeal.deal.lastPrice = this.isLong
+        ? Math.min(findDeal.deal.lastPrice, parseFloat(order.price))
+        : Math.max(findDeal.deal.lastPrice, parseFloat(order.price))
+      if (!roa) {
+        findDeal.deal.currentBalances = {
+          base:
+            findDeal.deal.currentBalances.base +
+            qty * (order.side === OrderSideEnum.buy ? 1 : -1),
+          quote:
+            findDeal.deal.currentBalances.quote +
+            qty * price * (order.side === OrderSideEnum.sell ? 1 : -1),
+        }
+      }
+      findDeal.deal.updateTime = order.updateTime
+      if (roa) {
+        findDeal.deal.pendingAddFunds = (
+          findDeal.deal.pendingAddFunds ?? []
+        ).filter((s) => s.id !== order.addFundsId)
+        findDeal.deal.funds = [...(findDeal.deal.funds ?? []), { price, qty }]
+        const avgPrice = await this.getAvgPrice(dealId)
+        findDeal.deal.avgPrice = avgPrice.avg
+        findDeal.deal.displayAvg = avgPrice.display
+        findDeal.deal.settings.avgPrice = avgPrice.avg
+        findDeal.previousOrders = findDeal.currentOrders
+        findDeal.deal.levels.complete += 1
+        findDeal.deal.levels.all = Math.max(
+          findDeal.deal.levels.complete,
+          findDeal.initialOrders.filter(
+            (o) => o.type === TypeOrderEnum.dealRegular,
+          ).length +
+            1 +
+            (findDeal.deal.pendingAddFunds ?? []).length +
+            (findDeal.deal.funds ?? []).length,
+        )
+        findDeal.currentOrders = await this.createCurrentDealOrders(
+          findDeal.deal.symbol.symbol,
+          findDeal.deal.lastPrice,
+          findDeal.initialOrders,
+          findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+          findDeal.deal.initialPrice,
+          findDeal.deal._id,
+          false,
+          findDeal.deal,
+          false,
+        )
+        findDeal.deal.initialBalances = {
+          base:
+            findDeal.deal.initialBalances.base +
+            qty * (order.side === OrderSideEnum.buy ? 0 : 1),
+          quote:
+            findDeal.deal.initialBalances.quote +
+            qty * price * (order.side === OrderSideEnum.buy ? 1 : 0),
+        }
+        findDeal.deal.currentBalances = {
+          base:
+            findDeal.deal.currentBalances.base +
+            qty * (order.side === OrderSideEnum.buy ? 1 : 0),
+          quote:
+            findDeal.deal.currentBalances.quote +
+            qty * price * (order.side === OrderSideEnum.buy ? 0 : 1),
+        }
+        await this.checkDealSlMethods(findDeal)
+        this.checkDealsPriceExtremum()
+        this.saveDeal(findDeal, {
+          funds: findDeal.deal.funds,
+          pendingAddFunds: findDeal.deal.pendingAddFunds,
+          lastPrice: findDeal.deal.lastPrice,
+          updateTime: findDeal.deal.updateTime,
+          avgPrice: findDeal.deal.avgPrice,
+          'settings.avgPrice': findDeal.deal.settings.avgPrice,
+          levels: findDeal.deal.levels,
+          currentBalances: findDeal.deal.currentBalances,
+          initialBalances: findDeal.deal.initialBalances,
+        }).then(() => {
+          this.updateUsage(dealId)
+          this.updateAssets(dealId, findDeal)
+          this.updateDealBalances(findDeal)
+          this.updateDealLastPrices(this.botId)
+        })
+
+        this.placeOrders(
+          this.botId,
+          order.symbol,
+          dealId,
+          this.findDiff(findDeal.currentOrders, findDeal.previousOrders),
+        )
+      } else if (order.typeOrder === TypeOrderEnum.dealTP) {
+        const isReduce = !!order.reduceFundsId
+        if (isReduce) {
+          this.handleLog(`Reduce TP order FILLED ${order.clientOrderId}`)
+          findDeal.deal.pendingReduceFunds = (
+            findDeal.deal.pendingReduceFunds ?? []
+          ).filter((r) => r.id !== order.reduceFundsId)
+          findDeal.deal.reduceFunds = [
+            ...(findDeal.deal.reduceFunds ?? []),
+            { price, qty },
+          ]
+        } else {
+          this.handleLog(`Multiple TP order FILLED ${order.clientOrderId}`)
+        }
+        const settings = await this.getAggregatedSettings(findDeal.deal)
+        const commDeal = await this.getCommDeal(findDeal.deal)
+        const { avgPrice } = findDeal.deal
+        const total =
+          (!(await this.profitBase(findDeal.deal))
+            ? this.isLong
+              ? qty * price - qty * avgPrice
+              : avgPrice * qty - qty * price
+            : this.isLong
+              ? qty * (price / avgPrice - 1)
+              : qty * (avgPrice / price - 1)) - commDeal
+        const rate = await this.getUsdRate(order.symbol)
+        const totalUsd =
+          total *
+          (!(await this.profitBase(findDeal.deal))
+            ? 1
+            : findDeal.deal.lastPrice) *
+          rate
+        findDeal.deal.profit = {
+          ...findDeal.deal.profit,
+          total: findDeal.deal.profit.total + total,
+          totalUsd: findDeal.deal.profit.totalUsd + totalUsd,
+        }
+        findDeal.deal.tpHistory = (findDeal.deal.tpHistory ?? []).filter(
+          (t) => t.id !== order.clientOrderId,
+        )
+        this.updateUserProfitStep()
+        let reopen = false
+        if (!isReduce) {
+          if (
+            order.tpSlTarget &&
+            !((findDeal.deal.tpSlTargetFilled ?? []) as string[]).includes(
+              order.tpSlTarget,
+            )
+          ) {
+            findDeal.deal.tpSlTargetFilled = [
+              ...(findDeal.deal.tpSlTargetFilled ?? []),
+              order.tpSlTarget,
+            ]
+            findDeal.deal.tpFilledHistory = findDeal.deal.tpFilledHistory ?? []
+            findDeal.deal.tpFilledHistory.push({
+              id: order.tpSlTarget,
+              price,
+              qty,
+            })
+          }
+          findDeal.currentOrders = findDeal.currentOrders.filter(
+            (o) => o.type !== TypeOrderEnum.dealRegular,
+          )
+
+          if (
+            order.tpSlTarget &&
+            (settings.multiSl ?? [])
+              .map((tp) => tp.uuid)
+              .includes(order.tpSlTarget)
+          ) {
+            findDeal.previousOrders = findDeal.currentOrders
+            findDeal.currentOrders = await this.createCurrentDealOrders(
+              findDeal.deal.symbol.symbol,
+              price,
+              findDeal.initialOrders,
+              findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+              findDeal.deal.initialPrice,
+              findDeal.deal._id,
+              false,
+              findDeal.deal,
+              false,
+            )
+            reopen = true
+          }
+          if (findDeal.notCheckSl) {
+            findDeal.notCheckSl = false
+          }
+        }
+        if (isReduce) {
+          findDeal.previousOrders = findDeal.currentOrders
+          findDeal.currentOrders = await this.createCurrentDealOrders(
+            findDeal.deal.symbol.symbol,
+            price,
+            findDeal.initialOrders,
+            findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+            findDeal.deal.initialPrice,
+            findDeal.deal._id,
+            false,
+            findDeal.deal,
+            false,
+          )
+        }
+        findDeal.deal.commission += commDeal
+
+        this.saveDeal(findDeal, {
+          commission: findDeal.deal.commission,
+          profit: findDeal.deal.profit,
+          updateTime: findDeal.deal.updateTime,
+          lastPrice: findDeal.deal.lastPrice,
+          currentBalances: findDeal.deal.currentBalances,
+          tpSlTargetFilled: findDeal.deal.tpSlTargetFilled,
+          tpFilledHistory: findDeal.deal.tpFilledHistory,
+          blockSl: findDeal.deal.blockSl,
+          tpHistory: findDeal.deal.tpHistory,
+          reduceFunds: findDeal.deal.reduceFunds,
+          pendingReduceFunds: findDeal.deal.pendingReduceFunds,
+        }).then(() => {
+          if (isReduce) {
+            this.updateUsage(dealId)
+            this.updateAssets(dealId)
+          }
+        })
+
+        this.updateAssets(dealId, findDeal)
+        if (!isReduce) {
+          const activeOrders = this.getOrdersByStatusAndDealId({
+            dealId,
+            defaultStatuses: true,
+          }).filter((o) => o.typeOrder === TypeOrderEnum.dealRegular)
+          for (const aOrder of activeOrders) {
+            await this.cancelOrderOnExchange(aOrder)
+          }
+          if (reopen) {
+            this.placeOrders(
+              this.botId,
+              order.symbol,
+              dealId,
+              this.findDiff(findDeal.currentOrders, findDeal.previousOrders),
+            )
+          }
+        }
+        if (isReduce) {
+          if (this.data) {
+            this.data.dealsReduceForBot =
+              this.data.dealsReduceForBot?.filter(
+                (d) => d.id !== findDeal.deal._id,
+              ) ?? []
+
+            this.data.dealsReduceForBot?.push({
+              id: findDeal.deal._id,
+              profit: findDeal.deal.profit.total,
+              profitUsd: findDeal.deal.profit.totalUsd,
+              base:
+                (findDeal.deal.reduceFunds?.reduce(
+                  (acc, v) => acc + v.qty,
+                  0,
+                ) ?? 0) *
+                (await this.getUsdRate(findDeal.deal.symbol.symbol, 'base')),
+              quote:
+                (findDeal.deal.reduceFunds?.reduce(
+                  (acc, v) => acc + v.qty * v.price,
+                  0,
+                ) ?? 0) *
+                (await this.getUsdRate(findDeal.deal.symbol.symbol, 'quote')),
+            })
+            this.updateData({ dealsReduceForBot: this.data.dealsReduceForBot })
+            this.emit('bot settings update', {
+              dealsReduceForBot: this.data.dealsReduceForBot,
+            })
+          }
+          this.placeOrders(
+            this.botId,
+            order.symbol,
+            dealId,
+            this.findDiff(findDeal.currentOrders, findDeal.previousOrders),
+          )
+        }
+      } else {
+        this.handleLog(`Regular order FILLED ${order.clientOrderId}`)
+        this.handleLog('Update deal')
+        const avgPrice = await this.getAvgPrice(dealId)
+
+        if (price !== +order.origPrice) {
+          const breakpoint = {
+            price: +order.origPrice,
+            displacedPrice: price,
+          }
+          findDeal.deal.gridBreakpoints = await this.aggregateBreakpoint(
+            breakpoint,
+            findDeal.deal,
+          )
+          findDeal.initialOrders = await this.createInitialDealOrders(
+            findDeal.deal.symbol.symbol,
+            findDeal.deal.initialPrice,
+            `${findDeal.deal._id}`,
+            findDeal.deal,
+          )
+          this.saveDeal(findDeal, {
+            gridBreakpoints: findDeal.deal.gridBreakpoints,
+          })
+        }
+        findDeal.deal.avgPrice = avgPrice.avg
+        findDeal.deal.displayAvg = avgPrice.display
+        findDeal.deal.settings.avgPrice = findDeal.deal.avgPrice
+        findDeal.deal.levels.complete = Math.max(
+          findDeal.deal.levels.complete ?? 1,
+          this.getOrdersByStatusAndDealId({
+            dealId: findDeal.deal._id,
+            status: ['FILLED', 'CANCELED'],
+          }).filter(
+            (o) =>
+              (o.typeOrder === TypeOrderEnum.dealRegular ||
+                o.typeOrder === TypeOrderEnum.dealStart) &&
+              (this.data?.exchange === ExchangeEnum.bybit
+                ? +o.executedQty !== 0
+                : o.status === 'FILLED'),
+          ).length ?? 1,
+        )
+        if (findDeal.deal.levels.complete > findDeal.deal.levels.all) {
+          findDeal.deal.levels.all = findDeal.deal.levels.complete
+        }
+        findDeal.previousOrders = findDeal.currentOrders
+        findDeal.currentOrders = await this.createCurrentDealOrders(
+          findDeal.deal.symbol.symbol,
+          price,
+          findDeal.initialOrders,
+          findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+          findDeal.deal.initialPrice,
+          findDeal.deal._id,
+          false,
+          findDeal.deal,
+          false,
+        )
+        if (findDeal.deal.bestPrice) {
+          findDeal.deal.bestPrice = 0
+        }
+        this.handleLog(
+          `Avg price ${findDeal.deal.avgPrice} @ ${findDeal.deal.symbol.baseAsset} / ${findDeal.deal.symbol.quoteAsset}`,
+        )
+        await this.checkDealSlMethods(findDeal)
+        this.checkDealsPriceExtremum()
+        this.saveDeal(findDeal, {
+          avgPrice: findDeal.deal.avgPrice,
+          'settings.avgPrice': findDeal.deal.settings.avgPrice,
+          currentBalances: findDeal.deal.currentBalances,
+          updateTime: findDeal.deal.updateTime,
+          levels: findDeal.deal.levels,
+          lastPrice: findDeal.deal.lastPrice,
+        }).then(() => {
+          this.updateUsage(dealId)
+          this.updateDealLastPrices(this.botId)
+        })
+
+        this.updateAssets(dealId)
+        await this.placeOrders(
+          this.botId,
+          order.symbol,
+          dealId,
+          this.findDiff(findDeal.currentOrders, findDeal.previousOrders),
+        )
+      }
+    } else if (
+      dealId &&
+      order.botId === this.botId &&
+      (!findDeal || findDeal.deal.status === DCADealStatusEnum.closed)
+    ) {
+      await this.sellRemainder(
+        dealId,
+        +order.executedQty,
+        +order.price,
+        false,
+        findDeal,
+      )
+    }
+    this.endMethod(_id)
+  }
+  /**
+   * Check TP order status after timeout
+   * @param {string} id Base order id to check
+   */
+  @IdMute(
+    mutex,
+    (botId: string, _id: string, dealId: string) =>
+      `${botId}${dealId ?? 'closeById'}`,
+  )
+  async checkTPOrder(
+    _botId: string,
+    id: string,
+    dealId: string,
+    closeType: CloseDCATypeEnum = CloseDCATypeEnum.leave,
+    reopen = true,
+    forceMarket = false,
+    checkProfit = false,
+  ) {
+    if (this.orders) {
+      const find = this.getOrderFromMap(id)
+      if (
+        find &&
+        find.status !== 'FILLED' &&
+        find.status !== 'PARTIALLY_FILLED'
+      ) {
+        this.handleLog(`${id} not filled. Create new one`)
+        const findOtherTp = this.getOrdersByStatusAndDealId({ dealId }).find(
+          (o) =>
+            o.typeOrder === TypeOrderEnum.dealTP &&
+            o.status !== 'CANCELED' &&
+            o.clientOrderId !== find.clientOrderId,
+        )
+        if (findOtherTp) {
+          this.handleLog(`${dealId} have processed TP order`)
+          return
+        }
+        const cancelOrder = await this.cancelOrderOnExchange(find)
+        if (cancelOrder?.status === 'FILLED') {
+          return this.handleUnknownOrder(cancelOrder)
+        }
+        this.closeDealById(
+          this.botId,
+          dealId,
+          closeType,
+          reopen,
+          forceMarket,
+          undefined,
+          checkProfit,
+          undefined,
+          undefined,
+          cancelOrder?.sl,
+        )
+      }
+    }
+  }
+  /**
+   * Check base order status after timeout
+   * @param {string} id Base order id to check
+   * @param {string} dealId Deal id base order to check
+   */
+  @IdMute(
+    mutex,
+    (botId: string, _symbol: string) => `${botId}placeBaseOrder${_symbol}`,
+  )
+  async checkBaseOrder(
+    _botId: string,
+    symbol: string,
+    id?: string,
+    dealId?: string,
+    forceMarket = false,
+  ) {
+    if (this.orders) {
+      if (id) {
+        const find = this.getOrderFromMap(id)
+        if (
+          find &&
+          find.status !== 'FILLED' &&
+          find.status !== 'PARTIALLY_FILLED'
+        ) {
+          const deal = this.getDeal(find.dealId)
+          this.handleLog(`${id} not filled. Create new one`)
+          const cancelBase = await this.cancelOrderOnExchange(find)
+          if (cancelBase?.status === 'FILLED') {
+            return this.handleUnknownOrder(cancelBase)
+          }
+          if (deal?.deal.status === DCADealStatusEnum.start) {
+            this.placeBaseOrder(
+              this.botId,
+              symbol,
+              find.dealId,
+              forceMarket,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              deal.deal.dynamicAr,
+              deal.deal.sizes,
+              deal.deal.orderSizeType,
+            )
+          } else {
+            this.handleLog(
+              `Deal ${find.dealId} not in start status ${deal?.deal.status}`,
+            )
+          }
+        }
+      } else if (dealId) {
+        this.handleLog(`Deal ${dealId} enter market price`)
+        const findDeal = this.getDeal(dealId)
+        if (findDeal?.deal.enterMarketPrice) {
+          this.handleLog(`Deal ${dealId} already enter market price`)
+          return
+        }
+        const findDealTimer = this.dealTimersMap.get(dealId)
+        if (findDealTimer && findDealTimer.limitTimer) {
+          clearTimeout(findDealTimer.limitTimer)
+          findDealTimer.limitTimer = null
+          this.dealTimersMap.set(dealId, findDealTimer)
+          this.handleLog(`Deal ${dealId} clear limit timer`)
+        }
+        const find = this.getOrdersByStatusAndDealId({ dealId }).find(
+          (o) => o.typeOrder === TypeOrderEnum.dealStart,
+        )
+        this.handleLog(
+          `Deal ${dealId} ${
+            find
+              ? `found base order with status ${find.status}`
+              : 'not found base order'
+          }`,
+        )
+        if (
+          (find &&
+            find.status !== 'FILLED' &&
+            find.status !== 'PARTIALLY_FILLED') ||
+          !find
+        ) {
+          if (find?.status === 'NEW') {
+            const cancelBase = await this.cancelOrderOnExchange(find)
+            if (cancelBase?.status === 'FILLED') {
+              return this.handleUnknownOrder(cancelBase)
+            }
+          }
+          if (findDeal?.deal.status !== DCADealStatusEnum.start) {
+            this.handleLog(
+              `Deal ${dealId} not in start status ${findDeal?.deal.status}`,
+            )
+            return
+          }
+          this.placeBaseOrder(
+            this.botId,
+            symbol,
+            dealId,
+            forceMarket,
+            true,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            findDeal.deal.dynamicAr,
+            findDeal.deal.sizes,
+            findDeal.deal.orderSizeType,
+          )
+          findDeal.deal.enterMarketPrice = true
+          await this.saveDeal(findDeal, {
+            enterMarketPrice: findDeal.deal.enterMarketPrice,
+          })
+        }
+      }
+    }
+  }
+
+  async getBaseOrder(
+    symbol: string,
+    dealId?: string,
+    forceMarket?: boolean,
+    inputPrice?: number,
+    count = 0,
+    fixSize = 0,
+    sizes?: Sizes | null,
+    _override_orderSizeType?: OrderSizeTypeEnum,
+  ) {
+    const fee = await this.getUserFee(symbol)
+    const ed = await this.getExchangeInfo(symbol)
+    if (this.data && this.exchange && ed && fee) {
+      const settings = await this.getAggregatedSettings()
+      if (
+        this.data &&
+        settings.terminalDealType === TerminalDealTypeEnum.import &&
+        settings.baseOrderPrice &&
+        settings.baseOrderSize
+      ) {
+        const ed = await this.getExchangeInfo(symbol)
+        if (ed) {
+          const price = +settings.baseOrderPrice
+          const qty = await this.getSmartSellOrderQty(
+            symbol,
+            await this.checkAssets(true, true),
+          )
+          const order: Order = {
+            clientOrderId: this.getOrderId(`D-BO`),
+            status: 'FILLED',
+            executedQty: `${qty}`,
+            price: `${price}`,
+            origPrice: `${price}`,
+            cummulativeQuoteQty: `${price * qty}`,
+            orderId: '-1',
+            origQty: `${qty}`,
+            side: this.isLong ? OrderSideEnum.buy : OrderSideEnum.sell,
+            symbol,
+            type: OrderTypeEnum.limit,
+            updateTime: new Date().getTime(),
+            transactTime: new Date().getTime(),
+            exchange: this.data.exchange,
+            exchangeUUID: this.data.exchangeUUID,
+            typeOrder: TypeOrderEnum.dealStart,
+            botId: this.botId,
+            userId: this.userId,
+            dealId,
+            fills: [],
+            baseAsset: ed.baseAsset.name,
+            quoteAsset: ed.quoteAsset.name,
+          }
+          return order
+        }
+      }
+      const { orderSizeType: _orderSizeType, useLimitPrice } = settings
+      const orderSizeType =
+        _override_orderSizeType ??
+        (fixSize
+          ? settings.futures
+            ? settings.coinm
+              ? OrderSizeTypeEnum.base
+              : OrderSizeTypeEnum.quote
+            : settings.strategy === StrategyEnum.long
+              ? OrderSizeTypeEnum.quote
+              : OrderSizeTypeEnum.base
+          : _orderSizeType)
+      const baseOrderSize = fixSize || +(settings.baseOrderSize ?? '0')
+      const baseOrderPrice = +(settings.baseOrderPrice ?? '0')
+      const precision = await this.baseAssetPrecision(symbol)
+      const priceRequest = inputPrice ?? (await this.getLatestPrice(symbol))
+      if (priceRequest === 0) {
+        this.handleLog('Get latest price. Latest price = 0. getBaseOrder')
+        return
+      }
+      const baseOrderType = settings.startOrderType ?? OrderTypeEnum.market
+      const type = forceMarket ? OrderTypeEnum.market : baseOrderType
+      const slippage =
+        (settings.type === DCATypeEnum.terminal ? 0 : 0.005) * (1 + count / 10)
+      let price =
+        priceRequest *
+        (1 -
+          (type === OrderTypeEnum.market ? slippage : 0) *
+            (this.isLong ? 1 : -1) *
+            (this.useCompountReduce ? -1 : 1))
+      let useLimit = false
+      if (
+        settings.startOrderType === OrderTypeEnum.limit &&
+        baseOrderPrice &&
+        baseOrderPrice !== 0 &&
+        !isNaN(baseOrderPrice) &&
+        settings.type === DCATypeEnum.terminal &&
+        useLimitPrice
+      ) {
+        useLimit = true
+        price = baseOrderPrice
+      }
+      price = this.math.round(price, ed.priceAssetPrecision)
+      const feeFactor = this.futures
+        ? 1
+        : settings.terminalDealType === TerminalDealTypeEnum.simple
+          ? 1
+          : 1 + fee.taker
+      const short = !this.isLong
+      let qty = this.math.round(
+        (baseOrderSize / price) * feeFactor + (sizes?.base ?? 0),
+        precision,
+        true,
+      )
+      if (orderSizeType === OrderSizeTypeEnum.base) {
+        qty = this.math.round(
+          baseOrderSize * feeFactor + (sizes?.base ?? 0),
+          precision,
+          true,
+        )
+      }
+      if (orderSizeType === OrderSizeTypeEnum.usd) {
+        qty = this.math.round(
+          (baseOrderSize * feeFactor) /
+            ((await this.getUsdRate(symbol, 'quote')) * price) +
+            (sizes?.base ?? 0),
+          precision,
+          true,
+        )
+      }
+      if (orderSizeType === OrderSizeTypeEnum.quote && this.coinm) {
+        qty = this.math.round(
+          (baseOrderSize * ed.quoteAsset.minAmount) / price +
+            (sizes?.base ?? 0),
+          precision,
+          true,
+        )
+      }
+      if (
+        orderSizeType === OrderSizeTypeEnum.percFree ||
+        orderSizeType === OrderSizeTypeEnum.percTotal
+      ) {
+        const balances = await this.getBalancesFromExchange()
+        if (balances && balances.status === StatusEnum.ok) {
+          const long = this.isLong
+          const asset = this.futures
+            ? this.coinm
+              ? ed.baseAsset.name
+              : ed.quoteAsset.name
+            : ed?.[long ? 'quoteAsset' : 'baseAsset'].name
+          const find = balances.data.find((b) => b.asset === asset)
+          if (find) {
+            let useQty =
+              orderSizeType === OrderSizeTypeEnum.percFree
+                ? find.free
+                : find.free + find.locked
+            if (dealId) {
+              await this.dealsDb.updateData({ _id: `${dealId}` } as any, {
+                $set: { balanceStart: useQty },
+              })
+
+              const findDeal = this.getDeal(`${dealId}`)
+              if (findDeal) {
+                findDeal.deal.balanceStart = useQty
+                this.saveDeal(findDeal, {
+                  balanceStart: findDeal.deal.balanceStart,
+                })
+              }
+            }
+            useQty = useQty * (baseOrderSize / 100)
+            if (this.futures) {
+              useQty *= await this.getLeverageMultipler(
+                this.getDeal(dealId)?.deal,
+              )
+            }
+            qty = this.math.round(
+              (this.futures
+                ? this.coinm
+                  ? useQty
+                  : useQty / (useLimit ? price : priceRequest)
+                : long
+                  ? useQty / (useLimit ? price : priceRequest)
+                  : useQty) * (baseOrderSize === 100 ? 1 : feeFactor),
+              precision,
+              true,
+            )
+          } else {
+            return this.handleErrors(
+              `Asset ${asset} not found in user balances`,
+              'placeBaseOrder',
+            )
+          }
+        } else {
+          return this.handleErrors(
+            `Error getting balance: ${balances?.reason}`,
+            'placeBaseOrder',
+          )
+        }
+      }
+      if (
+        settings.useTp &&
+        ((settings.tpPerc &&
+          settings.dealCloseCondition === CloseConditionEnum.tp) ||
+          (settings.useMinTP &&
+            settings.minTp &&
+            (settings.dealCloseCondition === CloseConditionEnum.techInd ||
+              settings.dealCloseCondition === CloseConditionEnum.webhook))) &&
+        !this.futures
+      ) {
+        const perc =
+          settings.dealCloseCondition === CloseConditionEnum.tp
+            ? +(settings.tpPerc ?? '0') / 100
+            : +(settings.minTp ?? '0') / 100
+
+        const tpPrice = price * (1 + perc)
+        const tpQty = this.math.round(qty * (2 - feeFactor), precision, true)
+        if (tpQty * tpPrice < ed.quoteAsset.minAmount) {
+          qty = this.math.round(
+            (ed.quoteAsset.minAmount / tpPrice) * feeFactor + ed.baseAsset.step,
+            precision,
+            false,
+            true,
+          )
+        }
+        if (tpQty < ed.baseAsset.minAmount) {
+          qty = this.math.round(
+            ed.baseAsset.minAmount * feeFactor + ed.baseAsset.step,
+            precision,
+            false,
+            true,
+          )
+        }
+      }
+      if (qty < ed.baseAsset.minAmount) {
+        qty = this.math.round(
+          ed.baseAsset.minAmount * feeFactor,
+          precision,
+          false,
+          true,
+        )
+      }
+      if (qty * price < ed.quoteAsset.minAmount) {
+        qty = this.math.round(
+          (ed.quoteAsset.minAmount / price) * feeFactor,
+          precision,
+          false,
+          true,
+        )
+      }
+      if (!this.futures && short && settings.useTp && settings.tpPerc) {
+        const tpPerc = +settings.tpPerc / 100
+        if (
+          this.math.round(qty / feeFactor, precision, true) *
+            price *
+            (1 - tpPerc) <
+          ed.quoteAsset.minAmount
+        ) {
+          qty = this.math.round(qty + ed.baseAsset.step, precision, false, true)
+        }
+      }
+      if (this.coinm) {
+        const cont = (price * qty) / ed.quoteAsset.minAmount
+        if (cont < 1) {
+          qty = this.math.round(
+            ed.quoteAsset.minAmount / price,
+            precision,
+            false,
+            true,
+          )
+        } else if (cont % 1 > Number.EPSILON) {
+          qty = this.math.round(
+            (this.math.round(cont, 0) * ed.quoteAsset.minAmount) / price,
+            precision,
+            false,
+            true,
+          )
+        }
+      }
+      try {
+        const mod = +new Big(qty).mod(ed.baseAsset.step).toFixed(20)
+        if (mod !== 0) {
+          qty = this.math.round(
+            qty - mod + ed.baseAsset.step,
+            precision,
+            false,
+            true,
+          )
+        }
+      } catch (e) {
+        this.handleErrors(
+          `Big number error ${(e as Error).message || e}`,
+          'getBaseOrder',
+          '',
+          false,
+          false,
+          false,
+        )
+      }
+      const baseId = this.getOrderId(`D-BO`)
+
+      const baseOrder: Order = {
+        clientOrderId: baseId,
+        status: 'NEW',
+        executedQty: '0',
+        price: `${price}`,
+        origPrice: `${price}`,
+        cummulativeQuoteQty: `${price * qty}`,
+        orderId: '-1',
+        origQty: `${qty}`,
+        side: this.isLong ? OrderSideEnum.buy : OrderSideEnum.sell,
+        symbol,
+        type: settings.useRiskReward
+          ? OrderTypeEnum.market
+          : forceMarket
+            ? OrderTypeEnum.market
+            : baseOrderType,
+        updateTime: new Date().getTime(),
+        transactTime: new Date().getTime(),
+        exchange: this.data.exchange,
+        exchangeUUID: this.data.exchangeUUID,
+        typeOrder: TypeOrderEnum.dealStart,
+        botId: this.botId,
+        userId: this.userId,
+        dealId,
+        fills: [],
+        baseAsset: ed.baseAsset.name,
+        quoteAsset: ed.quoteAsset.name,
+        positionSide: this.hedge
+          ? this.isLong
+            ? PositionSide.LONG
+            : PositionSide.SHORT
+          : PositionSide.BOTH,
+      }
+      return baseOrder
+    }
+  }
+  /**
+   * Place base order<br />
+   * @param {string} [oldDealId] Deal id to create a new base order
+   */
+  @IdMute(
+    mutex,
+    (botId: string, symbol: string) => `${botId}placeBaseOrder${symbol}`,
+  )
+  async placeBaseOrder(
+    _botId: string,
+    symbol: string,
+    oldDealId?: string,
+    forceMarket = false,
+    cancelPending = false,
+    count = 0,
+    fixSl = 0,
+    fixTp = 0,
+    fixSize = 0,
+    dynamicAr: DynamicArPrices[] = [],
+    sizes?: Sizes | null,
+    orderSizeType?: OrderSizeTypeEnum,
+  ) {
+    const _id = this.startMethod('placeBaseOrder')
+    let dealId: string | undefined
+    if (!oldDealId) {
+      this.handleLog('Create new deal')
+      dealId = await this.createDeal(
+        symbol,
+        fixSl,
+        fixTp,
+        fixSize,
+        dynamicAr,
+        sizes,
+        orderSizeType,
+      )
+      if (!dealId) {
+        this.resetPending(this.botId, symbol)
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Cannot create deal for ${symbol}`,
+          'placeBaseOrder',
+          '',
+          false,
+        )
+      }
+    }
+    const settings = await this.getAggregatedSettings()
+    if (settings.terminalDealType === TerminalDealTypeEnum.import) {
+      const order = await this.getBaseOrder(
+        symbol,
+        dealId,
+        forceMarket,
+        undefined,
+        undefined,
+        fixSize,
+      )
+      if (order) {
+        this.setOrder(order)
+        this.ordersDb.createData(order)
+        this.endMethod(_id)
+        return this.startDeal(order)
+      }
+    }
+    if (oldDealId) {
+      dealId = oldDealId
+    }
+    const deal = this.getDeal(dealId)
+    if (deal?.deal.status === DCADealStatusEnum.open) {
+      this.handleLog(`Deal ${dealId} already open`)
+      this.endMethod(_id)
+      return
+    }
+    if (cancelPending) {
+      for (const order of this.getOrdersByStatusAndDealId({
+        status: 'NEW',
+        dealId,
+      }).filter((o) => o.typeOrder === TypeOrderEnum.dealStart)) {
+        const o = await this.cancelOrderOnExchange(order)
+        if (o?.status === 'FILLED') {
+          this.endMethod(_id)
+          return this.handleUnknownOrder(o)
+        }
+      }
+    }
+    const currentBase = this.getOrdersByStatusAndDealId({
+      dealId,
+      defaultStatuses: true,
+    }).find((o) => o.typeOrder === TypeOrderEnum.dealStart)
+    if (currentBase) {
+      this.endMethod(_id)
+      return this.handleLog(`Deal ${dealId} already have and active base order`)
+    }
+    if (this.data && this.exchange) {
+      const baseOrder = await this.getBaseOrder(
+        symbol,
+        dealId,
+        forceMarket,
+        undefined,
+        count,
+        fixSize,
+        sizes,
+        orderSizeType,
+      )
+      if (forceMarket && sizes && this.useCompountReduce && baseOrder) {
+        const deal = this.getDeal(dealId)
+        if (deal && deal.deal.sizes) {
+          deal.deal.sizes.origBase =
+            +baseOrder.origQty + (deal.deal.sizes.base ?? 0)
+          this.saveDeal(deal, { sizes: deal.deal.sizes })
+        }
+      }
+      const { startOrderType, useLimitPrice } = settings
+      const baseOrderPrice = +(settings.baseOrderPrice ?? '0')
+      if (baseOrder) {
+        this.updateDealLastPrices(this.botId, {
+          symbol,
+          entry: +baseOrder.price,
+          avg: +baseOrder.price,
+          time: this.getDeal(dealId)?.deal.createTime,
+        })
+        if (!this.data.settings.futures) {
+          if (this.data?.action) {
+            this.db?.updateData(
+              { _id: this.botId },
+              { $unset: { action: null } },
+            )
+            this.data.action = undefined
+          }
+          if (!oldDealId && dealId) {
+            const deal = this.getDeal(dealId)
+            if (!deal) {
+              this.resetPending(this.botId, symbol)
+              this.endMethod(_id)
+              return this.handleErrors(
+                `Cannot find deal ${dealId} after creation`,
+                'placeBaseOrder',
+                '',
+                false,
+                false,
+                false,
+              )
+            }
+            if (
+              deal.deal.action &&
+              deal.deal.action !== ActionsEnum.useBalance
+            ) {
+              if (deal.deal.action === ActionsEnum.noAction) {
+                this.resetPending(this.botId, symbol)
+                this.endMethod(_id)
+                return this.handleErrors(
+                  `Cannot place base order. Action is noAction`,
+                  'placeBaseOrder',
+                )
+              }
+              let proceedBaseOrder = false
+              if (
+                [
+                  ActionsEnum.buyDiff,
+                  ActionsEnum.buyForAll,
+                  ActionsEnum.sellDiff,
+                  ActionsEnum.sellForAll,
+                ].includes(deal.deal.action) &&
+                deal.deal.settings.useDca
+              ) {
+                this.handleLog(`Action ${deal.deal.action} detected`)
+                const lp = await this.getLatestPrice(symbol)
+                const orders = await this.createInitialDealOrders(
+                  symbol,
+                  lp,
+                  dealId,
+                  deal.deal,
+                )
+                const required = this.isLong
+                  ? orders.reduce((acc, v) => acc + v.qty * v.price, 0) / lp
+                  : orders.reduce((acc, v) => acc + v.qty, 0) * lp
+                this.handleLog(
+                  `Required amount for ${deal.deal.action} is ${required}, price is ${lp}`,
+                )
+                const ei = await this.getExchangeInfo(symbol)
+                const balance =
+                  (await this.checkAssets(true, true))?.get(
+                    (this.isLong ? ei?.baseAsset.name : ei?.quoteAsset.name) ??
+                      '',
+                  )?.free ?? 0
+                this.handleLog(`Available balance is ${balance}`)
+                const orderSize = [
+                  ActionsEnum.buyDiff,
+                  ActionsEnum.sellDiff,
+                ].includes(deal.deal.action)
+                  ? required - balance
+                  : required
+                this.handleLog(`Order size is ${orderSize}`)
+                if (orderSize > 0) {
+                  const price = `${this.math.round(
+                    lp,
+                    ei?.priceAssetPrecision,
+                  )}`
+                  const qty = `${this.math.round(
+                    orderSize * (this.isLong ? 1 : 1 / lp),
+                    await this.baseAssetPrecision(symbol),
+                  )}`
+                  const r = await this.sendOrderToExchange(
+                    {
+                      clientOrderId: this.getOrderId('CMB-H'),
+                      status: 'NEW',
+                      executedQty: '0',
+                      price: price,
+                      origPrice: price,
+                      cummulativeQuoteQty: `${+price * +qty}`,
+                      orderId: '-1',
+                      origQty: `${qty}`,
+                      side: this.isLong
+                        ? OrderSideEnum.sell
+                        : OrderSideEnum.buy,
+                      symbol,
+                      type: OrderTypeEnum.market,
+                      updateTime: new Date().getTime(),
+                      transactTime: new Date().getTime(),
+                      exchange: this.data.exchange,
+                      exchangeUUID: this.data.exchangeUUID,
+                      typeOrder: TypeOrderEnum.dealStart,
+                      botId: this.botId,
+                      userId: this.userId,
+                      dealId,
+                      fills: [],
+                      baseAsset: ei?.baseAsset.name ?? '',
+                      quoteAsset: ei?.quoteAsset.name ?? '',
+                    },
+                    true,
+                  )
+                  if (typeof r === 'string') {
+                    this.endMethod(_id)
+                    return this.handleErrors(
+                      `Error placing order: ${r}`,
+                      'placeBaseOrder',
+                      '',
+                      false,
+                      false,
+                      false,
+                    )
+                  }
+                  if (!r) {
+                    this.endMethod(_id)
+                    return this.handleErrors(
+                      `Error placing order`,
+                      'placeBaseOrder',
+                      '',
+                      false,
+                      false,
+                      false,
+                    )
+                  }
+                  this.handleLog(`Order ${r.clientOrderId} filled`)
+                }
+                proceedBaseOrder = true
+              }
+              if (deal.deal.action === ActionsEnum.useOppositeBalance) {
+                this.handleLog(`Action ${deal.deal.action} detected`)
+                proceedBaseOrder = true
+              }
+              if (proceedBaseOrder) {
+                baseOrder.status = 'FILLED'
+                baseOrder.executedQty = baseOrder.origQty
+                this.setOrder(baseOrder)
+                this.ordersDb.createData(baseOrder)
+                this.endMethod(_id)
+                return this.startDeal(baseOrder)
+              }
+            }
+          }
+        }
+        this.handleLog('Send base order')
+        const result = await this.sendOrderToExchange(
+          {
+            ...baseOrder,
+            type:
+              count === this.slippageRetry
+                ? OrderTypeEnum.limit
+                : baseOrder.type,
+          },
+          true,
+        )
+        if (result) {
+          if (typeof result === 'string') {
+            if (this.isNotionalReason(result) && count < this.slippageRetry) {
+              this.handleLog(
+                `Cannot place base order due to slippage ${
+                  baseOrder.clientOrderId
+                }, attempt ${count + 1}`,
+              )
+              await sleep(250)
+              this.placeBaseOrder(
+                this.botId,
+                symbol,
+                dealId,
+                forceMarket,
+                cancelPending,
+                count + 1,
+                fixSl,
+                fixTp,
+                fixSize,
+                dynamicAr,
+                sizes,
+                orderSizeType,
+              )
+            } else {
+              this.handleOrderErrors(
+                result,
+                baseOrder,
+                'limitOrders()',
+                `Send new order request ${baseOrder.clientOrderId}, qty ${baseOrder.origQty}, price ${baseOrder.price}, side ${baseOrder.side}`,
+              )
+              if (this.data.settings.type === DCATypeEnum.terminal) {
+                this.endMethod(_id)
+                return this.stop()
+              }
+            }
+          } else if (result.status === 'FILLED') {
+            await this.startDeal(result)
+          } else {
+            if (baseOrder.clientOrderId !== result.clientOrderId) {
+              baseOrder.clientOrderId = result.clientOrderId
+            }
+            if (
+              startOrderType === OrderTypeEnum.limit &&
+              (baseOrderPrice === 0 || isNaN(baseOrderPrice) || !useLimitPrice)
+            ) {
+              const deal = this.getDeal(dealId)
+              if (deal && count < this.slippageRetry) {
+                const dealTimer = this.dealTimersMap.get(deal.deal._id) ?? {
+                  limitTimer: null,
+                  enterMarketTimer: null,
+                }
+                if (
+                  this.orderLimitRepositionTimeout !== 0 &&
+                  !this.data.settings.notUseLimitReposition
+                ) {
+                  if (!this.startTimeoutTime.get(deal.deal._id)) {
+                    this.startTimeoutTime.set(
+                      deal.deal._id,
+                      new Date().getTime(),
+                    )
+                  }
+                  if (
+                    this.enterMarketTimeout === 0 ||
+                    (this.enterMarketTimeout !== 0 &&
+                      new Date().getTime() + this.orderLimitRepositionTimeout <
+                        (this.startTimeoutTime.get(deal.deal._id) ??
+                          +new Date()) +
+                          this.enterMarketTimeout)
+                  ) {
+                    dealTimer.limitTimer = setTimeout(
+                      () =>
+                        this.checkBaseOrder(
+                          this.botId,
+                          symbol,
+                          baseOrder.clientOrderId,
+                          dealId,
+                        ),
+                      this.orderLimitRepositionTimeout,
+                    )
+                  }
+                }
+                if (
+                  this.enterMarketTimeout !== 0 &&
+                  !dealTimer.enterMarketTimer &&
+                  (!this.data.settings.notUseLimitReposition ||
+                    (this.data.settings.useLimitTimeout &&
+                      this.data.settings.notUseLimitReposition))
+                ) {
+                  dealTimer.enterMarketTimer = setTimeout(
+                    () =>
+                      this.checkBaseOrder(
+                        this.botId,
+                        symbol,
+                        undefined,
+                        dealId,
+                        true,
+                      ),
+                    this.enterMarketTimeout,
+                  )
+                }
+                this.dealTimersMap.set(deal.deal._id, dealTimer)
+              }
+            }
+          }
+        }
+      }
+    }
+    this.endMethod(_id)
+  }
+  /**
+   * Update bot assets
+   *
+   * @param {string} dealId Id of the deal
+   * @param {Order} order Order to change assets
+   */
+
+  async updateAssets(dealId: string, deal?: FullDeal<ExcludeDoc<Deal>>) {
+    const findDeal = deal ?? this.getDeal(dealId)
+    if (this.data && findDeal) {
+      const long = this.isLong
+      let requiredBase = 0
+      let requiredQuote = 0
+      const settings = await this.getAggregatedSettings(findDeal.deal)
+      const { useTp, useSl, trailingTp, dealCloseCondition } = settings
+      const current = await this.createCurrentDealOrders(
+        findDeal.deal.symbol.symbol,
+        findDeal.deal.lastPrice,
+        findDeal.initialOrders,
+        findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+        findDeal.deal.initialPrice,
+        findDeal.deal._id,
+        settings.useSmartOrders &&
+          settings.activeOrdersCount !== settings.ordersCount,
+        findDeal.deal,
+        true,
+        false,
+      )
+      let used = current
+      if (
+        settings.useSmartOrders &&
+        settings.activeOrdersCount !== settings.ordersCount
+      ) {
+        used = await this.createCurrentDealOrders(
+          findDeal.deal.symbol.symbol,
+          findDeal.deal.lastPrice,
+          findDeal.initialOrders,
+          findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+          findDeal.deal.initialPrice,
+          findDeal.deal._id,
+          false,
+          findDeal.deal,
+          true,
+          false,
+        )
+      }
+      const usedRegular = used.filter(
+        (u) => u.type === TypeOrderEnum.dealRegular,
+      )
+      const all = current.filter((g) => g.type === TypeOrderEnum.dealRegular)
+      const leverage = await this.getLeverageMultipler(findDeal.deal)
+      const pending = this.getPendingAddFunds(findDeal)
+      const pendingReduce = this.getPendingReduceFunds(findDeal)
+      if (long) {
+        requiredQuote = this.coinm
+          ? 0
+          : all.reduce((acc, v) => acc + v.qty * v.price, 0) +
+            pending.quote -
+            pendingReduce.quote
+        if (this.coinm) {
+          requiredBase =
+            all.reduce((acc, v) => acc + v.qty, 0) +
+            pending.base -
+            pendingReduce.base
+        }
+
+        if (!this.futures) {
+          if (
+            useTp &&
+            !trailingTp &&
+            dealCloseCondition === CloseConditionEnum.tp &&
+            !this.data?.flags?.includes(BotFlags.externalTp)
+          ) {
+            requiredBase = findDeal.currentOrders
+              .filter((g) => g.type === TypeOrderEnum.dealTP)
+              .reduce((acc, v) => acc + v.qty, 0)
+          } else if (
+            (useTp && trailingTp) ||
+            (!useTp && useSl) ||
+            (useTp && dealCloseCondition !== CloseConditionEnum.tp) ||
+            this.data?.flags?.includes(BotFlags.externalTp)
+          ) {
+            const orders = await this.getTPOrder(
+              findDeal.deal.symbol.symbol,
+              findDeal.deal.lastPrice,
+              findDeal.initialOrders,
+              findDeal.deal.avgPrice,
+              findDeal.deal.initialPrice,
+              findDeal.deal._id,
+              findDeal.deal,
+            )
+            if (orders) {
+              requiredBase = orders.reduce((acc, v) => acc + v.qty, 0)
+            }
+          }
+        }
+      }
+      if (!long) {
+        requiredBase =
+          this.futures && !this.coinm
+            ? 0
+            : all.reduce((acc, v) => acc + v.qty, 0) +
+              pending.base -
+              pendingReduce.base
+        if (!(this.futures && !this.coinm)) {
+          if (
+            useTp &&
+            !trailingTp &&
+            dealCloseCondition === CloseConditionEnum.tp
+          ) {
+            requiredQuote = findDeal.currentOrders
+              .filter((g) => g.type === TypeOrderEnum.dealTP)
+              .reduce((acc, v) => acc + v.qty * v.price, 0)
+          } else if (
+            (useTp && trailingTp) ||
+            (!useTp && useSl) ||
+            (useTp && dealCloseCondition !== CloseConditionEnum.tp)
+          ) {
+            const orders = await this.getTPOrder(
+              findDeal.deal.symbol.symbol,
+              findDeal.deal.lastPrice,
+              findDeal.initialOrders,
+              findDeal.deal.avgPrice,
+              findDeal.deal.initialPrice,
+              findDeal.deal._id,
+              findDeal.deal,
+            )
+            if (orders) {
+              requiredQuote = orders.reduce(
+                (acc, v) => acc + v.qty * v.price,
+                0,
+              )
+            }
+          }
+        } else {
+          requiredQuote =
+            all.reduce((acc, v) => acc + v.qty * v.price, 0) +
+            pending.quote -
+            pendingReduce.quote
+        }
+      }
+      let usedBase =
+        used
+          .filter((g) => g.side === OrderSideEnum.sell)
+          .reduce((acc, v) => acc + v.qty, 0) +
+        pending.base -
+        pendingReduce.base
+      let usedQuote =
+        used
+          .filter((g) => g.side === OrderSideEnum.buy)
+          .reduce((acc, v) => acc + v.qty * v.price, 0) +
+        pending.quote -
+        pendingReduce.quote
+      if (this.futures) {
+        if (this.coinm) {
+          usedQuote = 0
+          usedBase =
+            usedRegular.reduce((acc, v) => acc + v.qty, 0) +
+            pending.base -
+            pendingReduce.base
+        } else {
+          usedBase = 0
+          usedQuote =
+            usedRegular.reduce((acc, v) => acc + v.qty * v.price, 0) +
+            pending.quote -
+            pendingReduce.quote
+        }
+      }
+      findDeal.deal.assets = {
+        used: {
+          base: usedBase / leverage,
+          quote: usedQuote / leverage,
+        },
+        required: {
+          base: requiredBase / leverage,
+          quote: requiredQuote / leverage,
+        },
+      }
+      this.saveDeal(findDeal, { assets: findDeal.deal.assets })
+      this.updateBotAssets()
+    }
+  }
+  /**
+   * Update bot assets
+   */
+
+  updateBotAssets() {
+    if (this.data) {
+      const activeDeals = this.getOpenDeals()
+      const used: typeof this.data.assets.used = {
+        base: new Map(),
+        quote: new Map(),
+      }
+      const required: typeof this.data.assets.required = {
+        base: new Map(),
+        quote: new Map(),
+      }
+      for (const d of activeDeals) {
+        const base = d.deal.symbol.baseAsset
+        const quote = d.deal.symbol.quoteAsset
+        used.base.set(
+          base,
+          (used.base.get(base) ?? 0) + d.deal.assets.used.base,
+        )
+        used.quote.set(
+          quote,
+          (used.quote.get(quote) ?? 0) + d.deal.assets.used.quote,
+        )
+        required.base.set(
+          base,
+          (required.base.get(base) ?? 0) + d.deal.assets.required.base,
+        )
+        required.quote.set(
+          quote,
+          (required.quote.get(quote) ?? 0) + d.deal.assets.required.quote,
+        )
+      }
+      this.data.assets = {
+        used,
+        required,
+      }
+      this.updateData({ assets: this.data.assets })
+      this.emit('bot settings update', {
+        assets: {
+          used: {
+            base: mapToArray(used.base),
+            quote: mapToArray(used.quote),
+          },
+          required: {
+            base: mapToArray(required.base),
+            quote: mapToArray(required.quote),
+          },
+        },
+      })
+    }
+  }
+  /**
+   * Update bot deals
+   * @param {boolean} increase
+   */
+  @IdMute(mutex, (botId) => `updateBotDeals${botId}`)
+  async updateBotDeals(_botId: string, increase: boolean) {
+    if (this.data) {
+      this.data.deals = {
+        all: this.data.deals.all + (increase ? 1 : 0),
+        active: this.data.deals.active + (increase ? 1 : -1),
+      }
+      if (this.data.deals.active < 0) {
+        this.data.deals.active = 0
+      }
+      this.updateData({ deals: this.data.deals })
+      this.emit('bot settings update', { dealsInBot: this.data.deals })
+    }
+  }
+
+  getPendingAddFunds(deal: FullDeal<ExcludeDoc<Deal>>) {
+    const pendingAddFunds =
+      deal.deal.pendingAddFunds ??
+      ([] as unknown as NonNullable<Deal['pendingAddFunds']>)
+    const base = pendingAddFunds.reduce(
+      (acc, v) =>
+        acc +
+        (v.useLimitPrice
+          ? v.asset === OrderSizeTypeEnum.base
+            ? +v.qty
+            : +v.qty / +(v.limitPrice ?? '0')
+          : 0),
+      0,
+    )
+    const quote = pendingAddFunds.reduce(
+      (acc, v) =>
+        acc +
+        (v.useLimitPrice
+          ? v.asset === OrderSizeTypeEnum.base
+            ? +v.qty * +(v.limitPrice ?? '0')
+            : +v.qty
+          : 0),
+      0,
+    )
+    return { base, quote }
+  }
+
+  getPendingReduceFunds(deal: FullDeal<ExcludeDoc<Deal>>) {
+    const pendingReduceFunds =
+      deal.deal.pendingReduceFunds ??
+      ([] as unknown as NonNullable<Deal['pendingReduceFunds']>)
+    const base = pendingReduceFunds.reduce(
+      (acc, v) =>
+        acc +
+        (v.useLimitPrice
+          ? v.asset === OrderSizeTypeEnum.base
+            ? +v.qty
+            : +v.qty / +(v.limitPrice ?? '0')
+          : 0),
+      0,
+    )
+    const quote = pendingReduceFunds.reduce(
+      (acc, v) =>
+        acc +
+        (v.useLimitPrice
+          ? v.asset === OrderSizeTypeEnum.base
+            ? +v.qty * +(v.limitPrice ?? '0')
+            : +v.qty
+          : 0),
+      0,
+    )
+    return { base, quote }
+  }
+  /**
+   * Update usage for bot and deal
+   * @param {string} dealId Id of the deal
+   * @param {boolean} [reset] Reset usage. Default=false
+   * @param {boolean} [noBotUsage] Not calculate bot usage. Default = false
+   */
+
+  @IdMute(mutex, (dealId) => `updateUsage${dealId}`)
+  async updateUsage(dealId: string, reset = false, noBotUsage = false) {
+    const findDeal = this.getDeal(dealId)
+    const runBot = () => {
+      if (!noBotUsage) {
+        this.calculateBotUsage(this.botId)
+      }
+    }
+    if (this.data && findDeal) {
+      const long = this.isLong
+      const leverage = await this.getLeverageMultipler(findDeal.deal)
+      const bo = this.findBaseOrderByDeal(findDeal.deal._id)
+      const regular = findDeal.initialOrders.filter(
+        (o) => o.type === TypeOrderEnum.dealRegular,
+      )
+      const boQty = +(bo?.executedQty ?? '0') || +(bo?.origQty ?? '0') || 0
+      const boPrice = +(bo?.price ?? '0') || 0
+      const fundsBase = (
+        findDeal.deal.funds ?? ([] as unknown as NonNullable<Deal['funds']>)
+      ).reduce((acc, v) => acc + v.qty, 0)
+      const fundsQuote = (
+        findDeal.deal.funds ?? ([] as unknown as NonNullable<Deal['funds']>)
+      ).reduce((acc, v) => acc + v.qty * v.price, 0)
+      const reduceFundsBase = (
+        findDeal.deal.reduceFunds ??
+        ([] as unknown as NonNullable<Deal['reduceFunds']>)
+      ).reduce((acc, v) => acc + v.qty, 0)
+      const reduceFundsQuote = (
+        findDeal.deal.reduceFunds ??
+        ([] as unknown as NonNullable<Deal['reduceFunds']>)
+      ).reduce((acc, v) => acc + v.qty * v.price, 0)
+      const pending = this.getPendingAddFunds(findDeal)
+      const pendingReduce = this.getPendingReduceFunds(findDeal)
+      const totalBase =
+        regular.reduce((acc, g) => acc + g.qty, 0) +
+        boQty +
+        fundsBase +
+        pending.base -
+        reduceFundsBase -
+        pendingReduce.base
+      const totalQuote =
+        regular.reduce((acc, g) => acc + g.qty * g.price, 0) +
+        boQty * boPrice +
+        fundsQuote +
+        pending.quote -
+        reduceFundsQuote -
+        pendingReduce.quote
+      const base = (await this.profitBase(findDeal.deal))
+        ? findDeal.deal.profit.total
+        : 0
+
+      const quote = !(await this.profitBase(findDeal.deal))
+        ? findDeal.deal.profit.total
+        : 0
+      const rate = await this.getUsdRate(
+        findDeal.deal.symbol.symbol,
+        this.futures
+          ? this.coinm
+            ? 'base'
+            : 'quote'
+          : long
+            ? 'quote'
+            : 'base',
+      )
+      let maxBase =
+        (this.futures ? (this.coinm ? totalBase : 0) : long ? 0 : totalBase) /
+        leverage
+      let maxQuote =
+        (this.futures ? (this.coinm ? 0 : totalQuote) : long ? totalQuote : 0) /
+        leverage
+      const currentBase =
+        (!reset
+          ? this.futures
+            ? this.coinm
+              ? long
+                ? findDeal.deal.currentBalances.base
+                : findDeal.deal.initialBalances.base -
+                  (findDeal.deal.currentBalances.base - base)
+              : 0
+            : long
+              ? 0
+              : findDeal.deal.initialBalances.base -
+                (findDeal.deal.currentBalances.base - base)
+          : 0) / leverage
+      const currentQuote =
+        (!reset
+          ? this.futures
+            ? this.coinm
+              ? 0
+              : !long
+                ? findDeal.deal.currentBalances.quote
+                : findDeal.deal.initialBalances.quote -
+                  (findDeal.deal.currentBalances.quote - quote)
+            : long
+              ? findDeal.deal.initialBalances.quote -
+                (findDeal.deal.currentBalances.quote - quote)
+              : 0
+          : 0) / leverage
+      if (
+        findDeal.deal.levels.complete > 0 &&
+        findDeal.deal.levels.complete === findDeal.deal.levels.all
+      ) {
+        if (maxQuote > 0 && maxQuote > currentQuote) {
+          maxQuote = currentQuote
+        }
+        if (maxBase > 0 && maxBase > currentBase) {
+          maxBase = currentBase
+        }
+      }
+      const maxUsd = this.futures
+        ? this.coinm
+          ? maxBase * rate
+          : maxQuote * rate
+        : long
+          ? maxQuote * rate
+          : maxBase * rate
+      const currentUsd = this.futures
+        ? this.coinm
+          ? currentBase * rate
+          : currentQuote * rate
+        : long
+          ? currentQuote * rate
+          : currentBase * rate
+      let relative = currentUsd / maxUsd
+      if (isNaN(relative) || !isFinite(relative)) {
+        relative = 0
+      }
+      findDeal.deal.usage = {
+        max: {
+          base: maxBase,
+          quote: maxQuote,
+        },
+        current: {
+          base: currentBase,
+          quote: currentQuote,
+        },
+        maxUsd,
+        currentUsd,
+        relative,
+      }
+      if (findDeal.deal.usage.current.base > findDeal.deal.usage.max.base) {
+        findDeal.deal.usage.max.base = findDeal.deal.usage.current.base
+      }
+      if (findDeal.deal.usage.current.quote > findDeal.deal.usage.max.quote) {
+        findDeal.deal.usage.max.quote = findDeal.deal.usage.current.quote
+      }
+      const costValue =
+        this.futures && findDeal.deal.status === DCADealStatusEnum.closed
+          ? this.coinm
+            ? findDeal.deal.usage.current.base *
+              findDeal.deal.avgPrice *
+              leverage
+            : findDeal.deal.usage.current.quote * leverage
+          : Math.max(
+              (this.futures
+                ? this.coinm
+                  ? findDeal.deal.usage.current.base * findDeal.deal.avgPrice
+                  : findDeal.deal.usage.current.quote
+                : long
+                  ? findDeal.deal.usage.current.quote
+                  : findDeal.deal.usage.current.base) * leverage,
+              0,
+            )
+      const sizeValue =
+        this.futures && !this.coinm
+          ? findDeal.deal.status === DCADealStatusEnum.closed
+            ? (findDeal.deal.usage.current.quote * leverage) /
+              findDeal.deal.avgPrice
+            : long
+              ? findDeal.deal.currentBalances.base
+              : findDeal.deal.initialBalances.base -
+                findDeal.deal.currentBalances.base
+          : Math.max(
+              (this.futures
+                ? this.coinm
+                  ? findDeal.deal.usage.current.base
+                  : findDeal.deal.usage.current.quote
+                : long
+                  ? findDeal.deal.usage.current.quote
+                  : findDeal.deal.usage.current.base) * leverage,
+              0,
+            )
+      const costMultiplier = this.futures
+        ? 1
+        : long
+          ? 1
+          : findDeal.deal.avgPrice
+      const sizeDenominator = this.futures
+        ? 1
+        : long
+          ? findDeal.deal.avgPrice
+          : 1
+      let s = sizeValue / sizeDenominator
+      s = isNaN(s) ? 0 : isFinite(s) ? s : 0
+      let c = costValue * costMultiplier
+      c = isNaN(c) ? 0 : c
+      this.saveDeal(findDeal, {
+        usage: findDeal.deal.usage,
+        size: s,
+        cost: c / leverage,
+        value: c,
+      }).then(runBot)
+    }
+    if (!findDeal && reset) {
+      runBot()
+    }
+  }
+  /**
+   * Rest bot assets
+   *
+   */
+
+  resetAssets() {
+    this.updateBotAssets()
+  }
+  /**
+   * Get open deals
+   */
+
+  getOpenDeals(ignoreStartDeals?: boolean, symbol?: string) {
+    return this.getDealsByStatusAndSymbol({
+      status: ignoreStartDeals
+        ? DCADealStatusEnum.open
+        : [DCADealStatusEnum.open, DCADealStatusEnum.start],
+      symbol,
+    })
+  }
+
+  async checkOpenedDeals() {
+    if (!this.data || !this.allowedMethods.has('checkOpenedDeals')) {
+      return
+    }
+    const { useCloseAfterXopen, closeAfterXopen, useBotController } =
+      await this.getAggregatedSettings()
+    if (
+      !useBotController ||
+      !useCloseAfterXopen ||
+      !closeAfterXopen ||
+      !checkNumber(closeAfterXopen)
+    ) {
+      return
+    }
+    const deals = await this.dealsDb.countData({
+      status: {
+        $in: [
+          DCADealStatusEnum.closed,
+          DCADealStatusEnum.error,
+          DCADealStatusEnum.open,
+          DCADealStatusEnum.canceled,
+        ],
+      },
+      botId: this.botId,
+    } as any)
+    if (deals.status === StatusEnum.notok) {
+      return this.handleErrors(
+        `Error reading deals ${deals.reason}`,
+        'checkOpenedDeals',
+        undefined,
+        false,
+        false,
+        false,
+      )
+    }
+    if (
+      deals.data.result >= +closeAfterXopen &&
+      this.data.status !== BotStatusEnum.closed
+    ) {
+      this.handleLog(
+        `Close deal after X opened trigger, opened: ${deals.data.result}, trigger: ${closeAfterXopen}`,
+      )
+      await this.stop(CloseDCATypeEnum.leave)
+    }
+  }
+  /**
+   * Caluculate bot deals
+   */
+
+  calculateBotDeals() {
+    const openDeals = this.getOpenDeals()
+    if (this.data) {
+      this.data.deals = {
+        active: openDeals.length,
+        all: this.allDeals,
+      }
+      this.updateData({ deals: this.data.deals })
+      this.emit('bot settings update', { dealsInBot: this.data.deals })
+      this.checkOpenedDeals()
+    }
+  }
+  /**
+   * Calculate bot usage
+   */
+
+  @IdMute(mutex, (botId) => `calculateBotUsage${botId}`)
+  async calculateBotUsage(_botId: string) {
+    if (this.data) {
+      const updateOpenDeals = this.getOpenDeals()
+      this.data.usage = {
+        current: {
+          base: 0,
+          quote: 0,
+        },
+        max: {
+          base: 0,
+          quote: 0,
+        },
+        currentUsd: 0,
+        maxUsd: 0,
+        relative: 0,
+      }
+      const settings = await this.getAggregatedSettings()
+      let { maxNumberOfOpenDeals } = settings
+      if (
+        !maxNumberOfOpenDeals ||
+        maxNumberOfOpenDeals === '' ||
+        isNaN(+maxNumberOfOpenDeals) ||
+        +maxNumberOfOpenDeals < 0
+      ) {
+        maxNumberOfOpenDeals = '1'
+      }
+      const currentUsage = {
+        base: updateOpenDeals.reduce(
+          (acc, d) => acc + d.deal.usage.current.base,
+          0,
+        ),
+        quote: updateOpenDeals.reduce(
+          (acc, d) => acc + d.deal.usage.current.quote,
+          0,
+        ),
+      }
+      const currentUsd = updateOpenDeals.reduce(
+        (acc, d) => acc + (d.deal.usage.currentUsd ?? 0),
+        0,
+      )
+      const [first] = settings.pair ?? []
+      if (first) {
+        const latestPrice = await this.getLatestPrice(first)
+        if (latestPrice !== 0) {
+          const long = this.isLong
+          const grids = await this.createInitialDealOrders(
+            first,
+            latestPrice,
+            '',
+          )
+          const base = await this.getBaseOrder(
+            first,
+            undefined,
+            undefined,
+            latestPrice,
+          )
+          const regularOrders = grids.filter(
+            (g) => g.type === TypeOrderEnum.dealRegular,
+          )
+          const leverage = await this.getLeverageMultipler()
+          const dealMaxUsage = {
+            base:
+              (this.futures
+                ? this.coinm
+                  ? regularOrders.reduce((acc, g) => acc + g.qty, 0) +
+                    +(base?.origQty ?? '0')
+                  : 0
+                : long
+                  ? 0
+                  : grids
+                      .filter((g) => g.side === OrderSideEnum.sell)
+                      .reduce((acc, g) => acc + g.qty, 0) +
+                    +(base?.origQty ?? '0')) / leverage,
+            quote:
+              (this.futures
+                ? this.coinm
+                  ? 0
+                  : regularOrders.reduce((acc, v) => acc + v.qty * v.price, 0) +
+                    +(base?.origQty ?? '0') * +(base?.price ?? '0')
+                : long
+                  ? grids
+                      .filter((g) => g.side === OrderSideEnum.buy)
+                      .reduce((acc, g) => acc + g.qty * g.price, 0) +
+                    +(base?.origQty ?? '0') * +(base?.price ?? '0')
+                  : 0) / leverage,
+          }
+          const realDealsMaxUsage = {
+            base: updateOpenDeals.reduce(
+              (acc, d) => acc + d.deal.usage.max.base,
+              0,
+            ),
+            quote: updateOpenDeals.reduce(
+              (acc, d) => acc + d.deal.usage.max.quote,
+              0,
+            ),
+          }
+          const maxBase =
+            +maxNumberOfOpenDeals === 0
+              ? 0
+              : realDealsMaxUsage.base +
+                dealMaxUsage.base *
+                  (+maxNumberOfOpenDeals - updateOpenDeals.length)
+          const maxQuote =
+            +maxNumberOfOpenDeals === 0
+              ? 0
+              : realDealsMaxUsage.quote +
+                dealMaxUsage.quote *
+                  (+maxNumberOfOpenDeals - updateOpenDeals.length)
+          const rate = await this.getUsdRate(
+            this.data.settings.pair[0],
+            this.futures
+              ? this.coinm
+                ? 'base'
+                : 'quote'
+              : long
+                ? 'quote'
+                : 'base',
+          )
+          const maxUsd = this.futures
+            ? this.coinm
+              ? maxBase * rate
+              : maxQuote * rate
+            : long
+              ? maxQuote * rate
+              : maxBase * rate
+          let relative = maxUsd / currentUsd
+          if (isNaN(relative) || !isFinite(relative)) {
+            relative = 0
+          }
+          this.data.usage = {
+            current: currentUsage,
+            currentUsd,
+            max: {
+              base: maxBase,
+              quote: maxQuote,
+            },
+            maxUsd,
+            relative,
+          }
+        }
+      }
+
+      if (this.data.usage.current.base > this.data.usage.max.base) {
+        this.data.usage.max.base = this.data.usage.current.base
+      }
+      if (this.data.usage.current.quote > this.data.usage.max.quote) {
+        this.data.usage.max.quote = this.data.usage.current.quote
+      }
+      this.updateData({ usage: this.data.usage })
+      this.emit('bot settings update', { usage: this.data.usage })
+      this.calculateBotBalances()
+    }
+  }
+  /**
+   * Calculate bot balances
+   */
+
+  calculateBotBalances() {
+    if (this.data) {
+      const updateOpenDeals = this.getOpenDeals()
+      this.data.initialBalances = {
+        base: new Map(),
+        quote: new Map(),
+      }
+      this.data.currentBalances = {
+        base: new Map(),
+        quote: new Map(),
+      }
+      for (const d of updateOpenDeals) {
+        const base = d.deal.symbol.baseAsset
+        const quote = d.deal.symbol.quoteAsset
+        this.data.initialBalances.base.set(
+          base,
+          (this.data.initialBalances.base.get(base) ?? 0) +
+            d.deal.initialBalances.base,
+        )
+        this.data.initialBalances.quote.set(
+          quote,
+          (this.data.initialBalances.quote.get(quote) ?? 0) +
+            d.deal.initialBalances.quote,
+        )
+        this.data.currentBalances.base.set(
+          base,
+          (this.data.currentBalances.base.get(base) ?? 0) +
+            d.deal.currentBalances.base,
+        )
+        this.data.currentBalances.quote.set(
+          quote,
+          (this.data.currentBalances.quote.get(quote) ?? 0) +
+            d.deal.currentBalances.quote,
+        )
+      }
+      const data = {
+        initialBalances: this.data.initialBalances,
+        currentBalances: this.data.currentBalances,
+      }
+      this.updateData({
+        ...data,
+      })
+      this.emit('bot settings update', {
+        currentBalances: {
+          base: mapToArray(data.currentBalances.base),
+          quote: mapToArray(data.currentBalances.quote),
+        },
+        initialBalances: {
+          base: mapToArray(data.initialBalances.base),
+          quote: mapToArray(data.initialBalances.quote),
+        },
+      })
+    }
+  }
+  /**
+   * Calculate usage
+   */
+
+  async calculateUsage() {
+    const openDeals = this.getOpenDeals()
+    if (this.data) {
+      for (const d of openDeals) {
+        await this.updateUsage(d.deal._id, false, true)
+      }
+    }
+    this.calculateBotUsage(this.botId)
+  }
+
+  getTimeByTimezone(timeZone: string, value: string) {
+    const ts = new Date(`${value} GMT`).toUTCString()
+    const newDate = new Date(ts)
+    const tz = newDate
+      .toLocaleString('en', { timeZone, timeStyle: 'long' })
+      .split(' ')[2]
+    return Date.parse(`${ts} ${tz}`)
+  }
+  /**
+   * Find diff to start time based trigger
+   */
+
+  async findTimeDiff() {
+    if (this.data) {
+      const timeZone = (await this.getUser())?.timezone ?? 'UTC'
+      const { hodlAt, hodlNextBuy, hodlHourly } =
+        await this.getAggregatedSettings()
+      if (hodlNextBuy && hodlAt) {
+        const time = hodlHourly
+          ? hodlNextBuy
+          : this.getTimeByTimezone(
+              timeZone,
+              `${new Date(hodlNextBuy).toDateString()} ${hodlAt}`,
+            )
+        const diff = time - new Date().getTime()
+        return diff
+      }
+    }
+  }
+  /**
+   *  Update next buy
+   */
+
+  async updateNextBuy(newTime = false) {
+    if (this.data) {
+      const timeZone = (await this.getUser())?.timezone ?? 'UTC'
+      const hour = 60 * 60 * 1000
+      const day = 24 * hour
+      const { hodlDay, hodlAt, hodlNextBuy, hodlHourly } =
+        await this.getAggregatedSettings()
+      if (hodlDay && hodlAt && hodlNextBuy) {
+        let add = parseFloat(hodlDay) * (hodlHourly ? hour : day)
+        if (newTime) {
+          let date = hodlHourly
+            ? hodlNextBuy
+            : this.getTimeByTimezone(
+                timeZone,
+                `${new Date().toDateString()} ${hodlAt}`,
+              )
+          const currentDate = +new Date()
+          if (date < currentDate) {
+            const cd = new Date(currentDate)
+            if (hodlHourly) {
+              cd.setHours(cd.getHours() + +hodlDay, 0, 0, 0)
+              date = +cd
+            } else {
+              date += day
+            }
+          }
+
+          add = date - hodlNextBuy
+        }
+        this.data.settings.hodlNextBuy += add
+        this.updateData({ settings: { ...this.data.settings } })
+      }
+    }
+  }
+  /**
+   * Open deal by timer
+   */
+
+  async openDealByTimer() {
+    if (this.data) {
+      await this.updateNextBuy()
+      const diff = await this.findTimeDiff()
+      if (diff && diff > 0) {
+        if (this.timer) {
+          clearTimeout(this.timer)
+        }
+        for (const symbol of await this.getSymbolsToOpenAsapDeals()) {
+          this.openNewDeal(this.botId, symbol)
+        }
+        this.timer =
+          diff > maxTimeout
+            ? setTimeout(this.startTimeBasedTrigger, maxTimeout)
+            : setTimeout(this.openDealByTimer, diff)
+        this.handleLog(
+          `Next deal will start in ${this.math.round(
+            diff / 1000,
+            0,
+          )}s ${new Date(+new Date() + diff).toUTCString()}`,
+        )
+      }
+    }
+  }
+  /**
+   * Start time based trigger
+   */
+
+  async startTimeBasedTrigger() {
+    if (this.data) {
+      let diff = await this.findTimeDiff()
+      if (diff && diff < 0) {
+        await this.updateNextBuy(true)
+        diff = await this.findTimeDiff()
+      }
+      if (diff) {
+        this.timer =
+          diff > maxTimeout
+            ? setTimeout(this.startTimeBasedTrigger, maxTimeout)
+            : setTimeout(this.openDealByTimer, diff)
+        this.handleLog(
+          `Next deal will start in ${this.math.round(
+            diff / 1000,
+            0,
+          )}s ${new Date(+new Date() + diff).toUTCString()}`,
+        )
+      }
+    }
+  }
+
+  processOrdersAfterCheck(
+    filledOrders: Order[],
+    partiallyFilledOrders: Order[],
+  ) {
+    for (const base of filledOrders.filter(
+      (o) => o.typeOrder === TypeOrderEnum.dealStart,
+    )) {
+      this.processFilledOrder(base)
+    }
+    for (const tp of filledOrders
+      .filter((o) => o.typeOrder === TypeOrderEnum.dealTP)
+      .sort((a, b) =>
+        this.isLong ? +a.origPrice - +b.origPrice : +b.origPrice - +a.origPrice,
+      )) {
+      this.processFilledOrder(tp)
+    }
+    for (const dca of filledOrders
+      .filter((o) => o.typeOrder === TypeOrderEnum.dealRegular)
+      .sort((a, b) =>
+        this.isLong ? +b.origPrice - +a.origPrice : +a.origPrice - +b.origPrice,
+      )) {
+      this.processFilledOrder(dca)
+    }
+    for (const partially of partiallyFilledOrders) {
+      this.processPartiallyFilledOrder(partially)
+    }
+  }
+  /** Check orders after socket reconnect */
+
+  async checkOrdersAfterReconnect(_botId: string) {
+    if (this.blockCheck) {
+      this.handleLog(`Block check skip orders check after reconnect`)
+      return
+    }
+    if (this.serviceRestart) {
+      this.handleLog(`Service restart skip orders check after reconnect`)
+      return
+    }
+    const _id = this.startMethod('checkOrdersAfterReconnect')
+    this.blockCheck = true
+    this.handleLog('Check order after user stream reconnect')
+    const filledOrders: Order[] = []
+    const partiallyFilledOrders: Order[] = []
+    for (const o of this.getOrdersByStatusAndDealId({
+      defaultStatuses: true,
+    })) {
+      const getOrder = await this.getOrder(o.clientOrderId, o.symbol, false)
+      if (!getOrder || !getOrder.data) {
+        this.handleLog(`Not enough data to get order ${o.clientOrderId}`)
+        continue
+      }
+      if (getOrder.status === StatusEnum.notok) {
+        this.handleLog(`Cannot get order ${getOrder.reason}`)
+        continue
+      }
+      const mergedOrder = await this.mergeCommonOrderWithOrder(getOrder.data, o)
+      if (mergedOrder.status !== o.status) {
+        this.emit('bot update', mergedOrder)
+        this.deleteOrder(mergedOrder.clientOrderId)
+        if (mergedOrder.status !== 'CANCELED') {
+          this.setOrder(mergedOrder)
+        }
+        this.handleLog(
+          `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} is ${
+            mergedOrder.status
+          }. Base ${mergedOrder.origQty} (${mergedOrder.executedQty}), quote ${
+            mergedOrder.cummulativeQuoteQty
+          } (${+mergedOrder.executedQty * +mergedOrder.price}), price ${
+            mergedOrder.price
+          }`,
+        )
+        this.updateOrderOnDb(mergedOrder)
+        if (mergedOrder.status === 'FILLED') {
+          filledOrders.push(mergedOrder)
+        }
+        if (mergedOrder.status === 'PARTIALLY_FILLED') {
+          partiallyFilledOrders.push(mergedOrder)
+        }
+      } else {
+        this.handleLog(
+          `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} not changed.`,
+        )
+      }
+    }
+    this.processOrdersAfterCheck(filledOrders, partiallyFilledOrders)
+    this.blockCheck = false
+    this.endMethod(_id)
+  }
+
+  async getDiffForCheckOrders(
+    deal: FullDeal<CleanDCADealsSchema>,
+    activeRegularOrders: Order[],
+  ) {
+    return this.findDiff(
+      deal.currentOrders.filter((g) => g.type !== TypeOrderEnum.dealTP),
+      activeRegularOrders.map((o) => this.mapOrderToGrid(o)),
+      true,
+    )
+  }
+  /** Check orders after service restart */
+  @IdMute(mutex, (botId: string) => `${botId}checkOrders`)
+  async checkOrders(_botId: string, partiallyFilled?: boolean) {
+    if (this.blockCheck) {
+      return
+    }
+    if (partiallyFilled) {
+      this.handleLog(`Check partially filled orders`)
+    }
+    const _id = this.startMethod('checkOrders')
+    this.blockCheck = true
+    if (this.serviceRestart || partiallyFilled) {
+      const dealOrders: Map<string, Order[]> = new Map()
+      const all = this.allOrders.filter((o) =>
+        partiallyFilled ? o.status === 'PARTIALLY_FILLED' : true,
+      )
+      const ordersWithoutDeal = all.filter((o) => !o.dealId)
+      if (ordersWithoutDeal) {
+        for (const o of ordersWithoutDeal) {
+          this.handleLog(`Order ${o.clientOrderId} without deal`)
+          await this.cancelOrderOnExchange(o, false)
+          this.deleteOrder(o.clientOrderId)
+        }
+      }
+      all.map(
+        (o) =>
+          o.dealId &&
+          dealOrders.set(o.dealId, [...(dealOrders.get(o.dealId) ?? []), o]),
+      )
+      main: for (const [dealId, orders] of dealOrders) {
+        const activeTPSLOrders = orders.filter(
+          (o) =>
+            this.orderStatuses.includes(o.status) &&
+            o.typeOrder === TypeOrderEnum.dealTP,
+        )
+        const deal = this.getDeal(dealId)
+        if (deal?.closeBySl) {
+          continue main
+        }
+        if (activeTPSLOrders.length) {
+          for (const activeTPSLOrder of activeTPSLOrders) {
+            const tpslOrderData = await this.getOrder(
+              activeTPSLOrder.clientOrderId,
+              activeTPSLOrder.symbol,
+              true,
+            )
+            if (!tpslOrderData || !tpslOrderData.data) {
+              this.handleLog(
+                `Not enough data to get order ${activeTPSLOrder.clientOrderId}`,
+              )
+            } else if (tpslOrderData.status === StatusEnum.notok) {
+              this.handleLog(`Cannot get order ${tpslOrderData.reason}`)
+            } else {
+              const updatedOrder = await this.mergeCommonOrderWithOrder(
+                tpslOrderData.data,
+                activeTPSLOrder,
+              )
+              if (updatedOrder.status === 'CANCELED') {
+                this.deleteOrder(updatedOrder.clientOrderId)
+                this.handleLog(
+                  `TP/SL order ${updatedOrder.clientOrderId} is CANCELED.`,
+                )
+                this.serviceRestart = false
+                this.emit('bot update', updatedOrder)
+                this.updateOrderOnDb(updatedOrder)
+                if (
+                  deal &&
+                  ![
+                    DCADealStatusEnum.closed,
+                    DCADealStatusEnum.canceled,
+                  ].includes(deal.deal.status)
+                ) {
+                  await this.placeOrders(
+                    this.botId,
+                    updatedOrder.symbol,
+                    dealId,
+                    {
+                      new: [this.mapOrderToGrid(updatedOrder)],
+                      cancel: [],
+                    },
+                  )
+                }
+              } else if (updatedOrder.status === 'FILLED') {
+                this.setOrder(updatedOrder)
+                this.handleLog(
+                  `TP/SL order ${updatedOrder.clientOrderId} is FILLED.`,
+                )
+
+                this.emit('bot update', updatedOrder)
+                this.updateOrderOnDb(updatedOrder)
+                await this.processFilledOrder(updatedOrder)
+                continue main
+              } else if (
+                updatedOrder.status === 'PARTIALLY_FILLED' &&
+                activeTPSLOrder.status === 'NEW'
+              ) {
+                this.setOrder(updatedOrder)
+                this.handleLog(
+                  `TP/SL order ${updatedOrder.clientOrderId} is PARTIALLY_FILLED.`,
+                )
+                this.emit('bot update', updatedOrder)
+                this.updateOrderOnDb(updatedOrder)
+                this.processPartiallyFilledOrder(updatedOrder)
+                continue
+              } else {
+                this.handleLog(
+                  `TP/SL order not changed ${updatedOrder.clientOrderId}`,
+                )
+              }
+            }
+          }
+        }
+
+        const tpOrdersInCurrent = (
+          deal ?? { currentOrders: [] }
+        ).currentOrders.filter(
+          (g) =>
+            g.type === TypeOrderEnum.dealTP &&
+            !((deal?.deal.tpSlTargetFilled ?? []) as string[]).includes(
+              g.tpSlTarget ?? '',
+            ),
+        )
+        if (activeTPSLOrders.length !== tpOrdersInCurrent.length) {
+          for (const tpOrderInCurrent of tpOrdersInCurrent) {
+            if (
+              activeTPSLOrders.find(
+                (o) =>
+                  o.side === tpOrderInCurrent.side &&
+                  +o.price === tpOrderInCurrent.price &&
+                  +o.origQty === tpOrderInCurrent.qty,
+              )
+            ) {
+              continue
+            }
+            this.handleLog(
+              `TP order wasn't found in orders, but must be in grid ${
+                tpOrderInCurrent.side
+              }, base: ${tpOrderInCurrent.qty}, quote: ${
+                tpOrderInCurrent.price * tpOrderInCurrent.qty
+              }, price: ${tpOrderInCurrent.price}`,
+            )
+            if (deal) {
+              await this.placeOrders(
+                this.botId,
+                deal.deal.symbol.symbol,
+                dealId,
+                {
+                  new: [tpOrderInCurrent],
+                  cancel: [],
+                },
+              )
+            }
+          }
+        }
+        if (deal?.deal.action !== ActionsEnum.useOppositeBalance) {
+          const activeRegularOrders = orders.filter(
+            (o) =>
+              this.orderStatuses.includes(o.status) &&
+              [TypeOrderEnum.dealRegular, TypeOrderEnum.dealGrid].includes(
+                o.typeOrder,
+              ),
+          )
+          if (
+            deal &&
+            ![DCADealStatusEnum.closed, DCADealStatusEnum.canceled].includes(
+              deal.deal.status,
+            ) &&
+            !activeTPSLOrders.find((o) => o.status === 'PARTIALLY_FILLED')
+          ) {
+            const canceledOrders: Order[] = []
+            let filledOrders: Order[] = []
+            let newOrders: Grid[] = []
+            const diff = await this.getDiffForCheckOrders(
+              deal,
+              activeRegularOrders,
+            )
+            if (diff.new.length > 0) {
+              newOrders = diff.new
+            }
+            for (const o of activeRegularOrders) {
+              const exchangeData = await this.getOrder(
+                o.clientOrderId,
+                o.symbol,
+                true,
+              )
+              if (!exchangeData || !exchangeData.data) {
+                this.handleLog(
+                  `Not enough data to get order ${o.clientOrderId}`,
+                )
+              } else {
+                if (exchangeData.status === StatusEnum.notok) {
+                  this.handleLog(`Cannot get order ${exchangeData.reason}`)
+                } else {
+                  const updatedOrder = await this.mergeCommonOrderWithOrder(
+                    exchangeData.data,
+                    o,
+                  )
+                  if (updatedOrder.status === 'CANCELED') {
+                    this.emit('bot update', updatedOrder)
+                    this.deleteOrder(updatedOrder.clientOrderId)
+                    this.handleLog(
+                      `Order ${updatedOrder.clientOrderId} is CANCELED.`,
+                    )
+                    this.updateOrderOnDb(updatedOrder)
+                    canceledOrders.push(o)
+                  } else if (updatedOrder.status === 'FILLED') {
+                    this.emit('bot update', updatedOrder)
+                    this.setOrder(updatedOrder)
+                    this.handleLog(
+                      `Order ${updatedOrder.clientOrderId} is FILLED.`,
+                    )
+                    this.updateOrderOnDb(updatedOrder)
+                    filledOrders.push(updatedOrder)
+                  } else if (
+                    o.status === 'NEW' &&
+                    updatedOrder.status === 'PARTIALLY_FILLED'
+                  ) {
+                    this.emit('bot update', updatedOrder)
+                    this.setOrder(updatedOrder)
+                    this.handleLog(
+                      `Order ${updatedOrder.clientOrderId} is PARTIALLY_FILLED.`,
+                    )
+                    this.updateOrderOnDb(updatedOrder)
+                  } else {
+                    this.handleLog(
+                      `Regular order not changed ${updatedOrder.clientOrderId}`,
+                    )
+                  }
+                }
+              }
+            }
+
+            for (const o of filledOrders.sort((a, b) =>
+              this.isLong
+                ? +b.origPrice - +a.origPrice
+                : +a.origPrice - +b.origPrice,
+            )) {
+              this.handleLog(
+                `Rebuilding grid after ${o.clientOrderId}, ${o.side}, base: ${
+                  o.executedQty
+                }, quote: ${+o.executedQty * +o.price}, price: ${o.price}`,
+              )
+              this.processFilledOrder(o)
+            }
+            for (const o of canceledOrders) {
+              this.handleLog(
+                `Send order again ${o.clientOrderId}, ${o.side}, base: ${
+                  o.origQty
+                }, quote: ${+o.price * +o.origQty}, price: ${o.price}`,
+              )
+              const precision = await this.baseAssetPrecision(o.symbol)
+              o.origQty = `${this.math.round(+o.origQty, precision)}`
+              await this.placeOrders(this.botId, o.symbol, dealId, {
+                new: [this.mapOrderToGrid(o)],
+                cancel: [],
+              })
+            }
+            filledOrders = []
+            for (const g of newOrders) {
+              const filledOrder = this.getOrdersByStatusAndDealId({
+                status: ['FILLED', 'CANCELED'],
+              }).find(
+                (fo) =>
+                  +fo.origPrice === g.price &&
+                  (fo.side === 'BUY'
+                    ? g.side === OrderSideEnum.buy
+                    : g.side === OrderSideEnum.sell) &&
+                  +fo.executedQty === g.qty &&
+                  (this.data?.exchange === ExchangeEnum.bybit
+                    ? +fo.executedQty !== 0 &&
+                      ['FILLED', 'CANCELED'].includes(fo.status)
+                    : fo.status === 'FILLED') &&
+                  fo.updateTime >= this.startTime,
+              )
+              if (filledOrder) {
+                this.handleLog(
+                  `Order wasn't found in orders, but already filled during check  ${
+                    g.side
+                  }, base: ${g.qty}, quote: ${g.price * g.qty}, price: ${
+                    g.price
+                  }`,
+                )
+                filledOrders.push(filledOrder)
+                continue
+              }
+              this.handleLog(
+                `Order wasn't found in orders, but must be in grid ${
+                  g.side
+                }, base: ${g.qty}, quote: ${g.price * g.qty}, price: ${
+                  g.price
+                }`,
+              )
+              await this.placeOrders(
+                this.botId,
+                deal.deal.symbol.symbol,
+                dealId,
+                {
+                  new: [g],
+                  cancel: [],
+                },
+              )
+            }
+
+            for (const o of filledOrders.sort((a, b) =>
+              this.isLong
+                ? +b.origPrice - +a.origPrice
+                : +a.origPrice - +b.origPrice,
+            )) {
+              this.handleLog(
+                `Rebuilding grid after ${o.clientOrderId}, ${o.side}, base: ${
+                  o.origQty
+                }, quote: ${+o.origQty * +o.price}, price: ${o.price}`,
+              )
+              this.processFilledOrder(o)
+            }
+          } else if (
+            !deal ||
+            [DCADealStatusEnum.closed, DCADealStatusEnum.canceled].includes(
+              deal.deal.status,
+            )
+          ) {
+            for (const o of orders) {
+              this.handleLog(
+                `Deal not found or already closed. Cancel order ${
+                  o.clientOrderId
+                }, ${o.side}, base: ${o.origQty}, quote: ${
+                  +o.price * +o.origQty
+                }, price: ${o.price}`,
+              )
+              await this.cancelOrderOnExchange(o)
+            }
+          }
+        }
+      }
+
+      if (!partiallyFilled) {
+        this.serviceRestart = false
+      }
+    }
+    this.blockCheck = false
+    this.endMethod(_id)
+  }
+  @IdMute(mutex, (botId: string) => `${botId}filterCoinsByVolume`)
+  private async filterCoinsByVolume(
+    _botId: string,
+    pairs: string[],
+  ): Promise<string[]> {
+    if (!this.allowedMethods.has('filterCoinsByVolume')) {
+      return pairs
+    }
+    //TODO: self-hosted logic to filter coins by volume
+    return pairs
+  }
+
+  async getSymbolsToOpenAsapDeals(
+    skipVolume = false,
+    all = false,
+  ): Promise<string[]> {
+    if (!this.data) {
+      return []
+    }
+    const settings = await this.getAggregatedSettings()
+    let maxNumberOfOpenDeals = +(settings.maxNumberOfOpenDeals ?? '1')
+    if (maxNumberOfOpenDeals < 0) {
+      maxNumberOfOpenDeals = settings.useMulti
+        ? Math.max(
+            Math.max(
+              1,
+              Math.max(1, +(settings.maxDealsPerPair ?? '1')) *
+                (settings.pair ?? []).length,
+            ),
+            1,
+          )
+        : 1
+    }
+    let maxDealsPerPair = +(settings.maxDealsPerPair ?? '1')
+    if (maxDealsPerPair < 0) {
+      maxDealsPerPair = 1
+    }
+    const pairs = settings.pair ?? []
+    if (pairs.length > 0 && !settings.useMulti) {
+      return [pairs[0]]
+    }
+    const symbolsNum = pairs.length
+    let dealPairs = [...pairs]
+    if (symbolsNum > +maxNumberOfOpenDeals) {
+      dealPairs = [...pairs]
+        .sort((a, b) =>
+          settings.pairPrioritization === PairPrioritizationEnum.alphabetical
+            ? `${a}`.localeCompare(`${b}`)
+            : 0.5 - Math.random(),
+        )
+        .slice(0, all ? pairs.length + 1 : +maxNumberOfOpenDeals)
+    } else if (settings.startCondition !== StartConditionEnum.timer) {
+      const numberOfFullRepeats =
+        Math.floor(maxNumberOfOpenDeals / symbolsNum) - 1
+      if (maxDealsPerPair - 1 >= numberOfFullRepeats) {
+        for (let index = 0; index < numberOfFullRepeats; index++) {
+          dealPairs = dealPairs.concat(pairs)
+        }
+        const singleRepeats = +maxNumberOfOpenDeals % symbolsNum
+        if (maxDealsPerPair - numberOfFullRepeats - 1 >= singleRepeats) {
+          dealPairs = dealPairs.concat(
+            [...pairs].sort(() => 0.5 - Math.random()).slice(0, singleRepeats),
+          )
+        }
+      }
+    }
+    return !skipVolume && this.botType === BotType.dca
+      ? await this.filterCoinsByVolume(this.botId, dealPairs)
+      : dealPairs
+  }
+
+  private convertToMultiplier(keepConditionBars?: string) {
+    return keepConditionBars
+      ? isNaN(+keepConditionBars)
+        ? 0
+        : +keepConditionBars < 0
+          ? 0
+          : +keepConditionBars
+      : 0
+  }
+
+  private async isIndicator(serviceRestart: boolean, activeDeals: number) {
+    const settings = await this.getAggregatedSettings()
+    return (
+      this.data &&
+      ((settings.startCondition === StartConditionEnum.ti &&
+        (settings.indicators ?? []).filter(
+          (i) => i.indicatorAction === IndicatorAction.startDeal,
+        ).length > 0) ||
+        (settings.dcaCondition === DCAConditionEnum.indicators &&
+          (settings.indicators ?? []).filter(
+            (i) => i.indicatorAction === IndicatorAction.startDca,
+          ).length > 0 &&
+          settings.useDca) ||
+        (this.scaleAr &&
+          (settings.indicators ?? []).filter(
+            (i) => i.indicatorAction === IndicatorAction.startDca,
+          ).length > 0) ||
+        ((settings.dealCloseCondition === CloseConditionEnum.techInd ||
+          this.tpAr) &&
+          (settings.indicators ?? []).filter(
+            (i) =>
+              i.indicatorAction === IndicatorAction.closeDeal &&
+              i.section !== IndicatorSection.sl,
+          ).length > 0) ||
+        ((settings.dealCloseConditionSL === CloseConditionEnum.techInd ||
+          this.slAr) &&
+          (settings.indicators ?? []).filter(
+            (i) =>
+              i.indicatorAction === IndicatorAction.closeDeal &&
+              i.section === IndicatorSection.sl,
+          ).length > 0) ||
+        (settings.useRiskReward &&
+          (settings.indicators ?? []).filter(
+            (i) => i.indicatorAction === IndicatorAction.riskReward,
+          ).length > 0 &&
+          settings.type !== DCATypeEnum.terminal) ||
+        (settings.botStart === BotStartTypeEnum.indicators &&
+          settings.useBotController &&
+          (settings.indicators ?? []).filter(
+            (i) => i.indicatorAction === IndicatorAction.stopBot,
+          ).length > 0) ||
+        (settings.botActualStart === BotStartTypeEnum.indicators &&
+          settings.useBotController &&
+          (settings.indicators ?? []).filter(
+            (i) => i.indicatorAction === IndicatorAction.startBot,
+          ).length > 0)) &&
+      (settings.indicators ?? []).filter((i) => i.type !== IndicatorEnum.unpnl)
+        .length > 0 &&
+      (this.data.status !== BotStatusEnum.closed ||
+        !!activeDeals ||
+        serviceRestart)
+    )
+  }
+
+  override async processServiceLog(msg: string) {
+    const service = JSON.parse(msg)?.restart
+    if (service === 'userStream') {
+      this.connectRabbitUserStream()
+    }
+    if (service === 'indicators') {
+      await this.startIndicatorInit(
+        false,
+        this.getDealsByStatusAndSymbol({
+          status: [
+            DCADealStatusEnum.error,
+            DCADealStatusEnum.open,
+            DCADealStatusEnum.start,
+          ],
+        }).length,
+      )
+    }
+  }
+
+  public async startIndicatorInit(
+    serviceRestart: boolean,
+    activeDeals: number,
+  ) {
+    const isIndicator = await this.isIndicator(serviceRestart, activeDeals)
+    this.handleLog(
+      `Start indicator init. Service restart: ${serviceRestart}, active deals: ${activeDeals}, check result: ${isIndicator}, status: ${this.data?.status}`,
+    )
+    if (isIndicator) {
+      if (!this.redisSubIndicators) {
+        this.redisSubIndicators = await RedisClient.getInstance(
+          true,
+          'indicators',
+        )
+      }
+
+      await this.openIndicators(this.botId, serviceRestart)
+    }
+  }
+  /**
+   * Restore work
+   */
+
+  async restoreWork() {
+    const _id = this.startMethod('restoreWork')
+    const serviceRestart = this.serviceRestart && !this.secondRestart
+    if (!serviceRestart) {
+      this.calculateBotDeals()
+    } else {
+      this.handleLog('Service restart skip calculate bot deals')
+    }
+    this.handleLog('Checking for existing deals')
+    const settings = await this.getAggregatedSettings()
+    this.closeAfterTpFilled = settings.type === DCATypeEnum.terminal
+    const asapSymbols = await this.getSymbolsToOpenAsapDeals()
+    if (serviceRestart) {
+      await this.checkOrders(this.botId)
+    } else {
+      await this.cancelAllOrder()
+      await this.checkOrders(this.botId, true)
+    }
+    const openDeals = this.getOpenDeals()
+    const activeDeals = openDeals.filter(
+      (d) => d.deal.status === DCADealStatusEnum.open,
+    )
+    const startDeals = openDeals.filter(
+      (d) => d.deal.status === DCADealStatusEnum.start,
+    )
+    if (startDeals.length > 0) {
+      for (const d of startDeals) {
+        const inDb = await this.ordersDb.readData<{
+          symbol: string
+          clientOrderId: string
+          status: OrderStatusType
+        }>(
+          {
+            botId: this.botId,
+            dealId: d.deal._id,
+            typeOrder: TypeOrderEnum.dealStart,
+            status: { $ne: 'CANCELED' },
+          },
+          { symbol: 1, clientOrderId: 1, status: 1 },
+        )
+        if (inDb && inDb.status === StatusEnum.ok && inDb.data.result) {
+          if (inDb.data.result.status !== 'FILLED') {
+            await this.checkBaseOrder(
+              this.botId,
+              inDb.data.result.symbol,
+              inDb.data.result.clientOrderId,
+              d.deal._id,
+            )
+          } else {
+            this.handleLog(
+              `Deal ${d.deal._id} in status start, but found filled base order`,
+            )
+            const full = await this.ordersDb.readData({
+              clientOrderId: inDb.data.result.clientOrderId,
+            })
+            if (full.data?.result) {
+              await this.startDeal(full.data.result)
+            } else {
+              this.handleLog(
+                `Cannot find full order for ${inDb.data.result.clientOrderId}`,
+              )
+            }
+          }
+        } else {
+          this.handleLog(
+            `${d.deal._id} not started yet. Place base order again`,
+          )
+          await this.placeBaseOrder(
+            this.botId,
+            d.deal.symbol.symbol,
+            d.deal._id,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            d.deal.fixSize,
+            undefined,
+            d.deal.sizes,
+            d.deal.orderSizeType,
+          )
+        }
+      }
+    }
+    if (activeDeals.length > 0) {
+      this.handleLog(`Found ${activeDeals.length} open deals`)
+
+      for (const d of activeDeals) {
+        const findFilledTp = this.getOrdersByStatusAndDealId({
+          status: 'FILLED',
+          dealId: `${d.deal._id}`,
+        }).filter(
+          (o) => o.typeOrder === TypeOrderEnum.dealTP && !o.reduceFundsId,
+        )
+        const settings = await this.getAggregatedSettings(d.deal)
+        let skip = false
+        if (settings.useMultiSl) {
+          const filledSl = new Set(
+            d.deal.tpSlTargetFilled?.filter((sl) =>
+              settings.multiSl?.map((s) => s.target).includes(sl),
+            ) ?? [],
+          )
+          findFilledTp.forEach(
+            (f) => f.tpSlTarget && filledSl.add(f.tpSlTarget),
+          )
+          if (filledSl.size < (settings.multiSl?.length ?? 0)) {
+            skip = true
+          }
+        }
+        if (settings.useMultiTp) {
+          const filledTp = new Set(
+            d.deal.tpSlTargetFilled?.filter((tp) =>
+              settings.multiTp?.map((t) => t.target).includes(tp),
+            ) ?? [],
+          )
+          findFilledTp.forEach(
+            (f) => f.tpSlTarget && filledTp.add(f.tpSlTarget),
+          )
+          if (filledTp.size < (settings.multiTp?.length ?? 0)) {
+            skip = true
+          }
+        }
+        if (!settings.useMultiTp && !settings.useMultiSl) {
+          const tp = findFilledTp[0]
+          skip =
+            tp &&
+            !!(
+              this.data?.exchange === ExchangeEnum.bybit &&
+              tp.type === 'LIMIT' &&
+              tp.status === 'FILLED' &&
+              (d?.deal.tpHistory ?? []).find(
+                (_tp) => _tp.id === tp.clientOrderId,
+              ) &&
+              !isNaN(+tp.executedQty) &&
+              isFinite(+tp.executedQty) &&
+              !isNaN(+tp.origQty) &&
+              isFinite(+tp.origQty) &&
+              +tp.executedQty < +tp.origQty
+            )
+        }
+        if (
+          findFilledTp.length &&
+          d.deal.status !== DCADealStatusEnum.closed &&
+          !skip &&
+          !d.deal.parent &&
+          !this.pendingClose.has(d.deal._id)
+        ) {
+          this.handleLog(
+            `Found filled tp ${findFilledTp
+              .map((f) => f.clientOrderId)
+              .join(', ')} for ${d.deal._id}, change deal status to closed`,
+          )
+          if (d.deal.profit.total) {
+            d.deal.status = DCADealStatusEnum.closed
+            this.saveDeal(d, { status: d.deal.status })
+            const stop = await this.processDealClose(this.botId, d.deal._id, {
+              total: d.deal.profit.total,
+              totalUsd: d.deal.profit.totalUsd,
+            })
+            if (stop) {
+              this.endMethod(_id)
+              return this.stop()
+            }
+          } else {
+            this.handleLog(
+              `No profit in deal, process full close for ${d.deal._id}`,
+            )
+            this.closeDeal(
+              this.botId,
+              `${d.deal._id}`,
+              [...findFilledTp].sort((a, b) => b.updateTime - a.updateTime)[0],
+            )
+          }
+          continue
+        }
+        await this.setCloseByTimer(d.deal)
+        if (!serviceRestart) {
+          this.updateDealBalances(d)
+          const completeLevels =
+            (this.getOrdersByStatusAndDealId({
+              dealId: `${d.deal._id}`,
+              status: ['FILLED', 'CANCELED'],
+            }).filter(
+              (o) =>
+                (o.typeOrder === TypeOrderEnum.dealRegular ||
+                  (!d.deal.parent &&
+                    o.typeOrder === TypeOrderEnum.dealStart)) &&
+                (this.data?.exchange === ExchangeEnum.bybit
+                  ? (o.status === 'FILLED' || o.status === 'CANCELED') &&
+                    +o.executedQty !== 0
+                  : o.status === 'FILLED'),
+            ).length ?? 1) + (d.deal.parent ? 1 : 0)
+          d.deal = {
+            ...d.deal,
+            levels: {
+              complete: completeLevels,
+              all: Math.max(
+                completeLevels,
+                d.initialOrders.filter(
+                  (o) => o.type === TypeOrderEnum.dealRegular,
+                ).length +
+                  1 +
+                  (d.deal.pendingAddFunds ?? []).length +
+                  (d.deal.funds ?? []).length,
+              ),
+            },
+          }
+          this.saveDeal(d, { levels: d.deal.levels })
+          this.updateAssets(d.deal._id)
+          const findTp = this.getOrdersByStatusAndDealId({
+            status: 'PARTIALLY_FILLED',
+            dealId: `${d.deal._id}`,
+          }).find((o) => o.typeOrder === TypeOrderEnum.dealTP)
+          await this.placeOrders(this.botId, d.deal.symbol.symbol, d.deal._id, {
+            new: d.currentOrders.filter((o) =>
+              findTp ? o.type !== TypeOrderEnum.dealTP : true,
+            ),
+            cancel: [],
+          })
+          const pendingAddFunds = d.deal.pendingAddFunds ?? []
+          if (pendingAddFunds.length) {
+            d.deal.pendingAddFunds = []
+            this.saveDeal(d, { pendingAddFunds: [] })
+            for (const pending of pendingAddFunds) {
+              const { id: _id, ...settings } = pending
+              this.addDealFunds(this.botId, d.deal._id, settings)
+            }
+          }
+          const pendingReduceFunds = d.deal.pendingReduceFunds ?? []
+          if (pendingReduceFunds.length) {
+            d.deal.pendingReduceFunds = []
+            this.saveDeal(d, { pendingReduceFunds: [] })
+            for (const pending of pendingReduceFunds) {
+              const { id: _id, ...settings } = pending
+              this.reduceDealFunds(this.botId, d.deal._id, settings)
+            }
+          }
+        }
+      }
+    }
+
+    if (!serviceRestart) {
+      this.updateDealLastPrices(this.botId)
+    } else {
+      this.handleLog('Service restart skip update last deal price')
+    }
+    if (
+      settings.startCondition === StartConditionEnum.asap &&
+      this.data?.status !== BotStatusEnum.closed
+    ) {
+      if (
+        activeDeals.length === 0 &&
+        startDeals.length === 0 &&
+        !settings.useMulti
+      ) {
+        if (await this.checkInRange(asapSymbols[0])) {
+          this.openNewDeal(this.botId, asapSymbols[0])
+        } else {
+          if (
+            !settings.useDynamicPriceFilter &&
+            settings.useStaticPriceFilter
+          ) {
+            this.setRangeOrError()
+          }
+        }
+      }
+      if (settings.useMulti) {
+        for (const symbol of asapSymbols) {
+          if (await this.checkInRange(symbol)) {
+            this.openNewDeal(this.botId, symbol)
+          }
+        }
+      }
+    }
+    if (
+      settings.startCondition === StartConditionEnum.timer &&
+      this.data?.status !== BotStatusEnum.closed
+    ) {
+      this.startTimeBasedTrigger()
+    }
+    await this.startIndicatorInit(serviceRestart, activeDeals.length)
+    if (!serviceRestart) {
+      this.calculateBotBalances()
+      this.calculateUsage()
+    } else {
+      this.handleLog('Service restart skip calculate bot balances and usage')
+    }
+    this.endMethod(_id)
+  }
+
+  private indicatorKey(i: SettingsIndicators) {
+    return `${i.indicatorAction}-${i.section}`
+  }
+
+  private async sendIndicatorSubscribeEvent(
+    data: BotParentIndicatorEventDto,
+  ): Promise<{
+    id: string
+    room: string
+    data?: IndicatorHistory[]
+    lastPrice?: number
+    cb?: (_msg: string) => void
+  }> {
+    const timeout = 60 * 1000
+    if (this.rabbitClient) {
+      const result = await this.rabbitClient.sendWithCallback<
+        BotParentIndicatorEventDto,
+        {
+          room: string
+          id: string
+          status: boolean
+          message?: string
+          data?: IndicatorHistory[]
+          lastPrice?: number
+        }
+      >(rabbitIndicatorsKey, data, timeout)
+      if (result && result?.response) {
+        if (result.response.status) {
+          const room = `${result.response.room}@${data.responseParams.uuid}@${data.responseParams.symbol}`
+          const cb = this.indicatorDataCbRedis(room)
+          if (this.redisSubIndicators) {
+            this.redisSubIndicators.subscribe(room, cb)
+          }
+          return {
+            id: result.response.id,
+            room,
+            data: result.response.data,
+            lastPrice: result.response.lastPrice,
+            cb,
+          }
+        } else {
+          const msg = `${result.response.message}`
+          if (msg.indexOf('not found in exchange') === -1) {
+            this.handleErrors(
+              `Indicators error: ${result.response.message}`,
+              'indicator service',
+              '',
+              false,
+              false,
+              true,
+            )
+          }
+        }
+      }
+    }
+
+    return { id: '', room: '' }
+  }
+
+  private async sendIndicatorUnsubscribeEvent(
+    id: string,
+    room: string,
+    cb?: (_msg: string) => void,
+    wait = true,
+  ): Promise<boolean> {
+    const responseId = v4()
+    const payload: BotParentUnsubscribeIndicatorEventDto = {
+      event: 'unsubscribeIndicator',
+      id,
+      botId: this.botId,
+      responseId,
+      type: this.botType,
+    }
+    const timeout = wait ? 60 * 1000 : 0
+    if (this.rabbitClient) {
+      const result = await this.rabbitClient.sendWithCallback<
+        BotParentUnsubscribeIndicatorEventDto,
+        boolean
+      >(rabbitIndicatorsKey, payload, timeout)
+      if (result) {
+        if (result.response) {
+          this.handleLog(`Unsubscribed from indicator ${id}`)
+          if (this.redisSubIndicators && cb) {
+            this.redisSubIndicators.unsubscribe(room, cb)
+          }
+          return true
+        }
+      }
+    }
+
+    return true
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}runAfterIndicatorsConnected`)
+  async runAfterIndicatorsConnected(_botId: string) {
+    this.handleLog('Run after indicators connected')
+    const c = [...this.afterIndicatorsConnected]
+    for (const f of c) {
+      await f.bind(this)()
+      await sleep(0)
+    }
+    this.afterIndicatorsConnected = []
+  }
+  override async beforeDelete() {
+    for (const i of this.indicators.values()) {
+      this.handleLog(`Remove listener ${i.id} ${i.uuid}@${i.symbol}`)
+      if (this.redisSubIndicators) {
+        this.redisSubIndicators.unsubscribe(i.room, i.cb)
+      }
+    }
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}openIndicators`)
+  async openIndicators(_botId: string, _serviceRestart?: boolean) {
+    this.afterIndicatorsConnected = []
+    this.handleLog('Open indicators')
+    this.indicatorGroupsToUse = (
+      this.data?.settings.indicatorGroups ?? []
+    ).filter((ig) => {
+      const indicators = (this.data?.settings.indicators ?? []).filter(
+        (i) => i.groupId === ig.id,
+      )
+      return indicators.length > 0
+    })
+    this.handleLog(
+      `Indicator groups to use ${this.indicatorGroupsToUse.length}`,
+    )
+    const _id = this.startMethod('openIndicators')
+    try {
+      const saveIndicators = this.saveIndicators
+      if (saveIndicators) {
+        this.saveIndicators = false
+      }
+      const serviceRestart = _serviceRestart && !this.openAtStartTriggered
+      if (serviceRestart) {
+        this.openAtStartTriggered = true
+      }
+      if (!this.data) {
+        this.handleLog('Open indicators | No data')
+        this.endMethod(_id)
+        return
+      }
+      const settings = await this.getAggregatedSettings()
+
+      const symbols = new Set([
+        ...(settings.pair ?? []),
+        ...this.getOpenDeals().map((d) => d.deal.symbol.symbol),
+      ])
+      const copySymbols = new Set([...symbols])
+      if (saveIndicators) {
+        ;[...this.indicators.values()].forEach((i) => {
+          if (
+            !copySymbols.has(i.symbol) &&
+            !this.getDealsByStatusAndSymbol({ symbol: i.symbol }).length
+          ) {
+            this.handleLog(
+              `Indicator ${i.id} ${i.uuid}@${i.symbol} is not needed anymore. Unsubscribe`,
+            )
+            this.sendIndicatorUnsubscribeEvent(i.id, i.room, i.cb)
+            this.lastIndicatorsDataMap.delete(`${i.uuid}@${i.symbol}`)
+            if (this.redisSubIndicators) {
+              this.redisSubIndicators.unsubscribe(i.room, i.cb)
+            }
+            this.indicators.delete(i.key)
+            const k = `${i.interval}@${i.action}`
+            this.indicatorsIntervalActionMap.set(
+              k,
+              (this.indicatorsIntervalActionMap.get(k) ?? 1) - 1,
+            )
+          }
+          if (copySymbols.has(i.symbol)) {
+            symbols.delete(i.symbol)
+          }
+        })
+      } else {
+        for (const i of this.indicators.values()) {
+          this.lastIndicatorsDataMap.delete(`${i.uuid}@${i.symbol}`)
+          if (this.redisSubIndicators) {
+            this.redisSubIndicators.unsubscribe(i.room, i.cb)
+          }
+        }
+      }
+
+      const _indicators: Map<string, LocalIndicators> = saveIndicators
+        ? this.indicators
+        : new Map()
+      if (!saveIndicators) {
+        this.indicators.forEach((i) => this.indicators.delete(i.key))
+        this.indicators = new Map()
+        this.indicatorsIntervalActionMap = new Map()
+      }
+      const indicatorTypeMap: Map<string, SettingsIndicators[]> = new Map()
+      const groupsId = this.indicatorGroupsToUse.map((g) => g.id)
+      const filteredIndicators = (settings.indicators ?? [])
+        .filter((i) => i.type !== IndicatorEnum.unpnl)
+        .filter(
+          (i) => !i.groupId || (i.groupId && groupsId.includes(i.groupId)),
+        )
+      for (const i of filteredIndicators) {
+        if (i.section === IndicatorSection.dca) {
+          continue
+        }
+        const key = this.indicatorKey(i)
+        indicatorTypeMap.set(key, [...(indicatorTypeMap.get(key) ?? []), i])
+      }
+      this.handleLog(
+        `Open indicators | Adding indicators ${symbols.size} symbol`,
+      )
+      for (const symbol of symbols) {
+        const time = +new Date()
+        this.handleLog(`Open indicators | Symbol ${symbol} start`)
+        await Promise.all(
+          filteredIndicators.map(async (i) => {
+            {
+              if (!this.data) {
+                return
+              }
+              const {
+                indicatorLength: _indicatorLength,
+                type,
+                uuid,
+                indicatorInterval,
+                checkLevel: _checkLevel,
+                condition,
+                maType,
+                maCrossingValue,
+                maCrossingInterval,
+                maCrossingLength,
+                maUUID,
+                stochSmoothD: _stochSmoothD,
+                stochSmoothK: _stochSmoothK,
+                stochRSI: _stochRSI,
+                leftBars: _leftBars,
+                rightBars: _rightBars,
+                basePeriods: _basePeriods,
+                pumpPeriods: _pumpPeriods,
+                pump: _pump,
+                baseCrack: _baseCrack,
+                indicatorAction,
+                section,
+                psarInc: _psarInc,
+                psarMax: _psarMax,
+                psarStart: _psarStart,
+                keepConditionBars,
+                voLong: _voLong,
+                voShort: _voShort,
+                uoFast: _uoFast,
+                uoMiddle: _uoMiddle,
+                uoSlow: _uoSlow,
+                momSource,
+                bbwpLookback,
+                xOscillator1,
+                xOscillator2,
+                xOscillator2Interval,
+                xOscillator2length: _xOscillator2length,
+                xOscillator2voLong: _xOscillator2voLong,
+                xOscillator2voShort: _xOscillator2voShort,
+                xoUUID,
+                percentile,
+                percentileLookback,
+                percentilePercentage,
+                mar1length: _mar1length,
+                mar1type,
+                mar2length,
+                mar2type,
+                bbwMa,
+                bbwMaLength: _bbwMaLength,
+                bbwMult: _bbwMult,
+                macdFast: _macdFast,
+                macdSlow: _macdSlow,
+                macdMaSignal,
+                macdMaSource,
+                divOscillators,
+                trendFilter,
+                trendFilterLookback,
+                trendFilterType,
+                trendFilterValue,
+                factor: _factor,
+                atrLength: _atrLength,
+                pcValue,
+                ppHighLeft,
+                ppHighRight,
+                ppLowLeft,
+                ppLowRight,
+                ppMult,
+                athLookback: _athLookback,
+                kcMa,
+                kcRange,
+                kcRangeLength: _kcRangeLength,
+              } = i
+              const macdFast = +(_macdFast ?? 12)
+              const macdSlow = +(_macdSlow ?? 26)
+              const indicatorLength = +(_indicatorLength ?? 14)
+              const factor = +(_factor ?? 3)
+              const atrLength = +(_atrLength ?? 10)
+
+              const checkLevel = +(_checkLevel ?? 0)
+              const athLookback = +(_athLookback ?? 100)
+              const stochSmoothD = +(_stochSmoothD ?? 3)
+              const stochSmoothK = +(_stochSmoothK ?? 3)
+              const stochRSI = +(_stochRSI ?? 14)
+              const leftBars = +(_leftBars ?? 5)
+              const rightBars = +(_rightBars ?? 5)
+              const mar1length = +(_mar1length ?? 20)
+              const basePeriods = +(_basePeriods ?? 36)
+              const pumpPeriods = +(_pumpPeriods ?? 8)
+              const uoFast = +(_uoFast ?? 7)
+              const uoMiddle = +(_uoMiddle ?? 14)
+              const uoSlow = +(_uoSlow ?? 28)
+              const psarInc = +(_psarInc ?? 0.02)
+              const psarMax = +(_psarMax ?? 0.2)
+              const psarStart = +(_psarStart ?? 0.02)
+              const voLong = +(_voLong ?? 10)
+              const voShort = +(_voShort ?? 5)
+              const bbwMult = +(_bbwMult ?? 2)
+              const kcRangeLength = +(_kcRangeLength ?? 20)
+              const bbwMaLength = +(_bbwMaLength ?? 20)
+              const pump = +(_pump ?? 3)
+              const baseCrack = +(_baseCrack ?? 3)
+              const xOscillator2length = +(_xOscillator2length ?? 14)
+              if (
+                (settings.startCondition !== StartConditionEnum.ti &&
+                  indicatorAction === IndicatorAction.startDeal) ||
+                (!settings.useRiskReward &&
+                  indicatorAction === IndicatorAction.riskReward) ||
+                (settings.useRiskReward &&
+                  indicatorAction === IndicatorAction.riskReward &&
+                  settings.type === DCATypeEnum.terminal) ||
+                ((!settings.useTp ||
+                  (settings.dealCloseCondition !== CloseConditionEnum.techInd &&
+                    !this.tpAr)) &&
+                  indicatorAction === IndicatorAction.closeDeal &&
+                  section !== IndicatorSection.sl) ||
+                ((!settings.useSl ||
+                  (settings.dealCloseConditionSL !==
+                    CloseConditionEnum.techInd &&
+                    !this.slAr)) &&
+                  indicatorAction === IndicatorAction.closeDeal &&
+                  section === IndicatorSection.sl) ||
+                ((!settings.useDca ||
+                  !(
+                    settings.dcaCondition === DCAConditionEnum.indicators ||
+                    this.scaleAr
+                  )) &&
+                  indicatorAction === IndicatorAction.startDca) ||
+                ((!settings.useBotController ||
+                  settings.botStart !== BotStartTypeEnum.indicators) &&
+                  indicatorAction === IndicatorAction.stopBot) ||
+                ((!settings.useBotController ||
+                  settings.botActualStart !== BotStartTypeEnum.indicators) &&
+                  indicatorAction === IndicatorAction.startBot)
+              ) {
+                return
+              }
+              if (indicatorLength && indicatorInterval) {
+                const rrOrAr =
+                  indicatorAction === IndicatorAction.riskReward ||
+                  (indicatorAction === IndicatorAction.startDca &&
+                    this.scaleAr) ||
+                  (indicatorAction === IndicatorAction.closeDeal &&
+                    section !== IndicatorSection.sl &&
+                    this.tpAr) ||
+                  (indicatorAction === IndicatorAction.closeDeal &&
+                    section === IndicatorSection.sl &&
+                    this.slAr)
+                const otherOnType = rrOrAr
+                  ? []
+                  : filteredIndicators.filter(
+                      (i) =>
+                        i.indicatorAction === indicatorAction &&
+                        ((!i.section && !section) || i.section === section),
+                    )
+                const lowerIntervals = otherOnType.filter(
+                  (i) =>
+                    timeIntervalMap[i.indicatorInterval] <
+                    timeIntervalMap[indicatorInterval],
+                ).length
+                const useAnd =
+                  i.indicatorAction === IndicatorAction.closeDeal
+                    ? i.section === IndicatorSection.sl
+                      ? !settings.stopDealSlLogic ||
+                        settings.stopDealSlLogic === IndicatorsLogicEnum.and
+                      : !settings.stopDealLogic ||
+                        settings.stopDealLogic === IndicatorsLogicEnum.and
+                    : i.indicatorAction === IndicatorAction.startBot
+                      ? !settings.startBotLogic ||
+                        settings.startBotLogic === IndicatorsLogicEnum.and
+                      : i.indicatorAction === IndicatorAction.startDeal
+                        ? !settings.startDealLogic ||
+                          settings.startDealLogic === IndicatorsLogicEnum.and
+                        : i.indicatorAction === IndicatorAction.stopBot
+                          ? !settings.stopBotLogic ||
+                            settings.stopBotLogic === IndicatorsLogicEnum.and
+                          : false
+                const hasLower = rrOrAr
+                  ? false
+                  : otherOnType.length > 1 && lowerIntervals > 0 && useAnd
+                if (hasLower) {
+                  this.handleLog(
+                    `Indicator ${uuid} ${symbol} ${indicatorAction} has indicators with lower interval: ${lowerIntervals}`,
+                  )
+                }
+                const indicatorData: BotParentIndicatorEventDto = {
+                  data: {
+                    indicatorConfig:
+                      type === IndicatorEnum.dc
+                        ? { type, length: indicatorLength }
+                        : type === IndicatorEnum.macd
+                          ? {
+                              type,
+                              shortInterval: macdFast ?? 12,
+                              longInterval: macdSlow ?? 26,
+                              signalInterval: indicatorLength,
+                              percentile,
+                              percentileLookback,
+                              percentilePercentage,
+                              maSignal: macdMaSignal ?? MAEnum.ema,
+                              maSource: macdMaSource ?? MAEnum.ema,
+                            }
+                          : type === IndicatorEnum.st
+                            ? {
+                                type,
+                                factor: factor ?? 3,
+                                atrLength: atrLength ?? 10,
+                              }
+                            : type === IndicatorEnum.pp
+                              ? {
+                                  type,
+                                  ppHighLeft: +(ppHighLeft ?? 5),
+                                  ppHighRight: +(ppHighRight ?? 5),
+                                  ppLowLeft: +(ppLowLeft ?? 5),
+                                  ppLowRight: +(ppLowRight ?? 5),
+                                  ppMult: +(ppMult ?? 1),
+                                }
+                              : type === IndicatorEnum.tv
+                                ? {
+                                    type,
+                                    checkLevel,
+                                    useAsEntryExitPoints:
+                                      condition ===
+                                      TradingviewAnalysisConditionEnum.entry,
+                                  }
+                                : type === IndicatorEnum.pc
+                                  ? {
+                                      type,
+                                      pcUp: Math.abs(+(pcValue ?? '5')),
+                                      pcDown: Math.abs(+(pcValue ?? '5')),
+                                    }
+                                  : type === IndicatorEnum.div
+                                    ? {
+                                        type,
+                                        oscillators: divOscillators ?? [],
+                                      }
+                                    : type === IndicatorEnum.ma
+                                      ? {
+                                          type,
+                                          interval: indicatorLength,
+                                          maType: maType || MAEnum.ema,
+                                        }
+                                      : type === IndicatorEnum.ath
+                                        ? {
+                                            type,
+                                            lookback: athLookback ?? 100,
+                                          }
+                                        : type === IndicatorEnum.xo
+                                          ? xOscillator1 === IndicatorEnum.vo
+                                            ? {
+                                                type: xOscillator1,
+                                                voLong: voLong ?? 10,
+                                                voShort: voShort ?? 5,
+                                              }
+                                            : {
+                                                type:
+                                                  xOscillator1 ||
+                                                  IndicatorEnum.rsi,
+                                                interval: indicatorLength,
+                                              }
+                                          : type === IndicatorEnum.atr
+                                            ? {
+                                                type,
+                                                interval: indicatorLength,
+                                              }
+                                            : type === IndicatorEnum.adr
+                                              ? {
+                                                  type,
+                                                  interval: indicatorLength,
+                                                }
+                                              : type === IndicatorEnum.stoch
+                                                ? {
+                                                    type,
+                                                    k: indicatorLength,
+                                                    dsmooth: stochSmoothD ?? 1,
+                                                    ksmooth: stochSmoothK ?? 3,
+                                                  }
+                                                : type ===
+                                                    IndicatorEnum.stochRSI
+                                                  ? {
+                                                      type,
+                                                      k: indicatorLength,
+                                                      dsmooth:
+                                                        stochSmoothD ?? 3,
+                                                      ksmooth:
+                                                        stochSmoothK ?? 3,
+                                                      interval: stochRSI ?? 14,
+                                                    }
+                                                  : type === IndicatorEnum.sr
+                                                    ? {
+                                                        type,
+                                                        leftBars:
+                                                          leftBars ?? 15,
+                                                        rightBars:
+                                                          rightBars ?? 15,
+                                                      }
+                                                    : type === IndicatorEnum.mar
+                                                      ? {
+                                                          type,
+                                                          mar1type:
+                                                            mar1type ||
+                                                            MAEnum.ema,
+                                                          mar1length:
+                                                            mar1length || 20,
+                                                          mar2type:
+                                                            mar2type ||
+                                                            MAEnum.price,
+                                                          mar2length:
+                                                            mar2length || 20,
+                                                          percentile,
+                                                          percentileLookback,
+                                                          percentilePercentage,
+                                                          trendFilter,
+                                                          trendFilterLookback,
+                                                          trendFilterType,
+                                                          trendFilterValue,
+                                                        }
+                                                      : type ===
+                                                          IndicatorEnum.mfi
+                                                        ? {
+                                                            type,
+                                                            interval:
+                                                              indicatorLength ??
+                                                              14,
+                                                            percentile,
+                                                            percentileLookback,
+                                                            percentilePercentage,
+                                                          }
+                                                        : type ===
+                                                            IndicatorEnum.qfl
+                                                          ? {
+                                                              type,
+                                                              basePeriods:
+                                                                basePeriods ??
+                                                                36,
+                                                              pumpPeriods:
+                                                                pumpPeriods ??
+                                                                8,
+                                                              pump:
+                                                                (pump ?? 3) /
+                                                                100,
+                                                              baseCrack:
+                                                                (baseCrack ??
+                                                                  3) / 100,
+                                                            }
+                                                          : type ===
+                                                              IndicatorEnum.uo
+                                                            ? {
+                                                                type,
+                                                                fast:
+                                                                  uoFast ?? 7,
+                                                                middle:
+                                                                  uoMiddle ??
+                                                                  14,
+                                                                slow:
+                                                                  uoSlow ?? 28,
+                                                                percentile,
+                                                                percentileLookback,
+                                                                percentilePercentage,
+                                                              }
+                                                            : type ===
+                                                                IndicatorEnum.mom
+                                                              ? {
+                                                                  type,
+                                                                  interval:
+                                                                    indicatorLength,
+                                                                  source:
+                                                                    momSource ??
+                                                                    'close',
+                                                                  percentile,
+                                                                  percentileLookback,
+                                                                  percentilePercentage,
+                                                                }
+                                                              : type ===
+                                                                  IndicatorEnum.bbwp
+                                                                ? {
+                                                                    type,
+                                                                    interval:
+                                                                      indicatorLength,
+                                                                    source:
+                                                                      momSource ??
+                                                                      'close',
+                                                                    lookback:
+                                                                      bbwpLookback ??
+                                                                      252,
+                                                                  }
+                                                                : type ===
+                                                                    IndicatorEnum.psar
+                                                                  ? {
+                                                                      type,
+                                                                      start:
+                                                                        psarStart ??
+                                                                        0.02,
+                                                                      inc:
+                                                                        psarInc ??
+                                                                        0.02,
+                                                                      max:
+                                                                        psarMax ??
+                                                                        0.2,
+                                                                    }
+                                                                  : type ===
+                                                                      IndicatorEnum.vo
+                                                                    ? {
+                                                                        type,
+                                                                        voLong:
+                                                                          voLong ??
+                                                                          10,
+                                                                        voShort:
+                                                                          voShort ??
+                                                                          5,
+                                                                        percentile,
+                                                                        percentileLookback,
+                                                                        percentilePercentage,
+                                                                      }
+                                                                    : type ===
+                                                                        IndicatorEnum.kc
+                                                                      ? {
+                                                                          type,
+                                                                          interval:
+                                                                            indicatorLength,
+                                                                          ma:
+                                                                            kcMa ||
+                                                                            MAEnum.ema,
+                                                                          multiplier:
+                                                                            bbwMult ||
+                                                                            2,
+                                                                          range:
+                                                                            kcRange ||
+                                                                            RangeType.atr,
+                                                                          rangeLength:
+                                                                            kcRangeLength ||
+                                                                            20,
+                                                                        }
+                                                                      : type ===
+                                                                          IndicatorEnum.kcpb
+                                                                        ? {
+                                                                            type,
+                                                                            interval:
+                                                                              indicatorLength,
+                                                                            ma:
+                                                                              kcMa ||
+                                                                              MAEnum.ema,
+                                                                            multiplier:
+                                                                              bbwMult ||
+                                                                              2,
+                                                                            range:
+                                                                              kcRange ||
+                                                                              RangeType.atr,
+                                                                            rangeLength:
+                                                                              kcRangeLength ||
+                                                                              20,
+                                                                            percentile,
+                                                                            percentileLookback,
+                                                                            percentilePercentage,
+                                                                          }
+                                                                        : type ===
+                                                                            IndicatorEnum.bb
+                                                                          ? {
+                                                                              type,
+                                                                              interval:
+                                                                                indicatorLength,
+                                                                              bbwMa:
+                                                                                bbwMa ||
+                                                                                MAEnum.sma,
+                                                                              bbwMaLength:
+                                                                                bbwMaLength ||
+                                                                                20,
+                                                                              bbwMult:
+                                                                                bbwMult ||
+                                                                                2,
+                                                                            }
+                                                                          : type ===
+                                                                              IndicatorEnum.bbw
+                                                                            ? {
+                                                                                type,
+                                                                                interval:
+                                                                                  indicatorLength,
+                                                                                bbwMa:
+                                                                                  bbwMa ||
+                                                                                  MAEnum.sma,
+                                                                                bbwMaLength:
+                                                                                  bbwMaLength ||
+                                                                                  20,
+                                                                                bbwMult:
+                                                                                  bbwMult ||
+                                                                                  2,
+                                                                                percentile,
+                                                                                percentileLookback,
+                                                                                percentilePercentage,
+                                                                              }
+                                                                            : type ===
+                                                                                IndicatorEnum.bbpb
+                                                                              ? {
+                                                                                  type,
+                                                                                  interval:
+                                                                                    indicatorLength,
+                                                                                  bbwMa:
+                                                                                    bbwMa ||
+                                                                                    MAEnum.sma,
+                                                                                  bbwMaLength:
+                                                                                    bbwMaLength ||
+                                                                                    20,
+                                                                                  bbwMult:
+                                                                                    bbwMult ||
+                                                                                    2,
+                                                                                  percentile,
+                                                                                  percentileLookback,
+                                                                                  percentilePercentage,
+                                                                                }
+                                                                              : type ===
+                                                                                  IndicatorEnum.ecd
+                                                                                ? {
+                                                                                    type,
+                                                                                  }
+                                                                                : ({
+                                                                                    type,
+                                                                                    interval:
+                                                                                      indicatorLength,
+                                                                                    percentile,
+                                                                                    percentileLookback,
+                                                                                    percentilePercentage,
+                                                                                  } as IndicatorConfig),
+                    interval:
+                      type === IndicatorEnum.adr
+                        ? ExchangeIntervals.oneD
+                        : indicatorInterval,
+                    symbol,
+                    exchange: this.data.exchange,
+                    test: false,
+                    limitMultiplier: serviceRestart
+                      ? this.convertToMultiplier(keepConditionBars)
+                      : undefined,
+                    load1d: rrOrAr || hasLower,
+                  },
+                  event: 'subscribeIndicator',
+                  botId: this.botId,
+                  responseId: v4(),
+                  responseParams: {
+                    uuid,
+                    symbol,
+                  },
+                  type: this.botType,
+                }
+                const { id, room, data, cb } =
+                  await this.sendIndicatorSubscribeEvent(indicatorData)
+                if (!id) {
+                  this.handleLog(`Indicator ${uuid} ${symbol} not connected`)
+                  return
+                }
+                const maChild =
+                  type === IndicatorEnum.ma &&
+                  maCrossingValue !== MAEnum.price &&
+                  maCrossingInterval &&
+                  maCrossingLength &&
+                  maUUID &&
+                  maCrossingValue &&
+                  indicatorAction !== IndicatorAction.riskReward &&
+                  !(
+                    this.scaleAr && indicatorAction === IndicatorAction.startDca
+                  ) &&
+                  !(
+                    indicatorAction === IndicatorAction.closeDeal &&
+                    section !== IndicatorSection.sl &&
+                    this.tpAr
+                  ) &&
+                  !(
+                    indicatorAction === IndicatorAction.closeDeal &&
+                    section === IndicatorSection.sl &&
+                    this.slAr
+                  )
+                const xoChild =
+                  type === IndicatorEnum.xo &&
+                  xOscillator2 &&
+                  xOscillator2Interval &&
+                  xOscillator2length &&
+                  xoUUID &&
+                  indicatorAction !== IndicatorAction.riskReward &&
+                  !(
+                    this.scaleAr && indicatorAction === IndicatorAction.startDca
+                  ) &&
+                  !(
+                    indicatorAction === IndicatorAction.closeDeal &&
+                    section !== IndicatorSection.sl &&
+                    this.tpAr
+                  ) &&
+                  !(
+                    indicatorAction === IndicatorAction.closeDeal &&
+                    section === IndicatorSection.sl &&
+                    this.slAr
+                  )
+                const key = `${uuid}@${symbol}`
+                const findInCurrent = serviceRestart
+                  ? this.data.indicatorsData?.find(
+                      (id) =>
+                        id.signature === this.getIndicatorSignature(i) &&
+                        id.symbol === symbol &&
+                        id.uuid === uuid,
+                    )
+                  : _indicators.get(key)
+
+                const active = (findInCurrent?.statusTo ?? 0) > +new Date()
+                const k = `${indicatorInterval}@${indicatorAction}`
+                this.indicatorsIntervalActionMap.set(
+                  k,
+                  (this.indicatorsIntervalActionMap.get(k) ?? 0) + 1,
+                )
+                this.indicators.set(key, {
+                  uuid,
+                  id: id,
+                  room,
+                  status: active ? (findInCurrent?.status ?? false) : false,
+                  statusSince: active ? findInCurrent?.statusSince : undefined,
+                  statusTo: active ? findInCurrent?.statusTo : undefined,
+                  numberOfSignals: active
+                    ? findInCurrent?.numberOfSignals
+                    : undefined,
+                  data: !!data,
+                  history: data ?? [],
+                  symbol,
+                  key,
+                  action: indicatorAction,
+                  maCross: false,
+                  section,
+                  interval: indicatorInterval,
+                  parentIndicator: '',
+                  childIndicator: maChild ? maUUID : xoChild ? xoUUID : '',
+                  cb,
+                  groupId: i.groupId,
+                })
+                this.handleLog(
+                  `Bot connected to ${type} indicator. Id: ${id}, room: ${room}`,
+                )
+                if (maChild) {
+                  const indicatorChildData: BotParentIndicatorEventDto = {
+                    data: {
+                      indicatorConfig: {
+                        type,
+                        interval: maCrossingLength,
+                        maType: maCrossingValue,
+                      },
+                      interval: maCrossingInterval,
+                      symbol,
+                      exchange: this.data.exchange,
+                      test: false,
+                    },
+
+                    botId: this.botId,
+                    responseId: v4(),
+                    responseParams: { uuid: maUUID, symbol },
+                    event: 'subscribeIndicator',
+                    type: this.botType,
+                  }
+                  const {
+                    id: idChild,
+                    room: roomChild,
+                    data: dataChild,
+                    cb: cbChild,
+                  } = await this.sendIndicatorSubscribeEvent(indicatorChildData)
+                  if (!idChild) {
+                    this.handleLog(
+                      `Indicator ${maUUID} ${symbol} not connected`,
+                    )
+                    return
+                  }
+                  const maKey = `${maUUID}@${symbol}`
+                  const findInCurrent = _indicators.get(maKey)
+
+                  const active =
+                    !serviceRestart &&
+                    (findInCurrent?.statusTo ?? 0) > +new Date()
+                  this.indicators.set(maKey, {
+                    uuid: maUUID,
+                    id: idChild,
+                    room: roomChild,
+                    status: active ? (findInCurrent?.status ?? false) : false,
+                    statusSince: active
+                      ? findInCurrent?.statusSince
+                      : undefined,
+                    statusTo: active ? findInCurrent?.statusTo : undefined,
+                    numberOfSignals: active
+                      ? findInCurrent?.numberOfSignals
+                      : undefined,
+                    data: !!dataChild,
+                    history: dataChild ?? [],
+                    symbol,
+                    key: maKey,
+                    action: indicatorAction,
+                    maCross: true,
+                    section,
+                    interval: indicatorInterval,
+                    parentIndicator: uuid,
+                    childIndicator: '',
+                    cb: cbChild,
+                    groupId: '',
+                  })
+                  this.handleLog(
+                    `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
+                  )
+                }
+                if (xoChild) {
+                  const indicatorChildData: BotParentIndicatorEventDto = {
+                    data: {
+                      indicatorConfig:
+                        xOscillator2 === IndicatorEnum.vo
+                          ? {
+                              type: xOscillator2,
+                              voLong: _xOscillator2voLong ?? voLong ?? 10,
+                              voShort: _xOscillator2voShort ?? voShort ?? 5,
+                            }
+                          : {
+                              type: xOscillator2 || IndicatorEnum.mfi,
+                              interval: xOscillator2length || indicatorLength,
+                            },
+                      interval: xOscillator2Interval || indicatorInterval,
+                      symbol,
+                      exchange: this.data.exchange,
+                      test: false,
+                    },
+                    event: 'subscribeIndicator',
+                    botId: this.botId,
+                    responseId: v4(),
+                    responseParams: { uuid: xoUUID, symbol },
+                    type: this.botType,
+                  }
+                  const {
+                    id: idChild,
+                    room: roomChild,
+                    data: dataChild,
+                    cb: cbChild,
+                  } = await this.sendIndicatorSubscribeEvent(indicatorChildData)
+                  if (!idChild) {
+                    this.handleLog(
+                      `Indicator ${xoUUID} ${symbol} not connected`,
+                    )
+                    return
+                  }
+                  const xoKey = `${xoUUID}@${symbol}`
+                  const findInCurrent = _indicators.get(xoKey)
+                  const active =
+                    !serviceRestart &&
+                    (findInCurrent?.statusTo ?? 0) > +new Date()
+                  this.indicators.set(xoKey, {
+                    uuid: xoUUID,
+                    id: idChild,
+                    room: roomChild,
+                    status: active ? (findInCurrent?.status ?? false) : false,
+                    statusSince: active
+                      ? findInCurrent?.statusSince
+                      : undefined,
+                    statusTo: active ? findInCurrent?.statusTo : undefined,
+                    numberOfSignals: active
+                      ? findInCurrent?.numberOfSignals
+                      : undefined,
+                    data: !!dataChild,
+                    history: dataChild ?? [],
+                    symbol,
+                    key: xoKey,
+                    action: indicatorAction,
+                    maCross: true,
+                    section,
+                    interval: indicatorInterval,
+                    childIndicator: '',
+                    parentIndicator: uuid,
+                    cb: cbChild,
+                    groupId: '',
+                  })
+                  this.handleLog(
+                    `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
+                  )
+                }
+              } else {
+                this.handleLog(
+                  `Bot start condition set to ${type}, but values wasn't provided.`,
+                )
+              }
+            }
+          }),
+        )
+        await sleep(0)
+        this.handleLog(
+          `Open indicators | Symbol ${symbol} end. Took ${
+            (+new Date() - time) / 1000
+          }s to connect ${filteredIndicators.length} indicators`,
+        )
+      }
+      this.handleLog(
+        `Open indicators | Added ${this.indicators.size} indicators to the bot`,
+      )
+    } catch (e) {
+      this.handleErrors(
+        `Open indicators error: ${(e as Error)?.message ?? e}`,
+        'indicator service',
+        '',
+        false,
+        false,
+        false,
+      )
+    }
+    this.endMethod(_id)
+    this.runAfterIndicatorsConnected(this.botId)
+  }
+
+  /**
+   * Open new deal manualy
+   */
+
+  async openNewDealMan(_symbol?: string) {
+    if (this.data) {
+      const settings = await this.getAggregatedSettings()
+      const symbols = _symbol ? [_symbol] : (settings.pair ?? [])
+      this.handleLog('Open new deal manualy')
+      for (const symbol of symbols) {
+        this.openNewDeal(this.botId, symbol, true)
+      }
+    }
+  }
+
+  async getSmartSellOrderQty(
+    symbol: string,
+    _balance: UnPromise<ReturnType<typeof this.checkAssets>>,
+  ) {
+    const ed = await this.getExchangeInfo(symbol)
+    if (!ed || !this.data) {
+      return 0
+    }
+    const settings = await this.getAggregatedSettings()
+    if (
+      checkNumber(settings.baseOrderSize) &&
+      settings.baseOrderPrice &&
+      checkNumber(settings.baseOrderPrice) &&
+      settings.baseOrderSize
+    ) {
+      const { orderSizeType } = settings
+      const price = +settings.baseOrderPrice
+      const baseSize = +settings.baseOrderSize
+      const precision = await this.baseAssetPrecision(symbol)
+      let required = this.math.round(baseSize, precision, true)
+      if (orderSizeType === OrderSizeTypeEnum.quote) {
+        required = this.math.round(
+          (baseSize * (this.coinm ? ed.quoteAsset.minAmount : 1)) / price,
+          precision,
+          true,
+        )
+      }
+      if (settings.coinm) {
+        const cont = (price * required) / ed.quoteAsset.minAmount
+        if (cont < 1) {
+          required = this.math.round(
+            ed.quoteAsset.minAmount / price,
+            precision,
+            false,
+            true,
+          )
+        } else if (cont % 1 > Number.EPSILON) {
+          required = this.math.round(
+            (this.math.round(cont, 0) * ed.quoteAsset.minAmount) / price,
+            precision,
+            false,
+            true,
+          )
+        }
+      }
+      return required
+    }
+    return 0
+  }
+
+  async checkBalance(symbol: string) {
+    const result = {
+      status: true,
+      required: 0,
+      available: 0,
+      price: 0,
+    }
+    if (
+      this.data?.action &&
+      this.data.action !== ActionsEnum.noAction &&
+      this.data.action !== ActionsEnum.useBalance
+    ) {
+      this.handleLog(`Balance check skipped. Action is ${this.data.action}`)
+      return result
+    }
+    const settings = await this.getAggregatedSettings()
+    if (settings.skipBalanceCheck) {
+      this.handleLog(`Balance check skipped`)
+      return result
+    }
+    const ed = await this.getExchangeInfo(symbol)
+    if (!ed) {
+      return result
+    }
+    const balance = await this.checkAssets(true, true)
+    const leverage = await this.getLeverageMultipler()
+    if (settings.terminalDealType === TerminalDealTypeEnum.import) {
+      const fee = await this.getUserFee(settings.pair?.[0] ?? '')
+      const requiredBase =
+        ((await this.getSmartSellOrderQty(symbol, balance)) / leverage) *
+        (1 - (fee?.maker ?? 0))
+      const baseBalance = balance?.get(ed.baseAsset.name)?.free ?? 0
+      const requiredQuote =
+        (requiredBase * +(settings.baseOrderPrice ?? 0)) / leverage
+      const quoteBalance = balance?.get(ed.quoteAsset.name)?.free ?? 0
+      if (this.futures) {
+        if (this.coinm) {
+          if (baseBalance < requiredBase) {
+            return {
+              status: false,
+              available: baseBalance,
+              required: requiredBase,
+              price: 0,
+            }
+          }
+        } else {
+          if (quoteBalance < requiredQuote) {
+            return {
+              status: false,
+              available: quoteBalance,
+              required: requiredQuote,
+              price: 0,
+            }
+          }
+        }
+      } else {
+        if (this.isLong) {
+          if (baseBalance < requiredBase) {
+            return {
+              status: false,
+              available: baseBalance,
+              required: requiredBase,
+              price: 0,
+            }
+          }
+        } else {
+          if (quoteBalance < requiredQuote) {
+            return {
+              status: false,
+              available: quoteBalance,
+              required: requiredQuote,
+              price: 0,
+            }
+          }
+        }
+      }
+      return result
+    }
+    const latestPrice = await this.getLatestPrice(symbol)
+    if (latestPrice === 0) {
+      this.handleLog('Latest price is 0, bypass check balance')
+      return result
+    }
+    const base = await this.getBaseOrder(
+      symbol,
+      undefined,
+      undefined,
+      latestPrice,
+    )
+    if (!base) {
+      this.handleLog('Cannot get base order, bypass check balance')
+      return result
+    }
+    const initialGrids = await this.createInitialDealOrders(
+      symbol,
+      latestPrice,
+      '',
+    )
+    const currentGrids = await this.createCurrentDealOrders(
+      symbol,
+      latestPrice,
+      initialGrids,
+      latestPrice,
+      latestPrice,
+      '',
+      false,
+      undefined,
+      true,
+    )
+    const allGrids = currentGrids.filter(
+      (g) => g.type === TypeOrderEnum.dealRegular,
+    )
+    const usedGrids = currentGrids.filter(
+      (g) => g.side === (this.isLong ? OrderSideEnum.buy : OrderSideEnum.sell),
+    )
+    let additionalValue = 0
+    if (this.useCompountReduce) {
+      const profit =
+        (this.data?.profit.total ?? 0) /
+        (settings.profitCurrency === 'base' ? 1 : +base.price)
+      if (profit < 0 && settings.useRiskReduction) {
+        additionalValue =
+          profit * (+(settings.riskReductionValue ?? '50') / 100) * 0.995
+      }
+      if (profit > 0 && settings.useReinvest) {
+        additionalValue = profit * (+(settings.reinvestValue ?? '50') / 100)
+      }
+    }
+    const requiredAmount = this.futures
+      ? this.coinm
+        ? allGrids.reduce((acc, g) => acc + g.qty, 0) +
+          +base.origQty +
+          additionalValue
+        : allGrids.reduce((acc, g) => acc + g.qty * g.price, 0) +
+          (+base.origQty + additionalValue) * +base.price
+      : this.isLong
+        ? (+base.origQty + additionalValue) * +base.price +
+          usedGrids.reduce((acc, g) => acc + g.price * g.qty, 0)
+        : +base.origQty +
+          usedGrids.reduce((acc, g) => acc + g.qty, 0) +
+          additionalValue
+    const available =
+      (this.futures
+        ? this.coinm
+          ? (balance?.get(ed.baseAsset.name)?.free ?? 0)
+          : (balance?.get(ed.quoteAsset.name)?.free ?? 0)
+        : this.isLong
+          ? (balance?.get(ed.quoteAsset.name)?.free ?? 0)
+          : balance?.get(ed.baseAsset.name)?.free) ?? 0
+    if (requiredAmount / leverage > available) {
+      return {
+        status: false,
+        required: requiredAmount / leverage,
+        available,
+        price: latestPrice,
+      }
+    }
+    return result
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}resetPending`)
+  resetPending(_botId: string, symbol: string) {
+    this.pendingDeals -= 1
+    if (this.pendingDeals < 0) {
+      this.pendingDeals = 0
+    }
+    const perPair = this.pendingDealsPerPair.get(symbol)
+    if (perPair && perPair <= 1) {
+      this.pendingDealsPerPair.delete(symbol)
+    }
+    if (!perPair || perPair > 1) {
+      this.pendingDealsPerPair.set(symbol, perPair ? perPair - 1 : 1)
+    }
+  }
+
+  async openDealAfterTimer() {
+    const asapSymbols = await this.getSymbolsToOpenAsapDeals()
+    for (const symbol of asapSymbols) {
+      this.openNewDeal(this.botId, symbol)
+    }
+  }
+
+  private async checkRiskRewardCondition(
+    pair: string,
+    price: number,
+  ): Promise<{ tp?: number; sl: number; size: number } | null> {
+    const {
+      riskTpRatio,
+      riskSlAmountValue,
+      riskSlType,
+      riskSlAmountPerc,
+      riskMaxPositionSize,
+      riskMinPositionSize,
+      riskUseTpRatio,
+      indicators,
+      riskMaxSl,
+      riskMinSl,
+    } = await this.getAggregatedSettings()
+    const indicator = [...this.indicators.values()].find(
+      (i) => i.symbol === pair && i.action === IndicatorAction.riskReward,
+    )
+    if (!indicator) {
+      this.handleErrors(
+        `Risk reward indicator not found for ${pair}`,
+        'checkRiskRewardCondition',
+        '',
+        false,
+        false,
+        false,
+      )
+      return null
+    }
+
+    const [last] = [...indicator.history].sort((a, b) => b.time - a.time)
+    if (!last) {
+      return null
+    }
+
+    const indicatorSettings = (indicators ?? []).find(
+      (i) => i.indicatorAction === IndicatorAction.riskReward,
+    )
+    if (!indicatorSettings) {
+      if (!indicator) {
+        this.handleErrors(
+          `Risk reward indicator not found for ${pair}`,
+          'checkRiskRewardCondition',
+          '',
+          false,
+        )
+        return null
+      }
+      return null
+    }
+    const { type, ppValue, srCrossingValue, bbCrossingValue, stCondition } =
+      indicatorSettings
+    let value = NaN
+    if (type === IndicatorEnum.pp) {
+      const data = last.value as PriorPivotResult
+      if (ppValue === ppValueEnum.anyH) {
+        value = isNaN(data.hh) || data.hh === null ? data.lh : data.hh
+      }
+      if (ppValue === ppValueEnum.hh) {
+        value = data.all.hh
+      }
+      if (ppValue === ppValueEnum.lh) {
+        value = data.all.lh
+      }
+      if (ppValue === ppValueEnum.anyL) {
+        value = isNaN(data.ll) || data.ll === null ? data.hl : data.ll
+      }
+      if (ppValue === ppValueEnum.hl) {
+        value = data.all.hl
+      }
+      if (ppValue === ppValueEnum.ll) {
+        value = data.all.ll
+      }
+      if (ppValue === ppValueEnum.anySWH) {
+        value = isNaN(data.wh) || data.wh === null ? data.sh : data.wh
+      }
+      if (ppValue === ppValueEnum.wh) {
+        value = data.all.wh
+      }
+      if (ppValue === ppValueEnum.sh) {
+        value = data.all.sh
+      }
+      if (ppValue === ppValueEnum.anySWL) {
+        value = isNaN(data.wl) || data.wl === null ? data.sl : data.wl
+      }
+      if (ppValue === ppValueEnum.wl) {
+        value = data.all.wl
+      }
+      if (ppValue === ppValueEnum.sl) {
+        value = data.all.sl
+      }
+    }
+    if (type === IndicatorEnum.qfl) {
+      const data = last.value as QFLResult
+      value = data.base
+    }
+    if (type === IndicatorEnum.sr) {
+      const data = last.value as PivotResult
+      value =
+        srCrossingValue === SRCrossingEnum.resistance ? data.high : data.low
+    }
+    if (type === IndicatorEnum.bb || type === IndicatorEnum.kc) {
+      const data = last.value as {
+        result: BandsResult
+        price: number
+      }
+      value =
+        bbCrossingValue === BBCrossingEnum.lower
+          ? data.result.lower
+          : bbCrossingValue === BBCrossingEnum.middle
+            ? data.result.middle
+            : data.result.upper
+    }
+    if (type === IndicatorEnum.ma) {
+      const data = last.value as MAResult
+      value = data.ma
+    }
+    if (type === IndicatorEnum.st) {
+      const data = last.value as SuperTrendResult
+      value = stCondition === STConditionEnum.down ? data.all.down : data.all.up
+    }
+    if (type === IndicatorEnum.psar) {
+      const data = last.value as { psar: number; price: number }
+      value = data.psar
+    }
+    if (type === IndicatorEnum.atr) {
+      const atrMultiplier = +(indicatorSettings?.riskAtrMult ?? '1')
+      const data = last.value as number
+      value = this.isLong
+        ? price - data * atrMultiplier
+        : price + data * atrMultiplier
+    }
+    if (isNaN(value) || value === null) {
+      this.handleErrors(
+        `Risk reward indicator value not found for ${pair}`,
+        'checkRiskRewardCondition',
+        '',
+        false,
+      )
+      return null
+    }
+    const symbol = await this.getExchangeInfo(pair)
+    const precisionPrice = symbol?.priceAssetPrecision
+    const precisionQuote = precisionPrice
+    const precisionBase = await this.baseAssetPrecision(pair)
+    let currentRiskSlPrice = this.math.round(value, precisionPrice)
+    const minSl =
+      typeof riskMinSl !== 'undefined' && `${riskMinSl}` !== 'null'
+        ? Math.abs(+riskMinSl) / 100
+        : riskSlType === RiskSlTypeEnum.perc && riskSlAmountPerc
+          ? Math.abs(+riskSlAmountPerc) / 100
+          : null
+    const maxSl = riskMaxSl ? Math.abs(+riskMaxSl) / 100 : 1
+    let currentSl = Math.abs((currentRiskSlPrice - price) / price)
+    if (minSl && currentSl < minSl) {
+      this.handleErrors(
+        `Current SL ${this.math.round(
+          currentSl * 100 * -1,
+          2,
+        )}% lower than minimum SL ${this.math.round(
+          minSl * 100 * -1,
+          2,
+        )}% for ${pair}. Using minimum SL`,
+        'riskReward',
+        '',
+        false,
+        false,
+      )
+      currentSl = minSl * -1
+    } else if (maxSl && currentSl > maxSl) {
+      this.handleErrors(
+        `Current SL ${this.math.round(
+          currentSl * 100 * -1,
+          2,
+        )}% more than maximum SL ${this.math.round(
+          maxSl * 100 * -1,
+          2,
+        )}% for ${pair}. Using maximum SL`,
+        'riskReward',
+        '',
+        false,
+        false,
+      )
+      currentSl = maxSl * -1
+    } else {
+      currentSl *= -1
+    }
+    const riskSlPerc = currentSl
+    currentRiskSlPrice = this.math.round(
+      price * (1 + riskSlPerc * (this.isLong ? 1 : -1)),
+      symbol?.priceAssetPrecision,
+    )
+    const rewardTpPerc = Math.abs(riskSlPerc) * +(riskTpRatio ?? '1')
+    const rewardTpPrice = this.math.round(
+      price * (1 + rewardTpPerc * (this.isLong ? 1 : -1)),
+      precisionPrice,
+    )
+    const riskPrecision = this.futures
+      ? this.coinm
+        ? precisionBase
+        : precisionQuote
+      : this.isLong
+        ? precisionQuote
+        : precisionBase
+    const balances = await this.checkAssets(true, true)
+    const asset =
+      (this.futures
+        ? this.coinm
+          ? symbol?.baseAsset.name
+          : symbol?.quoteAsset.name
+        : this.isLong
+          ? symbol?.quoteAsset.name
+          : symbol?.baseAsset.name) || ''
+    const riskBalance = balances?.get(asset)?.free
+    if ((riskBalance ?? 0) <= 0) {
+      this.handleErrors(
+        `Balance for ${asset} is lower than 0 (${riskBalance})`,
+        'riskReward',
+        '',
+        false,
+      )
+      return null
+    }
+    const riskSize = this.math.round(
+      riskSlType === RiskSlTypeEnum.fixed
+        ? +(riskSlAmountValue ?? 0)
+        : (riskBalance ?? 0) * (+(riskSlAmountPerc ?? '1') / 100),
+      riskPrecision ? riskPrecision + 2 : undefined,
+    )
+    const positionSize =
+      riskSlPerc >= 0 || riskSize === 0
+        ? 0
+        : this.math.round(
+            riskSize /
+              Math.abs(riskSlPerc) /
+              (await this.getLeverageMultipler()),
+            riskPrecision,
+          )
+    if (positionSize <= 0) {
+      this.handleErrors(
+        `Position size is lower than 0 for ${pair}`,
+        'riskReward',
+        '',
+        false,
+      )
+      return null
+    }
+    let min = +(riskMinPositionSize ?? '0')
+    if (min === -1) {
+      min = 0
+    }
+    let max = +(riskMaxPositionSize ?? '0')
+    if (max === -1 || max === 0) {
+      max = Infinity
+    }
+    if (positionSize < min || positionSize > max) {
+      this.handleErrors(
+        `Position size (${positionSize}) ${
+          positionSize < min ? `lower than ${min}` : `higher than ${max}`
+        } for ${pair}`,
+        'riskReward',
+        '',
+        false,
+      )
+      return null
+    }
+    return {
+      size: positionSize,
+      sl: currentRiskSlPrice,
+      tp: riskUseTpRatio ? rewardTpPrice : undefined,
+    }
+  }
+
+  private getDynamicLevels(pair: string): DynamicArPrices[] {
+    const indicators = [...this.indicators.values()].filter(
+      (i) =>
+        i.symbol === pair &&
+        ((this.scaleAr && i.action === IndicatorAction.startDca) ||
+          (this.tpAr &&
+            i.action === IndicatorAction.closeDeal &&
+            i.section !== IndicatorSection.sl) ||
+          (this.slAr &&
+            i.action === IndicatorAction.closeDeal &&
+            i.section === IndicatorSection.sl)),
+    )
+    const result: DynamicArPrices[] = []
+    for (const i of indicators) {
+      if (!i.history || !i.history.length) {
+        continue
+      }
+      const [last] = [...i.history].sort((a, b) => b.time - a.time)
+
+      result.push({ id: i.uuid, value: last.value as number })
+    }
+    if (indicators.length !== result.length) {
+      return []
+    }
+    return result
+  }
+
+  public async calculateCompoundReduce(symbol: string): Promise<Sizes | null> {
+    const use = this.useCompountReduce
+    if (!use) {
+      return null
+    }
+
+    const settings = await this.getAggregatedSettings()
+
+    const profit = this.data?.profit.total ?? 0
+
+    if (
+      (profit > 0 && !settings.useReinvest) ||
+      (profit < 0 && !settings.useRiskReduction)
+    ) {
+      return null
+    }
+
+    let maxDeals = +(settings.maxNumberOfOpenDeals ?? '0')
+    if (!maxDeals || maxDeals <= 0) {
+      if (settings.useMulti) {
+        const maxDealsPerPair = +(settings.maxDealsPerPair ?? '0')
+        if (!maxDealsPerPair || maxDealsPerPair <= 0) {
+          maxDeals = 1
+        } else {
+          maxDeals = Math.max(1, maxDealsPerPair * (settings.pair ?? []).length)
+        }
+      }
+    }
+
+    const toUse =
+      (profit *
+        (settings.useReinvest
+          ? +(settings.reinvestValue ?? '50') / 100
+          : +(settings.riskReductionValue ?? '50') / 100)) /
+      maxDeals
+
+    const price = await this.getLatestPrice(symbol)
+
+    const orders = (
+      await this.createInitialDealOrders(symbol, price, '')
+    ).filter((o) => o.type === TypeOrderEnum.dealRegular)
+
+    const baseOrder = await this.getBaseOrder(symbol)
+
+    if (!baseOrder) {
+      return null
+    }
+
+    const totalOrders =
+      orders.reduce((acc, v) => acc + v.qty, 0) + +baseOrder.origQty
+
+    const sizes: Sizes = {
+      base:
+        (+baseOrder.origQty / totalOrders) *
+        (toUse *
+          (settings.profitCurrency === 'base' ? 1 : 1 / +baseOrder.price)),
+      dca: orders.map(
+        (o) =>
+          (o.qty / totalOrders) *
+          (toUse * (settings.profitCurrency === 'base' ? 1 : 1 / o.price)),
+      ),
+      origBase: +baseOrder.origQty,
+      origDca: orders.map((o) => o.qty),
+    }
+
+    return sizes
+  }
+  /**
+   * Open new deal
+   */
+  @IdMute(mutex, (botId: string, symbol: string) => `${botId}newDeal@${symbol}`)
+  async openNewDeal(
+    _botId: string,
+    symbol: string,
+    skip = false,
+    dynamic = false,
+    time = 0,
+    cbIfNotOpened?: () => void,
+  ) {
+    if (!this.loadingComplete) {
+      this.runAfterLoadingQueue.push(() =>
+        this.openNewDeal.bind(this)(
+          this.botId,
+          symbol,
+          skip,
+          dynamic,
+          time,
+          cbIfNotOpened,
+        ),
+      )
+      return this.handleLog('Loading not complete yet')
+    }
+    if (!skip && this.data?.status === BotStatusEnum.monitoring) {
+      this.handleLog('Bot is in monitoring mode. Wont open new deal')
+      if (cbIfNotOpened) {
+        cbIfNotOpened()
+      }
+      return
+    }
+    const _id = this.startMethod('openNewDeal')
+    const settings = await this.getAggregatedSettings()
+    const t = this.openNewDealTimer.get(symbol)
+    if (t) {
+      clearTimeout(t)
+      this.openNewDealTimer.delete(symbol)
+    }
+    this.handleLog(`Open new deal ${symbol}`)
+    if (!this.pairs.has(symbol)) {
+      this.endMethod(_id)
+      if (cbIfNotOpened) {
+        cbIfNotOpened()
+      }
+      return this.handleLog(`Bot settings does not contain ${symbol}`)
+    }
+    if (
+      this.pairs.has(symbol) &&
+      !(this.data?.settings.pair ?? []).includes(symbol)
+    ) {
+      this.endMethod(_id)
+      if (cbIfNotOpened) {
+        cbIfNotOpened()
+      }
+      return this.handleLog(
+        `Bot settings does not contain ${symbol}. Wont open new deal`,
+      )
+    }
+    const ed = await this.getExchangeInfo(symbol)
+    const skipRange = skip && !dynamic
+    if (await this.checkMaxDeals(this.botId, symbol)) {
+      if (
+        ed &&
+        (skipRange || (await this.checkInRange(symbol))) &&
+        this.data?.status !== BotStatusEnum.closed &&
+        !(
+          this.data?.status === BotStatusEnum.error &&
+          this.data.previousStatus === BotStatusEnum.closed
+        )
+      ) {
+        this.handleLog(
+          `Bot status is ${this.data?.status}, close after tp ${this.closeAfterTpFilled}`,
+        )
+        let checkBalance = await this.checkBalance(symbol)
+        if (!checkBalance.status) {
+          this.handleLog(
+            `Not enough balance to start new deal. Required: ${checkBalance.required}, available: ${checkBalance.available}, repeat check in 5 seconds`,
+          )
+          await sleep(5000)
+          checkBalance = await this.checkBalance(symbol)
+        }
+        if (checkBalance.status) {
+          if (!(skip && !dynamic)) {
+            const cooldownStart = await this.checkCooldownStart(
+              this.botId,
+              symbol,
+            )
+            if (!cooldownStart.status) {
+              this.handleLog(
+                `Deal must wait because of cooldown start check. Time: ${cooldownStart.time}, last opened: ${cooldownStart.last}, diff: ${cooldownStart.diff}, cooldown: ${cooldownStart.cooldown} ${symbol} ${settings.cooldownAfterDealStartOption}`,
+              )
+              this.resetPending(this.botId, symbol)
+              if (settings.startCondition === StartConditionEnum.asap) {
+                this.openNewDealTimer.set(
+                  symbol,
+                  setTimeout(
+                    () => this.openDealAfterTimer(),
+                    cooldownStart.last +
+                      cooldownStart.cooldown -
+                      +new Date() -
+                      1,
+                  ),
+                )
+              }
+              this.endMethod(_id)
+              if (cbIfNotOpened) {
+                cbIfNotOpened()
+              }
+              return
+            }
+            const cooldownStop = await this.checkCooldownStop(
+              this.botId,
+              symbol,
+            )
+            if (!cooldownStop.status) {
+              this.handleLog(
+                `Deal must wait because of cooldown stop check. Time: ${cooldownStop.time}, last closed: ${cooldownStop.last}, diff: ${cooldownStop.diff}, cooldown: ${cooldownStop.cooldown} ${symbol} ${settings.cooldownAfterDealStopOption}`,
+              )
+              if (settings.startCondition === StartConditionEnum.asap) {
+                this.openNewDealTimer.set(
+                  symbol,
+                  setTimeout(
+                    () => this.openDealAfterTimer(),
+                    cooldownStop.last + cooldownStop.cooldown - +new Date() - 1,
+                  ),
+                )
+              }
+              this.resetPending(this.botId, symbol)
+              this.endMethod(_id)
+              if (cbIfNotOpened) {
+                cbIfNotOpened()
+              }
+              return
+            }
+          }
+          let fixSl = 0
+          let fixTp = 0
+          let fixSize = 0
+          if (
+            this.data?.settings?.useRiskReward &&
+            this.data.settings.type !== DCATypeEnum.terminal
+          ) {
+            const riskReward = await this.checkRiskRewardCondition(
+              symbol,
+              await this.getLatestPrice(symbol),
+            )
+            if (!riskReward) {
+              this.resetPending(this.botId, symbol)
+              this.endMethod(_id)
+              if (cbIfNotOpened) {
+                cbIfNotOpened()
+              }
+              return
+            }
+            fixSl = riskReward.sl
+            fixTp = riskReward.tp ?? 0
+            fixSize = riskReward.size
+          }
+          let dynamicAr: DynamicArPrices[] = []
+          if (this.scaleAr || this.tpAr || this.slAr) {
+            const dynamic = this.getDynamicLevels(symbol)
+            this.handleLog(
+              `Dynamic levels for ${symbol}: ${dynamic.length}, ${dynamic
+                .map((d) => `${d.id}: ${d.value}`)
+                .join(', ')}`,
+            )
+            if (!dynamic.length) {
+              this.resetPending(this.botId, symbol)
+              this.endMethod(_id)
+              if (cbIfNotOpened) {
+                cbIfNotOpened()
+              }
+              return
+            }
+            dynamicAr = dynamic
+          }
+          let sizes: Sizes | undefined | null
+          if (this.useCompountReduce) {
+            sizes = await this.calculateCompoundReduce(symbol)
+          }
+          this.updateDealLastTime(this.botId, 'opened', +new Date(), symbol)
+          await this.placeBaseOrder(
+            this.botId,
+            symbol,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            fixSl,
+            fixTp,
+            fixSize,
+            dynamicAr,
+            sizes,
+          )
+        } else {
+          const asset = this.futures
+            ? this.coinm
+              ? ed.baseAsset.name
+              : ed.quoteAsset.name
+            : settings.terminalDealType === TerminalDealTypeEnum.import
+              ? this.isLong
+                ? ed.baseAsset.name
+                : ed.quoteAsset.name
+              : this.isLong
+                ? ed.quoteAsset.name
+                : ed.baseAsset.name
+          const msg = `Not enough balance to start new deal required: ${
+            checkBalance.required
+          } ${asset}, available: ${checkBalance.available} ${asset}${
+            checkBalance.price
+              ? `, price: ${checkBalance.price} ${ed.quoteAsset.name}`
+              : ''
+          }`
+          this.handleErrors(msg, 'openNewDeal', '', false, true)
+          this.resetPending(this.botId, symbol)
+          if (cbIfNotOpened) {
+            cbIfNotOpened()
+          }
+          if (settings.type === DCATypeEnum.terminal) {
+            this.stop()
+          }
+        }
+      } else {
+        if (cbIfNotOpened) {
+          cbIfNotOpened()
+        }
+        this.resetPending(this.botId, symbol)
+      }
+    } else {
+      if (cbIfNotOpened) {
+        cbIfNotOpened()
+      }
+    }
+    this.endMethod(_id)
+  }
+
+  async convertSymbol(symbol?: string, checkOpen?: boolean) {
+    if (symbol) {
+      const [base, quote] = symbol.split('_')
+      if (!base || !quote) {
+        return this.handleErrors(
+          `Symbol ${symbol} format is incorrect`,
+          'openDealBySignal',
+          '',
+          false,
+        )
+      }
+      let symbolToUse = ''
+      for (const p of this.pairs) {
+        const val = await this.getExchangeInfo(p)
+        if (!val) {
+          continue
+        }
+        if (val.baseAsset.name === base && val.quoteAsset.name === quote) {
+          symbolToUse = val.pair
+          break
+        }
+      }
+      if (!symbolToUse && checkOpen) {
+        for (const val of this.getOpenDeals()) {
+          if (
+            val.deal.symbol.baseAsset === base &&
+            val.deal.symbol.quoteAsset === quote
+          ) {
+            symbolToUse = val.deal.symbol.symbol
+            break
+          }
+        }
+      }
+      if (symbolToUse === '' || !symbolToUse) {
+        return this.handleErrors(
+          `Symbol ${symbol} doesn't exist in bot settings`,
+          'openDealBySignal',
+          '',
+          false,
+        )
+      }
+      return symbolToUse
+    }
+  }
+  /**
+   * Open deal by signal if settings are specified
+   */
+
+  @IdMute(mutexOpenDealBySignal, (botId: string) => `${botId}openDealBySignal`)
+  public async openDealBySignal(
+    _botId: string,
+    _symbol?: string,
+    ignoreSettings = false,
+  ) {
+    this.handleLog('Open new deal by signal')
+    if (!this.loadingComplete) {
+      this.runAfterLoadingQueue.push(() =>
+        this.openDealBySignal.bind(this)(_botId, _symbol, ignoreSettings),
+      )
+      return this.handleLog('Loading not complete yet')
+    }
+    const settings = await this.getAggregatedSettings()
+    let pairsToUse = await this.getSymbolsToOpenAsapDeals(false, true)
+    if (_symbol) {
+      const symbolToUse = await this.convertSymbol(_symbol)
+      if (!symbolToUse) {
+        return this.handleLog(`Signal for ${_symbol} cannot be passed`)
+      }
+      if (!settings.pair?.includes(symbolToUse)) {
+        return this.handleErrors(
+          `Received signal for ${symbolToUse} but the pair is not in settings`,
+          'openDealBySignal',
+          '',
+          false,
+        )
+      }
+      if (symbolToUse && !pairsToUse.includes(symbolToUse)) {
+        return this.handleErrors(
+          `Received signal for ${symbolToUse} but didn't pass the volume filter`,
+          'openDealBySignal',
+          '',
+          false,
+        )
+      }
+      if (symbolToUse) {
+        pairsToUse = [symbolToUse]
+        this.handleLog(`Received signal for ${symbolToUse}`)
+      }
+    }
+    if (
+      settings.startCondition === StartConditionEnum.tradingviewSignals ||
+      ignoreSettings
+    ) {
+      for (const symbol of pairsToUse) {
+        await this.openNewDeal(this.botId, symbol)
+      }
+    } else {
+      this.handleLog(
+        `Only ${StartConditionEnum.tradingviewSignals} start condition can start deal by signals`,
+      )
+    }
+  }
+  /**
+   * Close deal by signal if settings are specified
+   */
+
+  public async closeDealBySignal(
+    _symbol?: string,
+    ignoreSettings = false,
+    sl = false,
+  ) {
+    this.handleLog(`Close by signal${_symbol ? ` symbol:${_symbol}` : ''}`)
+
+    let settings = await this.getAggregatedSettings()
+    if (this.data?.settings.type === DCATypeEnum.terminal) {
+      const deal = this.getOpenDeals(true)?.[0]
+      settings = await this.getAggregatedSettings(deal?.deal)
+    }
+    if (
+      (settings.useTp &&
+        settings.dealCloseCondition === CloseConditionEnum.webhook) ||
+      (settings.useSl &&
+        settings.dealCloseConditionSL === CloseConditionEnum.webhook) ||
+      ignoreSettings
+    ) {
+      const symbol = await this.convertSymbol(_symbol, true)
+      if (_symbol && !symbol) {
+        return this.handleLog(`Signal for ${symbol} cannot be passed`)
+      }
+      this.closeAllDeals(
+        ignoreSettings
+          ? CloseDCATypeEnum.closeByMarket
+          : settings.dealCloseCondition === CloseConditionEnum.webhook
+            ? settings.closeDealType
+            : settings.dealCloseConditionSL === CloseConditionEnum.webhook
+              ? CloseDCATypeEnum.closeByMarket
+              : undefined,
+        symbol ?? undefined,
+        true,
+        true,
+        ignoreSettings,
+        sl,
+        undefined,
+        DCACloseTriggerEnum.webhook,
+      )
+    }
+  }
+  /**
+   * Check new order in array of placed/pending orders
+   *
+   * @param {Grid} n order to find
+   * @param {TypeOrderEnum} type order type
+   * @param {string} dealId Id of the deal
+   * @returns {boolean} Indicates order exist or not
+   */
+
+  isOrderExistInDeal(n: Grid, type: TypeOrderEnum, dealId: string): boolean {
+    if (this.orders && this.orders.size > 0) {
+      const newOrder = Boolean(
+        this.getOrdersByStatusAndDealId({
+          defaultStatuses: true,
+          dealId,
+        }).find(
+          (o) =>
+            parseFloat(o.origPrice) === n.price &&
+            o.side === n.side &&
+            parseFloat(o.origQty) === n.qty &&
+            o.typeOrder === type,
+        ),
+      )
+      if (!newOrder) {
+        const filled = this.getOrdersByStatusAndDealId({
+          dealId,
+          status: 'FILLED',
+        }).find(
+          (o) =>
+            this.ordersInBetweenUpdates.has(o.clientOrderId) &&
+            parseFloat(o.origPrice) === n.price &&
+            o.side === n.side &&
+            parseFloat(o.origQty) === n.qty &&
+            o.typeOrder === type,
+        )
+        if (filled) {
+          this.handleLog(
+            `Order, qty: ${n.qty}, price: ${n.price}, side: ${n.side}, type: ${type} doesn't exists in new, but already filled and not processed yet ${filled.clientOrderId}, skip place new order`,
+          )
+        }
+        return !!filled
+      }
+      return newOrder
+    }
+    return false
+  }
+  /**
+   * Place orders queue
+   *
+   * @param {string} dealId Id of the deal
+   * @param {{new: Grid[], cancel: Grid[]}} orders Orders to cancel and place
+   */
+  @IdMute(
+    mutex,
+    (botId: string, _symbol: string, dealId: string) => `${botId}${dealId}`,
+  )
+  async placeOrders(
+    _botId: string,
+    symbol: string,
+    dealId: string,
+    orders: { new: Grid[]; cancel: Grid[] },
+  ): Promise<void | Order> {
+    const _id = this.startMethod('placeOrders')
+    const ed = await this.getExchangeInfo(symbol)
+    if (!ed) {
+      this.handleLog(`Exchange info not found for ${symbol}`)
+      this.endMethod(_id)
+      return
+    }
+    if (this.allowToPlaceOrders.get(dealId) === false) {
+      this.handleLog(`Deal ${dealId} is not allowed to place orders`)
+      this.endMethod(_id)
+      return
+    }
+    const deal = this.getDeal(dealId)
+    if (deal?.closeBySl) {
+      this.endMethod(_id)
+      return this.handleLog(`Deal ${dealId} closing by SL. Skip place orders`)
+    }
+    const settings = await this.getAggregatedSettings(deal?.deal)
+    if (this.data?.status === BotStatusEnum.error) {
+      this.restoreFromRangeOrError()
+    }
+    if (this.exchange && this.data) {
+      /**
+       * Cancel all unnecessery orders, remove them from orders property
+       */
+      for (const order of orders.cancel.sort((a) =>
+        a.type === TypeOrderEnum.dealTP ? -1 : 1,
+      )) {
+        const o = await this.cancelGridOnExchange(
+          order,
+          order.type === TypeOrderEnum.dealTP,
+          false,
+        )
+        if (
+          o?.status === 'FILLED' ||
+          (o?.status === 'PARTIALLY_FILLED' &&
+            o.typeOrder === TypeOrderEnum.dealTP)
+        ) {
+          await this.handleUnknownOrder(o)
+          if (!o.tpSlTarget && this.botType !== BotType.combo) {
+            this.endMethod(_id)
+            return o
+          }
+        }
+      }
+      if (
+        [
+          ExchangeEnum.kucoin,
+          ExchangeEnum.okx,
+          ExchangeEnum.okxInverse,
+          ExchangeEnum.okxLinear,
+        ].includes(this.data.exchange)
+      ) {
+        await utils.sleep(300)
+      }
+      /**
+       * Add new orders, add them to orders property
+       */
+      for (const order of [...orders.new]
+        .sort(
+          (a, b) =>
+            Math.abs(a.price - (deal?.deal?.lastPrice ?? 0)) -
+            Math.abs(b.price - (deal?.deal?.lastPrice ?? 0)),
+        )
+        .sort((a, b) =>
+          a.type === TypeOrderEnum.dealTP
+            ? 1
+            : b.type === TypeOrderEnum.dealTP
+              ? -1
+              : 0,
+        )) {
+        if (this.stopList.has(order.newClientOrderId)) {
+          this.handleLog(
+            `Order in stop list ${order.newClientOrderId}, side - ${order.side}, price - ${order.price}, qty - ${order.qty}`,
+          )
+          this.stopList.delete(order.newClientOrderId)
+          continue
+        }
+        if (
+          deal?.deal.action === ActionsEnum.useOppositeBalance &&
+          order.type === TypeOrderEnum.dealRegular
+        ) {
+          continue
+        }
+        if (order.minigridId) {
+          this.pendingOrdersList.set(
+            order.minigridId,
+            (this.pendingOrdersList.get(order.minigridId) ?? []).filter(
+              (o) => o.newClientOrderId !== order.newClientOrderId,
+            ),
+          )
+        }
+        const get = this.getOrderFromMap(order.newClientOrderId)
+        if (get && get.status !== 'CANCELED') {
+          this.handleLog(`Order duplicate: ${order.newClientOrderId}`)
+          continue
+        }
+        if (!this.isOrderExistInDeal(order, order.type, dealId)) {
+          if (order.type === TypeOrderEnum.dealTP) {
+            const tp = this.getOrdersByStatusAndDealId({
+              dealId,
+              status: 'NEW',
+            }).filter((o) => o.typeOrder === TypeOrderEnum.dealTP)
+            if (
+              tp &&
+              tp.length > 0 &&
+              parseFloat(tp[0].origQty) < order.qty &&
+              !settings.useMultiTp
+            ) {
+              this.handleLog(
+                `Deal already has a TP order with lower qty. Wait until cancel the order ${tp[0].clientOrderId}`,
+              )
+              const result = await this.cancelOrderOnExchange(tp[0])
+              if (result && result.status === 'FILLED') {
+                this.handleUnknownOrder(result)
+                this.endMethod(_id)
+                return
+              }
+            }
+            if (
+              tp &&
+              tp.length > 0 &&
+              parseFloat(tp[0].origQty) > order.qty &&
+              !settings.useMultiTp
+            ) {
+              this.handleLog('Deal already has a TP order with higher qty')
+              continue
+            }
+          }
+          const result = await this.sendGridToExchange(
+            order,
+            {
+              dealId,
+              type: order.market ? 'MARKET' : 'LIMIT',
+              reduceOnly: this.futures
+                ? (this.isLong && order.side === OrderSideEnum.sell) ||
+                  (!this.isLong && order.side === OrderSideEnum.buy)
+                : undefined,
+              positionSide: this.hedge
+                ? this.isLong
+                  ? PositionSide.LONG
+                  : PositionSide.SHORT
+                : PositionSide.BOTH,
+            },
+            ed,
+          )
+          if (result && result.status === 'FILLED') {
+            this.processFilledOrder(result)
+          }
+        } else {
+          this.handleLog(
+            `Order already exist qty: ${order.qty}, price: ${order.price}, side: ${order.side}, type: ${order.type}`,
+          )
+        }
+      }
+
+      const dealAfter = this.getDeal(dealId)
+      const tpAfter = this.getOrdersByStatusAndDealId({
+        dealId,
+        status: 'FILLED',
+      }).find((o) => o.typeOrder === TypeOrderEnum.dealTP && !o.reduceFundsId)
+      if (
+        ((dealAfter && dealAfter.deal.status === DCADealStatusEnum.closed) ||
+          (tpAfter && !settings.useMultiTp && !settings.useMultiSl)) &&
+        !(
+          this.data.settings.type === DCATypeEnum.terminal &&
+          this.data.settings.terminalDealType === TerminalDealTypeEnum.simple
+        )
+      ) {
+        const toCancel = this.getOrdersByStatusAndDealId({
+          dealId,
+          defaultStatuses: true,
+        }).filter((o) =>
+          [TypeOrderEnum.dealRegular, TypeOrderEnum.dealGrid].includes(
+            o.typeOrder,
+          ),
+        )
+        this.handleLog(
+          `Deal ${dealId} was closed during place orders. Cancel orders: ${toCancel.length}`,
+        )
+        for (const order of toCancel) {
+          await this.cancelOrderOnExchange(order, false)
+        }
+      }
+    }
+    this.endMethod(_id)
+  }
+  /**
+   * Find base order for deal
+   */
+
+  findBaseOrderByDeal(dealId: string) {
+    const safeDealId = `${dealId}`
+    const findDeal = this.getDeal(safeDealId)
+    if (findDeal && findDeal.deal.parent) {
+      const dealOrders = this.getOrdersByStatusAndDealId({
+        dealId: safeDealId,
+        status: 'FILLED',
+      }).filter((o) => o.typeOrder === TypeOrderEnum.dealStart)
+      if (dealOrders && dealOrders.length > 0) {
+        return {
+          ...dealOrders[0],
+          executedQty: `${dealOrders.reduce(
+            (acc, v) => (acc += +v.executedQty),
+            0,
+          )}`,
+          origQty: `${dealOrders.reduce((acc, v) => (acc += +v.origQty), 0)}`,
+          price: `${findDeal.deal.initialPrice}`,
+        }
+      }
+    }
+    const bo = this.getOrdersByStatusAndDealId({
+      dealId: safeDealId,
+      status: ['CANCELED', 'FILLED'],
+    })
+      .filter(
+        (o) =>
+          o.typeOrder === TypeOrderEnum.dealStart &&
+          (o.status === 'FILLED' || +o.executedQty > 0),
+      )
+      .sort((a, b) => a.updateTime - b.updateTime)
+    if (bo?.length && findDeal) {
+      return {
+        ...bo[0],
+        executedQty: `${bo.reduce((acc, v) => (acc += +v.executedQty), 0)}`,
+        origQty: `${bo.reduce((acc, v) => (acc += +v.origQty), 0)}`,
+        price: `${findDeal.deal.initialPrice}`,
+      }
+    }
+  }
+  /**
+   * Get TP order
+   */
+
+  async getTPOrder(
+    _symbol: string,
+    _price: number,
+    _initialOrders: Grid[],
+    avgPrice: number,
+    boPrice: number,
+    dealId: string,
+    deal?: ExcludeDoc<Deal>,
+    aggregate = false,
+    sl = false,
+    price?: number,
+  ) {
+    if (this.data) {
+      const ed = await this.getExchangeInfo(_symbol)
+      if (!ed) {
+        return
+      }
+      const settings = await this.getAggregatedSettings(deal)
+      const { orderSizeType } = settings
+      let fee = await this.getUserFee(_symbol)
+      if (!fee) {
+        return
+      }
+      if (this.futures) {
+        fee = {
+          maker: 0,
+          taker: 0,
+        }
+      }
+      const kucoinSpot = this.kucoinSpot && this.isLong
+      const tpPerc = +(settings.tpPerc ?? '0') / 100
+      const slPerc = +(settings.slPerc ?? '0') / 100
+      const symbol = ed
+      const baseOrderSize = +(settings.baseOrderSize ?? '0')
+      const precision = await this.baseAssetPrecision(_symbol)
+      const orders = this.getOrdersByStatusAndDealId({
+        status: 'FILLED',
+        dealId,
+      })
+      const filledOrders = [
+        ...orders.filter((o) => o.typeOrder === TypeOrderEnum.dealRegular),
+      ]
+      const filledCloseOrders = [
+        ...orders.filter((o) => o.typeOrder === TypeOrderEnum.dealTP),
+      ]
+      const findDeal = this.getDeal(dealId)
+      const pendingReduceFunds = findDeal
+        ? this.getPendingReduceFunds(findDeal)
+        : { base: 0, quote: 0 }
+      const reduceFundsBase = (
+        findDeal?.deal.reduceFunds ??
+        ([] as unknown as NonNullable<Deal['reduceFunds']>)
+      ).reduce((acc, v) => acc + v.qty, 0)
+      const long = this.isLong
+      const bo = this.findBaseOrderByDeal(dealId)
+      let boQty =
+        parseFloat(bo?.executedQty || '0') ||
+        parseFloat(bo?.origQty || '0') ||
+        (orderSizeType === OrderSizeTypeEnum.quote
+          ? (baseOrderSize * (this.coinm ? symbol.quoteAsset.minAmount : 1)) /
+            boPrice
+          : baseOrderSize)
+      boQty = this.math.round(boQty, precision, !this.futures)
+      let qty =
+        (filledOrders.reduce((acc, v) => acc + +v.executedQty, 0) + boQty) *
+          (this.futures ? 1 : 1 - fee.taker) -
+        (deal?.tpHistory ?? ([] as unknown as NonNullable<Deal['tpHistory']>))
+          .filter(
+            (dh) =>
+              !filledCloseOrders
+                .map((fco) => fco.clientOrderId)
+                .includes(dh.id),
+          )
+          .reduce((acc, d) => acc + d.qty, 0) -
+        filledCloseOrders.reduce((acc, v) => acc + +v.executedQty, 0) -
+        pendingReduceFunds.base -
+        reduceFundsBase
+      let origQty = qty
+      const sellDisplacement = fee.maker * 2
+      const priceDisplacement = this.futures
+        ? 1 +
+          ((await this.getUserFee(_symbol))?.maker ?? 0) * 2 * (long ? 1 : -1)
+        : 1 + (long ? 1 : -1) * sellDisplacement
+      let tpPrice = this.math.round(
+        settings.useFixedTPPrices && settings.fixedTpPrice
+          ? +settings.fixedTpPrice
+          : (price ??
+              avgPrice *
+                (1 + (long ? 1 : -1) * (sl ? slPerc : tpPerc)) *
+                (settings.useFixedTPPrices ? 1 : priceDisplacement)),
+        symbol.priceAssetPrecision,
+      )
+      if (tpPrice === avgPrice) {
+        tpPrice = this.math.round(
+          avgPrice +
+            (this.isLong ? 1 : -1) *
+              Number(`${1}e-${symbol.priceAssetPrecision}`),
+          symbol.priceAssetPrecision,
+        )
+      }
+      tpPrice = this.math.round(tpPrice, ed.priceAssetPrecision)
+      if (this.combo) {
+        if (findDeal) {
+          this.updateDealBalances(findDeal)
+        }
+        const _deal = this.getDeal(dealId)?.deal || deal
+        qty =
+          (this.isLong
+            ? (await this.profitBase(_deal))
+              ? Math.min(
+                  _deal?.currentBalances.base ?? qty,
+                  ((_deal?.initialBalances.quote ?? qty) -
+                    (_deal?.currentBalances.quote ?? qty)) /
+                    ((_price || _deal?.avgPrice) ?? 1),
+                )
+              : (_deal?.currentBalances.base ?? qty)
+            : (await this.profitBase(_deal))
+              ? (_deal?.currentBalances.quote ?? qty) /
+                ((_price || _deal?.avgPrice) ?? 1)
+              : (_deal?.initialBalances.base ?? 0) -
+                (_deal?.currentBalances.base ?? 0)) +
+          (this.isLong
+            ? Math.max(
+                0,
+                this.kucoinSpot &&
+                  this.data?.flags?.includes(BotFlags.kucoinNewFee) &&
+                  _deal
+                  ? (_deal?.feeBalance ?? 0) / _deal.initialPrice
+                  : (_deal?.feeBalance ?? 0),
+              )
+            : 0)
+        origQty = qty
+        const filled = this.getOrdersByStatusAndDealId({
+          status: ['FILLED', 'CANCELED', 'PARTIALLY_FILLED'],
+          dealId,
+        }).filter(
+          (o) =>
+            o.side === (this.isLong ? 'BUY' : 'SELL') &&
+            (this.data?.exchange === ExchangeEnum.bybit
+              ? +o.executedQty !== 0
+              : o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED'),
+        )
+        const f = filled.reduce(
+          (acc, v) => acc + +v.executedQty * (fee?.taker ?? 0),
+          0,
+        )
+        qty -= f
+        if (qty < symbol.baseAsset.minAmount && !this.futures) {
+          this.handleLog(
+            `Order amount less than base min amount. ${qty} qty, ${symbol.baseAsset.minAmount} base min`,
+          )
+          return []
+        }
+        if (qty * tpPrice < symbol.quoteAsset.minAmount && !this.futures) {
+          this.handleLog(
+            `Order amount less than quote min amount. ${qty * tpPrice} qty, ${
+              symbol.quoteAsset.minAmount
+            } quote min`,
+          )
+          return []
+        }
+      }
+      const tpOrder: Grid = {
+        qty: this.math.round(
+          qty,
+          precision,
+          this.futures || kucoinSpot || (this.zeroFee && !this.combo)
+            ? false
+            : true,
+        ),
+        price: tpPrice,
+        side: this.isLong ? OrderSideEnum.sell : OrderSideEnum.buy,
+        newClientOrderId: this.getOrderId(`D-TP`),
+        number: 0,
+        type: TypeOrderEnum.dealTP,
+        dealId,
+      }
+      if (
+        this.tpAr &&
+        !sl &&
+        settings.dealCloseCondition === CloseConditionEnum.dynamicAr &&
+        settings.useTp &&
+        deal
+      ) {
+        const indicator = this.data.settings.indicators.find(
+          (ind) =>
+            ind.indicatorAction === IndicatorAction.closeDeal &&
+            ind.section !== IndicatorSection.sl,
+        )
+        if (indicator) {
+          let value = (deal.dynamicAr ?? []).find(
+            (d) => d.id === indicator.uuid,
+          )?.value
+          if (value && !isNaN(value) && isFinite(value)) {
+            value *= +(indicator.dynamicArFactor || '1')
+            tpOrder.price = this.math.round(
+              avgPrice + value * (this.isLong ? 1 : -1),
+              symbol?.priceAssetPrecision ?? 8,
+            )
+          }
+        }
+      }
+      if (
+        this.slAr &&
+        sl &&
+        settings.dealCloseConditionSL === CloseConditionEnum.dynamicAr &&
+        settings.useSl &&
+        deal
+      ) {
+        const indicator = this.data.settings.indicators.find(
+          (ind) =>
+            ind.indicatorAction === IndicatorAction.closeDeal &&
+            ind.section === IndicatorSection.sl,
+        )
+        if (indicator) {
+          let value = (deal.dynamicAr ?? []).find(
+            (d) => d.id === indicator.uuid,
+          )?.value
+          if (value && !isNaN(value) && isFinite(value)) {
+            value *= +(indicator.dynamicArFactor || '1')
+            tpOrder.price = this.math.round(
+              avgPrice + value * (this.isLong ? -1 : 1),
+              symbol?.priceAssetPrecision ?? 8,
+            )
+          }
+        }
+      }
+      let qtyBase = tpOrder.qty
+      if ((await this.profitBase(deal)) && this.botType !== BotType.combo) {
+        let qtyNew = this.math.round(
+          ((origQty * avgPrice) / tpOrder.price) * (1 - fee.maker),
+          precision,
+          !this.futures,
+        )
+        qtyBase = qtyNew
+        if (
+          !this.isLong &&
+          !this.futures &&
+          deal &&
+          settings.useMultiTp &&
+          !aggregate
+        ) {
+          const nqtyNew = Math.min(
+            qtyNew,
+            this.math.round(
+              (deal?.currentBalances.quote ?? 0) / avgPrice,
+              precision,
+              !this.futures,
+            ),
+          )
+          if (!isNaN(nqtyNew) && isFinite(nqtyNew) && nqtyNew > 0) {
+            qtyNew = nqtyNew
+          }
+        }
+        if (this.coinm && !this.isBitget) {
+          const contracts = Math.max(
+            1,
+            this.math.round(
+              (filledOrders.reduce(
+                (acc, v) => acc + +v.executedQty * +v.price,
+                0,
+              ) +
+                boQty * +(bo?.price ?? 0) -
+                (
+                  deal?.tpHistory ??
+                  ([] as unknown as NonNullable<Deal['tpHistory']>)
+                )
+                  .filter(
+                    (dh) =>
+                      !filledCloseOrders
+                        .map((fco) => fco.clientOrderId)
+                        .includes(dh.id),
+                  )
+                  .reduce((acc, d) => acc + d.qty * d.price, 0) -
+                filledCloseOrders.reduce(
+                  (acc, v) => acc + +v.executedQty * +v.origQty,
+                  0,
+                ) -
+                pendingReduceFunds.base * pendingReduceFunds.quote -
+                (
+                  findDeal?.deal.reduceFunds ??
+                  ([] as unknown as NonNullable<Deal['reduceFunds']>)
+                ).reduce((acc, v) => acc + v.qty * v.price, 0)) /
+                (ed?.quoteAsset.minAmount ?? 1),
+              0,
+            ),
+          )
+          if (!isNaN(contracts) && isFinite(contracts)) {
+            const cqtyNew = this.math.round(
+              (contracts * (ed?.quoteAsset.minAmount ?? 1)) / tpOrder.price,
+              precision,
+              true,
+            )
+            if (cqtyNew > 0 && !isNaN(cqtyNew) && isFinite(cqtyNew)) {
+              qtyNew = cqtyNew
+            }
+          }
+        }
+        tpOrder.qty = this.coinm
+          ? qtyNew
+          : this.isLong
+            ? Math.min(tpOrder.qty, qtyNew)
+            : sl
+              ? Math.min(tpOrder.qty, qtyNew)
+              : Math.max(tpOrder.qty, qtyNew)
+      }
+      if (tpOrder.qty < symbol.baseAsset.minAmount && !this.futures) {
+        tpOrder.qty = symbol.baseAsset.minAmount
+      }
+      if (
+        tpOrder.price * tpOrder.qty < symbol.quoteAsset.minAmount &&
+        !this.futures &&
+        !settings.useFixedTPPrices
+      ) {
+        if (this.isLong) {
+          tpOrder.price = this.math.round(
+            symbol.quoteAsset.minAmount / tpOrder.qty,
+            symbol.priceAssetPrecision,
+            false,
+            true,
+          )
+        } else {
+          tpOrder.qty = this.math.round(
+            symbol.quoteAsset.minAmount / tpOrder.price,
+            precision,
+            false,
+            true,
+          )
+        }
+      }
+      try {
+        const mod = +new Big(tpOrder.qty).mod(symbol.baseAsset.step).toFixed(20)
+        if (mod !== 0) {
+          tpOrder.qty = this.math.round(
+            tpOrder.qty - mod + symbol.baseAsset.step,
+            precision,
+            true,
+          )
+        }
+      } catch (e) {
+        this.handleErrors(
+          `Big number error ${(e as Error).message || e}`,
+          'getTPOrder',
+          '',
+          false,
+          false,
+          false,
+        )
+      }
+      this.handleLog(
+        `TP order. Base order size: ${boQty}, qty: ${tpOrder.qty}, origQty: ${origQty}, qtyBase: ${qtyBase}, price: ${tpOrder.price}`,
+      )
+      let tpOrders = [tpOrder]
+      if (aggregate) {
+        return tpOrders
+      }
+      if (!sl && settings.useMultiTp) {
+        let restQty = tpOrder.qty
+        let end = false
+        tpOrders = []
+        const usedTp = (settings.multiTp ?? [])
+          .filter((mtp) =>
+            ((deal?.tpSlTargetFilled ?? []) as string[]).includes(mtp.uuid),
+          )
+          .reduce((acc, tp) => acc + +tp.amount, 0)
+        ;(settings.multiTp ?? [])
+          .filter(
+            (tp) =>
+              !((deal?.tpSlTargetFilled ?? []) as string[]).includes(tp.uuid),
+          )
+          .sort((a, b) => +a.target - +b.target)
+          .map((tp) => {
+            if (end || deal?.tpSlTargetFilled?.includes(tp.uuid)) {
+              return null
+            }
+            let price = this.math.round(
+              tp.fixed && settings.useFixedTPPrices
+                ? +tp.fixed
+                : avgPrice *
+                    (1 + (long ? 1 : -1) * (+tp.target / 100)) *
+                    (settings.useFixedTPPrices ? 1 : priceDisplacement),
+              symbol.priceAssetPrecision,
+            )
+            if (price === avgPrice) {
+              price = this.math.round(
+                avgPrice +
+                  (this.isLong ? 1 : -1) *
+                    Number(`${1}e-${symbol.priceAssetPrecision}`),
+                symbol.priceAssetPrecision,
+              )
+            }
+            price = this.math.round(price, ed.priceAssetPrecision)
+
+            let qty = this.math.round(
+              tpOrder.qty * (+tp.amount / (100 - usedTp)),
+              precision,
+              true,
+            )
+            if (qty > restQty) {
+              qty = this.math.round(restQty, precision, true)
+            }
+            if (qty < symbol.baseAsset.minAmount) {
+              qty = this.math.round(symbol.baseAsset.minAmount, precision, true)
+            }
+            if (
+              price * qty < symbol.quoteAsset.minAmount &&
+              !this.futures &&
+              !settings.useFixedTPPrices
+            ) {
+              const newQty = this.math.round(
+                symbol.quoteAsset.minAmount / price,
+                precision,
+                true,
+              )
+              const quote = newQty * price
+              if (qty === newQty || quote < symbol.quoteAsset.minAmount) {
+                price = this.math.round(
+                  symbol.quoteAsset.minAmount / qty,
+                  symbol.priceAssetPrecision,
+                  false,
+                  true,
+                )
+                if (quote < symbol.quoteAsset.minAmount) {
+                  qty = newQty
+                }
+              } else {
+                qty = newQty
+              }
+            }
+            try {
+              const modQty = +new Big(qty)
+                .mod(symbol.baseAsset.step)
+                .toFixed(20)
+              if (modQty !== 0) {
+                qty = this.math.round(
+                  qty - modQty + symbol.baseAsset.step,
+                  precision,
+                  true,
+                )
+              }
+            } catch (e) {
+              this.handleErrors(
+                `Big number error ${(e as Error).message || e}`,
+                'getTPOrder',
+                'multi tp',
+                false,
+                false,
+                false,
+              )
+            }
+            restQty -= qty
+            if (
+              restQty < symbol.baseAsset.minAmount ||
+              restQty * price < symbol.quoteAsset.minAmount ||
+              restQty < 0
+            ) {
+              end = true
+              qty =
+                restQty > 0 && restQty > symbol.baseAsset.step
+                  ? this.math.round(qty + restQty, precision, true)
+                  : qty
+            }
+            return {
+              ...tpOrder,
+              qty,
+              price,
+              newClientOrderId: this.getOrderId(`D-MTP`),
+              tpSlTarget: tp.uuid,
+            }
+          })
+          .forEach((o) => {
+            if (o) {
+              tpOrders.push(o)
+            }
+          })
+      }
+      if (
+        sl &&
+        settings.useMultiSl &&
+        settings.dealCloseConditionSL === CloseConditionEnum.tp
+      ) {
+        let restQty = tpOrder.qty
+        let end = false
+        tpOrders = []
+        const usedSl = (settings.multiSl ?? [])
+          .filter((mtp) =>
+            ((deal?.tpSlTargetFilled ?? []) as string[]).includes(mtp.uuid),
+          )
+          .reduce((acc, tp) => acc + +tp.amount, 0)
+        ;(settings.multiSl ?? [])
+          .filter(
+            (tp) =>
+              !((deal?.tpSlTargetFilled ?? []) as string[]).includes(tp.uuid),
+          )
+          .sort((a, b) => +b.target - +a.target)
+          .map((tp) => {
+            if (end || deal?.tpSlTargetFilled?.includes(tp.uuid)) {
+              return null
+            }
+            let price = this.math.round(
+              tp.fixed && settings.useFixedSLPrices
+                ? +tp.fixed
+                : avgPrice *
+                    (1 + (long ? 1 : -1) * (+tp.target / 100)) *
+                    (settings.useFixedSLPrices ? 1 : priceDisplacement),
+              symbol.priceAssetPrecision,
+            )
+            if (price === avgPrice) {
+              price = this.math.round(
+                avgPrice +
+                  (this.isLong ? 1 : -1) *
+                    Number(`${1}e-${symbol.priceAssetPrecision}`),
+                symbol.priceAssetPrecision,
+              )
+            }
+            price = this.math.round(price, ed.priceAssetPrecision)
+
+            let qty = this.math.round(
+              tpOrder.qty * (+tp.amount / (100 - usedSl)),
+              precision,
+              true,
+            )
+            if (qty > restQty) {
+              qty = this.math.round(restQty, precision, true)
+            }
+            if (qty < symbol.baseAsset.minAmount) {
+              qty = this.math.round(symbol.baseAsset.minAmount, precision, true)
+            }
+            if (
+              price * qty < symbol.quoteAsset.minAmount &&
+              !this.futures &&
+              !settings.useFixedSLPrices
+            ) {
+              const newQty = this.math.round(
+                symbol.quoteAsset.minAmount / price,
+                precision,
+                true,
+              )
+              const quote = newQty * price
+              if (qty === newQty || quote < symbol.quoteAsset.minAmount) {
+                price = this.math.round(
+                  symbol.quoteAsset.minAmount / qty,
+                  symbol.priceAssetPrecision,
+                  false,
+                  true,
+                )
+                if (quote < symbol.quoteAsset.minAmount) {
+                  qty = newQty
+                }
+              } else {
+                qty = newQty
+              }
+            }
+            try {
+              const modQty = +new Big(qty)
+                .mod(symbol.baseAsset.step)
+                .toFixed(20)
+              if (modQty !== 0) {
+                qty = this.math.round(
+                  qty - modQty + symbol.baseAsset.step,
+                  precision,
+                  true,
+                )
+              }
+            } catch (e) {
+              this.handleErrors(
+                `Big number error ${(e as Error).message || e}`,
+                'getTPOrder',
+                'multi sl',
+                false,
+                false,
+                false,
+              )
+            }
+            restQty -= qty
+            if (
+              restQty < symbol.baseAsset.minAmount ||
+              restQty * price < symbol.quoteAsset.minAmount ||
+              restQty < 0
+            ) {
+              end = true
+              qty =
+                restQty > 0 && restQty > symbol.baseAsset.step
+                  ? this.math.round(qty + restQty, precision, true)
+                  : qty
+            }
+
+            return {
+              ...tpOrder,
+              qty,
+              price,
+              newClientOrderId: this.getOrderId(`D-MSL`),
+              tpSlTarget: tp.uuid,
+              sl,
+            }
+          })
+          .forEach((o) => {
+            if (o) {
+              tpOrders.push(o)
+            }
+          })
+      }
+      return tpOrders
+    }
+  }
+  /** Get balance perc qty */
+
+  async getBalancePercQty(
+    orderSizeType: OrderSizeTypeEnum,
+    orderSize: number,
+    dealId: string,
+    symbol: string,
+  ) {
+    let balanceUseQty: number | undefined = 0
+    if (this.exchange) {
+      const long = this.isLong
+      const safeDealId = `${dealId}`
+      const d = this.getDeal(safeDealId)
+
+      balanceUseQty = d?.deal.balanceStart || 0
+      if (!balanceUseQty) {
+        const balances = await this.getBalancesFromExchange()
+        if (!balances || balances.status === StatusEnum.notok) {
+          this.handleErrors(
+            `Error getting user balances: ${balances?.reason}`,
+            'create intial orders',
+            'get balance for % qty',
+          )
+        }
+        if (balances && balances.status === StatusEnum.ok) {
+          const ed = await this.getExchangeInfo(symbol)
+          if (ed) {
+            const asset = this.futures
+              ? this.coinm
+                ? ed.baseAsset.name
+                : ed.quoteAsset.name
+              : ed[long ? 'quoteAsset' : 'baseAsset'].name
+            const findBalance = balances.data.find((b) => b.asset === asset)
+            if (!findBalance) {
+              this.handleErrors(`Balances not found`, 'create intial orders')
+            } else {
+              balanceUseQty =
+                orderSizeType === OrderSizeTypeEnum.percFree
+                  ? findBalance.free
+                  : findBalance.free + findBalance.locked
+            }
+          }
+        }
+      }
+      if (balanceUseQty) {
+        balanceUseQty = (balanceUseQty as number) * (orderSize / 100)
+        if (this.futures) {
+          ;(balanceUseQty as number) *= await this.getLeverageMultipler(d?.deal)
+        }
+        if (safeDealId !== '') {
+          const d = this.getDeal(safeDealId)
+          if (d) {
+            d.deal.settings.orderSizePercQty = balanceUseQty
+            this.saveDeal(d, {
+              'settings.orderSizePercQty': d.deal.settings.orderSizePercQty,
+            })
+          }
+        }
+      }
+    }
+    return balanceUseQty ?? 0
+  }
+  /** Getter for deal initial orders */
+
+  getDealInitialOrders(dealId: string) {
+    return this.getDeal(`${dealId}`)?.initialOrders ?? []
+  }
+  /** Aggregate breakpoint */
+
+  async aggregateBreakpoint(
+    breakpoint: { price: number; displacedPrice: number },
+    deal: ExcludeDoc<Deal>,
+  ) {
+    if (
+      (await this.getAggregatedSettings(deal)).dcaCondition ===
+      DCAConditionEnum.indicators
+    ) {
+      return deal.gridBreakpoints
+    }
+    const findBreakpoint = deal.gridBreakpoints?.find(
+      (db) => db.displacedPrice === breakpoint.price,
+    )
+    if (findBreakpoint) {
+      breakpoint.price = findBreakpoint.price
+    }
+    deal.gridBreakpoints = [
+      ...(deal.gridBreakpoints ?? []).filter(
+        (b) => b.price !== breakpoint.price,
+      ),
+      breakpoint,
+    ]
+    this.handleLog(
+      `Breakpoint created. Current price ${breakpoint.price}, next order price ${breakpoint.displacedPrice}.`,
+    )
+    return deal.gridBreakpoints
+  }
+  /**
+   * Create initial deal orders
+   *
+   * @param {number} price Price from which to start
+   * @param {string} dealId Id of the deal
+   * @returns {Grid[]} Orders calculated for initial price
+   */
+
+  async createInitialDealOrders(
+    _symbol: string,
+    price: number,
+    dealId: string,
+    deal?: ExcludeDoc<Deal>,
+    _price?: number,
+  ): Promise<Grid[]> {
+    this.handleLog('Generate initial deal orders')
+    const ed = await this.getExchangeInfo(_symbol)
+    if (this.data && ed) {
+      const settings = await this.getAggregatedSettings(deal)
+      const { orderSizeType } = settings
+      const symbol = ed
+      const _orderSize = +(settings.orderSize ?? '0')
+      const baseOrderSize = +(settings.baseOrderSize ?? '0')
+      const tpPerc = +(settings.tpPerc ?? '0') / 100
+      const precision = await this.baseAssetPrecision(_symbol)
+      const step = +(settings.step ?? '1') / 100
+      const stepScale = +(settings.stepScale ?? '1')
+      const minimumDeviation = +(settings.minimumDeviation ?? '0') / 100
+      const volumeScale = +(settings.volumeScale ?? '1')
+      const latestPrice = this.math.round(price, symbol.priceAssetPrecision)
+      const useDca = settings.useDca
+      const ordersSide = this.isLong ? OrderSideEnum.buy : OrderSideEnum.sell
+      const scaleAr = this.scaleAr && settings?.useDca
+      const bo = this.findBaseOrderByDeal(dealId)
+      let baseQty =
+        parseFloat(bo?.origQty || '0') ||
+        (orderSizeType === OrderSizeTypeEnum.quote
+          ? (baseOrderSize * (this.coinm ? ed.quoteAsset.minAmount : 1)) /
+            latestPrice
+          : baseOrderSize)
+      const baseQtyOrig = baseQty
+      baseQty = this.math.round(baseQty, precision, true)
+      let tpPrice = this.math.round(
+        latestPrice * (1 + (this.isLong ? 1 : -1) * tpPerc),
+        symbol.priceAssetPrecision,
+      )
+      if (tpPrice === latestPrice) {
+        tpPrice = this.math.round(
+          latestPrice +
+            (this.isLong ? 1 : -1) *
+              Number(`${1}e-${symbol.priceAssetPrecision}`),
+          symbol.priceAssetPrecision,
+        )
+      }
+      tpPrice = this.math.round(tpPrice, ed.priceAssetPrecision)
+      const tpOrder: Grid = {
+        qty: baseQty,
+        price: tpPrice,
+        side: this.isLong ? OrderSideEnum.sell : OrderSideEnum.buy,
+        newClientOrderId: this.getOrderId(`D-TP`),
+        number: 0,
+        type: TypeOrderEnum.dealTP,
+        dealId,
+      }
+      if (await this.profitBase(deal)) {
+        const qty = this.math.round(
+          (baseQtyOrig * latestPrice) / tpOrder.price,
+          precision,
+        )
+        tpOrder.qty = this.isLong
+          ? Math.min(tpOrder.qty, qty)
+          : Math.max(tpOrder.qty, qty)
+      }
+      if (tpOrder.qty < symbol.baseAsset.minAmount) {
+        tpOrder.qty = this.math.round(
+          symbol.baseAsset.minAmount,
+          precision,
+          false,
+          true,
+        )
+      }
+      if (
+        tpOrder.price * tpOrder.qty < symbol.quoteAsset.minAmount &&
+        !this.coinm
+      ) {
+        tpOrder.qty = this.math.round(
+          symbol.quoteAsset.minAmount / tpOrder.price,
+          precision,
+          false,
+          true,
+        )
+      }
+      try {
+        const mod = +new Big(tpOrder.qty).mod(symbol.baseAsset.step).toFixed(20)
+        if (mod !== 0) {
+          tpOrder.qty = this.math.round(
+            tpOrder.qty - mod + symbol.baseAsset.step,
+            precision,
+            false,
+            true,
+          )
+        }
+      } catch (e) {
+        this.handleErrors(
+          `Big number error ${(e as Error).message || e}`,
+          'createInitialDealOrders',
+          '',
+          false,
+          false,
+          false,
+        )
+      }
+      const gridStep = latestPrice * step
+      const minGridStep =
+        settings.dcaCondition === DCAConditionEnum.percentage &&
+        (settings.scaleDcaType === ScaleDcaTypeEnum.atr ||
+          settings.scaleDcaType === ScaleDcaTypeEnum.adr)
+          ? latestPrice * minimumDeviation
+          : 0
+      const orders: Grid[] = []
+      if (useDca) {
+        const breakpoints = deal?.gridBreakpoints ?? []
+        const long = this.isLong
+        let balanceUseQty = 0
+
+        const ordersCount =
+          settings.dcaCondition === DCAConditionEnum.indicators
+            ? (settings.indicators ?? []).filter(
+                (i) => i.indicatorAction === IndicatorAction.startDca,
+              ).length
+            : settings.dcaCondition === DCAConditionEnum.custom
+              ? (settings.dcaCustom ?? []).length
+              : parseInt(`${settings.ordersCount}`)
+        const useVolumeChange =
+          settings.dcaVolumeBaseOn === DCAVolumeType.change &&
+          settings.useTp &&
+          settings.dealCloseCondition === CloseConditionEnum.tp &&
+          settings.tpPerc &&
+          !settings.useMultiTp &&
+          !settings.trailingTp &&
+          ![OrderSizeTypeEnum.percFree, OrderSizeTypeEnum.percTotal].includes(
+            settings.orderSizeType ?? OrderSizeTypeEnum.percFree,
+          )
+        const volumeChangeValue =
+          +(settings.dcaVolumeRequiredChange ?? tpPerc * 100) *
+          (long ? 1 + Math.min(0.02, tpPerc) : 1 - Math.min(0.02, tpPerc))
+        let maxVolumeSize = +(settings.dcaVolumeMaxValue ?? '-1')
+        if (maxVolumeSize < 0) {
+          maxVolumeSize = Infinity
+        }
+        for (let i = 1; i <= (ordersCount ?? 0); i++) {
+          if (scaleAr && deal && !deal.dynamicAr?.length) {
+            continue
+          }
+          const stepVal =
+            settings.dcaCondition === DCAConditionEnum.indicators ||
+            settings.dcaCondition === DCAConditionEnum.custom
+              ? 1
+              : stepScale ** (i - 1)
+          const volumeVal =
+            settings.dcaCondition === DCAConditionEnum.indicators ||
+            settings.dcaCondition === DCAConditionEnum.custom ||
+            useVolumeChange
+              ? 1
+              : volumeScale ** (i - 1)
+          let price = this.math.round(
+            (i === 1 ? latestPrice : orders[orders.length - 1].price) -
+              (this.isLong ? 1 : -1) * gridStep * stepVal,
+            symbol.priceAssetPrecision,
+          )
+          if (settings.dcaCondition === DCAConditionEnum.indicators) {
+            const indicatorValue =
+              +(
+                (settings.indicators ?? []).filter(
+                  (ind) => ind.indicatorAction === IndicatorAction.startDca,
+                )[i - 1]?.minPercFromLast ?? '100'
+              ) / 100
+            price = this.math.round(
+              (i === 1 ? latestPrice : orders[orders.length - 1].price) *
+                (settings.strategy === StrategyEnum.long
+                  ? 1 - indicatorValue
+                  : 1 + indicatorValue),
+              symbol.priceAssetPrecision,
+            )
+          }
+          if (settings.dcaCondition === DCAConditionEnum.custom) {
+            const dcaCustomValue =
+              +((settings.dcaCustom ?? [])[i - 1]?.step ?? '1') / 100
+            price = this.math.round(
+              (i === 1 ? latestPrice : orders[orders.length - 1].price) *
+                (settings.strategy === StrategyEnum.long
+                  ? 1 - dcaCustomValue
+                  : 1 + dcaCustomValue),
+
+              symbol.priceAssetPrecision,
+            )
+          }
+          if (scaleAr) {
+            const indicator = (settings.indicators ?? []).find(
+              (ind) => ind.indicatorAction === IndicatorAction.startDca,
+            )
+            if (indicator) {
+              let value = (deal?.dynamicAr ?? []).find(
+                (d) => d.id === indicator.uuid,
+              )?.value
+              if (value && !isNaN(value) && isFinite(value)) {
+                const stepAr = i < 2 ? 1 : stepScale ** (i - 2)
+                value *= +(indicator.dynamicArFactor || '1') * stepAr
+                const lastPrice =
+                  i === 1
+                    ? latestPrice
+                    : (orders[orders.length - 1]?.price ?? 0)
+                price = this.math.round(
+                  lastPrice +
+                    value * (settings.strategy === StrategyEnum.long ? -1 : 1),
+                  symbol.priceAssetPrecision,
+                )
+                const priceMinDeviation = minGridStep
+                  ? this.math.round(
+                      lastPrice +
+                        (settings.strategy === StrategyEnum.long ? -1 : 1) *
+                          minGridStep *
+                          stepVal,
+                      symbol.priceAssetPrecision,
+                    )
+                  : 0
+                if (priceMinDeviation) {
+                  price =
+                    settings.strategy === StrategyEnum.long
+                      ? Math.min(price, priceMinDeviation)
+                      : Math.max(price, priceMinDeviation)
+                }
+              }
+            } else {
+              continue
+            }
+          }
+          if (i === 1) {
+            if (price === latestPrice) {
+              price = this.math.round(
+                latestPrice +
+                  (this.isLong ? -1 : 1) *
+                    Number(`${1}e-${symbol.priceAssetPrecision}`),
+                symbol.priceAssetPrecision,
+              )
+            }
+          }
+          if (i > 1) {
+            if (price === orders[orders.length - 1].price) {
+              price = this.math.round(
+                orders[orders.length - 1].price +
+                  (this.isLong ? -1 : 1) *
+                    Number(`${1}e-${symbol.priceAssetPrecision}`),
+                symbol.priceAssetPrecision,
+              )
+            }
+          }
+          if (price <= 0) {
+            break
+          }
+          price = this.math.round(price, ed.priceAssetPrecision)
+          const findBreakpoint = breakpoints
+            .sort((a, b) => (long ? b.price - a.price : a.price - b.price))
+            .find((b) => price === b.price)
+          if (findBreakpoint) {
+            price = this.math.round(
+              findBreakpoint.displacedPrice,
+              symbol.priceAssetPrecision,
+            )
+          }
+          let orderSize = _orderSize
+          if (
+            settings.dcaCondition === DCAConditionEnum.indicators &&
+            !useVolumeChange
+          ) {
+            orderSize =
+              +(
+                (settings.indicators ?? []).filter(
+                  (ind) => ind.indicatorAction === IndicatorAction.startDca,
+                )[i - 1]?.orderSize ?? '0'
+              ) || _orderSize
+          }
+          if (
+            settings.dcaCondition === DCAConditionEnum.custom &&
+            !useVolumeChange
+          ) {
+            orderSize =
+              +((settings.dcaCustom ?? [])[i - 1]?.size ?? '0') || _orderSize
+          }
+          if (useVolumeChange) {
+            const quote =
+              latestPrice * baseQtyOrig +
+              orders.reduce((acc, v) => acc + v.price * v.qty, 0)
+            const base = baseQtyOrig + orders.reduce((acc, v) => acc + v.qty, 0)
+            if (
+              settings.dcaVolumeRequiredChangeRef ===
+              DcaVolumeRequiredChangeRef.avg
+            ) {
+              const newAvg =
+                price * (1 + (volumeChangeValue / 100) * (long ? 1 : -1))
+              orderSize = (newAvg * base - quote) / (price - newAvg)
+            } else {
+              const c =
+                ((volumeChangeValue / 100 + 1) * price) /
+                (1 + tpPerc * (long ? 1 : -1))
+              orderSize = (c * base - quote) / (price - c)
+            }
+            if (orderSizeType === OrderSizeTypeEnum.quote) {
+              orderSize *= price
+            }
+            orderSize = Math.min(maxVolumeSize, orderSize)
+          }
+          if (
+            orderSizeType === OrderSizeTypeEnum.percFree ||
+            orderSizeType === OrderSizeTypeEnum.percTotal
+          ) {
+            if (
+              settings.orderSizePercQty &&
+              settings.orderSizePercQty !== 0 &&
+              settings.dcaCondition !== DCAConditionEnum.indicators &&
+              settings.dcaCondition !== DCAConditionEnum.custom
+            ) {
+              balanceUseQty = settings.orderSizePercQty
+            } else {
+              balanceUseQty = await this.getBalancePercQty(
+                orderSizeType,
+                orderSize,
+                dealId,
+                symbol.pair,
+              )
+            }
+          }
+          let qty = this.math.round(
+            ((orderSize * (this.coinm ? ed.quoteAsset.minAmount : 1)) /
+              (_price ?? price)) *
+              volumeVal +
+              (deal?.sizes?.dca?.[i - 1] ?? 0),
+            precision,
+          )
+          if (orderSizeType === OrderSizeTypeEnum.base) {
+            qty = this.math.round(
+              orderSize * volumeVal + (deal?.sizes?.dca?.[i - 1] ?? 0),
+              precision,
+            )
+          }
+          if (orderSizeType === OrderSizeTypeEnum.usd) {
+            qty = this.math.round(
+              (orderSize * volumeVal) /
+                ((await this.getUsdRate(symbol.pair, 'quote')) * latestPrice) +
+                (deal?.sizes?.dca?.[i - 1] ?? 0),
+              precision,
+            )
+          }
+          if (
+            orderSizeType === OrderSizeTypeEnum.percFree ||
+            orderSizeType === OrderSizeTypeEnum.percTotal
+          ) {
+            qty = this.futures
+              ? this.coinm
+                ? this.math.round(balanceUseQty * volumeVal, precision)
+                : this.math.round(
+                    (balanceUseQty / price) * volumeVal,
+                    precision,
+                  )
+              : long
+                ? this.math.round(
+                    (balanceUseQty / price) * volumeVal,
+                    precision,
+                  )
+                : this.math.round(balanceUseQty * volumeVal, precision)
+          }
+          if (symbol.baseAsset.maxAmount && qty > symbol.baseAsset.maxAmount) {
+            break
+          }
+          if (qty < symbol.baseAsset.minAmount) {
+            qty = symbol.baseAsset.minAmount
+          }
+          if (qty * price < symbol.quoteAsset.minAmount && !this.coinm) {
+            qty = this.math.round(
+              symbol.quoteAsset.minAmount / price,
+              precision,
+              false,
+              true,
+            )
+          }
+          if (settings.coinm && !this.isBitget) {
+            const cont = (price * qty) / symbol.quoteAsset.minAmount
+            if (cont < 1) {
+              qty = this.math.round(
+                symbol.quoteAsset.minAmount / price,
+                precision,
+                false,
+                true,
+              )
+            } else if (cont % 1 > Number.EPSILON) {
+              qty = this.math.round(
+                (this.math.round(cont, 0) * symbol.quoteAsset.minAmount) /
+                  price,
+                precision,
+                false,
+                true,
+              )
+            }
+          }
+          try {
+            const mod = +new Big(qty).mod(symbol.baseAsset.step).toFixed(20)
+            if (mod !== 0) {
+              qty = this.math.round(
+                qty - mod + symbol.baseAsset.step,
+                precision,
+                false,
+                true,
+              )
+            }
+          } catch (e) {
+            this.handleErrors(
+              `Big number error ${(e as Error).message || e}`,
+              'createInitialDealOrders',
+              'dca',
+              false,
+              false,
+              false,
+            )
+          }
+          orders.push({
+            qty,
+            price,
+            side: ordersSide,
+            newClientOrderId: this.getOrderId(`D-RO`),
+            number: i,
+            type: TypeOrderEnum.dealRegular,
+            dealId,
+            levelNumber: i,
+          })
+        }
+      }
+      const result = [...orders, tpOrder].filter(
+        (o) =>
+          !(deal?.blockOrders ?? []).filter(
+            (db) =>
+              db.price === o.price && db.qty === o.qty && db.side === o.side,
+          ).length,
+      )
+
+      return result
+    }
+    return []
+  }
+  /**
+   * Create current deal orders
+   *
+   * @param {number} price Price from which to start
+   * @param {Grid[]} initialOrders Initial orders of the deal
+   * @param {number} avgPrice Average price
+   * @param {number} boPrice Base order price
+   * @param {string} dealId Id of the deal
+   * @param {boolean} [all] Is need to generate all orders. Default = false
+   * @returns {Grid[]} Orders calculated for current price
+   */
+
+  async createCurrentDealOrders(
+    symbol: string,
+    price: number,
+    initialOrders: Grid[],
+    avgPrice: number,
+    boPrice: number,
+    dealId: string,
+    all = false,
+    deal?: ExcludeDoc<Deal>,
+    noCheck = true,
+    filterSl = true,
+  ): Promise<Grid[]> {
+    if (this.data && this.orders) {
+      this.handleLog(`Generate current deal orders @ ${price}`)
+      if (initialOrders.length > 0) {
+        const settings = await this.getAggregatedSettings(deal)
+        initialOrders = [
+          ...initialOrders.filter((o) =>
+            settings.dcaCondition === DCAConditionEnum.indicators
+              ? o.type !== TypeOrderEnum.dealRegular
+              : true,
+          ),
+        ]
+
+        const activeOrders = settings.activeOrdersCount
+        const useSmartOrders = settings.useSmartOrders
+        const dcaOrdersCount =
+          settings.dcaCondition === DCAConditionEnum.custom
+            ? (settings.dcaCustom?.length ?? 0)
+            : +(settings.ordersCount || '0')
+        const useTp =
+          settings.useTp &&
+          (settings.dealCloseCondition === CloseConditionEnum.tp ||
+            settings.dealCloseCondition === CloseConditionEnum.dynamicAr) &&
+          (!(settings.useTp && settings.trailingTp) ||
+            (settings.trailingTp && settings.useMultiTp && settings.multiTp)) &&
+          !this.data?.flags?.includes(BotFlags.externalTp)
+        const tpOrders = await this.getTPOrder(
+          symbol,
+          price,
+          initialOrders,
+          avgPrice,
+          boPrice,
+          dealId,
+          deal,
+        )
+        const orders = [
+          ...initialOrders.filter((o) => o.type === TypeOrderEnum.dealRegular),
+        ]
+        let currentOrders: Grid[] = []
+        const long = this.isLong
+        const filledRegular = this.getOrdersByStatusAndDealId({
+          status: ['FILLED', 'PARTIALLY_FILLED'],
+          dealId,
+        }).filter((o) => o.typeOrder === TypeOrderEnum.dealRegular)
+        let left = 0
+        try {
+          left = dcaOrdersCount - filledRegular.length
+        } catch (e) {
+          this.handleErrors(
+            `Cannot calculate left ${dealId} ${(e as Error).message || e}`,
+            'createCurrentDealOrders',
+            'left',
+            false,
+            false,
+            false,
+          )
+        }
+        if (long) {
+          if (left && !isNaN(left)) {
+            currentOrders = orders
+              .sort((a, b) => a.price - b.price)
+              .slice(0, left)
+              .filter((o) => o.price < price)
+              .sort((a, b) => b.price - a.price)
+          } else {
+            currentOrders = orders
+              .filter((o) => o.price < price)
+              .sort((a, b) => b.price - a.price)
+          }
+        }
+        if (!long) {
+          if (left && !isNaN(left)) {
+            currentOrders = orders
+              .sort((a, b) => b.price - a.price)
+              .slice(0, left)
+              .filter((o) => o.price > price)
+              .sort((a, b) => a.price - b.price)
+          } else {
+            currentOrders = orders
+              .filter((o) => o.price > price)
+              .sort((a, b) => a.price - b.price)
+          }
+        }
+        const [firstOrder] = currentOrders
+        if (!noCheck) {
+          if (
+            firstOrder &&
+            !this.getOrdersByStatusAndDealId({ defaultStatuses: true }).find(
+              (o) =>
+                +o.price === firstOrder.price &&
+                +o.origQty === firstOrder.qty &&
+                o.side === firstOrder.side,
+            ) &&
+            left &&
+            !isNaN(left)
+          ) {
+            const latestPrice = await this.getLatestPrice(symbol)
+            if (
+              firstOrder &&
+              latestPrice !== 0 &&
+              ((latestPrice < firstOrder.price && this.isLong) ||
+                (latestPrice > firstOrder.price && !this.isLong)) &&
+              deal
+            ) {
+              const breakpoint = {
+                price: firstOrder.price,
+                displacedPrice: latestPrice,
+              }
+              deal.gridBreakpoints = await this.aggregateBreakpoint(
+                breakpoint,
+                deal,
+              )
+              const newInitialOrders = await this.createInitialDealOrders(
+                deal.symbol.symbol,
+                deal.initialPrice || price,
+                dealId,
+                deal,
+              )
+              const findDeal = this.getDeal(deal._id)
+              if (findDeal) {
+                findDeal.initialOrders = newInitialOrders
+                const current = await this.createCurrentDealOrders(
+                  deal.symbol.symbol,
+                  breakpoint.price,
+                  newInitialOrders,
+                  avgPrice,
+                  boPrice,
+                  dealId,
+                  all,
+                  deal,
+                )
+                currentOrders = current
+                findDeal.currentOrders = current
+                findDeal.deal = deal
+                this.saveDeal(findDeal, {
+                  gridBreakpoints: deal.gridBreakpoints,
+                })
+              }
+            }
+          }
+        }
+
+        if (!all && useSmartOrders) {
+          currentOrders = currentOrders.slice(
+            0,
+            (activeOrders ?? 0) > 0 ? activeOrders : 1,
+          )
+        }
+        if (
+          deal?.trailingLevel &&
+          ((settings.useTp && settings.trailingTp) ||
+            (settings.useSl && settings.trailingSl)) &&
+          filterSl
+        ) {
+          currentOrders = currentOrders.filter((o) =>
+            this.isLong
+              ? o.price > (deal?.trailingLevel ?? 0)
+              : o.price < (deal?.trailingLevel ?? Infinity),
+          )
+        }
+        let result = [...currentOrders]
+        if (tpOrders) {
+          result = [...currentOrders, ...tpOrders]
+            .filter((o) => (!useTp ? o.type !== TypeOrderEnum.dealTP : true))
+            .filter((o) =>
+              ((settings.useTp && settings.useMultiTp) ||
+                (settings.useSl && settings.useMultiSl)) &&
+              (deal?.tpSlTargetFilled ?? []).length > 0
+                ? o.type !== TypeOrderEnum.dealRegular
+                : true,
+            )
+        }
+        if (filterSl) {
+          const useSl =
+            settings.useSl && !settings.moveSL && checkNumber(settings.slPerc)
+          if (
+            useSl &&
+            settings.dealCloseConditionSL === CloseConditionEnum.dynamicAr &&
+            deal
+          ) {
+            const indicator = this.data.settings.indicators.find(
+              (ind) =>
+                ind.indicatorAction === IndicatorAction.closeDeal &&
+                ind.section === IndicatorSection.sl,
+            )
+            if (indicator) {
+              let value = (deal.dynamicAr ?? []).find(
+                (d) => d.id === indicator.uuid,
+              )?.value
+              if (value && !isNaN(value) && isFinite(value)) {
+                value *= +(indicator.dynamicArFactor || '1')
+                const slLevel = boPrice + value * (this.isLong ? -1 : 1)
+                if (!isNaN(slLevel)) {
+                  return result.filter((r) =>
+                    this.isLong ? r.price > slLevel : r.price < slLevel,
+                  )
+                }
+              }
+            }
+          }
+          if (
+            useSl &&
+            settings.dealCloseConditionSL === CloseConditionEnum.tp
+          ) {
+            let perc = +(settings.slPerc ?? '0') / 100
+            if (settings.useMultiSl) {
+              const find = (settings.multiSl ?? [])
+                .filter(
+                  (t) =>
+                    !((deal?.tpSlTargetFilled ?? []) as string[]).includes(
+                      t.uuid,
+                    ),
+                )
+                .sort((a, b) => +a.target - +b.target)[0]
+              if (find) {
+                perc = +(find.target ?? '0') / 100
+              }
+            }
+            const ref =
+              (await this.baseSlOn(deal)) === BaseSlOnEnum.avg
+                ? avgPrice
+                : boPrice
+            const slLevel = this.math.round(
+              ref * (1 + (this.isLong ? perc : -perc)),
+              (await this.getExchangeInfo(symbol))?.priceAssetPrecision,
+            )
+            if (!isNaN(slLevel)) {
+              return result.filter((r) =>
+                this.isLong ? r.price > slLevel : r.price < slLevel,
+              )
+            }
+          }
+        }
+        return result
+      }
+    }
+    return []
+  }
+  /**
+   * Set bot status <br />
+   *
+   * If status closed - run {@link DCABotHelper#stop}<br />
+   *
+   * If status open - run {@link DCABotHelper#start}
+   *
+   * @param {BotStatusEnum} status Status to set for the bot
+   * @param {CloseDCATypeEnum} [closeType] Close type
+   */
+  @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
+  async setStatus(
+    _botId: string,
+    status: BotStatusEnum,
+    _closeType?: CloseDCATypeEnum,
+    webhook?: boolean,
+    ignoreErrors?: boolean,
+    indicators?: boolean,
+    closeTypeFromWebhook?: CloseDCATypeEnum,
+  ): Promise<void> {
+    const _id = this.startMethod('setStatus')
+    this.ignoreErrors = !!ignoreErrors
+    const currentStatus = this.data?.status
+    this.handleLog(`Set status ${status}, current status ${currentStatus}`)
+    if (status === currentStatus) {
+      this.endMethod(_id)
+      return
+    }
+    const setMonitoring =
+      this.isMonitoring &&
+      (currentStatus === BotStatusEnum.closed ||
+        (currentStatus === BotStatusEnum.error &&
+          this.data?.previousStatus === BotStatusEnum.monitoring))
+    if (
+      (webhook || indicators) &&
+      status === BotStatusEnum.open &&
+      (currentStatus === BotStatusEnum.error ||
+        currentStatus === BotStatusEnum.open ||
+        (setMonitoring && currentStatus === BotStatusEnum.monitoring))
+    ) {
+      this.endMethod(_id)
+      return
+    }
+
+    const settings = await this.getAggregatedSettings()
+
+    if (status === 'closed') {
+      let closeType = _closeType
+      if (webhook || indicators) {
+        closeType = webhook
+          ? (closeTypeFromWebhook ?? settings.stopType)
+          : settings.stopType
+      }
+      await this.stop(closeType)
+    } else if (status === 'open') {
+      await this.start(undefined, undefined, undefined)
+    } else {
+      await this.stop()
+    }
+
+    const postFix = `${
+      indicators ? ' (bot controller)' : webhook ? ' (webhook)' : ''
+    }`
+    if (
+      !this.data?.parentBotId ||
+      (this.data.parentBotId &&
+        this.data.settings.strategy === StrategyEnum.long)
+    ) {
+      this.botEventDb.createData({
+        userId: this.userId,
+        botId: this.botId,
+        event: BOT_STATUS_EVENT,
+        botType: this.botType,
+        description: currentStatus
+          ? `${currentStatus} -> ${status}${postFix}`
+          : `${
+              setMonitoring ? BotStatusEnum.monitoring : status
+            } status is set${postFix}`,
+        paperContext: !!this.data?.paperContext,
+      })
+    }
+
+    this.endMethod(_id)
+  }
+
+  async handleUnknownOrder(order: Order): Promise<void> {
+    if (order && order.status === 'FILLED') {
+      await this.processFilledOrder(order)
+    }
+    if (
+      order &&
+      order.status === 'PARTIALLY_FILLED' &&
+      order.typeOrder === TypeOrderEnum.dealTP
+    ) {
+      await this.processPartiallyFilledOrder(order)
+    }
+  }
+  override async setFilledInsteadOfCanceled(order: Order): Promise<boolean> {
+    if (
+      order.typeOrder === TypeOrderEnum.dealTP &&
+      (order.clientOrderId.indexOf('D-SR') === -1 ||
+        order.clientOrderId.indexOf('DSR') === -1) &&
+      !order.tpSlTarget &&
+      this.botType === BotType.dca
+    ) {
+      const deal = this.getDeal(order.dealId)
+      const skip =
+        this.data?.exchange === ExchangeEnum.bybit &&
+        order.type === 'LIMIT' &&
+        order.status === 'FILLED' &&
+        (deal?.deal.tpHistory ?? []).find(
+          (tp) => tp.id === order.clientOrderId,
+        ) &&
+        !isNaN(+order.executedQty) &&
+        isFinite(+order.executedQty) &&
+        !isNaN(+order.origQty) &&
+        isFinite(+order.origQty) &&
+        +order.executedQty < +order.origQty
+      if (skip) {
+        this.handleLog(
+          `TP order ${order.clientOrderId} FILLED, but executedQty(${order.executedQty}) < origQty(${order.origQty}) and order is in tpHistory. Will be skipped to prevent unexpected deal close`,
+        )
+      }
+      return !!skip
+    }
+    return true
+  }
+  /**
+   * Process filled order from queue<br />
+   *
+   * @param {Order} order Order data
+   */
+  @IdMute(
+    mutex,
+    (order: Order) =>
+      `${order.botId}process${order.symbol}${order.dealId ?? ''}`,
+  )
+  async processFilledOrder(order: Order): Promise<void> {
+    if (!this.loadingComplete) {
+      if (
+        this.data?.status === BotStatusEnum.open ||
+        this.data?.status === BotStatusEnum.error ||
+        this.data?.status === BotStatusEnum.range ||
+        this.data?.status === BotStatusEnum.monitoring ||
+        this.data?.deals.active
+      ) {
+        this.runAfterLoadingQueue.push(() =>
+          this.processFilledOrder.bind(this)(order),
+        )
+        return this.handleLog('Loading not complete yet')
+      } else {
+        return this.handleLog(
+          `Bot already closed. Wont process ${order.clientOrderId} order`,
+        )
+      }
+    }
+    const { dealId, clientOrderId } = order
+    const getSet = dealId
+      ? (this.processedFilled.get(dealId) ?? new Set<string>())
+      : new Set<string>()
+    if (dealId && !getSet.has(clientOrderId)) {
+      this.processedFilled.set(dealId, getSet.add(clientOrderId))
+      if (order.typeOrder === TypeOrderEnum.dealTP && order.reduceFundsId) {
+        return this.updateDeal(this.botId, order)
+      }
+      if (
+        order.typeOrder === TypeOrderEnum.dealTP &&
+        (order.clientOrderId.indexOf('D-SR') === -1 ||
+          order.clientOrderId.indexOf('DSR') === -1)
+      ) {
+        if (this.data && order.tpSlTarget) {
+          const deal = this.getDeal(dealId)
+          const { useMultiSl, useMultiTp, multiSl, multiTp } =
+            await this.getAggregatedSettings(deal?.deal)
+          if ((useMultiSl || useMultiTp) && deal) {
+            const filled = new Set([
+              ...(deal.deal.tpSlTargetFilled ?? []),
+              order.tpSlTarget ?? '',
+            ]).size
+            const total =
+              useMultiSl && order.sl
+                ? (multiSl ?? []).length
+                : useMultiTp && !order.sl
+                  ? (multiTp ?? []).length
+                  : 0
+            if (total > filled) {
+              const price = +order.price
+              const { symbol } = deal.deal.symbol
+              if (!isNaN(price)) {
+                this.setLastStreamData(symbol, {
+                  price,
+                  time: order.updateTime,
+                })
+                if (!useMultiSl) {
+                  await this.checkDealsMoveSL(this.botId, symbol)
+                }
+              }
+              return this.updateDeal(this.botId, order)
+            }
+          }
+        }
+        this.allowToPlaceOrders.delete(dealId)
+        this.closeDeal(this.botId, dealId, order)
+      }
+
+      if (order.typeOrder === TypeOrderEnum.dealStart) {
+        this.startDeal(order)
+      }
+      if (order.typeOrder === TypeOrderEnum.dealRegular) {
+        this.ordersInBetweenUpdates.add(order.clientOrderId)
+        this.updateDeal(this.botId, order)
+      }
+    } else {
+      this.handleLog(`Order ${clientOrderId} was already processed`)
+    }
+  }
+  @IdMute(mutex, (order: Order) => `${order.botId}${order.dealId}update`)
+  private async updatePartiallyFilledTP(order: Order) {
+    const price = parseFloat(order.price)
+    const qty = parseFloat(order.executedQty)
+    const { dealId } = order
+    const findDeal = this.getDeal(dealId)
+    if (
+      findDeal &&
+      dealId &&
+      this.orders &&
+      findDeal.deal.status === DCADealStatusEnum.open
+    ) {
+      findDeal.deal.tpHistory = [
+        ...(findDeal.deal.tpHistory ?? []).filter(
+          (h) => h.id !== order.clientOrderId,
+        ),
+        { qty, price, id: order.clientOrderId },
+      ]
+      findDeal.deal.updateTime = order.updateTime
+      this.handleLog('TP order PARTIALLY FILLED')
+      this.saveDeal(findDeal, {
+        tpHistory: findDeal.deal.tpHistory,
+        updateTime: findDeal.deal.updateTime,
+      })
+    }
+  }
+  /**
+   * Process partially filled order from queue<br />
+   *
+   * @param {Order} order Order data
+   */
+
+  async processPartiallyFilledOrder(order: Order): Promise<void> {
+    if (order.typeOrder === TypeOrderEnum.dealTP) {
+      this.updatePartiallyFilledTP(order)
+    }
+  }
+
+  async processNewOrder(_order: Order): Promise<void> {
+    return
+  }
+
+  async processLiquidationOrder(order: Order): Promise<void> {
+    if (!this.futures) {
+      return
+    }
+    const { symbol } = order
+    const activeDeals = this.getOpenDeals(false, symbol)
+    if (activeDeals.length === 0) {
+      return
+    }
+    this.handleLog(
+      `Liquidation order ${order.clientOrderId}/${order.orderId} for ${symbol}`,
+    )
+    const compareSide = this.kucoinFullFutures
+      ? true
+      : this.isLong
+        ? order.side === OrderSideEnum.sell
+        : order.side === OrderSideEnum.buy
+
+    const price = +order.price
+    if (compareSide && !isNaN(price) && isFinite(price)) {
+      await this.closeAllDeals(
+        undefined,
+        symbol,
+        false,
+        undefined,
+        true,
+        true,
+        price > 0 ? price : await this.getLatestPrice(symbol),
+        DCACloseTriggerEnum.liquidation,
+      )
+    }
+    this.handleErrors(
+      `Deals on ${
+        order.symbol
+      } closed due to position liquidation at ${new Date(
+        order.updateTime,
+      ).toUTCString()}`,
+      'processLiquidationOrder',
+      '',
+      false,
+      true,
+    )
+  }
+  /**
+   * Process canceled order from queue<br />
+   *
+   * @param {Order} order Order data
+   */
+
+  async processCanceledOrder(
+    _order: Order,
+    _updateTime: number,
+    _expired: boolean,
+  ): Promise<void> {
+    return
+  }
+  /**
+   * Sort function for order queue
+   */
+
+  sortQueue(a: ExecutionReport, b: ExecutionReport) {
+    if (a.orderTime === b.orderTime) {
+      if (a.orderStatus === 'FILLED' && a.orderStatus === b.orderStatus) {
+        if (
+          ((a.side === OrderSideEnum.buy && this.isLong) ||
+            (a.side === OrderSideEnum.sell && this.isLong)) &&
+          a.side === b.side
+        ) {
+          return parseFloat(a.price) - parseFloat(b.price)
+        } else if (
+          ((a.side === OrderSideEnum.sell && !this.isLong) ||
+            (a.side === OrderSideEnum.buy && this.isLong)) &&
+          a.side === b.side
+        ) {
+          return parseFloat(b.price) - parseFloat(a.price)
+        }
+        return parseFloat(b.price) - parseFloat(a.price)
+      }
+    }
+    return a.orderTime - b.orderTime
+  }
+  /**
+   * Cancel all orders<br />
+   *
+   * Update data in {@link DCABotHelper#orders}, save to orders collection in db, emit via {@link DCABotHelper#ioUpdate}<br />
+   *
+   * After each request run {@link DCABotHelper#countBalances}<br />
+   *
+   * @param {string} [dealId] If specify - cancel order for specifi deal
+   * @param {boolean} [cancelPartiallyFilled] cancel order with status PARTIALLY FILLED. Default = false
+   */
+
+  async cancelAllOrder(
+    latestPrice?: number,
+    dealId?: string,
+    cancelPartiallyFilled = false,
+    excludeTP = false,
+    side?: OrderSideEnum,
+  ): Promise<void> {
+    if (this.exchange && this.data && this.orders) {
+      let newOrders = this.getOrdersByStatusAndDealId({
+        status: cancelPartiallyFilled ? this.orderStatuses : 'NEW',
+      }).filter((order) => (side ? order.side === side : true))
+      if (latestPrice) {
+        newOrders = newOrders.sort(
+          (a, b) =>
+            Math.abs(latestPrice - +a.price) - Math.abs(latestPrice - +b.price),
+        )
+      }
+      if (excludeTP) {
+        newOrders = newOrders.filter(
+          (o) => o.typeOrder !== TypeOrderEnum.dealTP,
+        )
+      }
+      if (dealId) {
+        newOrders = newOrders.filter((o) => o.dealId === dealId)
+      }
+      for (const order of newOrders.sort((a) =>
+        a.typeOrder === TypeOrderEnum.dealTP ? -1 : 1,
+      )) {
+        const result = await this.cancelOrderOnExchange(order)
+        if (result?.status === 'FILLED') {
+          this.handleUnknownOrder(result)
+        }
+      }
+    }
+  }
+
+  setEquityTimer() {
+    if (this.data?.ignoreStats) {
+      return
+    }
+    const newTime = new Date()
+    newTime.setHours(0, 0, 0, 0)
+    newTime.setDate(newTime.getDate() + 1)
+    this.equityTimer = setTimeout(
+      () => this.updateEquityStats.bind(this)(this.botId),
+      +newTime - +new Date(),
+    )
+  }
+
+  async setClassProperties() {
+    const settings = await this.getAggregatedSettings()
+    if (this.data) {
+      this.data.settings = settings
+    }
+    this.isMonitoring = !!(
+      settings.useBotController &&
+      (settings.botActualStart === BotStartTypeEnum.indicators ||
+        settings.botActualStart === BotStartTypeEnum.price)
+    )
+    this.scaleAr = !!(
+      (settings.dcaCondition === DCAConditionEnum.percentage ||
+        !settings.dcaCondition) &&
+      [ScaleDcaTypeEnum.adr, ScaleDcaTypeEnum.atr].includes(
+        settings.scaleDcaType ?? ScaleDcaTypeEnum.percentage,
+      ) &&
+      settings.useDca
+    )
+    this.tpAr = !!(
+      settings.useTp &&
+      settings.dealCloseCondition === CloseConditionEnum.dynamicAr
+    )
+    this.useCompountReduce = !!(
+      settings.orderSizeType &&
+      [OrderSizeTypeEnum.base, OrderSizeTypeEnum.quote].includes(
+        settings.orderSizeType,
+      ) &&
+      ((settings.strategy === StrategyEnum.long &&
+        settings.profitCurrency === 'quote') ||
+        (settings.strategy === StrategyEnum.short &&
+          settings.profitCurrency === 'base') ||
+        settings.futures) &&
+      (settings.useRiskReduction || settings.useReinvest)
+    )
+    this.slAr = !!(
+      settings.useSl &&
+      settings.dealCloseConditionSL === CloseConditionEnum.dynamicAr
+    )
+    this.isLong = settings.strategy === StrategyEnum.long
+  }
+
+  async isDealForMoveSl(d: FullDeal<ExcludeDoc<Deal>>) {
+    const settings = await this.getAggregatedSettings(d.deal)
+    return (
+      !(
+        settings.trailingSl ||
+        (settings.useMultiSl &&
+          settings.dealCloseConditionSL === CloseConditionEnum.tp) ||
+        settings.useFixedSLPrices
+      ) &&
+      settings.useSl &&
+      settings.moveSL &&
+      settings.moveSLTrigger &&
+      settings.moveSLValue &&
+      !settings.slChangedByUser &&
+      (settings.dealCloseConditionSL === CloseConditionEnum.tp ||
+        !d.deal.moveSlActivated) &&
+      settings.slPerc !== settings.moveSLValue
+    )
+  }
+
+  async getDealMoveSlPrice(d: FullDeal<ExcludeDoc<Deal>>) {
+    const settings = await this.getAggregatedSettings(d.deal)
+    const { avgPrice, moveSLTrigger } = settings
+    const avgToUse = avgPrice ?? d.deal.avgPrice
+    const trigger = +(moveSLTrigger ?? '0') / 100
+    const required = this.isLong
+      ? avgToUse * (trigger + 1)
+      : avgToUse * (1 - trigger)
+
+    const get = this.dealsForMoveSl.get(d.deal._id)
+    if (get !== required) {
+      this.handleLog(
+        `Set new move sl start price for ${d.deal._id} ${get} to ${required}`,
+      )
+    }
+
+    return required
+  }
+
+  async triggerMoveSl(dealId: string, trigger: number, current: number) {
+    const d = this.getDeal(dealId)
+    if (!d) {
+      this.handleErrors(
+        `Cannot find deal in trigger move sl`,
+        'triggerMoveSl',
+        '',
+        false,
+        false,
+        false,
+      )
+      return
+    }
+    const settings = await this.getAggregatedSettings(d.deal)
+    this.handleLog(
+      `Deal: ${dealId} move sl trigger. SL trigger: ${trigger}, current price: ${current}, new SL: ${settings.moveSLValue}`,
+    )
+    if (settings.moveSLValue) {
+      d.deal.settings.slPerc = settings.moveSLValue
+    }
+    d.deal.moveSlActivated = true
+    this.saveDeal(d, {
+      'settings.slPerc': d.deal.settings.slPerc,
+      moveSlActivated: d.deal.moveSlActivated,
+    })
+    await this.setDealForStopLoss(d)
+    this.checkDealsPriceExtremum()
+  }
+
+  async checkDealsForMoveStopLoss() {
+    const activeDeals: [string, number][] = []
+
+    for (const d of this.allDealsData) {
+      if (await this.isDealForMoveSl(d)) {
+        activeDeals.push([
+          `${d.deal._id}`,
+          await this.getDealMoveSlPrice(d),
+        ] as [string, number])
+      }
+    }
+
+    this.dealsForMoveSl = new Map(activeDeals)
+  }
+
+  async getTrailingSettings(
+    d: FullDeal<ExcludeDoc<Deal>>,
+    price = false,
+  ): Promise<TrailingDeal> {
+    const settings = await this.getAggregatedSettings(d.deal)
+    const {
+      trailingSl,
+      trailingTp,
+      trailingTpPerc,
+      useMultiTp,
+      useMultiSl,
+      useTp,
+      useSl,
+      slPerc,
+      dealCloseConditionSL,
+      dealCloseCondition,
+      tpPerc,
+      fixedTpPrice,
+      useFixedTPPrices,
+      avgPrice,
+    } = settings
+
+    const skipSl = !(
+      useSl &&
+      trailingSl &&
+      dealCloseConditionSL === CloseConditionEnum.tp &&
+      checkNumber(slPerc) &&
+      !useMultiSl
+    )
+    const skipTp = !(
+      useTp &&
+      dealCloseCondition === CloseConditionEnum.tp &&
+      trailingTp &&
+      checkNumber(trailingTpPerc) &&
+      checkNumber(tpPerc) &&
+      !useMultiTp
+    )
+    const fixed =
+      useFixedTPPrices &&
+      fixedTpPrice &&
+      !isNaN(+fixedTpPrice) &&
+      isFinite(+fixedTpPrice)
+
+    let trailingTpPrice = 0
+    if (price && trailingTp && !skipTp) {
+      if (fixed) {
+        trailingTpPrice = +fixedTpPrice as number
+      } else {
+        const fee = await this.getUserFee(d.deal.symbol.symbol)
+        const sellDisplacement = (fee?.taker ?? 0) * 2
+        const avgToUse = avgPrice ?? d.deal.avgPrice
+        const trigger = +(tpPerc ?? '0') / 100 + sellDisplacement
+        trailingTpPrice = this.isLong
+          ? avgToUse * (trigger + 1)
+          : avgToUse * (1 - trigger)
+      }
+      if (trailingTpPrice && trailingTp && !skipTp) {
+        const get = this.dealsForTrailing.get(d.deal._id)
+        if (get?.trailingTpPrice !== trailingTpPrice) {
+          this.handleLog(
+            `Set new trailing price for ${d.deal._id} ${get?.trailingTpPrice} to ${trailingTpPrice}`,
+          )
+        }
+      }
+    }
+    return {
+      trailingTp: !!trailingTp,
+      skipTp,
+      trailingSl: !!trailingSl,
+      skipSl,
+      trailingTpPrice,
+    }
+  }
+
+  async isDealForTrailing(d: FullDeal<ExcludeDoc<Deal>>) {
+    const { trailingTp, skipTp, trailingSl, skipSl } =
+      await this.getTrailingSettings(d)
+    return (trailingSl && !skipSl) || (trailingTp && !skipTp)
+  }
+
+  async triggerTrailing(dealId: string, price: number) {
+    const d = this.getDeal(dealId)
+    if (!d) {
+      this.handleErrors(
+        `Cannot find deal in trigger trailing`,
+        'triggerMoveSl',
+        '',
+        false,
+        false,
+        false,
+      )
+      return
+    }
+    this.handleLog(
+      `Trailing: Set trailing level, deal: ${d.deal._id}, level: ${d.deal.trailingLevel}, price: ${price}, symbol: ${d.deal.symbol.symbol}`,
+    )
+    this.saveDeal(d, {
+      trailingLevel: d.deal.trailingLevel,
+      trailingMode: d.deal.trailingMode,
+      bestPrice: d.deal.bestPrice,
+    })
+
+    await this.setDealForStopLoss(d)
+    this.checkDealsPriceExtremum()
+    if (d.deal.bestPrice) {
+      if (this.isLong) {
+        const lowestHigh = this.lowestHigh.get(d.deal.symbol.symbol)
+        this.lowestHigh.set(
+          d.deal.symbol.symbol,
+          Math.min(lowestHigh ?? 0, d.deal.bestPrice),
+        )
+      } else {
+        const highestLow = this.highestLow.get(d.deal.symbol.symbol)
+        this.highestLow.set(
+          d.deal.symbol.symbol,
+          Math.max(highestLow ?? Infinity, d.deal.bestPrice),
+        )
+      }
+    }
+
+    if (d.deal.trailingLevel && d.deal.trailingLevel > 0) {
+      const orders = this.getOrdersByStatusAndDealId({
+        defaultStatuses: true,
+        dealId: d.deal._id,
+      }).filter((o) =>
+        this.isLong
+          ? +o.price < (d.deal.trailingLevel ?? 0)
+          : +o.price > (d.deal.trailingLevel ?? Infinity),
+      )
+      if (orders.length > 0) {
+        this.handleLog(
+          `Trailing: will cancel ${orders.length} orders, deal: ${d.deal._id}, level: ${d.deal.trailingLevel}, price: ${price} `,
+        )
+      }
+      for (const o of orders) {
+        this.cancelOrderOnExchange(o)
+      }
+    }
+  }
+
+  async checkDealsForTrailing() {
+    const activeDeals: [string, TrailingDeal][] = []
+    for (const d of this.allDealsData) {
+      if (await this.isDealForTrailing(d)) {
+        activeDeals.push([
+          `${d.deal._id}`,
+          await this.getTrailingSettings(d, true),
+        ])
+      }
+    }
+
+    this.dealsForTrailing = new Map(activeDeals)
+  }
+  private getIndicatorUnpnlValues() {
+    const foundInSl =
+      this.data?.settings.dealCloseConditionSL === CloseConditionEnum.techInd
+        ? (this.data?.settings.indicators ?? []).find(
+            (i) =>
+              i.type === IndicatorEnum.unpnl &&
+              i.section === IndicatorSection.sl,
+          )
+        : undefined
+    const foundInTp =
+      this.data?.settings.dealCloseCondition === CloseConditionEnum.techInd
+        ? (this.data?.settings.indicators ?? []).find(
+            (i) =>
+              i.type === IndicatorEnum.unpnl &&
+              i.section !== IndicatorSection.sl,
+          )
+        : undefined
+
+    const slLogicOr =
+      this.data?.settings.stopDealSlLogic === IndicatorsLogicEnum.or
+    const tpLogicOr =
+      this.data?.settings.stopDealLogic === IndicatorsLogicEnum.or
+    const slInidcators = foundInSl
+      ? (this.data?.settings.indicators ?? []).filter(
+          (i) =>
+            i.indicatorAction === IndicatorAction.closeDeal &&
+            i.section === IndicatorSection.sl,
+        )
+      : undefined
+    const tpInidcators = foundInTp
+      ? (this.data?.settings.indicators ?? []).filter(
+          (i) =>
+            i.indicatorAction === IndicatorAction.closeDeal &&
+            i.section !== IndicatorSection.sl,
+        )
+      : undefined
+    const slConditionGt =
+      (foundInSl
+        ? (foundInSl?.unpnlCondition ?? this.defaultUnpnlCondition)
+        : null) === IndicatorStartConditionEnum.gt
+    const tpConditionGt =
+      (foundInTp
+        ? (foundInTp?.unpnlCondition ?? this.defaultUnpnlCondition)
+        : null) === IndicatorStartConditionEnum.gt
+    return {
+      foundInSl,
+      foundInTp,
+      slLogicOr,
+      tpLogicOr,
+      slInidcators,
+      tpInidcators,
+      slConditionGt,
+      tpConditionGt,
+    }
+  }
+  get isBotForIndicatorUnpnl() {
+    if (this.combo) {
+      return false
+    }
+    const {
+      foundInSl,
+      foundInTp,
+      slLogicOr,
+      tpLogicOr,
+      slInidcators,
+      tpInidcators,
+    } = this.getIndicatorUnpnlValues()
+
+    if (foundInSl || foundInTp) {
+      return (
+        (foundInSl && ((slInidcators?.length ?? 0) === 1 || slLogicOr)) ||
+        (foundInTp && ((tpInidcators?.length ?? 0) === 1 || tpLogicOr))
+      )
+    }
+    return false
+  }
+
+  async isDealForStopLoss(d: FullDeal<ExcludeDoc<Deal>>) {
+    const settings = await this.getAggregatedSettings(d.deal)
+
+    return (
+      ((((settings.trailingSl &&
+        settings.useSl &&
+        settings.dealCloseConditionSL === CloseConditionEnum.tp) ||
+        (settings.trailingTp &&
+          settings.useTp &&
+          settings.dealCloseCondition === CloseConditionEnum.tp)) &&
+        d.deal.trailingMode &&
+        d.deal.trailingLevel) ||
+        (settings.useSl &&
+          !settings.trailingSl &&
+          (settings.dealCloseConditionSL === CloseConditionEnum.tp ||
+            (settings.moveSL && d.deal.moveSlActivated))) ||
+        (this.slAr &&
+          settings.useSl &&
+          settings.dealCloseConditionSL === CloseConditionEnum.dynamicAr)) &&
+      !this.data?.flags?.includes(BotFlags.externalSl)
+    )
+  }
+
+  async getDealStopLossPrice(d: FullDeal<ExcludeDoc<Deal>>): Promise<number> {
+    const settings = await this.getAggregatedSettings(d.deal)
+    const {
+      trailingSl,
+      useSl,
+      dealCloseConditionSL,
+      trailingTp,
+      useTp,
+      dealCloseCondition,
+      avgPrice,
+      useMultiSl,
+      multiSl,
+      moveSL,
+      useFixedSLPrices,
+      fixedSlPrice,
+    } = settings
+    let { slPerc } = settings
+    const dealId = d.deal._id
+    const get = this.dealsForStopLoss.get(d.deal._id)
+
+    if (
+      ((trailingSl &&
+        useSl &&
+        dealCloseConditionSL === CloseConditionEnum.tp) ||
+        (trailingTp &&
+          useTp &&
+          dealCloseCondition === CloseConditionEnum.tp)) &&
+      d.deal.trailingMode &&
+      d.deal.trailingLevel
+    ) {
+      if (get !== d.deal.trailingLevel) {
+        this.handleLog(
+          `Set new trailing stop loss price for ${d.deal._id} ${get} to ${d.deal.trailingLevel}`,
+        )
+      }
+      return d.deal.trailingLevel
+    } else if (
+      useSl &&
+      !trailingSl &&
+      (dealCloseConditionSL === CloseConditionEnum.tp ||
+        (moveSL && d.deal.moveSlActivated))
+    ) {
+      if (
+        useMultiSl &&
+        multiSl?.length &&
+        dealCloseConditionSL === CloseConditionEnum.tp
+      ) {
+        const inUseSl = multiSl.filter(
+          (t) => !d.deal.tpSlTargetFilled?.includes(t.uuid),
+        )
+        if (inUseSl.length === 0) {
+          d.deal.status = DCADealStatusEnum.closed
+          d.closeBySl = true
+          this.saveDeal(d, {
+            status: d.deal.status,
+          })
+          const stop = await this.processDealClose(this.botId, dealId, {
+            total: 0,
+            totalUsd: 0,
+          })
+          if (stop) {
+            this.stop()
+          }
+          if (get !== d.deal.trailingLevel) {
+            this.handleLog(`Deal ${d.deal._id} no SL levels. Closing deal`)
+          }
+          return 0
+        }
+        if (inUseSl.length >= 1) {
+          slPerc = inUseSl.sort((a, b) => +b.target - +a.target)[0].target
+        }
+      }
+      if (
+        useFixedSLPrices &&
+        fixedSlPrice &&
+        !isNaN(+fixedSlPrice) &&
+        isFinite(+fixedSlPrice)
+      ) {
+        if (get !== +fixedSlPrice) {
+          this.handleLog(
+            `Set new fixed stop loss price for ${
+              d.deal._id
+            } ${get} to ${+fixedSlPrice}`,
+          )
+        }
+        return +fixedSlPrice as number
+      } else {
+        const sl =
+          parseFloat(slPerc ?? '0') / 100 +
+          (useFixedSLPrices
+            ? 0
+            : ((await this.getUserFee(d.deal.symbol.symbol))?.taker ?? 0) * 2)
+
+        if (!isNaN(sl) && slPerc !== undefined) {
+          const ref =
+            (await this.baseSlOn(d.deal)) === BaseSlOnEnum.avg
+              ? (avgPrice ?? d.deal.avgPrice)
+              : d.deal.initialPrice
+          const price = this.isLong ? ref * (sl + 1) : ref * (1 - sl)
+          if (get !== price) {
+            this.handleLog(
+              `Set new stop loss price for ${d.deal._id} ${get} to ${price}`,
+            )
+          }
+          return price
+        }
+      }
+    } else if (
+      this.slAr &&
+      settings.useSl &&
+      settings.dealCloseConditionSL === CloseConditionEnum.dynamicAr
+    ) {
+      const indicator = (this.data?.settings.indicators ?? []).find(
+        (ind) =>
+          ind.indicatorAction === IndicatorAction.closeDeal &&
+          ind.section === IndicatorSection.sl,
+      )
+      if (indicator) {
+        let value = (d.deal.dynamicAr ?? []).find(
+          (d) => d.id === indicator.uuid,
+        )?.value
+        if (value && !isNaN(value) && isFinite(value)) {
+          value *= +(indicator.dynamicArFactor || '1')
+          const price = d.deal.avgPrice + value * (this.isLong ? -1 : 1)
+          if (get !== price) {
+            this.handleLog(
+              `Set new stop loss AR price for ${d.deal._id} ${get} to ${price}`,
+            )
+          }
+          return price
+        }
+      }
+    }
+    return 0
+  }
+  async getDealIndicatorUnpnlPrice(
+    d: FullDeal<ExcludeDoc<Deal>>,
+  ): Promise<DealIndicatorUnpnlVal> {
+    if (!this.isBotForIndicatorUnpnl) {
+      return { min: NaN, max: NaN }
+    }
+    const { foundInSl, foundInTp, slConditionGt, tpConditionGt } =
+      this.getIndicatorUnpnlValues()
+    const slValue = (foundInSl?.unpnlValue ?? this.defaultUnpnl) / 100
+    const tpValue = (foundInTp?.unpnlValue ?? this.defaultUnpnl) / 100
+    const min = Math.max(
+      foundInSl && !slConditionGt ? slValue : -Infinity,
+      foundInTp && !tpConditionGt ? tpValue : -Infinity,
+    )
+    const max = Math.min(
+      foundInSl && slConditionGt ? slValue : Infinity,
+      foundInTp && tpConditionGt ? tpValue : Infinity,
+    )
+    const fee = await this.getUserFee(d.deal.symbol.symbol)
+    const returnVal = (val: number) =>
+      ((val + (fee?.taker ?? 0) * 2) * (this.isLong ? 1 : -1) + 1) *
+      (d.deal.settings.avgPrice || d.deal.avgPrice)
+    return {
+      min: returnVal(min),
+      max: returnVal(max),
+    }
+  }
+
+  triggerStopLoss(
+    dealId: string,
+    closeBySl: boolean,
+    notCheckSl: boolean,
+    closeByMulti: boolean,
+  ) {
+    const d = this.getDeal(dealId)
+    if (!d) {
+      this.handleErrors(
+        `Cannot find deal in trigger stop loss`,
+        'triggerMoveSl',
+        '',
+        false,
+        false,
+        false,
+      )
+      return
+    }
+    d.closeBySl = closeBySl
+    d.notCheckSl = notCheckSl
+    this.saveDeal(d)
+    this.closeDealById(
+      this.botId,
+      dealId,
+      CloseDCATypeEnum.closeByMarket,
+      undefined,
+      undefined,
+      closeByMulti,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      DCACloseTriggerEnum.trailing,
+    )
+  }
+
+  async checkDealsForStopLoss() {
+    const activeDeals: [string, number][] = []
+    for (const d of this.allDealsData) {
+      if (await this.isDealForStopLoss(d)) {
+        activeDeals.push([`${d.deal._id}`, await this.getDealStopLossPrice(d)])
+      }
+    }
+
+    this.dealsForStopLoss = new Map(activeDeals)
+  }
+  async checkDealsForIndicatorUnpnl() {
+    if (!this.isBotForIndicatorUnpnl) {
+      return
+    }
+    const activeDeals: [string, DealIndicatorUnpnlVal][] = []
+    for (const d of this.allDealsData) {
+      activeDeals.push([
+        `${d.deal._id}`,
+        await this.getDealIndicatorUnpnlPrice(d),
+      ])
+    }
+
+    this.dealsForIndicatorUnpnl = new Map(activeDeals)
+  }
+
+  removeDealFromStopLossMethods(dealId: string) {
+    this.dealsForMoveSl.delete(dealId)
+    this.dealsForTrailing.delete(dealId)
+    this.dealsForStopLoss.delete(dealId)
+    this.dealsForStopLossCombo.delete(dealId)
+  }
+
+  async checkDealsForStopLossMethods() {
+    await this.checkDealsForMoveStopLoss()
+    await this.checkDealsForTrailing()
+    await this.checkDealsForStopLoss()
+    await this.checkDealsForIndicatorUnpnl()
+    this.checkDealsForDCALevelCheck()
+  }
+  isDealForDCALevelCheck(d: FullDeal<ExcludeDoc<ExcludeDoc<Deal>>>) {
+    return (
+      d.deal.action === ActionsEnum.useOppositeBalance &&
+      d.deal.levels.complete < d.deal.levels.all &&
+      d.deal.levels.all > 1
+    )
+  }
+  checkDealsForDCALevelCheck() {
+    const activeDeals: [string, number][] = []
+    for (const d of this.allDealsData) {
+      if (this.isDealForDCALevelCheck(d)) {
+        activeDeals.push([`${d.deal._id}`, this.getDealDCALevelToCheck(d)] as [
+          string,
+          number,
+        ])
+      }
+    }
+
+    this.dealsDCALevelCheck = new Map(activeDeals)
+  }
+  setDealForDCALevelCheck(deal: FullDeal<ExcludeDoc<Deal>>) {
+    if (this.isDealForDCALevelCheck(deal)) {
+      this.dealsDCALevelCheck.set(
+        deal.deal._id,
+        this.getDealDCALevelToCheck(deal),
+      )
+      this.allowedMethods.add('checkDCALevel')
+    }
+  }
+  private getDealDCALevelToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
+    const def = this.isLong ? 0 : Infinity
+    const lastLevel =
+      'lastFilledLevel' in d.deal
+        ? (d.deal as CleanComboDealsSchema).lastFilledLevel
+        : d.deal.levels.complete
+    if (!lastLevel) {
+      return def
+    }
+    return (
+      +[...d.currentOrders]
+        .filter(
+          (o) =>
+            o.type === TypeOrderEnum.dealRegular &&
+            o.dcaLevel &&
+            o.dcaLevel > lastLevel,
+        )
+        .sort((a, b) =>
+          this.isLong ? +b.price - +a.price : +a.price - +b.price,
+        )[0]?.price || def
+    )
+  }
+
+  async setDealForStopLoss(deal: FullDeal<ExcludeDoc<Deal>>) {
+    if (await this.isDealForStopLoss(deal)) {
+      this.dealsForStopLoss.set(
+        deal.deal._id,
+        await this.getDealStopLossPrice(deal),
+      )
+      this.allowedMethods.add('checkDealsStopLoss')
+    }
+  }
+  async setDealForIndicatorUnpnl(deal: FullDeal<ExcludeDoc<Deal>>) {
+    if (this.isBotForIndicatorUnpnl) {
+      this.dealsForIndicatorUnpnl.set(
+        deal.deal._id,
+        await this.getDealIndicatorUnpnlPrice(deal),
+      )
+      this.allowedMethods.add('checkIndicatorUnpnl')
+    }
+  }
+
+  async setDealForTrailing(deal: FullDeal<ExcludeDoc<Deal>>) {
+    if (await this.isDealForTrailing(deal)) {
+      this.dealsForTrailing.set(
+        deal.deal._id,
+        await this.getTrailingSettings(deal, true),
+      )
+      this.allowedMethods.add('checkTrailing')
+    }
+  }
+
+  async setDealForMoveSl(deal: FullDeal<ExcludeDoc<Deal>>) {
+    if (await this.isDealForMoveSl(deal)) {
+      this.dealsForMoveSl.set(
+        deal.deal._id,
+        await this.getDealMoveSlPrice(deal),
+      )
+      this.allowedMethods.add('checkDealsMoveSL')
+    }
+  }
+
+  checkDealsPriceExtremum() {
+    if (this.combo) {
+      const values = [...this.dealsForStopLossCombo.values()]
+      const min = this.isLong
+        ? values.sort((a, b) => b.sl - a.sl)?.[0]?.sl
+        : values.sort((a, b) => b.tp - a.tp)?.[0]?.tp
+      const max = this.isLong
+        ? values.filter((v) => !!v.tp).sort((a, b) => a.tp - b.tp)?.[0]?.tp
+        : values.filter((v) => !!v.sl).sort((a, b) => a.sl - b.sl)?.[0]?.sl
+      this.highestLow.set(this.data?.settings.pair[0] ?? '', min ?? 0)
+      this.lowestHigh.set(this.data?.settings.pair[0] ?? '', max || Infinity)
+
+      const valuesDCACheck = [...this.dealsDCALevelCheck.values()]
+      const minDCACheck = this.isLong
+        ? (valuesDCACheck.sort((a, b) => b - a)?.[0] ?? 0)
+        : 0
+      const maxDCACheck = this.isLong
+        ? Infinity
+        : valuesDCACheck.sort((a, b) => a - b)?.[0] || Infinity
+      this.highestLow.set(
+        this.data?.settings.pair[0] ?? '',
+        Math.max(min ?? 0, minDCACheck),
+      )
+      this.lowestHigh.set(
+        this.data?.settings.pair[0] ?? '',
+        Math.min(max || Infinity, maxDCACheck),
+      )
+    } else {
+      const dealsForMoveSlMin = [...this.dealsForMoveSl.entries()].reduce(
+        (acc, [k, v]) => {
+          const deal = this.getDeal(k)
+          const symbol = deal?.deal.symbol.symbol ?? ''
+          acc.set(
+            symbol,
+            this.isLong
+              ? Math.min(acc.get(symbol) || Infinity, v)
+              : Math.max(acc.get(symbol) ?? 0, v),
+          )
+          return acc
+        },
+        new Map<string, number>(),
+      )
+
+      const trailingTpMin = [...this.dealsForTrailing.entries()].reduce(
+        (acc, [k, v]) => {
+          const deal = this.getDeal(k)
+          const symbol = deal?.deal.symbol.symbol ?? ''
+          acc.set(
+            symbol,
+            this.isLong
+              ? Math.max(acc.get(symbol) ?? 0, v.trailingTpPrice)
+              : Math.min(acc.get(symbol) ?? Infinity, v.trailingTpPrice),
+          )
+          return acc
+        },
+        new Map<string, number>(),
+      )
+      const bestPrices = [...this.dealsForTrailing.keys()].reduce((acc, k) => {
+        const deal = this.getDeal(k)
+        const symbol = deal?.deal.symbol.symbol ?? ''
+        acc.set(
+          symbol,
+          this.isLong
+            ? Math.min(acc.get(symbol) ?? Infinity, deal?.deal.bestPrice ?? 0)
+            : Math.max(acc.get(symbol) ?? 0, deal?.deal.bestPrice ?? Infinity),
+        )
+        return acc
+      }, new Map<string, number>())
+
+      const stopLossMin = [...this.dealsForStopLoss.entries()].reduce(
+        (acc, [k, v]) => {
+          const deal = this.getDeal(k)
+          const symbol = deal?.deal.symbol.symbol ?? ''
+          acc.set(
+            symbol,
+            this.isLong
+              ? Math.max(acc.get(symbol) ?? 0, v)
+              : Math.min(acc.get(symbol) ?? Infinity, v),
+          )
+          return acc
+        },
+        new Map<string, number>(),
+      )
+      const indicatorUnpnlMin = [
+        ...this.dealsForIndicatorUnpnl.entries(),
+      ].reduce((acc, [k, v]) => {
+        const deal = this.getDeal(k)
+        const symbol = deal?.deal.symbol.symbol ?? ''
+        acc.set(
+          symbol,
+          this.isLong
+            ? Math.max(acc.get(symbol) ?? 0, v.min)
+            : Math.min(acc.get(symbol) ?? Infinity, v.min),
+        )
+        return acc
+      }, new Map<string, number>())
+      const indicatorUnpnlMax = [
+        ...this.dealsForIndicatorUnpnl.entries(),
+      ].reduce((acc, [k, v]) => {
+        const deal = this.getDeal(k)
+        const symbol = deal?.deal.symbol.symbol ?? ''
+        acc.set(
+          symbol,
+          this.isLong
+            ? Math.max(acc.get(symbol) ?? 0, v.max)
+            : Math.min(acc.get(symbol) ?? Infinity, v.max),
+        )
+        return acc
+      }, new Map<string, number>())
+      if (this.isLong) {
+        const slKeys = [...stopLossMin.keys(), ...indicatorUnpnlMin.keys()]
+        for (const key of slKeys) {
+          this.highestLow.set(
+            key,
+            Math.max(
+              stopLossMin.get(key) ?? 0,
+              indicatorUnpnlMin.get(key) ?? 0,
+            ),
+          )
+        }
+        this.highestLow.forEach((_, k) => {
+          if (!slKeys.includes(k)) {
+            this.handleLog(`Remove ${k} from highest low`)
+            this.highestLow.delete(k)
+          }
+        })
+        const otherKeys = [
+          ...bestPrices.keys(),
+          ...dealsForMoveSlMin.keys(),
+          ...trailingTpMin.keys(),
+          ...indicatorUnpnlMax.keys(),
+        ]
+        for (const key of otherKeys) {
+          this.lowestHigh.set(
+            key,
+            Math.min(
+              bestPrices.get(key) ?? Infinity,
+              dealsForMoveSlMin.get(key) ?? Infinity,
+              trailingTpMin.get(key) ?? Infinity,
+              indicatorUnpnlMax.get(key) ?? Infinity,
+            ),
+          )
+        }
+        this.lowestHigh.forEach((_, k) => {
+          if (!otherKeys.includes(k)) {
+            this.handleLog(`Remove ${k} from lowest high`)
+            this.lowestHigh.delete(k)
+          }
+        })
+      } else {
+        const slKeys = [...stopLossMin.keys(), ...indicatorUnpnlMin.keys()]
+        for (const key of slKeys) {
+          this.lowestHigh.set(
+            key,
+            Math.min(
+              stopLossMin.get(key) ?? Infinity,
+              indicatorUnpnlMin.get(key) ?? Infinity,
+            ),
+          )
+        }
+        this.lowestHigh.forEach((_, k) => {
+          if (!slKeys.includes(k)) {
+            this.handleLog(`Remove ${k} from lowest high`)
+            this.lowestHigh.delete(k)
+          }
+        })
+        const otherKeys = [
+          ...bestPrices.keys(),
+          ...dealsForMoveSlMin.keys(),
+          ...trailingTpMin.keys(),
+          ...indicatorUnpnlMax.keys(),
+        ]
+        for (const key of otherKeys) {
+          this.highestLow.set(
+            key,
+            Math.max(
+              bestPrices.get(key) ?? 0,
+              dealsForMoveSlMin.get(key) ?? 0,
+              trailingTpMin.get(key) ?? 0,
+              indicatorUnpnlMax.get(key) ?? 0,
+            ),
+          )
+        }
+        this.highestLow.forEach((_, k) => {
+          if (!otherKeys.includes(k)) {
+            this.handleLog(`Remove ${k} from highest low`)
+            this.highestLow.delete(k)
+          }
+        })
+      }
+    }
+  }
+
+  async checkDealSlMethods(deal: FullDeal<ExcludeDoc<Deal>>) {
+    await this.setDealForMoveSl(deal)
+    await this.setDealForTrailing(deal)
+    await this.setDealForStopLoss(deal)
+    await this.setDealForIndicatorUnpnl(deal)
+    this.setDealForDCALevelCheck(deal)
+  }
+
+  async checkDealsAllowedMethods() {
+    if (this.isBotForIndicatorUnpnl) {
+      this.allowedMethods.add('checkIndicatorUnpnl')
+    } else {
+      this.allowedMethods.delete('checkIndicatorUnpnl')
+    }
+
+    const activeDeals = this.getOpenDeals()
+    let sl = 0
+    let countDCALevelCheck = 0
+    for (const d of activeDeals) {
+      if (await this.isDealForStopLoss(d)) {
+        sl++
+      }
+      if (this.isDealForDCALevelCheck(d)) {
+        countDCALevelCheck++
+      }
+    }
+    if (activeDeals.length && sl) {
+      this.allowedMethods.add('checkDealsStopLoss')
+    } else {
+      this.allowedMethods.delete('checkDealsStopLoss')
+    }
+    let msl = 0
+    for (const d of activeDeals) {
+      if (await this.isDealForMoveSl(d)) {
+        msl++
+      }
+    }
+    if (activeDeals.length && msl) {
+      this.allowedMethods.add('checkDealsMoveSL')
+    } else {
+      this.allowedMethods.delete('checkDealsMoveSL')
+    }
+    let trailing = 0
+    for (const d of activeDeals) {
+      if (await this.isDealForTrailing(d)) {
+        trailing++
+      }
+    }
+    if (activeDeals.length && trailing) {
+      this.allowedMethods.add('checkTrailing')
+    } else {
+      this.allowedMethods.delete('checkTrailing')
+    }
+    if (activeDeals.length && countDCALevelCheck) {
+      this.allowedMethods.add('checkDCALevel')
+    } else {
+      this.allowedMethods.delete('checkDCALevel')
+    }
+    this.handleLog(
+      `Check deals allowed methods: ${[...this.allowedMethods].join(', ')}`,
+    )
+    await this.checkDealsForStopLossMethods()
+    this.checkDealsPriceExtremum()
+  }
+
+  hasAllowedStopLossMethods() {
+    return (
+      this.allowedMethods.has('checkDealsMoveSL') ||
+      this.allowedMethods.has('checkTrailing') ||
+      this.allowedMethods.has('checkDealsStopLoss') ||
+      this.allowedMethods.has('checkIndicatorUnpnl')
+    )
+  }
+
+  async checkAllowedMethods() {
+    const settingsCommon = await this.getAggregatedSettings()
+    if (
+      ((settingsCommon.useCloseAfterX &&
+        settingsCommon.closeAfterX &&
+        checkNumber(settingsCommon.closeAfterX)) ||
+        (settingsCommon.useCloseAfterXloss &&
+          settingsCommon.closeAfterXloss &&
+          checkNumber(settingsCommon.closeAfterXloss)) ||
+        (settingsCommon.useCloseAfterXwin &&
+          settingsCommon.closeAfterXwin &&
+          checkNumber(settingsCommon.closeAfterXwin)) ||
+        (settingsCommon.useCloseAfterXprofit &&
+          settingsCommon.closeAfterXprofitCond &&
+          settingsCommon.closeAfterXprofitValue &&
+          checkNumber(settingsCommon.closeAfterXprofitValue))) &&
+      settingsCommon.useBotController &&
+      this.data?.status !== BotStatusEnum.closed
+    ) {
+      this.allowedMethods.add('checkClosedDeals')
+    } else {
+      this.allowedMethods.delete('checkClosedDeals')
+    }
+    if (
+      this.data &&
+      !this.data?.paperContext &&
+      !(
+        this.data.settings.type === DCATypeEnum.terminal &&
+        this.data.settings.terminalDealType === TerminalDealTypeEnum.simple
+      )
+    ) {
+      this.allowedMethods.add('sendDealClosedAlert')
+      this.allowedMethods.add('sendDealOpenedAlert')
+      this.allowedMethods.add('sendEightyAlert')
+      this.allowedMethods.add('sendHundredAlert')
+    } else {
+      this.allowedMethods.delete('sendDealClosedAlert')
+      this.allowedMethods.delete('sendDealOpenedAlert')
+      this.allowedMethods.delete('sendEightyAlert')
+      this.allowedMethods.delete('sendHundredAlert')
+    }
+    if (
+      settingsCommon.useDynamicPriceFilter &&
+      settingsCommon.dynamicPriceFilterDeviation &&
+      !isNaN(+settingsCommon.dynamicPriceFilterDeviation) &&
+      isFinite(+settingsCommon.dynamicPriceFilterDeviation)
+    ) {
+      this.allowedMethods.add('checkInDynamicRange')
+    } else {
+      this.allowedMethods.delete('checkInDynamicRange')
+    }
+    if (!(settingsCommon.useMulti && !settingsCommon.useDynamicPriceFilter)) {
+      this.allowedMethods.add('checkInRange')
+    } else {
+      this.allowedMethods.delete('checkInRange')
+    }
+    if (
+      settingsCommon.useMulti &&
+      settingsCommon.maxDealsPerPair &&
+      settingsCommon.maxDealsPerPair !== '' &&
+      !isNaN(+settingsCommon.maxDealsPerPair) &&
+      +settingsCommon.maxDealsPerPair > 0
+    ) {
+      this.allowedMethods.add('checkMaxDealsPerPair')
+    } else {
+      this.allowedMethods.delete('checkMaxDealsPerPair')
+    }
+    if (
+      (settingsCommon.maxNumberOfOpenDeals &&
+        settingsCommon.maxNumberOfOpenDeals !== '' &&
+        !isNaN(+settingsCommon.maxNumberOfOpenDeals) &&
+        +settingsCommon.maxNumberOfOpenDeals > 0) ||
+      this.allowedMethods.has('checkMaxDealsPerPair')
+    ) {
+      this.allowedMethods.add('checkMaxDeals')
+    } else {
+      this.allowedMethods.delete('checkMaxDeals')
+    }
+    if (
+      settingsCommon.useMinTP &&
+      settingsCommon.dealCloseCondition &&
+      [CloseConditionEnum.techInd, CloseConditionEnum.webhook].includes(
+        settingsCommon.dealCloseCondition,
+      ) &&
+      settingsCommon.minTp &&
+      checkNumber(settingsCommon.minTp)
+    ) {
+      this.allowedMethods.add('checkMinTp')
+    } else {
+      this.allowedMethods.delete('checkMinTp')
+    }
+    if (!this.allowedMethods.has('checkMinTp') && this.isBotForIndicatorUnpnl) {
+      this.allowedMethods.add('checkMinTp')
+    } else {
+      const { foundInSl, foundInTp } = this.getIndicatorUnpnlValues()
+      if (foundInSl || foundInTp) {
+        this.allowedMethods.add('checkMinTp')
+      }
+    }
+    if (
+      settingsCommon.useBotController &&
+      settingsCommon.useCloseAfterXopen &&
+      settingsCommon.closeAfterXopen &&
+      !checkNumber(settingsCommon.closeAfterXopen) &&
+      this.data?.status !== BotStatusEnum.closed
+    ) {
+      this.allowedMethods.add('checkOpenedDeals')
+    } else {
+      this.allowedMethods.delete('checkOpenedDeals')
+    }
+    if (
+      settingsCommon.useMulti &&
+      (settingsCommon.useVolumeFilter ||
+        settingsCommon.useRelativeVolumeFilter) &&
+      settingsCommon.useVolumeFilterAll
+    ) {
+      this.allowedMethods.add('filterCoinsByVolume')
+    } else {
+      this.allowedMethods.delete('filterCoinsByVolume')
+    }
+
+    if (
+      settingsCommon.useDynamicPriceFilter &&
+      settingsCommon.dynamicPriceFilterDeviation &&
+      !settingsCommon.useRiskReward &&
+      settingsCommon.startCondition === StartConditionEnum.asap
+    ) {
+      this.allowedMethods.add('checkDynamic')
+    } else {
+      this.allowedMethods.delete('checkDynamic')
+    }
+    await this.checkDealsAllowedMethods()
+    this.handleLog(
+      `Allowed methods: ${Array.from(this.allowedMethods).join(', ')}`,
+    )
+  }
+  /**
+   * Start bot<br />
+   *
+   * Call {@link DCABotHelper#loadData} to load bot data from db, create exchange provider<br />
+   *
+   * Call {@link DCABotHelper#loadOrders} to load bot order from db<br />
+   *
+   * Call {@link DCABotHelper#fillExchangeInfo} to get symbol data from exchange<br />
+   *
+   * Call {@link DCABotHelper#cancelAllOrder} to cancel all previous orders to prevent overwriting new orders<br />
+   *
+   * Call {@link DCABotHelper#getUserFees} to get current fee for user for bot pair<br />
+   *
+   * Call {@link DCABotHelper#getActiveOrders} to get active orders for bot pair, to check if bot not exceed the limit of orders<br />
+   *
+   * Call {@link DCABotHelper#connectAccountStream} to set callback to user account stream<br />
+   *
+   * Call {@link DCABotHelper#checkAssets} to set user asstes to {@link DCABotHelper#userFee}<br />
+   *
+   * If bot status open - if working shift not started - run new working shift, save changes to db, send update via {@link DCABotHelper#ioUpdate}  <br />
+   */
+
+  async start(
+    reload = false,
+    restart = false,
+    realStatus?: BotStatusEnum,
+  ): Promise<void> {
+    const _id = this.startMethod('start')
+    this.finishLoad = false
+    this.startTime = +new Date()
+    this.clearClassProperties(undefined, true)
+
+    const data = await this.loadData(
+      (data: DCABotSchema) => data.deals.active > 0,
+      realStatus,
+    )
+    const wasServiceRestart = !!this.serviceRestart
+    this.ignoreRestartStats = false
+    if (data) {
+      this.serviceRestart = false
+      this.loadingComplete = true
+      this.finishLoad = true
+      this.endMethod(_id)
+      return await this.stop()
+    }
+    if (this.data) {
+      //@ts-ignore
+      this.data =
+        this.botType === BotType.dca
+          ? convertDCABot(this.data)
+          : //@ts-ignore
+            convertComboBot(this.data)
+    }
+    if (this.data?.status === BotStatusEnum.archive) {
+      this.loadingComplete = true
+      this.serviceRestart = false
+      this.finishLoad = true
+      this.endMethod(_id)
+      return await this.stop()
+    }
+    if (this.data?.exchangeUnassigned) {
+      this.handleErrors(`Bot exchange unassigned. Bot will stop`, 'start')
+      this.loadingComplete = true
+      this.serviceRestart = false
+      this.finishLoad = true
+      this.endMethod(_id)
+      return await this.stop()
+    }
+    try {
+      await this.setClassProperties()
+      this.useMonitoring =
+        this.isMonitoring &&
+        (((wasServiceRestart || restart) &&
+          this.data?.status === BotStatusEnum.monitoring) ||
+          this.data?.status === BotStatusEnum.closed ||
+          (this.data?.status === BotStatusEnum.error &&
+            this.data.previousStatus === BotStatusEnum.monitoring))
+      this.handleLog(`Bot use monitoring ${this.useMonitoring}`)
+      const settings = await this.getAggregatedSettings()
+      if (settings.limitTimeout && settings.useLimitTimeout) {
+        let timeout = parseFloat(settings.limitTimeout || '0') * 1000
+        timeout = isNaN(timeout) ? 0 : timeout
+        this.enterMarketTimeout = timeout
+        if (
+          this.enterMarketTimeout < this.orderLimitRepositionTimeout &&
+          this.enterMarketTimeout !== 0
+        ) {
+          this.orderLimitRepositionTimeout = 0
+        }
+      }
+      if (this.data) {
+        if (this.data.status === BotStatusEnum.closed && reload) {
+          this.data.status = BotStatusEnum.closed
+        } else if (
+          this.data.status === BotStatusEnum.error &&
+          reload &&
+          this.data.previousStatus
+        ) {
+          this.data.status = this.data.previousStatus ?? this.data.status
+          this.updateData({ status: this.data.status })
+          this.emit('bot settings update', { status: this.data.status })
+        } else {
+          this.data.status = this.useMonitoring
+            ? BotStatusEnum.monitoring
+            : BotStatusEnum.open
+        }
+      }
+      await this.fillExchangeInfo()
+
+      await this.getUserFees()
+      await this.loadOrders()
+      await this.checkAllowedMethods()
+      if (this.pairsNotFound.size) {
+        if (
+          this.data?.settings.useMulti &&
+          this.data.settings.pair.length > 1 &&
+          this.pairsNotFound.size < this.data.settings.pair.length
+        ) {
+          for (const p of this.pairsNotFound) {
+            this.handleLog(
+              `Exchange info not found for ${p}. Will close all deals`,
+            )
+            this.data.settings.pair = this.data.settings.pair.filter(
+              (d) => d !== p,
+            )
+            this.ignoreErrors = true
+            this.loadingComplete = true
+            await this.updateData({ settings: this.data.settings })
+            await this.closeAllDeals(
+              CloseDCATypeEnum.cancel,
+              p,
+              undefined,
+              undefined,
+              true,
+              undefined,
+              undefined,
+              DCACloseTriggerEnum.auto,
+            )
+            this.pairs.delete(p)
+            this.loadingComplete = false
+            this.ignoreErrors = false
+          }
+        } else {
+          this.handleLog(`Exchange info not found. Bot will stop`)
+          this.loadingComplete = true
+          await this.stop(CloseDCATypeEnum.cancel)
+          this.loadingComplete = false
+          this.serviceRestart = false
+          if (this.data) {
+            this.data.status = BotStatusEnum.closed
+            this.ignoreErrors = true
+            await this.updateData({ status: this.data.status })
+            this.emit('bot settings update', { status: this.data.status })
+            this.ignoreErrors = false
+            this.finishLoad = true
+            this.endMethod(_id)
+            return
+          }
+        }
+      }
+      this.loadingComplete = true
+      await this.runAfterLoading()
+      await this.restoreWork()
+      if (
+        this.data &&
+        (this.data.status === 'open' || this.data?.status === 'monitoring')
+      ) {
+        const lastShift =
+          this.data.workingShift[this.data.workingShift.length - 1]
+        if (lastShift && lastShift.end) {
+          this.data.workingShift = [
+            ...this.data.workingShift,
+            { start: new Date().getTime() },
+          ]
+        }
+        if (!lastShift) {
+          this.data.workingShift = [
+            {
+              start: new Date().getTime(),
+            },
+          ]
+        }
+        const data = {
+          status: this.data.status,
+          workingShift: this.trimWorkingShift(this.data.workingShift),
+          workingTimeNumber: this.getWorkingTimeNumber(),
+        }
+        this.updateData(data)
+        this.emit('bot settings update', data)
+      }
+      this.startPriceTimer()
+      this.finishLoad = true
+    } catch (e) {
+      this.serviceRestart = false
+      this.handleErrors(
+        `Get error during bot start ${(e as Error)?.message}`,
+        'start',
+        '',
+        false,
+        false,
+        false,
+      )
+      logger.error(e)
+    }
+    this.finishLoad = true
+    this.secondRestart = true
+    this.reload = false
+    this.endMethod(_id)
+  }
+
+  async afterBotStop() {
+    this.stopPriceTimer()
+    return
+  }
+  /**
+   * Stop work<br />
+   *
+   * Call {@link DCABotHelper#cancelAllOrder} to cancel all active orders<br />
+   *
+   * If swap order not filled - cancel swap order<br/>
+   *
+   * Close bot working shift<br />
+   *
+   * Send update via {@link DCABotHelper#ioUpdate}
+   *
+   * Unsubscribe from {@link DCABotHelper#ioUser} & {@link DCABotHelper#ioPrice}
+   *
+   * @param {CloseDCATypeEnum} [closeType] Close type
+   */
+
+  async stop(
+    closeType?: CloseDCATypeEnum,
+    forceClose = false,
+    ignoreErrors = false,
+  ): Promise<void> {
+    try {
+      this.ignoreErrors = ignoreErrors
+      if (closeType) {
+        this.handleLog(`Close by ${closeType}`)
+      }
+      if (closeType !== CloseDCATypeEnum.leave) {
+        this.blockPriceCheck = true
+      }
+      for (const [id, timer] of this.openNewDealTimer.entries()) {
+        clearInterval(timer)
+        this.openNewDealTimer.delete(id)
+      }
+      const openDeals = this.getOpenDeals()
+      for (const d of openDeals) {
+        await this.clearDealTimer(d.deal._id)
+      }
+
+      const startDeals = openDeals.filter(
+        (d) => d.deal.status === DCADealStatusEnum.start,
+      )
+      this.closeAfterTpFilled = true
+      for (const d of startDeals) {
+        await this.closeDealById(
+          this.botId,
+          d.deal._id,
+          CloseDCATypeEnum.cancel,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          DCACloseTriggerEnum.bot,
+        )
+      }
+      if (closeType && openDeals.length > 0) {
+        if (closeType !== CloseDCATypeEnum.leave) {
+          const activeDeals = openDeals.filter(
+            (d) => d.deal.status === DCADealStatusEnum.open,
+          )
+          for (const d of activeDeals) {
+            await this.closeDealById(
+              this.botId,
+              d.deal._id,
+              closeType,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              DCACloseTriggerEnum.bot,
+            )
+          }
+        }
+      }
+      if (!closeType || openDeals.length === 0) {
+        if (this.redisSubGlobal) {
+          for (const pair of this.redisSubKeys([...this.pairs])) {
+            this.redisSubGlobal.unsubscribe(pair, this.redisSubCb)
+          }
+        }
+        this.closeUserStream()
+        this.deals = new Map()
+        for (const i of this.indicators.values()) {
+          await this.sendIndicatorUnsubscribeEvent(i.id, i.room, i.cb, false)
+        }
+      }
+      if (this.timer) {
+        clearTimeout(this.timer)
+      }
+      if (this.equityTimer && closeType !== CloseDCATypeEnum.leave) {
+        clearTimeout(this.equityTimer)
+      }
+      if (closeType === CloseDCATypeEnum.cancel) {
+        await this.afterBotStop()
+      }
+      if (
+        this.data?.status === BotStatusEnum.closed &&
+        openDeals.length === 0
+      ) {
+        for (const pair of this.pairs) {
+          await this.unsubscribeFromExchangeInfo(pair)
+          await this.unsubscribeFromUserFee(pair)
+          await this.unsubscribeFromUser()
+          await this.unsubscribeFromLastUsdData(`${pair}_base`)
+          await this.unsubscribeFromLastUsdData(`${pair}_quote`)
+          await this.unsubscribeFromLastStreamData(pair)
+        }
+        for (const _var of this.data.vars?.list ?? []) {
+          await this.unsubscribeFromGlobalVars(_var)
+        }
+        this.clearClassProperties(true)
+        this.sendBotClosed()
+      }
+      if (this.data) {
+        const lastShift =
+          this.data.workingShift[this.data.workingShift.length - 1]
+        if (lastShift && !lastShift.end) {
+          this.data.workingShift = [
+            ...this.data.workingShift.filter(
+              (w) => w.start !== lastShift.start,
+            ),
+            { ...lastShift, end: new Date().getTime() },
+          ]
+        }
+        const data = {
+          workingShift: this.trimWorkingShift(this.data.workingShift),
+          workingTimeNumber: this.getWorkingTimeNumber(),
+          status: BotStatusEnum.closed,
+          action: undefined,
+          previousStatus: undefined,
+        }
+        if (!forceClose) {
+          this.data = { ...this.data, ...data }
+        }
+        await this.updateData({ ...data })
+        this.emit('bot settings update', data)
+      }
+    } catch (e) {
+      this.handleErrors(
+        `Get error during bot stop ${(e as Error)?.message}`,
+        'stop',
+        '',
+        false,
+        false,
+        false,
+      )
+    }
+  }
+
+  private async baseSlOn(deal?: ExcludeDoc<Deal>) {
+    if (this.combo) {
+      return BaseSlOnEnum.avg
+    }
+    const key = deal?._id ?? 'bot'
+    if (this.baseSlOnMap.has(key)) {
+      return this.baseSlOnMap.get(key)
+    }
+    const settings = await this.getAggregatedSettings(deal)
+    const result =
+      settings.trailingSl || settings.moveSL
+        ? BaseSlOnEnum.avg
+        : (settings.baseSlOn ?? BaseSlOnEnum.avg)
+    this.baseSlOnMap.set(key, result)
+    return result
+  }
+  /**
+   * Check deals SL
+   */
+  @IdMute(mutex, (botId: string, symbol) => `${botId}sl${symbol}`)
+  async checkDealsStopLoss(_botId: string, symbol: string) {
+    if (!this.allowedMethods.has('checkDealsStopLoss')) {
+      return
+    }
+    if (this.lockSLCheck) {
+      return
+    }
+    this.lockSLCheck = true
+    for (const [deal, priceToClose] of this.dealsForStopLoss) {
+      const d = this.getDeal(deal)
+      if (
+        !d ||
+        d.closeBySl ||
+        d.deal.blockSl ||
+        d.notCheckSl ||
+        d.deal.symbol.symbol !== symbol ||
+        d.deal.status !== DCADealStatusEnum.open
+      ) {
+        continue
+      }
+      const lastStreamData = this.getLastStreamData(d.deal.symbol.symbol)
+      const last = lastStreamData?.price
+      if (!last) {
+        continue
+      }
+      const {
+        trailingSl,
+        useSl,
+        dealCloseConditionSL,
+        trailingTp,
+        useTp,
+        dealCloseCondition,
+        moveSL,
+        useMultiSl,
+        multiSl,
+        useFixedSLPrices,
+        fixedSlPrice,
+        multiTp,
+      } = await this.getAggregatedSettings(d.deal)
+      const dealId = d.deal._id
+      let closeBySl = true
+      let notCheckSl = false
+      let closeByMulti = false
+      const close =
+        (this.isLong && last <= priceToClose) ||
+        (!this.isLong && last >= priceToClose)
+      if (
+        close &&
+        ((trailingSl &&
+          !moveSL &&
+          useSl &&
+          dealCloseConditionSL === CloseConditionEnum.tp) ||
+          (trailingTp &&
+            useTp &&
+            !multiTp &&
+            dealCloseCondition === CloseConditionEnum.tp))
+      ) {
+        this.handleLog(
+          `Trailing trigger mode: ${(
+            d.deal.trailingMode ?? ''
+          ).toUpperCase()}, level: ${
+            d.deal.trailingLevel
+          }, price: ${last}, deal: ${dealId}`,
+        )
+      } else if (
+        close &&
+        useSl &&
+        !trailingSl &&
+        (dealCloseConditionSL === CloseConditionEnum.tp ||
+          (moveSL && d.deal.moveSlActivated))
+      ) {
+        if (
+          useMultiSl &&
+          multiSl?.length &&
+          dealCloseConditionSL === CloseConditionEnum.tp
+        ) {
+          const inUseSl = multiSl.filter(
+            (t) => !d.deal.tpSlTargetFilled?.includes(t.uuid),
+          )
+          if (inUseSl.length > 1) {
+            closeBySl = false
+            notCheckSl = true
+          }
+          closeByMulti = true
+        }
+        const lastStreamData = this.getLastStreamData(d.deal.symbol.symbol)
+        const last = lastStreamData?.price
+        if (close && useFixedSLPrices && fixedSlPrice) {
+          this.handleLog(
+            `Deal: ${dealId} closing by stop loss. SL set: ${fixedSlPrice}, Price current : ${last}`,
+          )
+        } else {
+          this.handleLog(
+            `Deal: ${dealId} closing by stop loss. SL set: ${priceToClose}, SL surrent : ${last}`,
+          )
+        }
+      } else if (
+        close &&
+        this.slAr &&
+        useSl &&
+        dealCloseConditionSL === CloseConditionEnum.dynamicAr
+      ) {
+        this.handleLog(
+          `Deal: ${dealId} closing by stop loss. SL price: ${priceToClose}, current price : ${last}`,
+        )
+      }
+      if (close) {
+        this.triggerStopLoss(dealId, closeBySl, notCheckSl, closeByMulti)
+      }
+    }
+    this.lockSLCheck = false
+  }
+  @IdMute(mutex, (botId: string, symbol) => `${botId}indicatorUnpnl${symbol}`)
+  async checkDealsIndicatorUnpnl(_botId: string, symbol: string) {
+    if (!this.allowedMethods.has('checkIndicatorUnpnl')) {
+      return
+    }
+    if (this.lockSLCheck) {
+      return
+    }
+    this.lockSLCheck = true
+    for (const [deal, { min, max }] of this.dealsForIndicatorUnpnl) {
+      const d = this.getDeal(deal)
+      if (
+        !d ||
+        d.closeBySl ||
+        d.deal.blockSl ||
+        d.notCheckSl ||
+        d.deal.symbol.symbol !== symbol ||
+        d.deal.status !== DCADealStatusEnum.open
+      ) {
+        continue
+      }
+      const lastStreamData = this.getLastStreamData(d.deal.symbol.symbol)
+      const last = lastStreamData?.price
+      if (!last) {
+        continue
+      }
+      const dealId = d.deal._id
+      const close =
+        (this.isLong && (last >= max || last <= min)) ||
+        (!this.isLong && (last <= max || last >= min))
+      if (close) {
+        this.handleLog(
+          `Close deal by indicator unpnl required min: ${min}, required max: ${max}, current price: ${last}`,
+        )
+      }
+      if (close) {
+        d.closeBySl = true
+        d.notCheckSl = true
+        this.saveDeal(d)
+        this.closeDealById(
+          this.botId,
+          dealId,
+          CloseDCATypeEnum.closeByMarket,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          DCACloseTriggerEnum.indicator,
+        )
+      }
+    }
+    this.lockSLCheck = false
+  }
+  @IdMute(mutex, (botId: string, symbol: string) => `${botId}moveSl${symbol}`)
+  async checkDealsMoveSL(_botId: string, symbol: string) {
+    if (!this.allowedMethods.has('checkDealsMoveSL')) {
+      return
+    }
+    if (this.lockSLCheck) {
+      return
+    }
+    this.lockSLCheck = true
+    for (const [d, required] of this.dealsForMoveSl) {
+      const deal = this.getDeal(d)
+      if (
+        !deal ||
+        deal.closeBySl ||
+        deal.deal.symbol.symbol !== symbol ||
+        deal.deal.status !== DCADealStatusEnum.open
+      ) {
+        continue
+      }
+      const lastStreamData = this.getLastStreamData(deal.deal.symbol.symbol)
+      const last = lastStreamData?.price
+      if (!last) {
+        continue
+      }
+      if (
+        (this.isLong && last >= required) ||
+        (!this.isLong && last <= required)
+      ) {
+        this.dealsForMoveSl.delete(d)
+        await this.triggerMoveSl(d, required, last)
+      }
+    }
+
+    this.lockSLCheck = false
+  }
+  /** Set price timer */
+
+  startPriceTimer() {
+    if (this.priceTimer) {
+      clearTimeout(this.priceTimer)
+    }
+    this.priceTimer = setInterval(
+      () => this.priceTimerFn(this.data?.exchange),
+      this.priceTimeout,
+    )
+  }
+  /** Stop price timer */
+
+  stopPriceTimer() {
+    if (this.priceTimer) {
+      clearTimeout(this.priceTimer)
+    }
+  }
+  /** Check if price not update */
+  @IdMute(
+    mutex,
+    (exchange?: ExchangeEnum) =>
+      `${removePaperFormExchangeName(
+        exchange ?? ExchangeEnum.binance,
+      )}priceTimerFn`,
+  )
+  async priceTimerFn(_exchange?: ExchangeEnum) {
+    const symbols: Set<string> = new Set()
+    for (const d of this.getDealsByStatusAndSymbol({
+      status: DCADealStatusEnum.open,
+    }).filter((d) => !d.closeBySl && !d.deal.blockSl && !d.notCheckSl)) {
+      const symbol = d.deal.symbol.symbol
+      const lastStreamData = this.getLastStreamData(d.deal.symbol.symbol)
+      const time = lastStreamData?.time ?? 0
+      if (+new Date() - time < this.priceTimeout) {
+        continue
+      }
+      this.handleLog(
+        `Last update time for ${symbol} is ${new Date(
+          time,
+        ).toISOString()}, more then ${this.priceTimeout / 1000 / 60}m`,
+      )
+      symbols.add(symbol)
+    }
+    if (this.exchange && symbols.size) {
+      this.handleLog(
+        `Required prices for ${symbols.size} symbols in price timer`,
+      )
+      const allPrices = await this.exchange?.getAllPrices(true)
+      this.handleLog(`Get all prices in price timer`)
+      if (allPrices.status === StatusEnum.ok) {
+        const prices = allPrices.data.filter((p) => symbols.has(p.pair))
+        for (const p of prices) {
+          this.priceUpdateCallback(this.botId, {
+            symbol: p.pair,
+            price: p.price,
+            time: +new Date(),
+            volume: 0,
+          })
+        }
+      }
+    }
+  }
+  /** Check trailing conditions */
+  @IdMute(mutex, (botId: string, symbol: string) => `${botId}trailing${symbol}`)
+  async checkTrailing(_botId: string, _symbol: string) {
+    if (!this.allowedMethods.has('checkTrailing')) {
+      return
+    }
+    if (!this.data) {
+      return
+    }
+    for (const [deal, data] of this.dealsForTrailing) {
+      const { trailingTp, skipTp, trailingSl, skipSl, trailingTpPrice } = data
+      const d = this.getDeal(deal)
+      if (
+        !d ||
+        d.closeBySl ||
+        d.deal.blockSl ||
+        d.notCheckSl ||
+        d.deal.status !== DCADealStatusEnum.open
+      ) {
+        continue
+      }
+      const lastStreamData = this.getLastStreamData(d.deal.symbol.symbol)
+      const last = lastStreamData?.price
+      if (!last) {
+        continue
+      }
+      const settings = await this.getAggregatedSettings(d.deal)
+      const { trailingTpPerc, slPerc } = settings
+
+      const old = {
+        price: d.deal.bestPrice,
+        mode: d.deal.trailingMode,
+        level: d.deal.trailingLevel,
+      }
+      if (!d.deal.bestPrice) {
+        d.deal.bestPrice = last
+        this.handleLog(
+          `Trailing: Set initial best price: ${last}, deal: ${d.deal._id} `,
+        )
+      } else {
+        if (
+          (this.isLong && last > d.deal.bestPrice) ||
+          (!this.isLong && last < d.deal.bestPrice)
+        ) {
+          d.deal.bestPrice = last
+        }
+      }
+      if (!d.deal.trailingMode && trailingSl && !skipSl) {
+        d.deal.trailingMode = TrailingModeEnum.tsl
+        this.handleLog(
+          `Trailing: Set TSL trailing mode, deal: ${d.deal._id}, price: ${last} `,
+        )
+      }
+      if (
+        d.deal.trailingMode !== TrailingModeEnum.ttp &&
+        trailingTp &&
+        !skipTp &&
+        trailingTpPrice
+      ) {
+        if (
+          (this.isLong && last >= trailingTpPrice) ||
+          (!this.isLong && last <= trailingTpPrice)
+        ) {
+          d.deal.trailingMode = TrailingModeEnum.ttp
+          this.handleLog(
+            `Trailing: Set TTP trailing mode, deal: ${d.deal._id}, price : ${last}, deal trailing tp price %: ${trailingTpPrice}, price ${last} `,
+          )
+        }
+      }
+      if (old.price !== d.deal.bestPrice || old.mode !== d.deal.trailingMode) {
+        const longMult = this.isLong ? 1 : -1
+        d.deal.trailingLevel =
+          d.deal.trailingMode === TrailingModeEnum.tsl && slPerc
+            ? last * (1 + (+slPerc / 100) * longMult)
+            : d.deal.trailingMode === TrailingModeEnum.ttp && trailingTpPerc
+              ? last * (1 - (+trailingTpPerc / 100) * longMult)
+              : 0
+      }
+      if (
+        d.deal.trailingLevel !== old.level ||
+        old.price !== d.deal.bestPrice
+      ) {
+        await this.triggerTrailing(deal, last)
+      }
+    }
+  }
+  @IdMute(
+    mutex,
+    (botId: string, symbol: string) => `${botId}checkDynamic${symbol}`,
+  )
+  async checkDynamic(_botId: string, symbol: string, price: number) {
+    if (this.data?.status === BotStatusEnum.closed) {
+      return
+    }
+    if (
+      !this.allowedMethods.has('checkDynamic') ||
+      isNaN(price) ||
+      !isFinite(price)
+    ) {
+      return
+    }
+    const settings = await this.getAggregatedSettings()
+    const useDynamic = !!(
+      settings.useDynamicPriceFilter &&
+      settings.dynamicPriceFilterDeviation &&
+      !settings.useRiskReward
+    )
+    if (useDynamic && settings.startCondition === StartConditionEnum.asap) {
+      const dealsPerSymbol = this.getOpenDeals(false, symbol)
+      let maxDeals =
+        settings.maxNumberOfOpenDeals && !isNaN(+settings.maxNumberOfOpenDeals)
+          ? +settings.maxNumberOfOpenDeals
+          : 1
+      if (maxDeals < 0) {
+        maxDeals = Infinity
+      }
+      let maxPerSymbol =
+        settings.useMulti &&
+        settings.maxDealsPerPair &&
+        +settings.maxDealsPerPair !== 0 &&
+        !isNaN(+settings.maxDealsPerPair)
+          ? +settings.maxDealsPerPair
+          : 1
+      if (maxPerSymbol < 0) {
+        maxPerSymbol = Infinity
+      }
+      if (
+        dealsPerSymbol.length &&
+        dealsPerSymbol.length <
+          (settings.useMulti
+            ? maxPerSymbol
+            : useDynamic && maxDeals
+              ? maxDeals
+              : 1)
+      ) {
+        if (await this.checkInRange(symbol, price)) {
+          const lastData = (this.data?.lastPricesPerSymbol ?? []).find(
+            (d) => d.symbol === symbol,
+          )
+          this.handleLog(
+            `Price ${price} in range for ${symbol}. Last data: avg - ${lastData?.avg}, entry - ${lastData?.entry}, time - ${lastData?.time}`,
+          )
+          await this.openNewDeal(this.botId, symbol, true, true, +new Date())
+        }
+      }
+    }
+  }
+  @IdMute(mutex, (botId: string) => `${botId}checkDCALevel`)
+  public async checkDCALevel(_botId: string, price: number) {
+    for (const [d, v] of this.dealsDCALevelCheck) {
+      if (!(this.isLong ? price <= v : price >= v)) {
+        continue
+      }
+      const deal = this.getDeal(d)
+      if (!deal) {
+        continue
+      }
+      const value = this.dealsDCALevelCheck.get(deal.deal._id)
+      if (value) {
+        const trigger = this.isLong ? price <= value : price >= value
+        if (trigger) {
+          this.handleLog(
+            `Deal: ${deal.deal._id} adding DCA level by DCA level check`,
+          )
+          const order = deal.currentOrders.find((o) => +o.price === value)
+          if (!order) {
+            return this.handleErrors(
+              `Cannot find order for DCA level check`,
+              'checkDCALevel',
+              '',
+              false,
+              false,
+              false,
+            )
+          }
+          const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
+          if (ed) {
+            const fullOrder = this.convertGridToOrder(
+              order,
+              {
+                dealId: deal.deal._id,
+                type: 'LIMIT',
+              },
+              ed,
+            )
+            if (fullOrder) {
+              fullOrder.status = 'FILLED'
+              fullOrder.executedQty = fullOrder.origQty
+              this.setOrder(fullOrder)
+              this.ordersDb.createData(fullOrder)
+              return await this.updateDeal(this.botId, fullOrder)
+            }
+          }
+        }
+      }
+    }
+  }
+  /**
+   * Price update callback<br />
+   *
+   */
+  @IdMute(
+    mutex,
+    (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
+    50,
+  )
+  @IdMute(
+    mutexPriceConcurrently,
+    (botId: string) => `${botId}priceUpdateCallback`,
+  )
+  override async priceUpdateCallback(
+    _botId: string,
+    msg: PriceMessage,
+  ): Promise<void> {
+    if (!this.finishLoad) {
+      return
+    }
+    if (
+      this.data?.status === BotStatusEnum.closed &&
+      this.data?.deals.active === 0
+    ) {
+      return
+    }
+
+    if (this.blockPriceCheck) {
+      return
+    }
+    if (+new Date() - (this.lastPriceCheck.get(msg.symbol) ?? 0) < 500) {
+      return
+    }
+    this.lastPriceCheck.set(msg.symbol, +new Date())
+    const time = msg.time ? msg.time : (msg.eventTime ?? msg.time)
+    const lastStreamData = this.getLastStreamData(msg.symbol)
+    if (time < (lastStreamData?.time ?? 0)) {
+      return
+    }
+    this.setLastStreamData(msg.symbol, { price: msg.price, time })
+    if (msg.price === lastStreamData?.price) {
+      return
+    }
+    const hasAllowed = this.hasAllowedStopLossMethods()
+    const lastCheck =
+      +new Date() - (this.lastCheckPerSymbol.get(msg.symbol) ?? 0) >
+      (this.data?.parentBotId ? 30 * 1000 : 60 * 1000)
+    const needProcess = lastCheck || hasAllowed
+    if (needProcess) {
+      if (lastCheck) {
+        const _activeDeals = this.getOpenDeals(false, msg.symbol)
+        this.lastCheckPerSymbol.set(msg.symbol, +new Date())
+        for (const d of _activeDeals) {
+          if (this.data) {
+            const data: BotParentProcessStatsEventDtoDcaCombo = {
+              event: 'processStats',
+              botId: this.botId,
+              botType: this.combo ? BotType.combo : BotType.dca,
+              payload: {
+                combo: this.combo,
+                data: msg,
+                deal: {
+                  _id: d.deal._id,
+                  settings: {
+                    futures: d.deal.settings.futures,
+                    marginType: d.deal.settings.marginType,
+                    leverage: d.deal.settings.leverage,
+                    comboTpBase: d.deal.settings.comboTpBase,
+                    coinm: d.deal.settings.coinm,
+                    profitCurrency: d.deal.settings.profitCurrency,
+                  },
+                  currentBalances: d.deal.currentBalances,
+                  initialBalances: d.deal.initialBalances,
+                  profit: {
+                    total: d.deal.profit.total,
+                    pureBase: 0,
+                    pureQuote: 0,
+                  },
+                  feePaid: d.deal.feePaid,
+                  avgPrice: d.deal.avgPrice,
+                  strategy: d.deal.strategy,
+                  usage: d.deal.usage,
+                  stats: d.deal.stats,
+                  flags: d.deal.flags,
+                  tpFilledHistory: d.deal.tpFilledHistory,
+                  reduceFunds: d.deal.reduceFunds,
+                  botId: this.botId,
+                },
+                fee: (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0,
+                usdRate: (await this.getUsdRate(d.deal.symbol.symbol)) ?? 0,
+              },
+            }
+            try {
+              DealStats.getInstance().updateStats(data)
+            } catch (e) {
+              this.handleErrors(
+                `Cannot send deal ${d.deal._id} stats to parent process ${e}`,
+                'priceUpdateCallback',
+                '',
+                false,
+                false,
+                false,
+              )
+            }
+          }
+        }
+        await this.checkDynamic(this.botId, msg.symbol, +msg.price)
+      }
+      if (hasAllowed) {
+        if (
+          msg.price >= (this.lowestHigh.get(msg.symbol) ?? Infinity) ||
+          msg.price <= (this.highestLow.get(msg.symbol) ?? 0)
+        ) {
+          await this.checkDealsMoveSL(this.botId, msg.symbol)
+          await this.checkTrailing(this.botId, msg.symbol)
+          await this.checkDealsStopLoss(this.botId, msg.symbol)
+          await this.checkDealsIndicatorUnpnl(this.botId, msg.symbol)
+          await this.checkDCALevel(this.botId, msg.price)
+        }
+      }
+    }
+    if (this.data?.status === 'range') {
+      if (await this.checkInRange(msg.symbol, msg.price)) {
+        this.restoreFromRangeOrError()
+        if (
+          this.data.settings.startCondition === StartConditionEnum.asap &&
+          this.getOpenDeals().length === 0
+        ) {
+          this.openNewDeal(this.botId, msg.symbol)
+        }
+      }
+    }
+    if (
+      this.data &&
+      this.data.settings.useBotController &&
+      (this.data.settings.botStart === BotStartTypeEnum.price ||
+        this.data.settings.botActualStart === BotStartTypeEnum.price)
+    ) {
+      if (
+        (this.data.status === BotStatusEnum.monitoring ||
+          (this.data.status === BotStatusEnum.error &&
+            this.data.previousStatus === BotStatusEnum.monitoring)) &&
+        this.data?.settings.botActualStart === BotStartTypeEnum.price &&
+        !this.startSent
+      ) {
+        if (
+          this.data.settings.startBotPriceCondition ===
+          IndicatorStartConditionEnum.gt
+            ? msg.price > +(this.data.settings.startBotPriceValue ?? Infinity)
+            : msg.price < +(this.data.settings.startBotPriceValue ?? 0)
+        ) {
+          this.startSent = true
+          this.handleLog(
+            `Start bot by price condition ${msg.price} ${this.data.settings.startBotPriceCondition} ${this.data.settings.startBotPriceValue}`,
+          )
+          this.setStatus(this.botId, BotStatusEnum.open)
+        }
+      }
+      if (
+        (this.data.status === BotStatusEnum.open ||
+          this.data.status === BotStatusEnum.range ||
+          (this.data.status === BotStatusEnum.error &&
+            (this.data.previousStatus === BotStatusEnum.open ||
+              this.data.previousStatus === BotStatusEnum.range))) &&
+        this.data?.settings.botStart === BotStartTypeEnum.price &&
+        !this.stopSent
+      ) {
+        if (
+          this.data.settings.stopBotPriceCondition ===
+          IndicatorStartConditionEnum.gt
+            ? msg.price > +(this.data.settings.stopBotPriceValue ?? Infinity)
+            : msg.price < +(this.data.settings.stopBotPriceValue ?? 0)
+        ) {
+          this.stopSent = true
+          const setMonitoring =
+            this.data.settings.stopStatus === BotStatusEnum.monitoring &&
+            (this.data.settings.botActualStart ===
+              BotStartTypeEnum.indicators ||
+              this.data.settings.botActualStart === BotStartTypeEnum.price)
+          this.handleLog(
+            `Stop bot by price condition ${msg.price} ${this.data.settings.stopBotPriceCondition} ${this.data.settings.stopBotPriceValue}, set monitoring ${setMonitoring} (${this.data.settings.stopStatus}, ${this.data.settings.botActualStart})`,
+          )
+          await this.setStatus(
+            this.botId,
+            BotStatusEnum.closed,
+            this.data.settings.stopType,
+          )
+          if (setMonitoring) {
+            this.setStatus(this.botId, BotStatusEnum.open)
+          }
+        }
+      }
+    }
+  }
+
+  clearClassProperties(clearRedis = false, start = false) {
+    mutex.clear(this.botId)
+    mutexConcurrently.clear(this.botId)
+    mutexPriceConcurrently.clear(this.botId)
+    this.pendingClose = new Set()
+    this.lastLogs = []
+    this.lastMethods = []
+    this.currentMethods = new Map()
+    this.afterIndicatorsConnected = []
+    this.ordersInBetweenUpdates = new Set()
+    this.zeroFee = false
+    this.startSent = false
+    this.stopSent = false
+    for (const [id, timer] of this.closeDealTimer.entries()) {
+      if (timer) {
+        clearTimeout(timer)
+      }
+      this.closeDealTimer.delete(id)
+    }
+    if (this.equityTimer) {
+      clearTimeout(this.equityTimer)
+    }
+    for (const [id, timer] of this.openNewDealTimer.entries()) {
+      if (timer) {
+        clearTimeout(timer)
+      }
+      this.openNewDealTimer.delete(id)
+    }
+    for (const [id, timer] of this.dealTimersMap.entries()) {
+      if (timer.enterMarketTimer) {
+        clearTimeout(timer.enterMarketTimer)
+      }
+      if (timer.limitTimer) {
+        clearTimeout(timer.limitTimer)
+      }
+      this.dealTimersMap.delete(id)
+    }
+    this.indicatorsIntervalActionMap = new Map()
+    try {
+      for (const timer of Object.values(this.indicatorCheckTimers)) {
+        if (timer) {
+          clearInterval(timer)
+        }
+      }
+      this.indicatorCheckTimers = {}
+      this.indicatorCheckTimersFired = {}
+    } catch (e) {
+      this.handleErrors(
+        `Cannot clear intervals ${e}`,
+        'stop',
+        '',
+        false,
+        false,
+        false,
+      )
+    }
+    if (this.saveIndicatorTimer) {
+      clearInterval(this.saveIndicatorTimer)
+    }
+    if (this.timer) {
+      clearInterval(this.timer)
+    }
+    if (start) {
+      this.setEquityTimer()
+    }
+    this.indicatorActions = {
+      startDeal: new Map<string, number>(),
+      stopBot: new Map<string, number>(),
+      startBot: new Map<string, number>(),
+      closeDealTp: new Map<string, number>(),
+      closeDealSl: new Map<string, number>(),
+      dcaOrder: new Map<string, number>(),
+    }
+    this.profitBaseDealMap = new Map()
+    this.leverageMap = new Map()
+    this.baseSlOnMap = new Map()
+    this.dealStatusMap = new Map()
+    this.dealSymbolMap = new Map()
+    this.orderStatusMap = new Map()
+    this.orderDealMap = new Map()
+    this.orders = new Map()
+    this.minigridDealMap = new Map()
+    this.checkIndicatorsQueue = new Map()
+    this.dcaOrdersBySignal = new Set()
+    this.lastIndicatorsDataMap = new Map()
+    this.allowToPlaceOrders = new Map()
+    this.pendingDeals = 0
+    this.pendingDealsPerPair = new Map()
+    this.loadingComplete = false
+    this.runAfterLoadingQueue = []
+    this.lockProcessQueueMethod = false
+    this.userStreamInitialStart = true
+    this.blockCheck = false
+    this.ignoreErrors = false
+    this.stopList = new Set()
+    this.pendingOrdersList = new Map()
+    this.closeAfterTpFilled = false
+    this.runAfterLoadingQueue = []
+    this.pairsNotFound = new Set()
+    this.coinsMemory = new Set()
+    this.coinsLastRequest = 0
+    this.relativeCoinsLastRequest = 0
+    this.relativeCoinsMemory = new Set()
+    this.stopPriceTimer()
+    if (clearRedis) {
+      this.clearRedis()
+    }
+    this.dealTimersMap = new Map()
+    this.dealsForMoveSl = new Map()
+    this.dealsForStopLoss = new Map()
+    this.dealsForTrailing = new Map()
+    this.dealsForStopLossCombo = new Map()
+    this.ordersKeys = new Set()
+    this.highestLow = new Map()
+    this.lowestHigh = new Map()
+    this.lastPriceCheck = new Map()
+    this.blockCheck = false
+    this.blockPriceCheck = false
+    if (start) {
+      if (this.closeTimer) {
+        this.handleLog(`Clear close timer`)
+        clearTimeout(this.closeTimer)
+        this.closeTimer = null
+      }
+    }
+    this.blockCheck = false
+    this.precisions = new Map()
+    this.lastStreamData = new Map()
+  }
+  /**
+   * Reload bot after settings changed
+   */
+  @IdMute(mutex, (botId: string) => `reload${botId}`)
+  override async reloadBot(_botId: string, replaceOrders = true) {
+    try {
+      if (this.reloadTimer) {
+        clearTimeout(this.reloadTimer)
+        this.reloadTimer = null
+      }
+      this.handleLog(`Reload bot`)
+      const _id = this.startMethod('reloadBot')
+      for (const [id, timer] of this.openNewDealTimer.entries()) {
+        clearInterval(timer)
+        this.openNewDealTimer.delete(id)
+      }
+      const stopped =
+        this.data?.status === BotStatusEnum.closed ||
+        (this.data?.status === BotStatusEnum.error &&
+          this.data.previousStatus === BotStatusEnum.closed)
+      if (replaceOrders) {
+        await this.cancelAllOrder()
+      }
+      if (!replaceOrders) {
+        this.serviceRestart = true
+        this.secondRestart = true
+        this.ignoreRestartStats = true
+        this.saveIndicators = true
+        this.reload = true
+      }
+      for (const d of this.getOpenDeals()) {
+        await this.clearDealTimer(d.deal._id)
+        this.allowToPlaceOrders.set(d.deal._id, false)
+      }
+      if (!this.saveIndicators) {
+        for (const i of [...this.indicators.values()]) {
+          await this.sendIndicatorUnsubscribeEvent(i.id, i.room, i.cb)
+        }
+      }
+
+      if (this.timer) {
+        clearTimeout(this.timer)
+      }
+      this.endMethod(_id)
+      await this.start(false, true)
+      if (stopped && this.data) {
+        const data = { status: BotStatusEnum.closed }
+        this.data = { ...this.data, ...data }
+        this.updateData(data)
+        this.emit('bot settings update', data)
+      }
+    } catch (e) {
+      this.handleErrors(
+        `Error on reload bot ${e}`,
+        'reloadBot',
+        '',
+        false,
+        false,
+        false,
+      )
+    }
+  }
+
+  /**
+   * Update deal balances
+   */
+
+  async updateDealBalances(findDeal: FullDeal<ExcludeDoc<Deal>>) {
+    const orderBo = this.findBaseOrderByDeal(findDeal.deal._id)
+    if (orderBo) {
+      const long = this.isLong
+      const qty = parseFloat(orderBo.executedQty)
+      const price = parseFloat(orderBo.price)
+      const fundsBase = (
+        findDeal.deal.funds ?? ([] as unknown as NonNullable<Deal['funds']>)
+      ).reduce((acc, v) => acc + v.qty, 0)
+      const fundsQuote = (
+        findDeal.deal.funds ?? ([] as unknown as NonNullable<Deal['funds']>)
+      ).reduce((acc, v) => acc + v.qty * v.price, 0)
+      const pending = this.getPendingAddFunds(findDeal)
+      const reduceFundsBase = (
+        findDeal.deal.reduceFunds ??
+        ([] as unknown as NonNullable<Deal['reduceFunds']>)
+      ).reduce((acc, v) => acc + v.qty, 0)
+      const reduceFundsQuote = (
+        findDeal.deal.reduceFunds ??
+        ([] as unknown as NonNullable<Deal['reduceFunds']>)
+      ).reduce((acc, v) => acc + v.qty * v.price, 0)
+      findDeal.deal.initialBalances = {
+        base: long
+          ? 0
+          : findDeal.initialOrders
+              .filter((o) => o.side === OrderSideEnum.sell)
+              .reduce((acc, v) => acc + v.qty, 0) +
+            qty +
+            fundsBase +
+            pending.base -
+            reduceFundsBase,
+        quote: long
+          ? findDeal.initialOrders
+              .filter((o) => o.side === OrderSideEnum.buy)
+              .reduce((acc, v) => acc + v.qty * v.price, 0) +
+            qty * price +
+            fundsQuote +
+            pending.quote -
+            reduceFundsQuote
+          : 0,
+      }
+      const filled = this.getOrdersByStatusAndDealId({
+        dealId: findDeal.deal._id,
+        status: ['FILLED', 'CANCELED'],
+      })
+        .filter(
+          (o) =>
+            (o.status === 'FILLED' || +o.executedQty !== 0) &&
+            ![
+              TypeOrderEnum.fee,
+              TypeOrderEnum.br,
+              TypeOrderEnum.rebalance,
+            ].includes(o.typeOrder),
+        )
+        .filter((o) =>
+          findDeal.deal.parent ? o.typeOrder !== TypeOrderEnum.dealStart : true,
+        )
+      const filledBase =
+        filled.reduce(
+          (acc, v) =>
+            acc +
+            (v.executedQty &&
+            !isNaN(+v.executedQty) &&
+            isFinite(+v.executedQty) &&
+            +v.executedQty
+              ? +v.executedQty
+              : v.typeOrder === TypeOrderEnum.dealStart
+                ? +v.executedQty
+                : +v.origQty) *
+              (v.side === 'BUY' ? 1 : -1),
+          0,
+        ) +
+        (findDeal.deal.parent ? qty : 0) * (orderBo.side === 'BUY' ? 1 : -1)
+      const filledQuote =
+        filled.reduce(
+          (acc, v) =>
+            acc +
+            (v.executedQty &&
+            !isNaN(+v.executedQty) &&
+            isFinite(+v.executedQty) &&
+            +v.executedQty
+              ? +v.executedQty * +v.price
+              : v.typeOrder === TypeOrderEnum.dealStart
+                ? +v.executedQty * +v.price
+                : +v.origQty * +v.price) *
+              (v.side === 'BUY' ? -1 : 1),
+          0,
+        ) +
+        (findDeal.deal.parent ? qty * price : 0) *
+          (orderBo.side === 'BUY' ? -1 : 1)
+      findDeal.deal.currentBalances = {
+        base: findDeal.deal.initialBalances.base + filledBase,
+        quote: findDeal.deal.initialBalances.quote + filledQuote,
+      }
+      if (this.combo) {
+        this.handleLog(
+          `Deal ${findDeal.deal._id} balances ${
+            findDeal.deal.currentBalances.base
+          } base, ${
+            findDeal.deal.currentBalances.quote
+          } quote, filled ${filledBase} base ${filledQuote} quote, sells - ${
+            filled.filter((o) => o.side === 'SELL').length
+          } buys - ${filled.filter((o) => o.side === 'BUY').length}, initial ${
+            findDeal.deal.initialBalances.base
+          } base ${findDeal.deal.initialBalances.quote} quote`,
+        )
+      }
+      if (this.combo) {
+        const initOrdersMap: Map<number, Grid> = new Map()
+        findDeal.initialOrders
+          .filter((o) => o.type === TypeOrderEnum.dealRegular)
+          .map((o) => {
+            if (o.dcaLevel) {
+              initOrdersMap.set(o.dcaLevel, o)
+            }
+          })
+        findDeal.deal.levels.all = Math.max(
+          findDeal.deal.levels.complete,
+          initOrdersMap.size + 1,
+        )
+      } else {
+        findDeal.deal.levels.all = Math.max(
+          findDeal.deal.levels.complete,
+          findDeal.initialOrders.filter(
+            (o) => o.type === TypeOrderEnum.dealRegular,
+          ).length +
+            1 +
+            (findDeal.deal.pendingAddFunds ?? []).length +
+            (findDeal.deal.funds ?? []).length,
+        )
+      }
+      this.saveDeal(findDeal, {
+        initialBalances: findDeal.deal.initialBalances,
+        currentBalances: findDeal.deal.currentBalances,
+        levels: findDeal.deal.levels,
+      })
+    }
+  }
+  /**
+   * Reset deal settings to global bot
+   */
+
+  async resetDealSettings(dealId: string) {
+    const findDeal = this.getDeal(dealId)
+    if (
+      findDeal &&
+      findDeal.deal.status === DCADealStatusEnum.open &&
+      this.data
+    ) {
+      const dealSettings = this.getInitalDealSettings()
+      if (dealSettings) {
+        await this.updateDealSettings(
+          dealId,
+          {
+            ...dealSettings,
+            avgPrice: findDeal.deal.settings.avgPrice,
+            orderSizePercQty: findDeal.deal.settings.orderSizePercQty,
+            slChangedByUser: findDeal.deal.settings.slChangedByUser,
+            updatedComboAdjustments:
+              findDeal.deal.settings.updatedComboAdjustments,
+            fixedSlPrice: findDeal.deal.settings.fixedSlPrice,
+            fixedTpPrice: findDeal.deal.settings.fixedTpPrice,
+            useFixedSLPrices: findDeal.deal.settings.useFixedSLPrices,
+            useFixedTPPrices: findDeal.deal.settings.useFixedTPPrices,
+            useTp:
+              this.data.settings.dealCloseCondition ===
+                CloseConditionEnum.dynamicAr && this.data.settings.useTp
+                ? true
+                : findDeal.deal.settings.fixedTpPrice &&
+                    findDeal.deal.settings.useFixedTPPrices
+                  ? findDeal.deal.settings.useTp
+                  : dealSettings.useTp,
+            useSl:
+              this.data.settings.dealCloseConditionSL ===
+                CloseConditionEnum.dynamicAr && this.data.settings.useSl
+                ? true
+                : findDeal.deal.settings.fixedSlPrice &&
+                    findDeal.deal.settings.useFixedSLPrices
+                  ? findDeal.deal.settings.useSl
+                  : dealSettings.useSl,
+            baseSlOn: this.data.settings.baseSlOn,
+            profitCurrency: this.combo
+              ? findDeal.deal.settings.profitCurrency
+              : dealSettings.profitCurrency,
+          },
+          true,
+        )
+      }
+    }
+  }
+
+  async getOrdersToRestartAfterSettingsUpdate(dealId: string) {
+    const findDeal = this.getDeal(dealId)
+    return this.findDiff(findDeal?.currentOrders ?? [], [])
+  }
+
+  async afterDealUpdate(_dealId: string) {
+    return
+  }
+
+  async setNewTp(tp?: string, sl?: string) {
+    if (!this.data) {
+      return
+    }
+    if (!tp && !sl) {
+      return
+    }
+    if (tp) {
+      this.data.settings.tpPerc = tp
+    }
+    if (sl) {
+      this.data.settings.slPerc = sl
+    }
+    for (const d of this.getOpenDeals()) {
+      if (tp) {
+        d.deal.settings.tpPerc = tp
+      }
+      if (sl) {
+        d.deal.settings.slPerc = sl
+      }
+      this.setDeal(d)
+      await this.setDealForStopLoss(d)
+    }
+    this.setDealToRedis(this.botId, this.serviceRestart && !this.secondRestart)
+  }
+  /**
+   * Update deal settings
+   */
+
+  async updateDealSettings(
+    dealId: string,
+    settings: Partial<Deal['settings']>,
+    reset = false,
+  ) {
+    const keys = Object.keys(settings)
+    if (keys.length > 0) {
+      const findDeal = this.getDeal(dealId)
+      if (
+        findDeal &&
+        (findDeal.deal.status === DCADealStatusEnum.open ||
+          findDeal.deal.status === DCADealStatusEnum.start ||
+          findDeal.deal.status === DCADealStatusEnum.error)
+      ) {
+        const currentSlPerc = findDeal.deal.settings.slPerc
+        const changeTrailing =
+          settings.trailingTpPerc &&
+          `${settings.trailingTpPerc}` !==
+            `${findDeal.deal.settings.trailingTpPerc}`
+        if (changeTrailing) {
+          findDeal.deal.trailingLevel = 0
+          findDeal.deal.trailingMode = undefined
+        }
+        findDeal.deal.settings = {
+          ...findDeal.deal.settings,
+          ...settings,
+          changed: reset
+            ? false
+            : keys.length === 1 && keys[0] === 'avgPrice'
+              ? false
+              : true,
+        }
+        const keysToCheck = Object.keys(findDeal.deal.settings).map((k) => {
+          if (
+            (!findDeal.deal.settings.useDca &&
+              !this.data?.settings.useDca &&
+              [
+                'ordersCount',
+                'orderSize',
+                'useSmartOrders',
+                'activeOrdersCount',
+                'stepScale',
+                'volumeScale',
+              ].includes(k)) ||
+            k === 'avgPrice' ||
+            k === 'changed' ||
+            (findDeal.deal.settings.useDca &&
+              this.data?.settings.useDca &&
+              !findDeal.deal.settings.useSmartOrders &&
+              !this.data?.settings.useSmartOrders &&
+              ['activeOrdersCount'].includes(k)) ||
+            (!findDeal.deal.settings.useTp &&
+              !this.data?.settings.useTp &&
+              [
+                'tpPerc',
+                'trailingTp',
+                'trailingTpPerc',
+                'useMinTP',
+                'minTp',
+                'multiTp',
+                'useMultiTp',
+              ].includes(k)) ||
+            (!findDeal.deal.settings.useSl &&
+              !this.data?.settings.useSl &&
+              [
+                'slPerc',
+                'trailingSl',
+                'moveSL',
+                'moveSLTrigger',
+                'moveSLValue',
+                'useMultiSl',
+                'multiSl',
+              ].includes(k))
+          ) {
+            return true
+          }
+          if (this.data) {
+            if (Object.prototype.hasOwnProperty.call(this.data.settings, k)) {
+              // @ts-ignore
+              return this.data.settings[k] === findDeal.deal.settings[k]
+            }
+          }
+          if (k === 'avgPrice' || k === 'changed') {
+            return true
+          }
+          return false
+        })
+        if (findDeal.deal.moveSlActivated && !settings.moveSL) {
+          findDeal.deal.moveSlActivated = false
+        }
+        if (!findDeal.deal.moveSlActivated && settings.moveSL) {
+          findDeal.deal.moveSlActivated =
+            (settings.moveSLValue ?? findDeal.deal.settings.moveSLValue) ===
+            (settings.slPerc ?? findDeal.deal.settings.slPerc)
+        }
+        findDeal.deal.settings = {
+          ...findDeal.deal.settings,
+          ...settings,
+          changed: reset ? false : keysToCheck.filter((k) => !k).length !== 0,
+          slChangedByUser: reset ? false : currentSlPerc !== settings.slPerc,
+        }
+        await this.cancelAllOrder(findDeal.deal.lastPrice, dealId, true)
+        if (findDeal.deal.status !== DCADealStatusEnum.start) {
+          findDeal.initialOrders = await this.createInitialDealOrders(
+            findDeal.deal.symbol.symbol,
+            findDeal.deal.initialPrice,
+            dealId,
+            findDeal.deal,
+          )
+          findDeal.currentOrders = await this.createCurrentDealOrders(
+            findDeal.deal.symbol.symbol,
+            findDeal.deal.lastPrice,
+            findDeal.initialOrders,
+            findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+            findDeal.deal.initialPrice,
+            dealId,
+            false,
+            findDeal.deal,
+            false,
+          )
+          findDeal.initialOrders = this.getDealInitialOrders(dealId)
+
+          const completeLevels =
+            (this.getOrdersByStatusAndDealId({
+              dealId: findDeal.deal._id,
+              status: ['FILLED', 'CANCELED'],
+            }).filter(
+              (o) =>
+                (o.typeOrder === TypeOrderEnum.dealRegular ||
+                  (!findDeal.deal.parent &&
+                    o.typeOrder === TypeOrderEnum.dealStart)) &&
+                (this.data?.exchange === ExchangeEnum.bybit
+                  ? (o.status === 'FILLED' || o.status === 'CANCELED') &&
+                    +o.executedQty !== 0
+                  : o.status === 'FILLED'),
+            ).length ?? 1) + (findDeal.deal.parent ? 1 : 0)
+          findDeal.deal.levels = {
+            complete: completeLevels,
+            all: Math.max(
+              completeLevels,
+              findDeal.initialOrders.filter(
+                (o) => o.type === TypeOrderEnum.dealRegular,
+              ).length +
+                1 +
+                (findDeal.deal.pendingAddFunds ?? []).length +
+                (findDeal.deal.funds ?? []).length,
+            ),
+          }
+          findDeal.deal.fullFee = await this.getCommDeal(findDeal.deal)
+        }
+        this.updateDealBalances(findDeal)
+        this.saveDeal(findDeal, {
+          settings: findDeal.deal.settings,
+          levels: findDeal.deal.levels,
+          moveSlActivated: findDeal.deal.moveSlActivated,
+          fullFee: findDeal.deal.fullFee,
+          trailingLevel: findDeal.deal.trailingLevel,
+          trailingMode: findDeal.deal.trailingMode,
+        }).then(async () => {
+          this.removeDealFromStopLossMethods(dealId)
+          await this.checkAllowedMethods()
+          await this.setClassProperties()
+          this.updateUsage(dealId)
+          this.updateAssets(dealId)
+          await this.setCloseByTimer(findDeal.deal)
+        })
+
+        if (findDeal.deal.status !== DCADealStatusEnum.start) {
+          await this.placeOrders(
+            this.botId,
+            findDeal.deal.symbol.symbol,
+            dealId,
+            await this.getOrdersToRestartAfterSettingsUpdate(dealId),
+          )
+          const pendingAddFunds = findDeal.deal.pendingAddFunds ?? []
+          if (pendingAddFunds.length) {
+            findDeal.deal.pendingAddFunds = []
+            this.saveDeal(findDeal, { pendingAddFunds: [] })
+            for (const pending of pendingAddFunds) {
+              const { id: _id, ...settings } = pending
+              this.addDealFunds(this.botId, findDeal.deal._id, settings)
+            }
+          }
+          const pendingReduceFunds = findDeal.deal.pendingReduceFunds ?? []
+          if (pendingReduceFunds.length) {
+            findDeal.deal.pendingReduceFunds = []
+            this.saveDeal(findDeal, { pendingReduceFunds: [] })
+            for (const pending of pendingReduceFunds) {
+              const { id: _id, ...settings } = pending
+              this.reduceDealFunds(this.botId, findDeal.deal._id, settings)
+            }
+          }
+        } else {
+          await this.placeBaseOrder(
+            this.botId,
+            findDeal.deal.symbol.symbol,
+            findDeal.deal._id,
+          )
+        }
+      }
+    }
+    await this.afterDealUpdate(dealId)
+  }
+  /**
+   * Merge deals
+   * @param {string[]} _deals Id of deals to merge
+   * @param {(botId: string, dealId: string, close?: CloseDCATypeEnum, reopen?: boolean) => Promise<{status: StatusEnum.ok, reason: null, data: string} | undefined}> closeFn Closed deal funstion
+   */
+
+  async mergeDeals(_deals: string[]) {
+    const _id = this.startMethod('mergeDeals')
+    const prefix = `Merge Deals | `
+    if (this.data) {
+      const dealsFromDB = await this.dealsDb.readData(
+        {
+          _id: { $in: _deals },
+          status: DCADealStatusEnum.open,
+          userId: this.userId,
+        } as any,
+        undefined,
+        {},
+        true,
+      )
+      if (dealsFromDB.status === StatusEnum.notok) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Read deals error. ${dealsFromDB.reason}`,
+          'mergeDeals()',
+          'read data',
+        )
+      } else {
+        this.handleLog(
+          `${prefix} Found ${dealsFromDB.data.result.length} deals`,
+        )
+      }
+      const deals = dealsFromDB.data.result
+      if (deals.length < _deals.length) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Cannot find all deals`,
+          'mergeDeals()',
+          'deals length',
+          false,
+          false,
+          false,
+        )
+      }
+      const botsId: Set<string> = new Set()
+      deals.forEach((d) => botsId.add(d.botId))
+      let bots: Schema[] = []
+      if (this.db && botsId.size > 0) {
+        const botsFromDb = await this.db.readData(
+          { _id: { $in: Array.from(botsId) }, userId: this.userId },
+          undefined,
+          {},
+          true,
+        )
+        if (botsFromDb.status === StatusEnum.notok) {
+          this.endMethod(_id)
+          return this.handleErrors(
+            `Cannot get bots from db. ${botsFromDb.reason}`,
+            'mergeDeals()',
+            'get bots',
+            false,
+            false,
+            false,
+          )
+        } else {
+          this.handleLog(
+            `${prefix} Found ${botsFromDb.data.result.length} bots`,
+          )
+        }
+        bots = [...bots, ...botsFromDb.data.result]
+      }
+      if (bots.length === 0) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Found 0 bots`,
+          'mergeDeals()',
+          'bots length',
+          false,
+          false,
+          false,
+        )
+      }
+      const strategy = bots[0].settings.strategy
+      const pair = dealsFromDB.data.result[0].symbol.symbol
+      let sameStrategy = true
+      let samePair = true
+      dealsFromDB.data.result.forEach((b) => {
+        if (b.strategy !== strategy) {
+          sameStrategy = false
+        }
+        if (b.symbol.symbol !== pair) {
+          samePair = false
+        }
+      })
+      if (!sameStrategy) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `All bots must be the same strategy`,
+          'mergeDeals()',
+          'strategy check',
+          false,
+          false,
+          false,
+        )
+      }
+      if (!samePair) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `All bots must be the same pair`,
+          'mergeDeals()',
+          'pair check',
+          false,
+          false,
+          false,
+        )
+      }
+      const ordersFromDb = await this.ordersDb.readData(
+        {
+          userId: this.userId,
+          dealId: { $in: _deals },
+          status: { $in: ['FILLED', 'PARTIALLY_FILLED'] },
+          typeOrder: {
+            $in: [
+              TypeOrderEnum.dealStart,
+              TypeOrderEnum.dealRegular,
+              TypeOrderEnum.dealTP,
+            ],
+          },
+        },
+        undefined,
+        {},
+        true,
+      )
+      if (ordersFromDb.status === StatusEnum.notok) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Cannot get orders from db. ${ordersFromDb.reason}`,
+          'mergeDeals()',
+          'get orders',
+          false,
+          false,
+          false,
+        )
+      } else {
+        this.handleLog(
+          `${prefix} Found ${ordersFromDb.data.result.length} orders`,
+        )
+      }
+      const orders = ordersFromDb.data.result
+      if (orders.length === 0) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          `Found 0 orders`,
+          'mergeDeals()',
+          'orders length',
+          false,
+          false,
+          false,
+        )
+      }
+      const ed = await this.getExchangeInfo(pair)
+      if (ed) {
+        const initialQuote = orders.reduce(
+          (acc, o) =>
+            acc +
+            (o.typeOrder !== TypeOrderEnum.dealTP
+              ? +o.price * +o.executedQty
+              : 0),
+          0,
+        )
+        const initialBase = orders.reduce(
+          (acc, o) =>
+            acc + (o.typeOrder !== TypeOrderEnum.dealTP ? +o.executedQty : 0),
+          0,
+        )
+        const currentQuote =
+          (this.isLong ? initialQuote : 0) +
+          orders.reduce(
+            (acc, o) =>
+              acc + +o.price * +o.executedQty * (o.side === 'BUY' ? -1 : 1),
+            0,
+          )
+        const curentBase =
+          (this.isLong ? 0 : initialBase) +
+          orders.reduce(
+            (acc, o) => acc + +o.executedQty * (o.side === 'BUY' ? 1 : -1),
+            0,
+          )
+        const time = new Date().getTime()
+        const avgPrice = initialQuote / initialBase
+        this.handleLog(
+          `Merge deals ${_deals.join(
+            ', ',
+          )}, initial quote: ${initialQuote}, initial base: ${initialBase}, current quote: ${currentQuote}, current base: ${curentBase}, avg price: ${avgPrice}, found orders ${
+            orders.length
+          }`,
+        )
+        const rate = await this.getUsdRate(
+          this.data.settings.pair[0],
+          this.futures
+            ? this.coinm
+              ? 'base'
+              : 'quote'
+            : this.isLong
+              ? 'quote'
+              : 'base',
+        )
+        const usageCurrentBase = this.futures
+          ? this.coinm
+            ? initialBase
+            : 0
+          : this.isLong
+            ? 0
+            : initialBase
+        const usageCurrentQuote = this.futures
+          ? this.coinm
+            ? 0
+            : initialQuote
+          : this.isLong
+            ? initialQuote
+            : 0
+        const usageMaxBase = this.futures
+          ? this.coinm
+            ? initialBase
+            : 0
+          : this.isLong
+            ? 0
+            : initialBase
+        const usageMaxQuote = this.futures
+          ? this.coinm
+            ? 0
+            : initialQuote
+          : this.isLong
+            ? initialQuote
+            : 0
+        const maxUsd = this.futures
+          ? this.coinm
+            ? usageMaxBase * rate
+            : usageMaxQuote * rate
+          : this.isLong
+            ? usageMaxQuote * rate
+            : usageMaxBase * rate
+        const currentUsd = this.futures
+          ? this.coinm
+            ? usageCurrentBase * rate
+            : usageCurrentQuote * rate
+          : this.isLong
+            ? usageCurrentQuote * rate
+            : usageCurrentBase * rate
+        let relative = currentUsd / maxUsd
+        if (isNaN(relative) || !isFinite(relative)) {
+          relative = 0
+        }
+        const mergedDeals: Omit<CleanDCADealsSchema, '_id'> = {
+          botId: this.botId,
+          userId: this.userId,
+          status: DCADealStatusEnum.open,
+          initialBalances: {
+            base: this.isLong ? 0 : initialBase,
+            quote: this.isLong ? initialQuote : 0,
+          },
+          currentBalances: {
+            base: curentBase,
+            quote: currentQuote,
+          },
+          initialPrice: avgPrice,
+          avgPrice,
+          displayAvg: avgPrice,
+          profit: {
+            pureBase: 0,
+            pureQuote: 0,
+            total: 0,
+            totalUsd: 0,
+          },
+          feePaid: {
+            base: 0,
+            quote: 0,
+          },
+          lastPrice: avgPrice,
+          commission: 0,
+          createTime: time,
+          updateTime: time,
+          levels: {
+            all: 1,
+            complete: 1,
+          },
+          usage: {
+            current: {
+              base: usageCurrentBase,
+              quote: usageCurrentQuote,
+            },
+            max: {
+              base: usageMaxBase,
+              quote: usageMaxQuote,
+            },
+            maxUsd,
+            currentUsd,
+            relative,
+          },
+          assets: {
+            used: {
+              base: this.isLong ? 0 : initialBase,
+              quote: this.isLong ? initialQuote : 0,
+            },
+            required: {
+              base: 0,
+              quote: 0,
+            },
+          },
+          settings: {
+            changed: true,
+            ordersCount: 1,
+            tpPerc: this.data.settings.tpPerc,
+            profitCurrency: this.data.settings.profitCurrency,
+            avgPrice: avgPrice,
+            baseOrderSize: `${initialQuote}`,
+            orderSize: `${initialQuote}`,
+            useTp:
+              this.data.settings.useTp &&
+              (this.data.settings.dealCloseCondition ===
+                CloseConditionEnum.techInd ||
+                this.data.settings.dealCloseCondition ===
+                  CloseConditionEnum.webhook),
+            useSl:
+              this.data.settings.useSl &&
+              (this.data.settings.dealCloseConditionSL ===
+                CloseConditionEnum.techInd ||
+                this.data.settings.dealCloseConditionSL ===
+                  CloseConditionEnum.webhook),
+            slPerc: this.data.settings.slPerc,
+            useDca: false,
+            useSmartOrders: false,
+            activeOrdersCount: 1,
+            orderSizePercQty: 0,
+            trailingSl: false,
+            moveSL: false,
+            moveSLTrigger: this.data.settings.moveSLTrigger,
+            moveSLValue: this.data.settings.moveSLValue,
+            trailingTp: false,
+            trailingTpPerc: this.data.settings.trailingTpPerc,
+            useMinTP: this.data.settings.useMinTP,
+            minTp: this.data.settings.minTp,
+            orderSizeType: this.data.settings.orderSizeType,
+            useMultiSl: false,
+            multiSl: [],
+            useMultiTp: false,
+            multiTp: [],
+            useLimitPrice: false,
+            startOrderType: this.data.settings.startOrderType,
+            volumeScale: '1',
+            stepScale: '1',
+            minimumDeviation: '0',
+            step: '1',
+            futures: this.futures,
+            coinm: this.coinm,
+            marginType: this.data.settings.marginType,
+            leverage: this.data.settings.leverage,
+          },
+          parent: true,
+          child: false,
+          childIds: _deals,
+          parentId: null,
+          gridBreakpoints: [],
+          paperContext: this.data.paperContext,
+          strategy: this.data.settings.strategy,
+          exchange: this.data.exchange,
+          exchangeUUID: this.data.exchangeUUID,
+          symbol: {
+            symbol: ed.pair,
+            baseAsset: ed.baseAsset.name,
+            quoteAsset: ed.quoteAsset.name,
+          },
+          stats: {
+            drawdownPercent: 0,
+            runUpPercent: 0,
+            timeInProfit: 0,
+            timeInLoss: 0,
+            trackTime: 0,
+            timeCountStart: Date.now(),
+            unrealizedProfit: 0,
+            usage: 0,
+          },
+          type: this.data.settings.type,
+          tpHistory: deals.map((d) => d.tpHistory ?? []).flat(),
+        }
+        const newDeal = await this.dealsDb.createData(mergedDeals as any)
+        if (newDeal.status === StatusEnum.notok) {
+          this.endMethod(_id)
+          return this.handleErrors(
+            `Error saving merged deal: ${newDeal.reason}`,
+            'mergeDeals()',
+            'save merged deal',
+          )
+        } else {
+          this.handleLog(`${prefix} Created parent deal ${newDeal.data._id}`)
+        }
+        const botInstance = new Bot(false)
+        for (const d of deals) {
+          if (this.combo) {
+            await botInstance.closeComboDeal(
+              this.userId,
+              d.botId,
+              `${d._id}`,
+              CloseDCATypeEnum.cancel,
+              false,
+              !!this.data.paperContext,
+            )
+          } else {
+            await botInstance.closeDCADeal(
+              this.userId,
+              d.botId,
+              `${d._id}`,
+              CloseDCATypeEnum.cancel,
+              false,
+              !!this.data.paperContext,
+            )
+          }
+          this.handleLog(`${prefix} Closing deal ${d._id}`)
+        }
+        this.handleLog(`${prefix} Waiting for 2 seconds`)
+        await sleep(2 * 1000)
+        await this.dealsDb.updateManyData({ _id: { $in: _deals } } as any, {
+          $set: { child: true, parentId: `${newDeal.data._id}` },
+        })
+        const dealData = {
+          ...mergedDeals,
+          _id: `${newDeal.data._id}`,
+        } as ExcludeDoc<Deal>
+        for (const o of orders) {
+          const data = {
+            dealId: dealData._id,
+            typeOrder:
+              o.typeOrder === TypeOrderEnum.dealTP
+                ? o.typeOrder
+                : TypeOrderEnum.dealStart,
+            botId: this.botId,
+          }
+          const changedOrder = { ...o, data }
+
+          await this.ordersDb.updateData(
+            { clientOrderId: changedOrder.clientOrderId },
+            {
+              $set: {
+                ...data,
+              },
+            },
+          )
+
+          this.emit('bot update', changedOrder)
+        }
+
+        const initialOrders = await this.createInitialDealOrders(
+          dealData.symbol.symbol,
+          dealData.initialPrice,
+          dealData._id,
+          dealData,
+        )
+        const currentOrders = await this.createCurrentDealOrders(
+          dealData.symbol.symbol,
+          dealData.lastPrice,
+          initialOrders,
+          dealData.settings.avgPrice || dealData.avgPrice,
+          dealData.initialPrice,
+          dealData._id,
+          false,
+          dealData,
+        )
+        const full: FullDeal<ExcludeDoc<Deal>> = {
+          initialOrders,
+          currentOrders,
+          previousOrders: [],
+          deal: dealData,
+          closeBySl: false,
+          notCheckSl: false,
+        }
+        await this.checkDealSlMethods(full)
+        this.setDeal(full)
+        this.emit('bot deal update', dealData)
+        await this.setCloseByTimer(full.deal)
+        this.reloadBot(this.botId)
+      } else {
+        this.handleErrors(
+          `Cannot find exchange info`,
+          'mergeDeals()',
+          'exchange',
+          false,
+          false,
+          false,
+        )
+      }
+    }
+    this.endMethod(_id)
+  }
+
+  async getLeverageMultipler(deal?: ExcludeDoc<Deal>) {
+    const key = deal?._id ?? 'bot'
+    if (this.leverageMap.has(key)) {
+      return this.leverageMap.get(key) ?? 1
+    }
+    const settings = await this.getAggregatedSettings(deal)
+    const result = settings.futures
+      ? settings.marginType !== BotMarginTypeEnum.inherit
+        ? settings.leverage || 1
+        : 1
+      : 1
+    this.leverageMap.set(key, result)
+    return result
+  }
+
+  async addFundsForAllDeals(
+    qty: string,
+    asset: OrderSizeTypeEnum,
+    _symbol?: string,
+    type?: AddFundsTypeEnum,
+    fromWebhook = false,
+    limitPrice = false,
+    convert = true,
+    dealId?: string,
+  ) {
+    const symbol = convert ? await this.convertSymbol(_symbol, true) : _symbol
+    if (_symbol && !symbol) {
+      return this.handleLog(`Signal for ${symbol} cannot be passed`)
+    }
+    const deals = this.getOpenDeals(false, symbol ?? undefined)
+    for (const d of deals.filter((_d) =>
+      dealId ? _d.deal._id === dealId : true,
+    )) {
+      this.addDealFunds(
+        this.botId,
+        d.deal._id,
+        {
+          qty,
+          asset,
+          useLimitPrice: limitPrice,
+          type,
+        },
+        fromWebhook,
+      )
+    }
+  }
+
+  async reduceFundsInAllDeals(
+    qty: string,
+    asset: OrderSizeTypeEnum,
+    _symbol?: string,
+    type?: AddFundsTypeEnum,
+    fromWebhook = false,
+    limitPrice = false,
+    convert = true,
+    dealId?: string,
+  ) {
+    const symbol = convert ? await this.convertSymbol(_symbol, true) : _symbol
+    if (_symbol && !symbol) {
+      return this.handleLog(`Signal for ${symbol} cannot be passed`)
+    }
+    const deals = this.getOpenDeals(false, symbol ?? undefined)
+    for (const d of deals.filter((_d) =>
+      dealId ? _d.deal._id === dealId : true,
+    )) {
+      this.reduceDealFunds(
+        this.botId,
+        d.deal._id,
+        {
+          qty,
+          asset,
+          useLimitPrice: limitPrice,
+          type,
+        },
+        fromWebhook,
+      )
+    }
+  }
+
+  @IdMute(mutex, (botId: string, dealId: string) => `addFunds${botId}${dealId}`)
+  async addDealFunds(
+    _botId: string,
+    dealId: string,
+    settings: AddFundsSettings,
+    fromWebhook = false,
+  ) {
+    const _id = this.startMethod('addDealFunds')
+    this.handleLog(
+      `Add funds | Received add funds for ${dealId}, use limit price: ${settings.useLimitPrice}, price: ${settings.limitPrice}, size: ${settings.qty}, asset: ${settings.asset}, type: ${settings.type}`,
+    )
+    if (this.combo) {
+      this.endMethod(_id)
+      return
+    }
+    if (!this.data) {
+      this.endMethod(_id)
+      return
+    }
+    const deal = this.getDeal(dealId)
+    if (!deal) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot find deal to add funds`, '')
+    }
+    if (deal.deal.status !== DCADealStatusEnum.open) {
+      this.endMethod(_id)
+      return this.handleErrors(
+        `Funds can only be added to deals with status open`,
+        '',
+        '',
+        false,
+        true,
+      )
+    }
+    let price = 0
+    if (settings.useLimitPrice && settings.limitPrice) {
+      price = +settings.limitPrice
+      if (isNaN(price)) {
+        price = 0
+      }
+    }
+    if (price === 0) {
+      price = await this.getLatestPrice(deal.deal.symbol.symbol)
+    }
+    if (price === 0) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot get price`, '')
+    }
+    let origQty = `${this.math.round(
+      settings.asset === OrderSizeTypeEnum.base
+        ? +settings.qty
+        : +settings.qty / price,
+      await this.baseAssetPrecision(deal.deal.symbol.symbol),
+      false,
+      fromWebhook && settings.asset === OrderSizeTypeEnum.quote,
+    )}`
+    const requiredQty = this.math.round(
+      settings.asset === OrderSizeTypeEnum.base
+        ? +settings.qty
+        : +settings.qty / price,
+      await this.baseAssetPrecision(deal.deal.symbol.symbol),
+    )
+    if (fromWebhook && requiredQty !== 0) {
+      origQty = `${requiredQty}`
+    }
+    if (
+      fromWebhook &&
+      requiredQty !== +origQty &&
+      requiredQty === 0 &&
+      settings.type !== AddFundsTypeEnum.perc
+    ) {
+      this.handleErrors(
+        `Order qty was increased from ${requiredQty} ${deal.deal.symbol.baseAsset} to ${origQty} ${deal.deal.symbol.baseAsset} due to exchange minimum requirements`,
+        'addDealFunds',
+        '',
+        false,
+      )
+    }
+    const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
+    price =
+      typeof ed?.priceAssetPrecision !== 'undefined'
+        ? this.math.round(price, ed.priceAssetPrecision)
+        : price
+    if (settings.type === AddFundsTypeEnum.perc) {
+      const qtyPerc = this.futures
+        ? (this.coinm
+            ? deal.deal.usage.current.base
+            : deal.deal.usage.current.quote / deal.deal.lastPrice) *
+          (await this.getLeverageMultipler(deal.deal))
+        : this.isLong
+          ? deal.deal.usage.current.quote / deal.deal.lastPrice
+          : deal.deal.usage.current.base
+      this.handleLog(`Add funds | qtyPerc ${qtyPerc}`)
+      origQty = `${this.math.round(
+        qtyPerc * (+settings.qty / 100),
+        await this.baseAssetPrecision(deal.deal.symbol.symbol),
+      )}`
+      if (
+        +origQty < (ed?.baseAsset.minAmount ?? 0) ||
+        +origQty * price < (ed?.quoteAsset.minAmount ?? 0)
+      ) {
+        const old = origQty
+        origQty = `${this.math.round(
+          Math.max(
+            ed?.baseAsset.minAmount ?? 0,
+            (ed?.quoteAsset.minAmount ?? 0) / price,
+          ),
+          await this.baseAssetPrecision(deal.deal.symbol.symbol),
+          false,
+          true,
+        )}`
+        this.handleErrors(
+          `Order qty was increased from ${old} ${deal.deal.symbol.baseAsset} to ${origQty} ${deal.deal.symbol.baseAsset} due to exchange minimum requirements`,
+          'addDealFunds',
+          '',
+          false,
+        )
+      }
+    }
+
+    if (+origQty === 0) {
+      this.endMethod(_id)
+      return this.handleErrors(`Add funds order qty is 0`, '', '', false)
+    }
+    if (isNaN(+origQty) || !isFinite(+origQty)) {
+      this.endMethod(_id)
+      return this.handleErrors(`Order qty is not a number`, '', '', false)
+    }
+
+    if (
+      +origQty < (ed?.baseAsset.minAmount ?? 0) ||
+      +origQty * price < (ed?.quoteAsset.minAmount ?? 0)
+    ) {
+      this.endMethod(_id)
+      return this.handleErrors(
+        `Add funds order qty is less than exchange minimum requirements`,
+        '',
+        '',
+        false,
+      )
+    }
+    const addFundsId = v4()
+    const order: Order = {
+      symbol: deal.deal.symbol.symbol,
+      orderId: '-1',
+      clientOrderId: this.getOrderId(`D-ROA`),
+      updateTime: +new Date(),
+      price: `${price}`,
+      origQty,
+      executedQty: '0',
+      status: 'NEW',
+      origPrice: `${price}`,
+      cummulativeQuoteQty: `${price * +origQty}`,
+      side: this.isLong ? 'BUY' : 'SELL',
+      baseAsset: deal.deal.symbol.baseAsset,
+      quoteAsset: deal.deal.symbol.quoteAsset,
+      exchange: this.data.exchange,
+      exchangeUUID: this.data.exchangeUUID,
+      typeOrder: TypeOrderEnum.dealRegular,
+      botId: this.botId,
+      userId: this.userId,
+      type: settings.useLimitPrice && settings.limitPrice ? 'LIMIT' : 'MARKET',
+      transactTime: new Date().getTime(),
+      fills: [],
+      dealId,
+      positionSide: this.hedge
+        ? this.isLong
+          ? PositionSide.LONG
+          : PositionSide.SHORT
+        : PositionSide.BOTH,
+      addFundsId,
+    }
+    this.handleLog(`Add funds | create order ${order.clientOrderId}`)
+    const result = await this.sendOrderToExchange(order)
+    if (result && result.status === 'FILLED') {
+      this.processFilledOrder(result)
+    }
+    if (result && result.status !== 'FILLED') {
+      deal.deal.pendingAddFunds = [
+        ...(deal.deal.pendingAddFunds ?? []),
+        { ...settings, id: addFundsId, limitPrice: price },
+      ] as Deal['pendingAddFunds']
+      deal.deal.levels.all += 1
+      this.saveDeal(deal, {
+        pendingAddFunds: deal.deal.pendingAddFunds,
+        levels: deal.deal.levels,
+      }).then(() => {
+        this.updateUsage(dealId)
+        this.updateAssets(dealId, deal)
+        this.updateDealBalances(deal)
+      })
+    }
+    this.endMethod(_id)
+  }
+
+  @IdMute(
+    mutex,
+    (botId: string, dealId: string) => `reduceFunds${botId}${dealId}`,
+  )
+  async reduceDealFunds(
+    _botId: string,
+    dealId: string,
+    settings: AddFundsSettings,
+    fromWebhook = false,
+  ) {
+    const _id = this.startMethod('reduceDealFunds')
+    this.handleLog(
+      `Reduce funds | Received reduce funds for ${dealId}, use limit price: ${settings.useLimitPrice}, price: ${settings.limitPrice}, size: ${settings.qty}, asset: ${settings.asset}, type: ${settings.type}`,
+    )
+    if (this.combo) {
+      this.endMethod(_id)
+      return
+    }
+    if (!this.data) {
+      this.endMethod(_id)
+      return
+    }
+    const deal = this.getDeal(dealId)
+    if (!deal) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot find deal to reduce funds`, '')
+    }
+    if (deal.deal.status !== DCADealStatusEnum.open) {
+      this.endMethod(_id)
+      return this.handleErrors(
+        `Funds can only be reduced in deal with status open`,
+        '',
+        '',
+        false,
+        true,
+      )
+    }
+    let price = 0
+    if (settings.useLimitPrice && settings.limitPrice) {
+      price = +settings.limitPrice
+      if (isNaN(price)) {
+        price = 0
+      }
+    }
+    if (price === 0) {
+      price = await this.getLatestPrice(deal.deal.symbol.symbol)
+    }
+    if (price === 0) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot get price`, '')
+    }
+    let origQty = `${this.math.round(
+      settings.asset === OrderSizeTypeEnum.base
+        ? +settings.qty
+        : +settings.qty / price,
+      await this.baseAssetPrecision(deal.deal.symbol.symbol),
+      false,
+      fromWebhook && settings.asset === OrderSizeTypeEnum.quote,
+    )}`
+    const requiredQty = this.math.round(
+      settings.asset === OrderSizeTypeEnum.base
+        ? +settings.qty
+        : +settings.qty / price,
+      await this.baseAssetPrecision(deal.deal.symbol.symbol),
+    )
+    if (fromWebhook && requiredQty !== 0) {
+      origQty = `${requiredQty}`
+    }
+    if (
+      fromWebhook &&
+      requiredQty !== +origQty &&
+      requiredQty === 0 &&
+      settings.type !== AddFundsTypeEnum.perc
+    ) {
+      this.handleErrors(
+        `Order qty was increased from ${requiredQty} ${deal.deal.symbol.baseAsset} to ${origQty} ${deal.deal.symbol.baseAsset} due to exchange minimum requirements`,
+        'reduceDealFunds',
+        '',
+        false,
+      )
+    }
+    const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
+    price =
+      typeof ed?.priceAssetPrecision !== 'undefined'
+        ? this.math.round(price, ed.priceAssetPrecision)
+        : price
+    if (settings.type === AddFundsTypeEnum.perc) {
+      const qtyPerc = this.futures
+        ? (this.coinm
+            ? deal.deal.usage.current.base
+            : deal.deal.usage.current.quote / deal.deal.lastPrice) *
+          (await this.getLeverageMultipler(deal.deal))
+        : this.isLong
+          ? deal.deal.usage.current.quote / deal.deal.lastPrice
+          : deal.deal.usage.current.base
+      this.handleLog(`Reduce funds | qtyPerc ${qtyPerc}`)
+      origQty = `${this.math.round(
+        qtyPerc * (+settings.qty / 100),
+        await this.baseAssetPrecision(deal.deal.symbol.symbol),
+      )}`
+
+      if (
+        +origQty < (ed?.baseAsset.minAmount ?? 0) ||
+        +origQty * price < (ed?.quoteAsset.minAmount ?? 0)
+      ) {
+        const old = origQty
+        origQty = `${this.math.round(
+          Math.max(
+            ed?.baseAsset.minAmount ?? 0,
+            (ed?.quoteAsset.minAmount ?? 0) / price,
+          ),
+          await this.baseAssetPrecision(deal.deal.symbol.symbol),
+          false,
+          true,
+        )}`
+        this.handleErrors(
+          `Order qty was increased from ${old} ${deal.deal.symbol.baseAsset} to ${origQty} ${deal.deal.symbol.baseAsset} due to exchange minimum requirements`,
+          'reduceDealFunds',
+          '',
+          false,
+        )
+      }
+    }
+
+    if (+origQty === 0) {
+      this.endMethod(_id)
+      return this.handleErrors(`Reduce funds order qty is 0`, '', '', false)
+    }
+    if (isNaN(+origQty) || !isFinite(+origQty)) {
+      this.endMethod(_id)
+      return this.handleErrors(`Reduce qty is not a number`, '', '', false)
+    }
+
+    if (
+      +origQty < (ed?.baseAsset.minAmount ?? 0) ||
+      +origQty * price < (ed?.quoteAsset.minAmount ?? 0)
+    ) {
+      this.endMethod(_id)
+      return this.handleErrors(
+        `Reduce funds order qty is less than exchange minimum requirements`,
+        '',
+        '',
+        false,
+      )
+    }
+    const tpOrder = await this.getTPOrder(
+      deal.deal.symbol.symbol,
+      price,
+      deal.initialOrders,
+      deal.deal.avgPrice,
+      deal.deal.initialPrice,
+      dealId,
+      deal.deal,
+      true,
+      false,
+      price,
+    )
+    const tpQty = tpOrder?.[0]?.qty ?? 0
+    if (tpQty <= +origQty) {
+      this.handleErrors(
+        `Reduce funds order qty ${origQty} ${ed?.baseAsset.name} is more than closed order qty ${tpQty} ${ed?.baseAsset.name}. Order size will be reduced`,
+        '',
+        '',
+        false,
+      )
+
+      this.endMethod(_id)
+      return this.closeDealById(
+        this.botId,
+        dealId,
+        settings.useLimitPrice
+          ? CloseDCATypeEnum.closeByLimit
+          : CloseDCATypeEnum.closeByMarket,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        `${price}`,
+        undefined,
+        undefined,
+        DCACloseTriggerEnum.auto,
+      )
+    }
+    const orders = this.getOrdersByStatusAndDealId({
+      status: 'NEW',
+      dealId,
+    }).filter((o) => o.typeOrder === TypeOrderEnum.dealTP && !o.reduceFundsId)
+    for (const o of orders) {
+      this.handleLog(`Reduce funds | Cancel order ${o.clientOrderId}`)
+      await this.cancelOrderOnExchange(o)
+    }
+    const reduceFundsId = v4()
+    const order: Order = {
+      symbol: deal.deal.symbol.symbol,
+      orderId: '-1',
+      clientOrderId: this.getOrderId(`D-TPR`),
+      updateTime: +new Date(),
+      price: `${price}`,
+      origQty,
+      executedQty: '0',
+      status: 'NEW',
+      origPrice: `${price}`,
+      cummulativeQuoteQty: `${price * +origQty}`,
+      side: this.isLong ? 'SELL' : 'BUY',
+      baseAsset: deal.deal.symbol.baseAsset,
+      quoteAsset: deal.deal.symbol.quoteAsset,
+      exchange: this.data.exchange,
+      exchangeUUID: this.data.exchangeUUID,
+      typeOrder: TypeOrderEnum.dealTP,
+      botId: this.botId,
+      userId: this.userId,
+      type: settings.useLimitPrice && settings.limitPrice ? 'LIMIT' : 'MARKET',
+      transactTime: new Date().getTime(),
+      fills: [],
+      dealId,
+      positionSide: this.hedge
+        ? this.isLong
+          ? PositionSide.LONG
+          : PositionSide.SHORT
+        : PositionSide.BOTH,
+      reduceFundsId,
+    }
+    this.handleLog(`Reduce funds | create order ${order.clientOrderId}`)
+    const result = await this.sendOrderToExchange(order)
+    if (result && result.status === 'FILLED') {
+      this.processFilledOrder(result)
+    }
+    if (result && result.status !== 'FILLED') {
+      deal.deal.pendingReduceFunds = [
+        ...(deal.deal.pendingReduceFunds ?? []),
+        { ...settings, id: reduceFundsId, limitPrice: price },
+      ] as Deal['pendingReduceFunds']
+      this.saveDeal(deal, {
+        pendingReduceFunds: deal.deal.pendingReduceFunds,
+        levels: deal.deal.levels,
+      }).then(() => {
+        this.updateUsage(dealId)
+        this.updateAssets(dealId, deal)
+        this.updateDealBalances(deal)
+      })
+    }
+    this.endMethod(_id)
+  }
+
+  @IdMute(
+    mutex,
+    (botId: string, dealId: string) =>
+      `cancelTerminalDealOrder${botId}${dealId}`,
+  )
+  async cancelTerminalDealOrder(
+    _botId: string,
+    dealId: string,
+    orderId: string,
+  ) {
+    const _id = this.startMethod('cancelTerminalDealOrder')
+    this.handleLog(
+      `Cancel terminal deal order | Received cancel for ${dealId}, order: ${orderId}`,
+    )
+    if (this.combo) {
+      this.endMethod(_id)
+      return
+    }
+    if (!this.data) {
+      this.endMethod(_id)
+      return
+    }
+    const deal = this.getDeal(dealId)
+    if (!deal) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot find deal to cancel order`, '')
+    }
+    if (deal.deal.status !== DCADealStatusEnum.open) {
+      this.endMethod(_id)
+      return this.handleErrors(
+        `Cannot find deal to cancel order in deal with status open`,
+        '',
+      )
+    }
+    let order = this.getOrderFromMap(orderId)
+    if (!order) {
+      order = (await this.ordersDb.readData({ clientOrderId: orderId })).data
+        ?.result
+    }
+    if (!order) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot find order to cancel`, '')
+    }
+    if (order.status !== 'NEW') {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot cancel processing order`, '')
+    }
+
+    if (order.typeOrder !== TypeOrderEnum.dealTP) {
+      deal.deal.pendingAddFunds = (deal.deal.pendingAddFunds ?? []).filter(
+        (paf) => order && paf.id !== order.addFundsId,
+      )
+      deal.deal.levels.all -= 1
+      deal.deal.blockOrders = [
+        ...(deal.deal.blockOrders ?? []),
+        {
+          price: +order.price,
+          qty: +order.origQty,
+          side: order.side === 'BUY' ? OrderSideEnum.buy : OrderSideEnum.sell,
+        },
+      ]
+    }
+    if (order.typeOrder === TypeOrderEnum.dealTP) {
+      deal.deal.pendingReduceFunds = (
+        deal.deal.pendingReduceFunds ?? []
+      ).filter((paf) => order && paf.id !== order.addFundsId)
+    }
+    deal.initialOrders = await this.createInitialDealOrders(
+      deal.deal.symbol.symbol,
+      deal.deal.initialPrice,
+      dealId,
+      deal.deal,
+    )
+    deal.previousOrders = deal.currentOrders
+    deal.currentOrders = await this.createCurrentDealOrders(
+      deal.deal.symbol.symbol,
+      deal.deal.lastPrice,
+      deal.initialOrders,
+      deal.deal.avgPrice,
+      deal.deal.initialPrice,
+      dealId,
+      undefined,
+      deal.deal,
+      undefined,
+      undefined,
+    )
+    this.saveDeal(deal, {
+      pendingAddFunds: deal.deal.pendingAddFunds,
+      pendingReduceFunds: deal.deal.pendingReduceFunds,
+      levels: deal.deal.levels,
+      blockOrders: deal.deal.blockOrders,
+    })
+    await this.cancelOrderOnExchange(order)
+    this.placeOrders(
+      this.botId,
+      deal.deal.symbol.symbol,
+      dealId,
+      this.findDiff(
+        deal.currentOrders,
+        deal.previousOrders.filter(
+          (o) =>
+            order &&
+            (order.reduceFundsId
+              ? !(
+                  o.type === TypeOrderEnum.dealTP &&
+                  o.price === +order.origPrice &&
+                  o.qty === +order.origQty
+                )
+              : !(
+                  o.type === TypeOrderEnum.dealRegular &&
+                  o.price === +order.origPrice &&
+                  o.qty === +order.origQty
+                )),
+        ),
+      ),
+    )
+  }
+
+  @IdMute(
+    mutex,
+    (botId: string, dealId: string) =>
+      `cancelPendingAddFundsDealOrder${botId}${dealId}`,
+  )
+  async cancelPendingAddFundsDealOrder(
+    _botId: string,
+    dealId: string,
+    orderId: string,
+  ) {
+    const _id = this.startMethod('cancelPendingAddFundsDealOrder')
+    this.handleLog(
+      `Cancel pending add funds deal order | Received cancel for ${dealId}, order: ${orderId}`,
+    )
+    if (this.combo) {
+      this.endMethod(_id)
+      return
+    }
+    if (!this.data) {
+      this.endMethod(_id)
+      return
+    }
+    const deal = this.getDeal(dealId)
+    if (!deal) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot find deal to cancel order`, '')
+    }
+    if (deal.deal.status !== DCADealStatusEnum.open) {
+      this.endMethod(_id)
+      return this.handleErrors(
+        `Cannot find deal to cancel order in deal with status open`,
+        '',
+      )
+    }
+    let reduce = false
+    let order = (deal.deal.pendingAddFunds ?? []).find((o) => o.id === orderId)
+    if (!order) {
+      order = (deal.deal.pendingReduceFunds ?? []).find((o) => o.id === orderId)
+      if (order) {
+        reduce = true
+      }
+    }
+    if (!order) {
+      this.endMethod(_id)
+      return this.handleErrors(`Cannot find order to cancel`, '')
+    }
+
+    if (!reduce) {
+      deal.deal.pendingAddFunds = (deal.deal.pendingAddFunds ?? []).filter(
+        (paf) => paf.id !== orderId,
+      )
+    }
+    if (reduce) {
+      deal.deal.pendingReduceFunds = (
+        deal.deal.pendingReduceFunds ?? []
+      ).filter((paf) => paf.id !== orderId)
+    }
+    deal.initialOrders = await this.createInitialDealOrders(
+      deal.deal.symbol.symbol,
+      deal.deal.initialPrice,
+      dealId,
+      deal.deal,
+    )
+    deal.currentOrders = await this.createCurrentDealOrders(
+      deal.deal.symbol.symbol,
+      deal.deal.lastPrice,
+      deal.initialOrders,
+      deal.deal.avgPrice,
+      deal.deal.initialPrice,
+      dealId,
+      undefined,
+      deal.deal,
+      undefined,
+      undefined,
+    )
+    this.saveDeal(deal, {
+      pendingAddFunds: deal.deal.pendingAddFunds,
+      pendingReduceFunds: deal.deal.pendingReduceFunds,
+      levels: deal.deal.levels,
+      blockOrders: deal.deal.blockOrders,
+    })
+    const realOrder = this.allOrders.find((o) =>
+      reduce ? o.reduceFundsId === orderId : o.addFundsId === orderId,
+    )
+    if (realOrder) {
+      await this.cancelOrderOnExchange(realOrder)
+    }
+    if (realOrder && reduce) {
+      this.reloadBot(this.botId)
+    }
+  }
+
+  private getEmptyStats(): { stats: BotStats; symbolStats: BotSymbolsStats[] } {
+    const usdAsset = () => ({
+      usd: 0,
+      asset: 0,
+    })
+    const series = () => ({
+      count: 0,
+      max: 0,
+      value: usdAsset(),
+      minValue: usdAsset(),
+      maxValue: usdAsset(),
+      perc: 0,
+    })
+    return {
+      stats: {
+        numerical: {
+          profit: {
+            grossProfit: usdAsset(),
+            grossProfitPerc: 0,
+            maxDealProfit: usdAsset(),
+            maxDealProfitPerc: 0,
+            avgDealProfit: usdAsset(),
+            avgDealProfitPerc: 0,
+            maxRunUp: usdAsset(),
+            maxRunUpPerc: 0,
+            maxConsecutiveWins: 0,
+            standardDeviationOfPositiveReturns: 0,
+            series: series(),
+          },
+          loss: {
+            grossLoss: usdAsset(),
+            grossLossPerc: 0,
+            maxDealLoss: usdAsset(),
+            maxDealLossPerc: 0,
+            avgDealLoss: usdAsset(),
+            avgDealLossPerc: 0,
+            maxDrawdown: usdAsset(),
+            maxDrawdownPerc: 0,
+            maxEquityDrawdown: usdAsset(),
+            maxEquityDrawdownPerc: 0,
+            maxConsecutiveLosses: 0,
+            standardDeviationOfNegativeReturns: 0,
+            standardDeviationOfDownside: 0,
+            series: series(),
+            seriesEquity: {
+              value: 0,
+              min: 0,
+              max: 0,
+              perc: 0,
+            },
+          },
+          general: {
+            netProfitPerc: 0,
+            avgDaily: usdAsset(),
+            avgDailyPerc: 0,
+            annualizedReturn: 0,
+            startBalance: usdAsset(),
+            maxDCAOrdersTriggered: 0,
+            avgDCAOrdersTriggered: 0,
+            coveredPriceDeviation: 0,
+            actualPriceDeviation: 0,
+            confidenceGrade: '',
+          },
+          ratios: {
+            profitFactor: 0,
+            sharpeRatio: 0,
+            sortinoRatio: 0,
+            cwr: 0,
+            buyAndHold: {
+              result: 0,
+              perc: 0,
+              symbol: '',
+              startPrice: 0,
+            },
+          },
+          usage: {
+            maxTheoreticalUsage: 0,
+            maxActualUsage: 0,
+            avgDealUsage: 0,
+          },
+          deals: {
+            profit: 0,
+            loss: 0,
+          },
+        },
+        duration: {
+          profit: {
+            avgWinningTradeDuration: 0,
+            maxWinningTradeDuration: 0,
+          },
+          loss: {
+            avgLosingTradeDuration: 0,
+            maxLosingTradeDuration: 0,
+          },
+          general: {
+            maxDealDuration: 0,
+            avgDealDuration: 0,
+            dealsPerDay: 0,
+            workingTime: 0,
+          },
+        },
+        chart: [],
+      },
+      symbolStats: (this.data?.settings.pair ?? []).map((symbol) => ({
+        numerical: {
+          deals: {
+            profit: 0,
+            loss: 0,
+          },
+          general: {
+            startBalance: usdAsset(),
+            netProfit: usdAsset(),
+            netProfitPerc: 0,
+            dailyProfit: usdAsset(),
+            dailyProfitPerc: 0,
+            winRate: 0,
+            profitFactor: 0,
+          },
+        },
+        duration: {
+          maxDealDuration: 0,
+          avgDealDuration: 0,
+        },
+        symbol,
+      })),
+    }
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}updateBotStats`)
+  @IdMute(mutexConcurrently, () => 'updateEquityStats')
+  async updateEquityStats(_botId: string) {
+    const _id = this.startMethod('updateEquityStats')
+    if (!this.data) {
+      this.endMethod(_id)
+      return
+    }
+    if (this.equityTimer) {
+      clearTimeout(this.equityTimer)
+    }
+    if (this.data?.ignoreStats) {
+      this.endMethod(_id)
+      return
+    }
+    this.handleLog(`Update equity stats`)
+    this.setEquityTimer()
+    let { stats, symbolStats } = this.data
+    const emptyStats = this.getEmptyStats()
+    if (!stats) {
+      stats = emptyStats.stats
+    }
+    if (!symbolStats) {
+      symbolStats = emptyStats.symbolStats
+    }
+    const time = new Date()
+    time.setHours(0, 0, 0, 0)
+    time.setDate(time.getDate() - 1)
+    const settings = await this.getAggregatedSettings()
+    if (!settings.pair?.length) {
+      this.endMethod(_id)
+      return
+    }
+    let stop = false
+    const pairToUse =
+      stats.numerical.ratios.buyAndHold.symbol || settings.pair[0]
+    if (
+      !stats.numerical.general.startBalance.asset &&
+      (this.data.usage.max.quote || this.data.usage.max.base)
+    ) {
+      const profitBase = await this.profitBase()
+      const latestPrice = await this.getLatestPrice(pairToUse)
+      const use = this.futures
+        ? this.coinm
+          ? this.data.usage.max.base
+          : this.data.usage.max.quote
+        : this.isLong
+          ? this.data.usage.max.quote / (profitBase ? latestPrice : 1)
+          : this.data.usage.max.base * (profitBase ? 1 : latestPrice)
+      const usdRate = await this.getUsdRate(
+        pairToUse,
+        this.futures
+          ? this.coinm
+            ? 'base'
+            : 'quote'
+          : profitBase
+            ? 'base'
+            : 'quote',
+      )
+      if (!stats.numerical.general.startBalance.asset) {
+        stats.numerical.general.startBalance.asset = use
+        stats.numerical.general.startBalance.usd =
+          stats.numerical.general.startBalance.asset * usdRate
+        stats.numerical.ratios.buyAndHold.symbol = pairToUse
+        stats.numerical.ratios.buyAndHold.startPrice = latestPrice
+      }
+    }
+    if (!stats.numerical.general.startBalance.asset) {
+      this.endMethod(_id)
+      return
+    }
+    if (!stats.chart.length) {
+      stats.chart.push({
+        time: +time,
+        equity: stats.numerical.general.startBalance.usd,
+        buyAndHold: stats.numerical.general.startBalance.usd,
+        realizedProfit: stats.numerical.general.startBalance.usd,
+      })
+      stop = true
+    }
+    const prev = [...stats.chart]
+      .filter((c) => c.time < +time)
+      .sort((a, b) => b.time - a.time)[0]
+    if (!stop) {
+      const rates: Map<string, number> = new Map()
+      const prices: Map<string, number> = new Map()
+      let equity = 0
+      let bnh = 0
+      for (const d of this.getOpenDeals(true)) {
+        const symbol = d.deal.symbol.symbol
+        const baseName = d.deal.symbol.baseAsset
+        const baseRate =
+          rates.get(baseName) ?? (await this.getUsdRate(symbol, 'base'))
+        const quoteName = d.deal.symbol.quoteAsset
+        const quoteRate =
+          rates.get(quoteName) ?? (await this.getUsdRate(symbol, 'quote'))
+        rates.set(baseName, baseRate)
+        rates.set(quoteName, quoteRate)
+        if (this.futures && !prices.has(symbol)) {
+          prices.set(symbol, await this.getLatestPrice(symbol))
+        }
+
+        const used = this.futures
+          ? this.coinm
+            ? d.deal.usage.max.base * baseRate
+            : d.deal.usage.max.quote * quoteRate
+          : this.isLong
+            ? d.deal.usage.max.quote * quoteRate
+            : d.deal.usage.max.base * baseRate
+        equity += this.futures
+          ? this.coinm
+            ? (d.deal.currentBalances.base +
+                d.deal.currentBalances.quote /
+                  (prices.get(symbol) ?? d.deal.lastPrice) -
+                (d.deal.initialBalances.base +
+                  d.deal.initialBalances.quote / d.deal.initialPrice)) *
+              (this.isLong ? 1 : -1) *
+              baseRate
+            : (d.deal.currentBalances.base *
+                (prices.get(symbol) ?? d.deal.lastPrice) +
+                d.deal.currentBalances.quote -
+                (d.deal.initialBalances.base * d.deal.initialPrice +
+                  d.deal.initialBalances.quote)) *
+              (this.isLong ? 1 : -1) *
+              quoteRate
+          : (d.deal.currentBalances.base * baseRate +
+              d.deal.currentBalances.quote * quoteRate) /
+              (await this.getLeverageMultipler()) -
+            used
+      }
+      const usdRate = await this.getUsdRate(
+        pairToUse,
+        this.futures
+          ? this.coinm
+            ? 'base'
+            : 'quote'
+          : (await this.profitBase())
+            ? 'base'
+            : 'quote',
+      )
+      const balanceUsd = settings.useMulti
+        ? stats.numerical.general.startBalance.usd + this.data.profit.totalUsd
+        : this.futures ||
+            (this.isLong && !(await this.profitBase())) ||
+            ((await this.profitBase()) && !this.isLong)
+          ? (stats.numerical.general.startBalance.asset +
+              this.data.profit.total) *
+            usdRate
+          : stats.numerical.general.startBalance.usd +
+            this.data.profit.total * usdRate
+      equity = balanceUsd + equity
+      let bnhUsdRate = 1
+      if (
+        stats.numerical.ratios.buyAndHold.startPrice &&
+        stats.numerical.general.startBalance.usd
+      ) {
+        const bnhRate = await this.getLatestPrice(pairToUse)
+        bnhUsdRate = await this.getUsdRate(
+          pairToUse,
+          (await this.profitBase()) ? 'base' : 'quote',
+        )
+        bnh =
+          (stats.numerical.general.startBalance.asset /
+            stats.numerical.ratios.buyAndHold.startPrice) *
+          bnhRate
+        stats.numerical.ratios.buyAndHold.result =
+          (bnh - stats.numerical.general.startBalance.asset) * bnhUsdRate
+        stats.numerical.ratios.buyAndHold.perc =
+          stats.numerical.ratios.buyAndHold.result /
+          stats.numerical.general.startBalance.usd
+      }
+      const current = stats.chart.find((c) => c.time === +time)
+      stats.chart = stats.chart.filter((c) => c.time !== +time)
+      stats.chart.push({
+        time: +time,
+        equity: equity,
+        buyAndHold: bnh * bnhUsdRate,
+        realizedProfit:
+          current?.realizedProfit ??
+          prev?.realizedProfit ??
+          stats.numerical.general.startBalance.usd,
+      })
+    }
+    if (stats.chart.length > 90) {
+      stats.chart.shift()
+    }
+    if (stats.chart.length >= 1) {
+      const last = stats.chart[stats.chart.length - 1]
+      const secondToLast = stats.chart[stats.chart.length - 2]
+      if (!secondToLast) {
+        stats.numerical.loss.seriesEquity = {
+          value: 0,
+          min: last.equity,
+          max: last.equity,
+          perc: 0,
+        }
+      }
+      if (last.equity > stats.numerical.loss.seriesEquity.max) {
+        stats.numerical.loss.seriesEquity.max = last.equity
+        stats.numerical.loss.seriesEquity.min = last.equity
+      }
+      if (last.equity < stats.numerical.loss.seriesEquity.max) {
+        const tempValue = stats.numerical.loss.seriesEquity.max - last.equity
+        if (tempValue > stats.numerical.loss.seriesEquity.value) {
+          stats.numerical.loss.seriesEquity.value = tempValue
+          stats.numerical.loss.seriesEquity.min = last.equity
+          stats.numerical.loss.seriesEquity.perc =
+            tempValue / stats.numerical.loss.seriesEquity.max
+          stats.numerical.loss.maxEquityDrawdown.usd = tempValue
+          stats.numerical.loss.maxEquityDrawdownPerc =
+            stats.numerical.loss.seriesEquity.perc
+        }
+      }
+    }
+    this.data.stats = stats
+    this.data.symbolStats = symbolStats
+    this.updateData({ stats, symbolStats })
+    this.emit('bot stats update', { stats, symbolStats })
+    this.endMethod(_id)
+  }
+
+  @IdMute(mutex, (botId: string) => `${botId}updateBotStats`)
+  async botUpdateStats(_botId: string, d: FullDeal<ExcludeDoc<Deal>>) {
+    const _id = this.startMethod('botUpdateStats')
+    if (!this.data) {
+      this.endMethod(_id)
+      return
+    }
+    if (this.data.settings.type === DCATypeEnum.terminal) {
+      this.endMethod(_id)
+      return
+    }
+    if (this.data?.ignoreStats) {
+      this.endMethod(_id)
+      return
+    }
+    const readResetTime = (
+      await this.db?.readData<{ resetStatsAfter?: number }>(
+        { _id: this.botId },
+        { resetStatsAfter: 1 },
+      )
+    )?.data?.result?.resetStatsAfter as number | undefined
+    const { deal } = d
+    if (readResetTime && deal.createTime < readResetTime) {
+      this.endMethod(_id)
+      return
+    }
+    const settings = await this.getAggregatedSettings(deal)
+    const emptyStats = this.getEmptyStats()
+    let { stats, symbolStats } = this.data
+    if (!stats) {
+      stats = emptyStats.stats
+    }
+    if (!symbolStats?.length) {
+      symbolStats = emptyStats.symbolStats
+    }
+    const combo = this.combo
+    const comboBasedOn = await this.comboBasedOn(deal)
+    const _usdRate = await this.getUsdRate(deal.symbol.symbol)
+    const usdRate =
+      _usdRate *
+      (this.futures
+        ? this.coinm
+          ? deal.lastPrice
+          : 1
+        : this.isLong
+          ? 1
+          : deal.lastPrice)
+    const profitBase = await this.profitBase(deal)
+    const baseUsage = combo
+      ? comboBasedOn === ComboTpBase.full
+        ? deal.usage.max.base
+        : deal.usage.current.base
+      : deal.usage.current.base
+    const quoteUsage = combo
+      ? comboBasedOn === ComboTpBase.full
+        ? deal.usage.max.quote
+        : deal.usage.current.quote
+      : deal.usage.current.quote
+    const usage = this.futures
+      ? this.coinm
+        ? baseUsage
+        : quoteUsage
+      : this.isLong
+        ? quoteUsage
+        : baseUsage
+    if (usage > stats.numerical.usage.maxActualUsage) {
+      stats.numerical.usage.maxActualUsage = usage
+    }
+    const end = deal.closeTime ?? deal.updateTime
+    if (deal.profit.total !== 0) {
+      const multipltyUsage = this.futures
+        ? 1
+        : this.isLong
+          ? (await this.profitBase(deal))
+            ? 1 / deal.avgPrice
+            : 1
+          : (await this.profitBase(deal))
+            ? 1
+            : deal.avgPrice
+      const perc = deal.profit.total / (usage * multipltyUsage)
+      this.botProfitDb
+        .createData({
+          userId: this.userId,
+          botId: this.botId,
+          type: this.botType,
+          value: perc,
+          time: end,
+        })
+        .then(async () => {
+          const count =
+            (await this.botProfitDb.countData({ botId: this.botId }))?.data
+              ?.result ?? 0
+          if (count > 600) {
+            this.handleLog(
+              `Bot update stats | Clear profit db. Profit count: ${count}`,
+            )
+            const last = await this.botProfitDb.readData(
+              { botId: this.botId },
+              {},
+              { sort: { time: -1 }, limit: 1, skip: 500 },
+            )
+            if (last.data?.result) {
+              try {
+                this.handleLog(
+                  `Bot update stats | Clear profit db. Found last record ${new Date(
+                    last.data.result.time,
+                  ).toISOString()}`,
+                )
+                await this.botProfitDb
+                  .deleteManyData({
+                    botId: this.botId,
+                    time: { $lt: last.data.result.time },
+                  })
+                  .then((r) => {
+                    this.handleLog(
+                      `Bot update stats | Clear profit db. Deleted records result: ${r.reason}`,
+                    )
+                  })
+              } catch (e) {
+                logger.error(
+                  `Error clearing profit db: ${e}, ${JSON.stringify(last)}`,
+                )
+              }
+            }
+          }
+        })
+    }
+
+    const isProfit = isFinite(deal.profit.total) && deal.profit.total > 0
+    const isLoss = isFinite(deal.profit.total) && deal.profit.total < 0
+
+    const workingTime = this.data.workingShift.reduce(
+      (acc, ws) => acc + (ws.end ?? +new Date()) - ws.start,
+      0,
+    )
+    const workingDays = workingTime / (24 * 60 * 60 * 1000)
+
+    const use = this.futures
+      ? this.coinm
+        ? deal.usage.max.base
+        : deal.usage.max.quote
+      : this.isLong
+        ? deal.usage.max.quote / (profitBase ? deal.initialPrice : 1)
+        : deal.usage.max.base * (profitBase ? 1 : deal.initialPrice)
+    const multiply = this.futures
+      ? 1
+      : this.isLong
+        ? profitBase
+          ? deal.initialPrice
+          : 1
+        : profitBase
+          ? 1
+          : 1 / deal.initialPrice
+    if (!stats.numerical.general.startBalance.asset) {
+      const maxDeals = Math.max(
+        1,
+        settings.maxNumberOfOpenDeals &&
+          +settings.maxNumberOfOpenDeals &&
+          !isNaN(+settings.maxNumberOfOpenDeals) &&
+          isFinite(+settings.maxNumberOfOpenDeals)
+          ? +settings.maxNumberOfOpenDeals
+          : 1,
+      )
+      stats.numerical.general.startBalance.asset = use * maxDeals
+      stats.numerical.general.startBalance.usd =
+        stats.numerical.general.startBalance.asset * usdRate * multiply
+    }
+    if (
+      (isProfit && !!stats.numerical.loss.series.count) ||
+      (isLoss && !!stats.numerical.profit.series.count)
+    ) {
+      stats.numerical.loss.series.count = 0
+      stats.numerical.profit.series.count = 0
+    }
+    if (isProfit) {
+      stats.numerical.deals.profit += 1
+      stats.numerical.profit.grossProfit.usd += d.deal.profit.totalUsd
+      stats.numerical.profit.grossProfit.asset += d.deal.profit.total
+      stats.numerical.profit.grossProfitPerc =
+        stats.numerical.profit.grossProfit.usd /
+        stats.numerical.general.startBalance.usd
+      stats.numerical.profit.avgDealProfit.usd =
+        stats.numerical.profit.grossProfit.usd / stats.numerical.deals.profit
+      if (isNaN(stats.numerical.profit.avgDealProfit.usd)) {
+        stats.numerical.profit.avgDealProfit.usd = 0
+      }
+      stats.numerical.profit.avgDealProfit.asset =
+        stats.numerical.profit.grossProfit.asset / stats.numerical.deals.profit
+      if (isNaN(stats.numerical.profit.avgDealProfit.asset)) {
+        stats.numerical.profit.avgDealProfit.asset = 0
+      }
+      stats.numerical.profit.avgDealProfitPerc =
+        stats.numerical.profit.avgDealProfit.usd /
+        stats.numerical.general.startBalance.usd
+      stats.numerical.profit.series.count += 1
+      if (
+        stats.numerical.profit.series.count >
+        stats.numerical.profit.maxConsecutiveWins
+      ) {
+        stats.numerical.profit.maxConsecutiveWins =
+          stats.numerical.profit.series.count
+      }
+      if (!(stats.numerical.deals.loss + stats.numerical.deals.profit - 1)) {
+        stats.numerical.profit.series.value.asset = deal.profit.total
+        stats.numerical.profit.series.value.usd = deal.profit.totalUsd
+        stats.numerical.profit.series.minValue.asset =
+          stats.numerical.general.startBalance.asset
+        stats.numerical.profit.series.minValue.usd =
+          stats.numerical.general.startBalance.usd
+        stats.numerical.profit.series.maxValue.asset =
+          stats.numerical.general.startBalance.asset + deal.profit.total
+        stats.numerical.profit.series.maxValue.usd =
+          stats.numerical.general.startBalance.usd + deal.profit.totalUsd
+        stats.numerical.profit.series.perc =
+          deal.profit.totalUsd / stats.numerical.general.startBalance.usd
+      }
+      if (isNaN(stats.duration.profit.avgWinningTradeDuration)) {
+        stats.duration.profit.avgWinningTradeDuration = 0
+      }
+    }
+    if (isLoss) {
+      stats.numerical.deals.loss += 1
+      stats.numerical.loss.grossLoss.usd += d.deal.profit.totalUsd
+      stats.numerical.loss.grossLoss.asset += d.deal.profit.total
+      stats.numerical.loss.grossLossPerc =
+        stats.numerical.loss.grossLoss.usd /
+        stats.numerical.general.startBalance.usd
+      stats.numerical.loss.avgDealLoss.usd =
+        stats.numerical.loss.grossLoss.usd / stats.numerical.deals.loss
+      if (isNaN(stats.numerical.loss.avgDealLoss.usd)) {
+        stats.numerical.loss.avgDealLoss.usd = 0
+      }
+      stats.numerical.loss.avgDealLoss.asset =
+        stats.numerical.loss.grossLoss.asset / stats.numerical.deals.loss
+      if (isNaN(stats.numerical.loss.avgDealLoss.asset)) {
+        stats.numerical.loss.avgDealLoss.asset = 0
+      }
+      stats.numerical.loss.avgDealLossPerc =
+        stats.numerical.loss.avgDealLoss.usd /
+        stats.numerical.general.startBalance.usd
+      stats.numerical.loss.series.count += 1
+      if (
+        stats.numerical.loss.series.count >
+        stats.numerical.loss.maxConsecutiveLosses
+      ) {
+        stats.numerical.loss.maxConsecutiveLosses =
+          stats.numerical.loss.series.count
+      }
+      if (!(stats.numerical.deals.loss + stats.numerical.deals.profit - 1)) {
+        stats.numerical.loss.series.value.asset = deal.profit.total * -1
+        stats.numerical.loss.series.value.usd = deal.profit.totalUsd * -1
+        stats.numerical.loss.series.minValue.asset =
+          stats.numerical.general.startBalance.asset + deal.profit.total
+        stats.numerical.loss.series.minValue.usd =
+          stats.numerical.general.startBalance.usd + deal.profit.totalUsd
+        stats.numerical.loss.series.maxValue.asset =
+          stats.numerical.general.startBalance.asset
+        stats.numerical.loss.series.maxValue.usd =
+          stats.numerical.general.startBalance.usd
+        stats.numerical.loss.series.perc =
+          (deal.profit.totalUsd * -1) / stats.numerical.general.startBalance.usd
+      }
+    }
+    if (isLoss) {
+      stats.numerical.loss.maxDealLoss.usd = Math.min(
+        stats.numerical.loss.maxDealLoss.usd,
+        d.deal.profit.totalUsd,
+      )
+      stats.numerical.loss.maxDealLoss.asset = Math.min(
+        stats.numerical.loss.maxDealLoss.asset,
+        d.deal.profit.total,
+      )
+      stats.numerical.loss.maxDealLossPerc =
+        stats.numerical.loss.maxDealLoss.usd /
+        stats.numerical.general.startBalance.usd
+    }
+    if (isProfit) {
+      stats.numerical.profit.maxDealProfit.usd = Math.max(
+        stats.numerical.profit.maxDealProfit.usd,
+        d.deal.profit.totalUsd,
+      )
+
+      stats.numerical.profit.maxDealProfit.asset = Math.max(
+        stats.numerical.profit.maxDealProfit.asset,
+        d.deal.profit.total,
+      )
+      stats.numerical.profit.maxDealProfitPerc =
+        stats.numerical.profit.maxDealProfit.usd /
+        stats.numerical.general.startBalance.usd
+    }
+    if (deal.profit.totalUsd !== 0) {
+      const balanceUsd =
+        stats.numerical.general.startBalance.usd + this.data.profit.totalUsd
+      const balance =
+        stats.numerical.general.startBalance.asset + this.data.profit.total
+      if (balanceUsd > stats.numerical.profit.series.maxValue.usd) {
+        stats.numerical.profit.series.maxValue.usd = balanceUsd
+        stats.numerical.profit.series.maxValue.asset = balance
+        if (stats.numerical.profit.series.minValue.asset === 0) {
+          stats.numerical.profit.series.minValue.asset =
+            stats.numerical.loss.series.minValue.asset === 0
+              ? stats.numerical.general.startBalance.asset
+              : Math.min(
+                  stats.numerical.loss.series.minValue.asset,
+                  stats.numerical.general.startBalance.asset,
+                )
+          stats.numerical.profit.series.minValue.usd =
+            stats.numerical.loss.series.minValue.asset === 0
+              ? stats.numerical.general.startBalance.usd
+              : Math.min(
+                  stats.numerical.loss.series.minValue.usd,
+                  stats.numerical.general.startBalance.usd,
+                )
+        }
+        const tempValueUsd =
+          stats.numerical.profit.series.maxValue.usd -
+          stats.numerical.profit.series.minValue.usd
+        if (tempValueUsd > stats.numerical.profit.series.value.usd) {
+          stats.numerical.profit.series.perc = Math.abs(
+            tempValueUsd / stats.numerical.profit.series.minValue.usd,
+          )
+          stats.numerical.profit.series.value.usd = tempValueUsd
+          stats.numerical.profit.series.value.asset =
+            stats.numerical.profit.series.maxValue.asset -
+            stats.numerical.profit.series.minValue.asset
+        }
+      }
+      if (balanceUsd < stats.numerical.profit.series.minValue.usd) {
+        stats.numerical.profit.series.minValue.asset = balance
+        stats.numerical.profit.series.maxValue.asset = balance
+        stats.numerical.profit.series.minValue.usd = balanceUsd
+        stats.numerical.profit.series.maxValue.usd = balanceUsd
+      }
+      if (balanceUsd < stats.numerical.loss.series.minValue.usd) {
+        stats.numerical.loss.series.minValue.usd = balanceUsd
+        stats.numerical.loss.series.minValue.asset = balance
+        if (stats.numerical.loss.series.maxValue.asset === 0) {
+          stats.numerical.loss.series.maxValue.asset =
+            stats.numerical.profit.series.maxValue.asset === 0
+              ? stats.numerical.general.startBalance.asset
+              : Math.min(
+                  stats.numerical.profit.series.maxValue.asset,
+                  stats.numerical.general.startBalance.asset,
+                )
+          stats.numerical.loss.series.maxValue.usd =
+            stats.numerical.profit.series.maxValue.asset === 0
+              ? stats.numerical.general.startBalance.usd
+              : Math.min(
+                  stats.numerical.profit.series.maxValue.usd,
+                  stats.numerical.general.startBalance.usd,
+                )
+        }
+        const tempValueUsd =
+          stats.numerical.loss.series.maxValue.usd -
+          stats.numerical.loss.series.minValue.usd
+        if (tempValueUsd > stats.numerical.loss.series.value.usd) {
+          stats.numerical.loss.series.perc = Math.abs(
+            tempValueUsd / stats.numerical.loss.series.maxValue.usd,
+          )
+          stats.numerical.loss.series.value.usd = tempValueUsd
+          stats.numerical.loss.series.value.asset =
+            stats.numerical.loss.series.maxValue.asset -
+            stats.numerical.loss.series.minValue.asset
+        }
+      }
+      if (balanceUsd > stats.numerical.loss.series.maxValue.usd) {
+        stats.numerical.loss.series.minValue.asset = balance
+        stats.numerical.loss.series.maxValue.asset = balance
+        stats.numerical.loss.series.minValue.usd = balanceUsd
+        stats.numerical.loss.series.maxValue.usd = balanceUsd
+      }
+      if (
+        stats.numerical.loss.series.value.usd >
+        stats.numerical.loss.maxDrawdown.usd
+      ) {
+        stats.numerical.loss.maxDrawdown.usd =
+          stats.numerical.loss.series.value.usd
+        stats.numerical.loss.maxDrawdown.asset =
+          stats.numerical.loss.series.value.asset
+        stats.numerical.loss.maxDrawdownPerc = stats.numerical.loss.series.perc
+      }
+      if (
+        stats.numerical.profit.series.value.usd >
+        stats.numerical.profit.maxRunUp.usd
+      ) {
+        stats.numerical.profit.maxRunUp.usd =
+          stats.numerical.profit.series.value.usd
+        stats.numerical.profit.maxRunUp.asset =
+          stats.numerical.profit.series.value.asset
+        stats.numerical.profit.maxRunUpPerc = stats.numerical.profit.series.perc
+      }
+      stats.numerical.general.netProfitPerc =
+        this.data.profit.totalUsd / stats.numerical.general.startBalance.usd
+
+      stats.numerical.general.avgDaily.asset =
+        this.data.profit.total / workingDays
+      stats.numerical.general.avgDaily.usd =
+        this.data.profit.totalUsd / workingDays
+      stats.numerical.general.avgDailyPerc =
+        this.data.profit.totalUsd /
+        stats.numerical.general.startBalance.usd /
+        workingDays
+      if (
+        !isNaN(stats.numerical.general.avgDailyPerc) &&
+        isFinite(stats.numerical.general.avgDailyPerc) &&
+        stats.numerical.general.avgDailyPerc
+      ) {
+        const compound =
+          [OrderSizeTypeEnum.percFree, OrderSizeTypeEnum.percTotal].includes(
+            this.data.settings.orderSizeType,
+          ) || this.data.settings.useReinvest
+        stats.numerical.general.annualizedReturn = compound
+          ? (1 + stats.numerical.general.avgDailyPerc) ** 365 - 1
+          : stats.numerical.general.avgDailyPerc * 365
+        if (
+          stats.numerical.general.annualizedReturn > Number.MAX_SAFE_INTEGER
+        ) {
+          stats.numerical.general.annualizedReturn = Infinity
+        }
+      }
+    }
+    if (
+      settings.useDca &&
+      deal.levels.complete - 1 > stats.numerical.general.maxDCAOrdersTriggered
+    ) {
+      stats.numerical.general.maxDCAOrdersTriggered = deal.levels.complete - 1
+    }
+    if (!stats.numerical.general.coveredPriceDeviation) {
+      const lastOrder = d.initialOrders
+        .filter((o) => o.type === TypeOrderEnum.dealRegular)
+        .sort((a, b) =>
+          this.isLong ? a.price - b.price : b.price - a.price,
+        )[0]
+      if (lastOrder) {
+        stats.numerical.general.coveredPriceDeviation =
+          Math.abs(lastOrder.price - deal.initialPrice) / deal.initialPrice
+      }
+    }
+    const actualPriceDeviationOrder = d.initialOrders
+      .filter((o) => o.type === TypeOrderEnum.dealRegular)
+      .sort((a, b) => (this.isLong ? a.price - b.price : b.price - a.price))
+      .slice(0, deal.levels.complete - 1)[0]
+    if (actualPriceDeviationOrder) {
+      stats.numerical.general.actualPriceDeviation =
+        Math.abs(actualPriceDeviationOrder.price - deal.initialPrice) /
+        deal.initialPrice
+    }
+    const totalDeals = stats.numerical.deals.profit + stats.numerical.deals.loss
+    stats.numerical.general.confidenceGrade =
+      totalDeals < 107
+        ? 'F'
+        : totalDeals >= 107 && totalDeals < 133
+          ? 'E'
+          : totalDeals >= 133 && totalDeals < 164
+            ? 'D'
+            : totalDeals >= 164 && totalDeals < 208
+              ? 'C'
+              : totalDeals >= 208 && totalDeals < 273
+                ? 'B'
+                : totalDeals >= 273 && totalDeals < 385
+                  ? 'A'
+                  : 'A+'
+    stats.numerical.ratios.profitFactor =
+      stats.numerical.deals.profit / stats.numerical.deals.loss
+    if (!isFinite(stats.numerical.ratios.profitFactor)) {
+      stats.numerical.ratios.profitFactor = -1
+    }
+    if (isNaN(stats.numerical.ratios.profitFactor)) {
+      stats.numerical.ratios.profitFactor = 0
+    }
+
+    const maxUsage = this.futures
+      ? this.coinm
+        ? deal.usage.max.base
+        : deal.usage.max.quote
+      : this.isLong
+        ? deal.usage.max.quote
+        : deal.usage.max.base
+    if (maxUsage > stats.numerical.usage.maxTheoreticalUsage) {
+      stats.numerical.usage.maxTheoreticalUsage = maxUsage
+    }
+    const duration = end - deal.createTime
+    if (isProfit && duration > stats.duration.profit.maxWinningTradeDuration) {
+      stats.duration.profit.maxWinningTradeDuration = duration
+    }
+    if (isLoss && duration > stats.duration.loss.maxLosingTradeDuration) {
+      stats.duration.loss.maxLosingTradeDuration = duration
+    }
+    if (duration > stats.duration.general.maxDealDuration) {
+      stats.duration.general.maxDealDuration = duration
+    }
+
+    if (workingDays) {
+      stats.duration.general.dealsPerDay = totalDeals / workingDays
+    }
+    stats.duration.general.workingTime = workingTime
+    if (!stats.numerical.ratios.buyAndHold.symbol) {
+      stats.numerical.ratios.buyAndHold.symbol = deal.symbol.symbol
+      stats.numerical.ratios.buyAndHold.startPrice = deal.initialPrice
+    }
+    const bnhUsdRate =
+      deal.symbol.symbol === stats.numerical.ratios.buyAndHold.symbol
+        ? _usdRate
+        : await this.getUsdRate(stats.numerical.ratios.buyAndHold.symbol)
+    const bnhRate =
+      deal.symbol.symbol === stats.numerical.ratios.buyAndHold.symbol
+        ? deal.lastPrice
+        : await this.getLatestPrice(stats.numerical.ratios.buyAndHold.symbol)
+    stats.numerical.ratios.buyAndHold.result =
+      ((stats.numerical.general.startBalance.asset /
+        stats.numerical.ratios.buyAndHold.startPrice) *
+        bnhRate -
+        stats.numerical.general.startBalance.asset) *
+      bnhUsdRate
+    stats.numerical.ratios.buyAndHold.perc =
+      stats.numerical.ratios.buyAndHold.result /
+      stats.numerical.general.startBalance.usd
+    const chartTime = new Date(end)
+    chartTime.setHours(0, 0, 0, 0)
+    if (!stats.chart.length) {
+      stats.chart.push({
+        realizedProfit: stats.numerical.general.startBalance.usd,
+        buyAndHold: stats.numerical.general.startBalance.usd,
+        equity: stats.numerical.general.startBalance.usd,
+        time: +chartTime,
+      })
+    }
+    const find = stats.chart.find((c) => c.time === +chartTime)
+    if (find) {
+      find.realizedProfit = (find.realizedProfit ?? 0) + deal.profit.totalUsd
+      find.equity = find.equity + deal.profit.totalUsd
+      stats.chart = stats.chart.filter((c) => c.time !== +chartTime)
+      stats.chart.push(find)
+      if (stats.chart.length > 90) {
+        stats.chart.shift()
+      }
+    } else {
+      const last = stats.chart[stats.chart.length - 1]
+      stats.chart.push({
+        realizedProfit:
+          (last?.realizedProfit ?? stats.numerical.general.startBalance.usd) +
+          deal.profit.totalUsd,
+        buyAndHold: last.buyAndHold,
+        equity: last?.equity + deal.profit.totalUsd,
+        time: +chartTime,
+      })
+    }
+    if (settings.useMulti) {
+      let findSymbol = symbolStats.find((s) => s.symbol === deal.symbol.symbol)
+      if (!findSymbol) {
+        findSymbol = {
+          ...emptyStats.symbolStats[0],
+          symbol: deal.symbol.symbol,
+        }
+      }
+      if (isProfit) {
+        findSymbol.numerical.deals.profit += 1
+      }
+      if (isLoss) {
+        findSymbol.numerical.deals.loss += 1
+      }
+      if (!findSymbol.numerical.general.startBalance.asset) {
+        const maxDeals = Math.max(
+          1,
+          settings.maxDealsPerPair &&
+            +settings.maxDealsPerPair &&
+            !isNaN(+settings.maxDealsPerPair) &&
+            isFinite(+settings.maxDealsPerPair)
+            ? +settings.maxDealsPerPair
+            : 1,
+        )
+        findSymbol.numerical.general.startBalance.asset = use * maxDeals
+        findSymbol.numerical.general.startBalance.usd =
+          findSymbol.numerical.general.startBalance.asset * usdRate * multiply
+      }
+      findSymbol.numerical.general.netProfit.asset += d.deal.profit.total
+
+      findSymbol.numerical.general.netProfit.usd += d.deal.profit.totalUsd
+      if (findSymbol.numerical.general.startBalance.usd) {
+        findSymbol.numerical.general.netProfitPerc =
+          findSymbol.numerical.general.netProfit.usd /
+          findSymbol.numerical.general.startBalance.usd
+        findSymbol.numerical.general.dailyProfit.asset =
+          findSymbol.numerical.general.netProfit.asset / workingDays
+        findSymbol.numerical.general.dailyProfit.usd =
+          findSymbol.numerical.general.netProfit.usd / workingDays
+        findSymbol.numerical.general.dailyProfitPerc =
+          findSymbol.numerical.general.dailyProfit.usd /
+          findSymbol.numerical.general.startBalance.usd /
+          workingDays
+      }
+      const totalSymbolDeals =
+        findSymbol.numerical.deals.profit + findSymbol.numerical.deals.loss
+      if (totalSymbolDeals) {
+        findSymbol.numerical.general.winRate =
+          findSymbol.numerical.deals.profit / totalSymbolDeals
+      }
+      findSymbol.numerical.general.profitFactor =
+        findSymbol.numerical.deals.profit / findSymbol.numerical.deals.loss
+      if (!isFinite(findSymbol.numerical.general.profitFactor)) {
+        findSymbol.numerical.general.profitFactor = -1
+      }
+      if (isNaN(findSymbol.numerical.general.profitFactor)) {
+        findSymbol.numerical.general.profitFactor = 0
+      }
+      if (duration > findSymbol.duration.maxDealDuration) {
+        findSymbol.duration.maxDealDuration = duration
+      }
+
+      findSymbol.duration.avgDealDuration = isNaN(
+        findSymbol.duration.avgDealDuration,
+      )
+        ? findSymbol.duration.maxDealDuration
+        : findSymbol.duration.avgDealDuration
+      symbolStats = symbolStats.filter((s) => s.symbol !== findSymbol?.symbol)
+      symbolStats.push(findSymbol)
+      symbolStats = symbolStats.sort((a, b) => a.symbol.localeCompare(b.symbol))
+    }
+    this.data.stats = stats
+    this.data.symbolStats = symbolStats
+    this.updateData({ stats, symbolStats })
+    this.emit('bot stats update', {
+      stats: this.data.stats,
+      symbolStats: this.data.symbolStats,
+    })
+    this.endMethod(_id)
+  }
+}
+
+export default DCABotHelper

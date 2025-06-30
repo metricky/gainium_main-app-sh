@@ -1,0 +1,1344 @@
+import ExchangeChooser from '../exchange/exchangeChooser'
+import { paperExchanges } from '../exchange/paper/utils'
+import {
+  Prices,
+  SnapshotSchema,
+  UserDataStreamEvent,
+  ExchangeInUser,
+  ClearUserSchema,
+  FreeAsset,
+  ResetAccountTypeEnum,
+} from '../../types'
+import {
+  BotStatusEnum,
+  BotType,
+  CloseDCATypeEnum,
+  CloseGRIDTypeEnum,
+  ExchangeEnum,
+  liveupdate,
+  rabbitUsersStreamKey,
+  serviceLogRedis,
+  StatusEnum,
+} from '../../types'
+import type { Socket } from 'socket.io-client'
+import utils from '.'
+import { decrypt } from './crypto'
+import logger from './logger'
+import {
+  botEventDb,
+  botMessageDb,
+  botProfitChartDb,
+  comboBotDb,
+  comboDealsDb,
+  comboProfitDb,
+  comboTransactionsDb,
+  dcaDealsDb,
+  hedgeComboBotDb,
+  globalVarsDb,
+  minigridDb,
+  orderDb,
+  paperHedgeDb,
+  paperLeverageDb,
+  paperOrderDb,
+  paperPositionDb,
+  paperUserDb,
+  paperWalletsDb,
+  transactionDb,
+  userProfitByHourDb,
+  hedgeDCABotDb,
+  userDb,
+  balanceDb,
+  feeDb,
+  rateDb,
+  snapshotDb,
+  botDb,
+  dcaBotDb,
+} from '../db/dbInit'
+import RedisClient from '../db/redis'
+import Rabbit from '../db/rabbit'
+import type { ErrorResponse, MessageResponse } from '../db/crud'
+import BotService from '../bot'
+import { updateRelatedBotsInVar } from '../bot/utils'
+import axios from 'axios'
+
+const { getTimezoneOffset, findUSDRate } = utils
+
+const streams: { stream: Socket; uuid: string }[] = []
+
+const streamsSet: Set<string> = new Set()
+
+const coinsbaseTimer: Map<string, NodeJS.Timeout> = new Map()
+
+const coinbaseTimeout = 10 * 60 * 1000
+
+const balanceMsg: (UserDataStreamEvent & {
+  userId: string
+  e: ExchangeInUser
+})[] = []
+
+let lockBalance = false
+
+const rabbitClient = new Rabbit()
+
+const processBalanceUpdate = async () => {
+  const next = async () => {
+    lockBalance = false
+    balanceMsg.shift()
+    await processBalanceUpdate()
+  }
+  if (!lockBalance && balanceMsg.length > 0) {
+    lockBalance = true
+    const [msg] = balanceMsg
+    if (
+      msg.eventType !== 'outboundAccountPosition' &&
+      msg.eventType !== 'balanceUpdate' &&
+      msg.eventType !== 'ACCOUNT_UPDATE'
+    ) {
+      next()
+      return
+    }
+    const { userId, e } = msg
+    /** Check exchange in user account */
+    const user = await userDb.readData({
+      exchanges: { $elemMatch: { uuid: e.uuid } },
+    })
+    if (user.status === StatusEnum.notok) {
+      logger.warn(`Get user in update balance: ${user.reason}`)
+    } else {
+      if (!user.data.result) {
+        logger.warn(
+          `Balance update message | Exchange not found in user account ${e.uuid}@${userId}`,
+        )
+      } else {
+        const ex = user.data.result.exchanges.find(
+          (ue) => ue.uuid === e.uuid && !ue.linkedTo,
+        )
+        if (!ex) {
+          next()
+          return ex
+        }
+        const redis = await RedisClient.getInstance()
+        if (msg.eventType === 'outboundAccountPosition') {
+          const data = msg.balances.map((b) => ({
+            ...b,
+            exchange: e.provider,
+            exchangeUUID: e.uuid,
+            paperContext: paperExchanges.includes(e.provider),
+          }))
+
+          redis?.publish(
+            `${liveupdate}${userId}`,
+            JSON.stringify({ data: { data }, event: 'balance' }),
+          )
+
+          for (const d of msg.balances) {
+            const getPair = await balanceDb.countData({
+              asset: d.asset,
+              userId,
+              exchange: e.provider,
+              exchangeUUID: e.uuid,
+              paperContext: paperExchanges.includes(e.provider),
+            })
+            if (getPair.status === 'OK' && getPair.data.result === 0) {
+              balanceDb.updateData(
+                { exchangeUUID: e.uuid, asset: d.asset, userId },
+                {
+                  ...d,
+                  free: parseFloat(d.free),
+                  locked: parseFloat(d.locked),
+                  userId,
+                  exchange: e.provider,
+                  exchangeUUID: e.uuid,
+                  paperContext: paperExchanges.includes(e.provider),
+                },
+                false,
+                true,
+                true,
+              )
+            } else {
+              balanceDb.updateData(
+                {
+                  asset: d.asset,
+                  userId,
+                  exchange: e.provider,
+                  exchangeUUID: e.uuid,
+                  paperContext: paperExchanges.includes(e.provider),
+                },
+                {
+                  $set: {
+                    ...d,
+                    free: parseFloat(d.free),
+                    locked: parseFloat(d.locked),
+                  },
+                },
+                false,
+                true,
+              )
+            }
+          }
+        }
+        if (msg.eventType === 'balanceUpdate') {
+          const getBalance = await balanceDb.readData({
+            asset: msg.asset,
+            userId,
+            exchange: e.provider,
+            exchangeUUID: e.uuid,
+            paperContext: paperExchanges.includes(e.provider),
+          })
+          if (getBalance.status === 'OK') {
+            const result = getBalance.data.result
+            const free = (result?.free || 0) + parseFloat(msg.balanceDelta)
+            balanceDb
+              .updateData(
+                {
+                  asset: msg.asset,
+                  userId,
+                  exchange: e.provider,
+                  exchangeUUID: e.uuid,
+                  paperContext: paperExchanges.includes(e.provider),
+                },
+                {
+                  $set: {
+                    free,
+                  },
+                },
+                false,
+                true,
+              )
+              .then(() => {
+                const data = [
+                  {
+                    asset: msg.asset,
+                    free,
+                    locked: result?.locked || 0,
+                    exchange: e.provider,
+                    exchangeUUID: e.uuid,
+                    paperContext: paperExchanges.includes(e.provider),
+                  },
+                ]
+
+                redis?.publish(
+                  `${liveupdate}${userId}`,
+                  JSON.stringify({ data: { data }, event: 'balance' }),
+                )
+              })
+          }
+        }
+        if (msg.eventType === 'ACCOUNT_UPDATE') {
+          const balances = msg.balances
+          for (const b of balances) {
+            const free = parseFloat(b.crossWalletBalance)
+            const locked =
+              parseFloat(b.walletBalance) - parseFloat(b.crossWalletBalance)
+            const getPair = await balanceDb.countData({
+              asset: b.asset,
+              userId,
+              exchange: e.provider,
+              exchangeUUID: e.uuid,
+              paperContext: paperExchanges.includes(e.provider),
+            })
+            if (getPair.status === 'OK' && getPair.data.result === 0) {
+              balanceDb.updateData(
+                { exchangeUUID: e.uuid, asset: b.asset, userId },
+                {
+                  asset: b.asset,
+                  free,
+                  locked,
+                  userId,
+                  exchange: e.provider,
+                  exchangeUUID: e.uuid,
+                  paperContext: paperExchanges.includes(e.provider),
+                },
+                false,
+                true,
+                true,
+              )
+            } else {
+              balanceDb
+                .updateData(
+                  {
+                    asset: b.asset,
+                    userId,
+                    exchange: e.provider,
+                    exchangeUUID: e.uuid,
+                    paperContext: paperExchanges.includes(e.provider),
+                  },
+                  {
+                    $set: {
+                      free,
+                      locked,
+                    },
+                  },
+                  false,
+                  true,
+                )
+                .then(() => {
+                  const data = [
+                    {
+                      asset: b.asset,
+                      free,
+                      locked,
+                      exchange: e.provider,
+                      exchangeUUID: e.uuid,
+                      paperContext: paperExchanges.includes(e.provider),
+                    },
+                  ]
+
+                  redis?.publish(
+                    `${liveupdate}${userId}`,
+                    JSON.stringify({ data: { data }, event: 'balance' }),
+                  )
+                })
+            }
+          }
+        }
+      }
+    }
+
+    await next()
+  }
+}
+
+const updateUserBalance = async (
+  user: ClearUserSchema,
+  uuid?: string,
+  paperContext?: boolean,
+) => {
+  const userId = user._id.toString()
+  const filter: Record<string, unknown> = { userId }
+  if (uuid) {
+    filter.exchangeUUID = uuid
+  }
+  const userBalances = await balanceDb.readData(
+    filter,
+    undefined,
+    {},
+    true,
+    true,
+  )
+  for (const e of user.exchanges
+    .filter((ue) =>
+      paperContext === undefined
+        ? true
+        : paperContext
+          ? paperExchanges.includes(ue.provider)
+          : !paperExchanges.includes(ue.provider),
+    )
+    .filter((ue) => !ue.linkedTo)) {
+    if ((uuid && uuid === e.uuid) || !uuid) {
+      const exchange = ExchangeChooser.chooseExchangeFactory(e.provider)
+
+      if (exchange) {
+        const provider = exchange(
+          e.key,
+          e.secret,
+          e.passphrase,
+          undefined,
+          e.keysType,
+          e.okxSource,
+        )
+        const balances = await provider.getBalance()
+        if (balances.status === 'OK' && userBalances.status === StatusEnum.ok) {
+          const balancesMap: Map<string, FreeAsset[0]> = new Map()
+          for (const b of balances.data) {
+            balancesMap.set(b.asset, b)
+          }
+          for (const b of balancesMap.values()) {
+            const getPair = userBalances.data.result.find(
+              (rb) => rb.asset === b.asset && rb.exchangeUUID === e.uuid,
+            )
+            if (!getPair) {
+              await balanceDb.updateData(
+                { exchangeUUID: e.uuid, asset: b.asset, userId },
+                {
+                  ...b,
+                  userId,
+                  exchange: e.provider,
+                  exchangeUUID: e.uuid,
+                  paperContext: paperExchanges.includes(e.provider),
+                },
+                false,
+                true,
+                true,
+              )
+            } else if (
+              getPair &&
+              (getPair.free !== b.free || getPair.locked !== b.locked)
+            ) {
+              await balanceDb.updateData(
+                {
+                  asset: b.asset,
+                  userId,
+                  exchange: e.provider,
+                  exchangeUUID: e.uuid,
+                  paperContext: paperExchanges.includes(e.provider),
+                },
+                { $set: { free: b.free, locked: b.locked } },
+                false,
+                true,
+              )
+            }
+          }
+          for (const ub of userBalances.data.result) {
+            if (
+              !balances.data.map((b) => b.asset).includes(ub.asset) &&
+              (ub.free > 0 || ub.locked > 0)
+            ) {
+              await balanceDb.updateData(
+                {
+                  asset: ub.asset,
+                  userId,
+                  exchange: e.provider,
+                  exchangeUUID: e.uuid,
+                  paperContext: paperExchanges.includes(e.provider),
+                },
+                { $set: { free: 0, locked: 0 } },
+                false,
+                true,
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+const setCoinbaseTimer = async (user: ClearUserSchema, uuid: string) => {
+  const key = `${uuid}`
+  const get = coinsbaseTimer.get(key)
+  if (get) {
+    clearInterval(get)
+  }
+  logger.info(`Coinbase timer set for ${uuid}`)
+  coinsbaseTimer.set(
+    key,
+    setInterval(
+      () => (
+        logger.info(`Coinbase timer trigger for ${uuid}`),
+        updateUserBalance(user, uuid)
+      ),
+      coinbaseTimeout,
+    ),
+  )
+}
+
+const connectUserBalance = async (id?: string, uuid?: string) => {
+  const users = await userDb.readData(
+    id ? { _id: id } : {},
+    undefined,
+    {},
+    true,
+    true,
+  )
+  if (users.status === 'OK' && users.data.count > 0) {
+    if (uuid || id) {
+      await Promise.all(
+        users.data.result.map((u) => updateUserBalance(u, uuid)),
+      )
+    }
+    for (const u of users.data.result) {
+      const userId = u._id.toString()
+      for (const e of u.exchanges.filter((ue) => !ue.linkedTo)) {
+        if (e.provider === ExchangeEnum.coinbase) {
+          setCoinbaseTimer(u, e.uuid)
+          continue
+        }
+        const find = streams.find((s) => s.uuid === e.uuid)
+        if (find) {
+          disconnectUserBalance(find.uuid)
+        }
+
+        if (streamsSet.has(e.uuid)) {
+          disconnectUserBalance(e.uuid)
+        }
+
+        const data = {
+          key: decrypt(e.key),
+          secret: decrypt(e.secret),
+          passphrase: e.passphrase ? decrypt(e.passphrase) : '',
+          provider: e.provider,
+          keysType: e.keysType,
+          okxSource: e.okxSource,
+        }
+        const redisClient = await RedisClient.getInstance(true, 'app')
+
+        const connect = () =>
+          rabbitClient?.send(rabbitUsersStreamKey, {
+            event: 'open stream',
+            data: { userId, api: data },
+            uuid: e.uuid,
+          })
+        connect()
+        redisClient?.subscribe(serviceLogRedis, (msg: string) => {
+          const service = JSON.parse(msg)?.restart
+          if (service === 'userStream') {
+            connect()
+          }
+        })
+        streamsSet.add(e.uuid)
+        redisClient?.subscribe(`userStreamInfo${e.uuid}`, (msg) =>
+          logger.info('socket connect on start | ', msg),
+        )
+
+        if (redisClient) {
+          redisClient.subscribe(e.uuid, async (msg) => {
+            balanceMsg.push({ ...JSON.parse(msg), userId, e })
+            await processBalanceUpdate()
+          })
+        }
+      }
+    }
+  }
+}
+
+const disconnectUserBalance = async (uuid: string) => {
+  const getTimer = coinsbaseTimer.get(uuid)
+  if (getTimer) {
+    clearInterval(getTimer)
+    coinsbaseTimer.delete(uuid)
+  }
+
+  if (streamsSet.has(uuid)) {
+    rabbitClient?.send(rabbitUsersStreamKey, {
+      event: 'close stream',
+      uuid,
+    })
+  }
+  streamsSet.delete(uuid)
+  const redisClient = await RedisClient.getInstance(true, 'app')
+
+  redisClient?.unsubscribe(`userStreamInfo${uuid}`)
+  redisClient?.unsubscribe(uuid)
+  return
+}
+
+const updateUserFee = async (id?: string, uuid?: string, log = true) => {
+  const users = await userDb.readData(
+    id ? { _id: id } : {},
+    undefined,
+    {},
+    true,
+  )
+  if (users.status === 'OK') {
+    const redis = await RedisClient.getInstance()
+    for (const u of users.data.result) {
+      for (const e of u.exchanges) {
+        const exchange = ExchangeChooser.chooseExchangeFactory(e.provider)
+        if (((uuid && e.uuid === uuid) || !uuid) && exchange) {
+          const provider = exchange(
+            e.key,
+            e.secret,
+            e.passphrase,
+            undefined,
+            e.keysType,
+            e.okxSource,
+          )
+          const userId = u._id.toString()
+          const fees = await provider.getAllUserFees()
+          const localFees = await feeDb.readData(
+            { userId, exchangeUUID: e.uuid },
+            undefined,
+            undefined,
+            true,
+          )
+          if (fees.status === 'OK' && localFees.status === 'OK') {
+            for (const f of fees.data) {
+              const getPair = localFees.data.result.find(
+                (lf) => lf.pair === f.pair,
+              )
+              if (!getPair) {
+                feeDb
+                  .createData({
+                    ...f,
+                    userId,
+                    exchange: e.provider,
+                    exchangeUUID: e.uuid,
+                  })
+                  .then((r) => {
+                    if (r.status === 'OK') {
+                      if (log) {
+                        logger.info(
+                          `Fee ${f.pair} for user ${userId} created | ${e.provider} | ${e.uuid}`,
+                        )
+                      }
+                    } else {
+                      logger.error(
+                        `Fee ${f.pair} for user ${userId} error | reason ${r.reason} | ${e.provider} | ${e.uuid}`,
+                      )
+                    }
+                  })
+              } else if (
+                getPair.maker !== f.maker ||
+                getPair.taker !== f.taker
+              ) {
+                logger.info(
+                  `Fee different ${f.pair}@${userId}@${e.provider}@${e.uuid} old: ${getPair.maker} (maker), ${getPair.taker} (taker), new: ${f.maker} (maker), ${f.taker} (taker)`,
+                )
+                feeDb
+                  .updateData(
+                    { pair: f.pair, userId, exchangeUUID: e.uuid },
+                    { $set: { ...f, exchangeUUID: e.uuid, userId } },
+                    false,
+                    true,
+                  )
+                  .then((r) => {
+                    if (r.status === 'OK') {
+                      logger.info(
+                        `Fee ${f.pair} for user ${userId} updated | ${e.provider} | ${e.uuid}`,
+                      )
+                      redis?.publish(
+                        'updateuserFee',
+                        JSON.stringify({
+                          uuid: e.uuid,
+                          userId,
+                          pair: f.pair,
+                        }),
+                      )
+                    } else {
+                      logger.error(
+                        `Fee ${f.pair} for user ${userId} error | reason ${r.reason} | ${e.provider} | ${e.uuid}`,
+                      )
+                    }
+                  })
+              }
+            }
+            const deleted = localFees.data.result
+              .filter((lf) => !fees.data.map((f) => f.pair).includes(lf.pair))
+              .map((d) => d.pair)
+            if (deleted.length > 0) {
+              feeDb
+                .deleteManyData({
+                  pair: { $in: deleted },
+                  userId,
+                  exchangeUUID: e.uuid,
+                })
+                .then((r) => {
+                  if (r.status === 'OK') {
+                    logger.info(
+                      `Fee Delete ${r.reason} | ${userId} | ${e.provider} | ${e.uuid}`,
+                    )
+                  } else {
+                    logger.error(
+                      `Fee Delete error ${r.reason} | ${userId} | ${e.provider} | ${e.uuid}`,
+                    )
+                  }
+                })
+            }
+          } else {
+            logger.error(
+              `Fee Update error, remote ${fees.reason}, local ${localFees.reason}`,
+            )
+          }
+        }
+      }
+    }
+  } else {
+    logger.error(`Fee Update error, cannot get users ${users.reason}`)
+  }
+}
+
+const exchanges = [
+  ExchangeEnum.binance,
+  ExchangeEnum.kucoin,
+  ExchangeEnum.binanceUS,
+  ExchangeEnum.bybit,
+  ExchangeEnum.paperBinance,
+  ExchangeEnum.paperBybit,
+  ExchangeEnum.paperKucoin,
+  ExchangeEnum.binanceCoinm,
+  ExchangeEnum.binanceUsdm,
+  ExchangeEnum.paperBinanceCoinm,
+  ExchangeEnum.paperBinanceUsdm,
+  ExchangeEnum.bybitCoinm,
+  ExchangeEnum.bybitUsdm,
+  ExchangeEnum.paperBybitUsdm,
+  ExchangeEnum.paperBybitCoinm,
+  ExchangeEnum.okx,
+  ExchangeEnum.okxInverse,
+  ExchangeEnum.okxLinear,
+  ExchangeEnum.paperOkx,
+  ExchangeEnum.paperOkxInverse,
+  ExchangeEnum.paperOkxLinear,
+  ExchangeEnum.coinbase,
+  ExchangeEnum.paperCoinbase,
+  ExchangeEnum.kucoinInverse,
+  ExchangeEnum.kucoinLinear,
+  ExchangeEnum.paperKucoinInverse,
+  ExchangeEnum.paperKucoinLinear,
+  ExchangeEnum.bitget,
+  ExchangeEnum.paperBitget,
+  ExchangeEnum.bitgetUsdm,
+  ExchangeEnum.bitgetCoinm,
+  ExchangeEnum.paperBitgetUsdm,
+  ExchangeEnum.paperBitgetCoinm,
+  ExchangeEnum.mexc,
+  ExchangeEnum.paperMexc,
+]
+
+const userSnapshots = async (
+  id?: string,
+  paperContext?: boolean,
+  onlyOneCycle?: boolean,
+  skipBalance?: boolean,
+) => {
+  let rates: Prices = []
+  const users = await userDb.readData(
+    id ? { _id: id } : {},
+    undefined,
+    {},
+    true,
+  )
+  if (users.status === 'OK') {
+    const userExchangeSet: Set<string> = new Set()
+    for (const u of users.data.result) {
+      for (const e of u.exchanges) {
+        userExchangeSet.add(e.provider)
+      }
+    }
+    for (const e of exchanges) {
+      const provider = ExchangeChooser.chooseExchangeFactory(e)
+      if (
+        userExchangeSet.has(e) &&
+        provider &&
+        (paperContext
+          ? paperExchanges.includes(e)
+          : !paperExchanges.includes(e))
+      ) {
+        const exchange = provider('', '')
+        const prices = await exchange.getAllPrices()
+        if (prices.status === StatusEnum.ok) {
+          rates = [...rates, ...prices.data.map((p) => ({ ...p, exchange: e }))]
+        } else {
+          logger.error(`Snapshot | Cannot get price ${e} ${prices.reason}`)
+        }
+      }
+    }
+    const usdRequest = await rateDb.readData({}, undefined, {
+      limit: 1,
+      sort: { created: -1 },
+    })
+    if (usdRequest.status === StatusEnum.ok) {
+      const price = usdRequest.data.result?.usdRate ?? 1
+      rates = [...rates, { pair: 'USDTZUSD', price, exchange: 'all' }]
+    } else {
+      logger.error(`Snapshot | Cannot get user rates ${usdRequest.reason}`)
+    }
+    if (!skipBalance) {
+      await Promise.all(
+        users.data.result.map((u) =>
+          updateUserBalance(u, undefined, !!paperContext),
+        ),
+      )
+    }
+    logger.info(`Snapshot | Found ${users.data.result.length} users`)
+    for (const u of users.data.result) {
+      let totalUsd = 0
+      let assets: SnapshotSchema['assets'] = []
+      const userId = u._id.toString()
+      let exchangesTotal: SnapshotSchema['exchangesTotal'] = []
+      const timezone = u.timezone
+      const balances = await balanceDb.readData(
+        { userId, paperContext: paperContext ? { $eq: true } : { $ne: true } },
+        undefined,
+        {},
+        true,
+      )
+      if (balances.status === 'OK') {
+        logger.info(
+          `Snapshot | User ${u.username} found ${balances.data.result.length} balances`,
+        )
+        const userExchanges = u.exchanges.map((e) => e.uuid)
+        for (const b of balances.data.result.filter((b) =>
+          userExchanges.includes(b.exchangeUUID),
+        )) {
+          const { asset } = b
+          const { free, locked } = b
+          const amount = free + locked
+          if (amount !== 0) {
+            const usdRate = findUSDRate(asset, rates, b.exchange)
+            const amountUsd = amount * usdRate
+            if (amountUsd) {
+              const find = assets.find((a) => a.name === asset)
+              if (find) {
+                find.amount += amount
+                find.amountUsd += amountUsd
+                assets = [...assets.filter((a) => a.name !== asset), find]
+              } else {
+                assets.push({
+                  name: asset,
+                  amount,
+                  amountUsd,
+                })
+              }
+              const findExchange = exchangesTotal.find(
+                (e) => e.uuid === b.exchangeUUID,
+              )
+              if (findExchange) {
+                findExchange.totalUsd += amountUsd
+                exchangesTotal = [
+                  ...exchangesTotal.filter((e) => e.uuid !== b.exchangeUUID),
+                  findExchange,
+                ]
+              } else {
+                exchangesTotal.push({
+                  uuid: b.exchangeUUID,
+                  totalUsd: amountUsd,
+                })
+              }
+              totalUsd += amountUsd
+            }
+          }
+        }
+      } else {
+        logger.error(`Snapshot | Cannot get balances ${balances.reason}`)
+      }
+      const utcDate = new Date(new Date().setUTCHours(0, 0, 0, 0)).getTime()
+      let updateTime = utcDate - getTimezoneOffset(timezone)
+      if (isNaN(updateTime)) {
+        updateTime = utcDate
+      }
+      const document = {
+        userId,
+        updateTime,
+        totalUsd,
+        assets,
+        exchangesTotal,
+      }
+
+      const currentSnapshot = await snapshotDb.readData({
+        updateTime,
+        userId,
+        paperContext: paperContext ? { $eq: true } : { $ne: true },
+      })
+      if (currentSnapshot.status === 'OK' && currentSnapshot.data.result) {
+        const data = await snapshotDb.updateData(
+          { _id: currentSnapshot.data.result._id.toString() },
+          {
+            $set: {
+              ...document,
+              paperContext,
+            },
+          },
+        )
+        if (data.status === 'OK') {
+          logger.info(`Snapshot | ${u.username} ${userId} updated`)
+        } else {
+          logger.error(
+            `Snapshot | ${u.username} ${userId} error ${data.reason}`,
+          )
+        }
+      } else {
+        const data = await snapshotDb.createData({
+          ...document,
+          paperContext,
+        })
+        if (data.status === 'OK') {
+          logger.info(`Snapshot | ${u.username} ${userId} saved`)
+        } else {
+          logger.error(
+            `Snapshot | ${u.username} ${userId} error ${data.reason}`,
+          )
+        }
+      }
+    }
+  } else {
+    logger.error(`Snapshot | Cannot get users ${users.reason}`)
+  }
+  if (!paperContext && !onlyOneCycle) {
+    userSnapshots(id, true)
+  }
+}
+
+const checkTokens = async () => {
+  const removeTokens = await userDb.updateManyData(
+    {},
+    { $pull: { tokens: { expiredAt: { $lte: new Date() } } } },
+  )
+  if (removeTokens.status !== StatusEnum.ok) {
+    logger.error(removeTokens.reason)
+  }
+}
+
+export const updateUserSteps = async (
+  userId: string,
+  field: keyof ClearUserSchema['onboardingSteps'],
+) => {
+  await userDb.updateData(
+    { _id: userId },
+    { $set: { [`onboardingSteps.${field}`]: true } },
+  )
+}
+
+const processing = new Set<string>()
+
+export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
+  const prefix = `Reset user ${userId} ${type}`
+  if (!userId) {
+    logger.error(`${prefix} | UserId is empty`)
+    return
+  }
+  try {
+    if (processing.has(userId)) {
+      logger.info(`${prefix} | Already in progress`)
+    }
+    processing.add(userId)
+    userId = userId.toString()
+    logger.info(`${prefix} | Start`)
+    const userRequest = await userDb.readData({ _id: userId })
+    if (userRequest.status === StatusEnum.notok) {
+      logger.error(`${prefix} | Cannot read user ${userRequest.reason}`)
+      processing.delete(userId)
+      return
+    }
+    if (!userRequest.data.result) {
+      logger.error(`${prefix} | Cannot find user`)
+      processing.delete(userId)
+      return
+    }
+    const user = userRequest.data.result
+    const isPaper = type === ResetAccountTypeEnum.paper
+    const isLive = type === ResetAccountTypeEnum.live
+    const isAll = type === ResetAccountTypeEnum.whole
+    const Bot = BotService.getInstance()
+    const paperFilter: Record<string, unknown> = {}
+    if (isPaper) {
+      paperFilter.paperContext = { $eq: true }
+    }
+    if (isLive) {
+      paperFilter.paperContext = { $ne: true }
+    }
+    const userWithPaperFilter = { userId, ...paperFilter }
+    const bots =
+      (await botDb.readData(userWithPaperFilter, {}, {}, true)).data?.result ??
+      []
+    const dcaBots =
+      (await dcaBotDb.readData(userWithPaperFilter, {}, {}, true)).data
+        ?.result ?? []
+    const comboBots =
+      (await comboBotDb.readData(userWithPaperFilter, {}, {}, true)).data
+        ?.result ?? []
+    logger.info(
+      `${prefix} | Found ${bots.length} bots, ${dcaBots.length} dca bots, ${comboBots.length} combo bots`,
+    )
+    const botIds = [...bots, ...dcaBots, ...comboBots].map((b) =>
+      b._id.toString(),
+    )
+    const dcaBotsWithDeals = dcaBots.filter(
+      (b) =>
+        !b.parentBotId &&
+        (b.status === BotStatusEnum.closed ||
+          (b.status === BotStatusEnum.error &&
+            b.previousStatus === BotStatusEnum.closed)) &&
+        b.deals.active > 0,
+    )
+    const comboBotsWithDeals = comboBots.filter(
+      (b) =>
+        !b.parentBotId &&
+        (b.status === BotStatusEnum.closed ||
+          (b.status === BotStatusEnum.error &&
+            b.previousStatus === BotStatusEnum.closed)) &&
+        b.deals.active > 0,
+    )
+    if (dcaBotsWithDeals.length) {
+      logger.info(
+        `${prefix} | Found ${dcaBotsWithDeals.length} dca bots with deals`,
+      )
+      const deals =
+        (
+          await dcaDealsDb.readData(
+            {
+              botId: { $in: dcaBotsWithDeals.map((b) => `${b._id}`) },
+              ...paperFilter,
+            },
+            {},
+            {},
+            true,
+          )
+        )?.data?.result ?? []
+      logger.info(`${prefix} | Found ${deals.length} dca deals`)
+      for (const d of deals) {
+        await Bot.closeDCADeal(
+          userId,
+          d.botId,
+          `${d._id}`,
+          CloseDCATypeEnum.cancel,
+          undefined,
+          d.paperContext,
+        )
+      }
+      logger.info(`${prefix} | DCA deals closed`)
+    }
+    if (comboBotsWithDeals.length) {
+      logger.info(
+        `${prefix} | Found ${comboBotsWithDeals.length} combo bots with deals`,
+      )
+      const deals =
+        (
+          await comboDealsDb.readData(
+            {
+              botId: { $in: comboBotsWithDeals.map((b) => `${b._id}`) },
+              ...paperFilter,
+            },
+            {},
+            {},
+            true,
+          )
+        )?.data?.result ?? []
+      logger.info(`${prefix} | Found ${deals.length} combo deals`)
+      for (const d of deals) {
+        await Bot.closeComboDeal(
+          userId,
+          d.botId,
+          `${d._id}`,
+          CloseDCATypeEnum.cancel,
+          undefined,
+          d.paperContext,
+        )
+      }
+      logger.info(`${prefix} | Combo deals closed`)
+    }
+    const activeBots = bots.filter(
+      (b) =>
+        b.status === BotStatusEnum.open ||
+        b.status === BotStatusEnum.range ||
+        b.status === BotStatusEnum.error,
+    )
+    if (activeBots.length) {
+      logger.info(`${prefix} | Found ${activeBots.length} active bots, closing`)
+      for (const b of activeBots) {
+        await Bot.changeStatus(
+          userId,
+          {
+            status: BotStatusEnum.closed,
+            id: b._id.toString(),
+            cancelPartiallyFilled: true,
+            type: BotType.grid,
+            closeGridType: CloseGRIDTypeEnum.cancel,
+          },
+          !!b.paperContext,
+        )
+      }
+      logger.info(`${prefix} | Bots closed`)
+    }
+
+    const activeDCABots = dcaBots.filter(
+      (b) =>
+        !b.parentBotId &&
+        (b.status === BotStatusEnum.open ||
+          b.status === BotStatusEnum.range ||
+          b.status === BotStatusEnum.error),
+    )
+    if (activeDCABots.length) {
+      logger.info(
+        `${prefix} | Found ${activeDCABots.length} active bots, closing`,
+      )
+      for (const b of activeDCABots) {
+        Bot.changeStatus(
+          userId,
+          {
+            status: BotStatusEnum.closed,
+            id: b._id.toString(),
+            cancelPartiallyFilled: true,
+            type: BotType.dca,
+            closeType: CloseDCATypeEnum.cancel,
+          },
+          !!b.paperContext,
+        )
+      }
+      logger.info(`${prefix} | Bots closed`)
+    }
+
+    const activeComboBots = comboBots.filter(
+      (b) =>
+        !b.parentBotId &&
+        (b.status === BotStatusEnum.open ||
+          b.status === BotStatusEnum.range ||
+          b.status === BotStatusEnum.error),
+    )
+    if (activeComboBots.length) {
+      logger.info(
+        `${prefix} | Found ${activeComboBots.length} active bots, closing`,
+      )
+      for (const b of activeComboBots) {
+        await Bot.changeStatus(
+          userId,
+          {
+            status: BotStatusEnum.closed,
+            id: b._id.toString(),
+            cancelPartiallyFilled: true,
+            type: BotType.combo,
+            closeType: CloseDCATypeEnum.cancel,
+          },
+          !!b.paperContext,
+        )
+      }
+      logger.info(`${prefix} | Bots closed`)
+    }
+
+    logger.info(`${prefix} | Bots deleted`)
+    const requests: {
+      fn: Promise<ErrorResponse | MessageResponse>
+      name: string
+    }[] = []
+    /** General */
+    if (isAll) {
+      requests.push({ fn: feeDb.deleteManyData({ userId }), name: 'feeDb' })
+    }
+    if (isPaper) {
+      requests.push({
+        fn: feeDb.deleteManyData({ userId, exchange: { $in: paperExchanges } }),
+        name: 'feeDb',
+      })
+    }
+    if (isLive) {
+      requests.push({
+        fn: feeDb.deleteManyData({
+          userId,
+          exchange: { $nin: paperExchanges },
+        }),
+        name: 'feeDb',
+      })
+    }
+    requests.push({
+      fn: balanceDb.deleteManyData(userWithPaperFilter),
+      name: 'balanceDb',
+    })
+    requests.push({
+      fn: snapshotDb.deleteManyData(userWithPaperFilter),
+      name: 'snapshotDb',
+    })
+    requests.push({
+      fn: botEventDb.deleteManyData({ botId: { $in: botIds } }),
+      name: 'botEventDb',
+    })
+    requests.push({
+      fn: botMessageDb.deleteManyData(userWithPaperFilter),
+      name: 'botMessageDb',
+    })
+    if (isAll) {
+      requests.push({
+        fn: botProfitChartDb.deleteManyData({ userId }),
+        name: 'botProfitChartDb',
+      })
+    }
+    if (isPaper || isLive) {
+      requests.push({
+        fn: botProfitChartDb.deleteManyData({ userId, botId: { $in: botIds } }),
+        name: 'botProfitChartDb',
+      })
+    }
+    requests.push({
+      fn: userProfitByHourDb.deleteManyData(userWithPaperFilter),
+      name: 'userProfitByHourDb',
+    })
+    requests.push({
+      fn: orderDb.deleteManyData(userWithPaperFilter),
+      name: 'orderDb',
+    })
+    /** Bots */
+    requests.push({
+      fn: hedgeComboBotDb.deleteManyData(userWithPaperFilter),
+      name: 'hedgeComboBotDb',
+    })
+    requests.push({
+      fn: hedgeDCABotDb.deleteManyData(userWithPaperFilter),
+      name: 'hedgeDCABotDb',
+    })
+    requests.push({
+      fn: botDb.deleteManyData(userWithPaperFilter),
+      name: 'botDb',
+    })
+    requests.push({
+      fn: transactionDb.deleteManyData(userWithPaperFilter),
+      name: 'transactionDb',
+    })
+    requests.push({
+      fn: dcaBotDb.deleteManyData(userWithPaperFilter),
+      name: 'dcaBotDb',
+    })
+    requests.push({
+      fn: dcaDealsDb.deleteManyData(userWithPaperFilter),
+      name: 'dcaDealsDb',
+    })
+    requests.push({
+      fn: comboBotDb.deleteManyData(userWithPaperFilter),
+      name: 'comboBotDb',
+    })
+    requests.push({
+      fn: comboDealsDb.deleteManyData(userWithPaperFilter),
+      name: 'comboDealsDb',
+    })
+    requests.push({
+      fn: minigridDb.deleteManyData({
+        botId: { $in: botIds },
+        ...userWithPaperFilter,
+      }),
+      name: 'minigridDb',
+    })
+    requests.push({
+      fn: comboProfitDb.deleteManyData(userWithPaperFilter),
+      name: 'comboProfitDb',
+    })
+    requests.push({
+      fn: comboTransactionsDb.deleteManyData(userWithPaperFilter),
+      name: 'comboTransactionsDb',
+    })
+    /** Paper */
+    if (isAll || isPaper) {
+      const userPaperExchanges = user.exchanges
+        .filter((e) => paperExchanges.includes(e.provider))
+        .map((e) => decrypt(e.key))
+      const paperUsers =
+        (
+          await paperUserDb.readData(
+            {
+              key: { $in: userPaperExchanges },
+            },
+            {},
+            {},
+            true,
+          )
+        )?.data?.result ?? []
+      if (paperUsers.length) {
+        logger.info(`${prefix} | Found ${paperUsers.length} paper users`)
+        const paperIds = paperUsers.map((p) => p._id)
+        requests.push({
+          fn: paperPositionDb.deleteManyData({
+            user: { $in: paperIds },
+          }),
+          name: 'paperPositionDb',
+        })
+        requests.push({
+          fn: paperHedgeDb.deleteManyData({
+            user: { $in: paperIds },
+          }),
+          name: 'paperHedgeDb',
+        })
+        requests.push({
+          fn: paperLeverageDb.deleteManyData({
+            user: { $in: paperIds },
+          }),
+          name: 'paperLeverageDb',
+        })
+
+        requests.push({
+          fn: paperOrderDb.deleteManyData({
+            user: { $in: paperIds },
+          }),
+          name: 'paperOrderDb',
+        })
+        requests.push({
+          fn: paperWalletsDb.deleteManyData({
+            user: { $in: paperIds },
+          }),
+          name: 'paperWalletsDb',
+        })
+        requests.push({
+          fn: paperUserDb.deleteManyData({
+            _id: { $in: paperIds },
+          }),
+          name: 'paperUserDb',
+        })
+      }
+    }
+
+    await Promise.all(
+      requests.map((r) =>
+        r.fn.then((res) => {
+          if (res.status === StatusEnum.ok) {
+            logger.info(`${prefix} | ${r.name} ${res.reason}`)
+          } else {
+            logger.error(`${prefix} | ${r.name} delete error ${res.reason}`)
+          }
+        }),
+      ),
+    )
+
+    await userDb
+      .updateData(
+        { _id: userId },
+        {
+          $set: {
+            exchanges: isAll
+              ? []
+              : user.exchanges.filter((e) =>
+                  isPaper
+                    ? !paperExchanges.includes(e.provider)
+                    : paperExchanges.includes(e.provider),
+                ),
+          },
+        },
+      )
+      .then((res) => {
+        if (res.status === StatusEnum.ok) {
+          logger.info(`${prefix} | User updated`)
+        } else {
+          logger.error(`${prefix} | User update error ${res.reason}`)
+        }
+      })
+    logger.info(`${prefix} | User updated. Checking global vars`)
+    const vars = await globalVarsDb.readData({ userId }, {}, {}, true)
+    logger.info(
+      `${prefix} | Found ${vars.data?.result?.length ?? 0} global vars`,
+    )
+    await updateRelatedBotsInVar(
+      (vars.data?.result ?? []).map((v) => `${v._id}`),
+    )
+    processing.delete(userId)
+    logger.info(`${prefix} | End`)
+  } catch (e) {
+    logger.error(`${prefix} | Error ${e}`)
+    processing.delete(userId)
+  }
+}
+
+export const checkLicenseKey = async () => {
+  const defaultResponse = { valid: false, isPremium: false }
+  const user = await userDb.readData()
+  if (user.status === StatusEnum.notok) {
+    logger.error(`checkLicenseKey | Cannot get user ${user.reason}`)
+    return defaultResponse
+  }
+  if (!user.data.result || !user.data.result.licenseKey) {
+    return defaultResponse
+  }
+  try {
+    const getLicenseStatus = await axios
+      .get<{ valid: boolean; isPremium: boolean }>(
+        'https://api.gainium.io/license',
+        {
+          params: {
+            key: user.data.result.licenseKey,
+          },
+        },
+      )
+      .then(async (res) => {
+        if (!res.data.valid) {
+          logger.error(`checkLicenseKey | License key is not valid.`)
+          await userDb.updateData(
+            { _id: user.data.result._id },
+            { $set: { licenseKey: '' } },
+          )
+        }
+        return res.data
+      })
+      .catch((e) => {
+        logger.error(`checkLicenseKey | Cannot get license status ${e}`)
+        return { valid: false, isPremium: false }
+      })
+    return getLicenseStatus
+  } catch (e) {
+    logger.error(`checkLicenseKey | Error ${e}`)
+    return defaultResponse
+  }
+}
+
+export default {
+  connectUserBalance,
+  updateUserFee,
+  userSnapshots,
+  disconnectUserBalance,
+  checkTokens,
+  resetUser,
+}

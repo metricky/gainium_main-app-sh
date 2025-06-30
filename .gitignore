@@ -1,0 +1,10 @@
+yarn-error.log
+node_modules
+.eslintcache
+.idea
+.env
+dist
+.vscode
+.DS_Store
+loaded-data-candles
+user-files

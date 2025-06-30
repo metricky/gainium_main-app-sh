@@ -1,0 +1,193 @@
+import { IdMute, IdMutex } from '../utils/mutex'
+import {
+  PriceMessage,
+  ProfitLossStats,
+  BotSchema,
+  InputGrid,
+  PositionSide,
+  BotMarginTypeEnum,
+} from '../../types'
+import DB, { model } from '../db'
+import { isFutures } from '../utils/index'
+
+type GridStatsMap = {
+  start: number
+  drawdownPercent: number
+  runUpPercent: number
+  timeInLoss: number
+  timeInProfit: number
+  timeCountStart: number
+  currentCount: 'loss' | 'profit'
+  wasChanged: boolean
+}
+
+const mutex = new IdMutex()
+
+export class GridMonitor {
+  private gridBotDb: DB<BotSchema>
+  private stats: Map<string, GridStatsMap>
+  private callBacks: Map<string, (data: ProfitLossStats) => void>
+  private static instance: GridMonitor
+
+  private constructor() {
+    this.gridBotDb = new DB(model.bot)
+    this.stats = new Map()
+    this.callBacks = new Map()
+  }
+
+  public static getInstance() {
+    if (!GridMonitor.instance) {
+      GridMonitor.instance = new GridMonitor()
+    }
+    return GridMonitor.instance
+  }
+
+  public addCallback(dealBotId: string, cb: (data: ProfitLossStats) => void) {
+    this.callBacks.set(dealBotId, cb)
+  }
+
+  @IdMute(
+    mutex,
+    (_data: unknown, bot: InputGrid) => `${bot._id.toString()}stats`,
+    10,
+  )
+  public async addBotStats(data: PriceMessage, bot: InputGrid) {
+    const { price, time } = data
+    const dealId = bot._id.toString()
+    const stats = this.stats.get(dealId)
+    if (stats && (time - stats.start <= 60 * 1000 || !stats.wasChanged)) {
+      this.updateDealStats(bot, stats, price, time)
+    } else {
+      if (stats) {
+        await this.completeStats(dealId, time, { ...stats })
+      }
+      this.addNewBot(bot, price, time)
+    }
+  }
+
+  private updateDealStats(
+    bot: InputGrid,
+    stats: GridStatsMap,
+    price: number,
+    time: number,
+  ) {
+    const futures = isFutures(bot.exchange)
+    const { initialBalances, initialPrice, currentBalances } = bot
+    if (initialPrice === undefined) {
+      return
+    }
+    if (bot.realInitialBalances === null) {
+      return
+    }
+    const initialValue =
+      initialBalances.base * initialPrice + initialBalances.quote
+    let newPerc = 0
+    let valueChange = 0
+    if (futures) {
+      const leverage =
+        bot.settings.marginType !== BotMarginTypeEnum.inherit
+          ? (bot.settings.leverage ?? 1)
+          : 1
+      const current = bot.position
+      const diff =
+        current.side === PositionSide.LONG
+          ? price - current.price
+          : current.price - price
+      const perc = current.price !== 0 ? diff / current.price : 0
+      const val = current.qty * perc * price
+      valueChange = val + bot.profit.total
+      newPerc = Math.abs(valueChange / (initialValue / leverage))
+    } else {
+      const currentValue =
+        currentBalances.base * price +
+        currentBalances.quote +
+        bot.profit.total * (bot.settings.profitCurrency === 'base' ? price : 1)
+      valueChange = currentValue - initialValue
+      newPerc = Math.abs(currentValue - initialValue) / initialValue
+    }
+    if (valueChange > 0 && newPerc > stats.runUpPercent) {
+      stats.runUpPercent = newPerc
+      stats.wasChanged = true
+    } else if (valueChange < 0 && newPerc > stats.drawdownPercent) {
+      stats.drawdownPercent = newPerc
+      stats.wasChanged = true
+    }
+
+    if (valueChange > 0 && stats.currentCount === 'loss') {
+      stats.timeInLoss += time - stats.timeCountStart - 1
+      stats.timeCountStart = time
+      stats.currentCount = 'profit'
+      stats.wasChanged = true
+    } else if (valueChange < 0 && stats.currentCount === 'profit') {
+      stats.timeInProfit += time - stats.timeCountStart - 1
+      stats.timeCountStart = time
+      stats.currentCount = 'loss'
+      stats.wasChanged = true
+    }
+    this.stats.set(bot._id.toString(), stats)
+  }
+
+  private addNewBot(bot: InputGrid, price: number, time: number) {
+    const { initialBalances, initialPrice, currentBalances } = bot
+    if (initialPrice === undefined) {
+      return
+    }
+    const initialValue =
+      initialBalances.base * initialPrice + initialBalances.quote
+    const futures = isFutures(bot.exchange)
+    let valueChange = 0
+    if (futures) {
+      const current = bot.position
+      const diff =
+        current.side === PositionSide.LONG
+          ? price - current.price
+          : current.price - price
+      const perc = current.price !== 0 ? diff / current.price : 0
+      const val = current.qty * perc * price
+      valueChange = val + bot.profit.total
+    } else {
+      const currentValue =
+        currentBalances.base * price +
+        currentBalances.quote +
+        bot.profit.total * (bot.settings.profitCurrency === 'base' ? price : 1)
+      valueChange = currentValue - initialValue
+    }
+    this.stats.set(bot._id.toString(), {
+      start: time,
+      drawdownPercent: bot.stats?.drawdownPercent ?? 0,
+      runUpPercent: bot.stats?.runUpPercent ?? 0,
+      timeCountStart: time,
+      currentCount:
+        (bot.stats?.currentCount ?? valueChange > 0) ? 'profit' : 'loss',
+      timeInLoss: 0,
+      timeInProfit: 0,
+      wasChanged: false,
+    })
+  }
+
+  private async completeStats(id: string, time: number, stats: GridStatsMap) {
+    const timeInLoss =
+      stats.timeInLoss +
+      (stats.currentCount === 'loss' ? time - stats.timeCountStart : 0)
+    const timeInProfit =
+      stats.timeInProfit +
+      (stats.currentCount === 'profit' ? time - stats.timeCountStart : 0)
+    await this.gridBotDb.updateData(
+      { _id: id },
+      {
+        $max: {
+          'stats.drawdownPercent': stats.drawdownPercent,
+          'stats.runUpPercent': stats.runUpPercent,
+        },
+        $inc: {
+          'stats.timeInLoss': timeInLoss,
+          'stats.timeInProfit': timeInProfit,
+          'stats.trackTime': timeInLoss + timeInProfit,
+        },
+        'stats.timeCountStart': time,
+      },
+    )
+    stats.wasChanged = false
+    this.stats.set(id, stats)
+  }
+}
