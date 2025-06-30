@@ -1,6 +1,11 @@
 # Changelog
 
-## [1.0.2] – 2025-06-30  
+## [1.0.3] – 2025-06-30
+### Changed
+- Switched to npm package manager
+- Removed yarn.lock file (no longer needed with npm)
+
+## [1.0.2] – 2025-06-30
 ### Added  
 - Initial public release of Gainium Main Backend.  
 - Main API Server (GraphQL, auth, user & trading endpoints).  

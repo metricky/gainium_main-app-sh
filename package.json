@@ -1,11 +1,11 @@
 {
   "name": "@gainium/main-app",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Main app",
   "author": "Maksym Shamko",
   "private": true,
   "scripts": {
-    "fullInit": "export GAINIUM_INDICATORS=@gainium/indicators && export GAINIUM_BACKTESTER=@gainium/backtester && (yarn remove $GAINIUM_INDICATORS $GAINIUM_BACKTESTER || true) && yarn cache clean $GAINIUM_INDICATORS && yarn cache clean $GAINIUM_BACKTESTER && yarn add $GAINIUM_INDICATORS@git+https://github.com/Gainium/indicators.git && yarn add $GAINIUM_BACKTESTER@git+https://github.com/Gainium/backtester.git && unset GAINIUM_INDICATORS && unset GAINIUM_BACKTESTER",
+    "fullInit": "export GAINIUM_INDICATORS=@gainium/indicators && export GAINIUM_BACKTESTER=@gainium/backtester && (npm uninstall $GAINIUM_INDICATORS $GAINIUM_BACKTESTER || true) && npm cache clean --force && npm install $GAINIUM_INDICATORS@git+https://github.com/Gainium/indicators.git && npm install $GAINIUM_BACKTESTER@git+https://github.com/Gainium/backtester.git && unset GAINIUM_INDICATORS && unset GAINIUM_BACKTESTER",
     "build": "tsc --project tsconfig.json",
     "push": "git push origin main",
     "pull": "git pull origin main",
@@ -16,7 +16,7 @@
     "bots:hedge:combo": "NODE_ENV=production BotServiceType=hedgeCombo SERVICETYPE=main node --max-old-space-size=3072 -r dotenv/config ./dist/src/server/bot.js",
     "bots:hedge:dca": "NODE_ENV=production BotServiceType=hedgeDca SERVICETYPE=main node --max-old-space-size=3072 -r dotenv/config ./dist/src/server/bot.js",
     "indicators": "NODE_ENV=production node --max-old-space-size=8192 -r dotenv/config ./dist/src/server/indicator.js",
-    "all": "yarn build && concurrently \"yarn server\" \"yarn stream\" \"yarn bots:dca\" \"yarn bots:grid\" \"yarn bots:combo\" \"yarn indicators\" \"yarn bots:hedge:combo\" \"yarn bots:hedge:dca\"",
+    "all": "npm run build && concurrently \"npm run server\" \"npm run stream\" \"npm run bots:dca\" \"npm run bots:grid\" \"npm run bots:combo\" \"npm run indicators\" \"npm run bots:hedge:combo\" \"npm run bots:hedge:dca\"",
     "cron": "node -r dotenv/config ./dist/src/server/cron.js",
     "stream": "node -r dotenv/config ./dist/src/server/stream.js",
     "lint": "tsc --noEmit --project tsconfig.json && eslint . --cache",
@@ -55,8 +55,8 @@
   },
   "dependencies": {
     "@apollo/server": "^4.12.2",
-    "@gainium/backtester": "git+https://github.com/Gainium/backtester.git",
-    "@gainium/indicators": "git+https://github.com/Gainium/indicators.git",
+    "@gainium/backtester": "github:Gainium/backtester",
+    "@gainium/indicators": "github:Gainium/indicators",
     "amqplib": "^0.10.8",
     "axios": "^1.10.0",
     "big.js": "^7.0.1",
