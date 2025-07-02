@@ -54,7 +54,9 @@ class Exchange extends AbstractExchange {
     ].includes(this.exchange)
   }
 
-  private getEmptyTimeProfile(requestName: string): ExchangeRequestTimeProfile {
+  protected getEmptyTimeProfile(
+    requestName: string,
+  ): ExchangeRequestTimeProfile {
     return timeProfiler.getEmptyTimeProfile(requestName, this.exchange)
   }
 
@@ -708,7 +710,7 @@ class Exchange extends AbstractExchange {
     return result.data
   }
 
-  private handleError<T>(cb: (...args: any[]) => Promise<T>, ...args: any[]) {
+  protected handleError<T>(cb: (...args: any[]) => Promise<T>, ...args: any[]) {
     return async (
       e: Error & {
         response?: { data?: { statusCode: boolean; message: string } }
@@ -744,7 +746,7 @@ class Exchange extends AbstractExchange {
     }
   }
 
-  private async apiCall<R>(
+  protected async apiCall<R>(
     request: {
       endpoint: string
       method: 'post' | 'get' | 'delete'

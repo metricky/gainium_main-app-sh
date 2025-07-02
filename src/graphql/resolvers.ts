@@ -4046,6 +4046,7 @@ const resolvers = {
             statusHistory: [
               { status: BacktestRequestStatus.pending, time: +new Date() },
             ],
+            cost: 0,
           })
           if (dcaRequest.status === StatusEnum.notok) {
             return dcaRequest
@@ -4064,6 +4065,7 @@ const resolvers = {
             statusHistory: [
               { status: BacktestRequestStatus.pending, time: +new Date() },
             ],
+            cost: 0,
           })
           if (dcaRequest.status === StatusEnum.notok) {
             return dcaRequest
@@ -4082,6 +4084,7 @@ const resolvers = {
             statusHistory: [
               { status: BacktestRequestStatus.pending, time: +new Date() },
             ],
+            cost: 0,
           })
           if (dcaRequest.status === StatusEnum.notok) {
             return dcaRequest

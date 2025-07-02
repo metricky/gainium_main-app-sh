@@ -13,7 +13,7 @@ const serverSideBacktestWorkers = 2
 const serverSideBacktestMutex = new IdMutex(serverSideBacktestWorkers)
 
 class Backtester {
-  private static instance: Backtester
+  protected static instance: Backtester
 
   public static getInstance(): Backtester {
     if (!Backtester.instance) {
@@ -27,7 +27,7 @@ class Backtester {
     { locked: boolean; cb: (() => void)[] }
   > = new Map()
 
-  private async queueCandle(key: string, cb: () => void) {
+  public async queueCandle(key: string, cb: () => void) {
     const get = this.requestCandleMap.get(key)
     if (get && get.locked) {
       this.requestCandleMap.set(key, {
@@ -40,7 +40,7 @@ class Backtester {
     }
   }
 
-  private async unQueueCandle(key: string) {
+  public async unQueueCandle(key: string) {
     const get = this.requestCandleMap.get(key)
     if (get && get.locked) {
       const cb = get.cb.shift()

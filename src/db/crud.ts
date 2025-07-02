@@ -15,6 +15,7 @@ import type {
 } from 'mongoose'
 import type { ExcludeDoc } from '../../types'
 import { MONGO_DB_MAX_POOL_SIZE } from '../config'
+import { syncIndexes } from './model'
 
 const { sleep } = utils
 
@@ -52,21 +53,38 @@ export type DataResponse<T> = {
 
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`}`
 
-class MongooseConnect {
+export class MongooseConnect {
   public static client?: typeof mongoose
+  private static synced = false
+  private static connectionFn: () => Promise<string>
   static async newClient() {
     MongooseConnect.client = undefined
-    await MongooseConnect.getClient()
+    await MongooseConnect.getClient(MongooseConnect.connectionFn)
   }
   @IdMute(mutex, () => 'mongogetclient')
-  static async getClient() {
+  static async getClient(
+    connection: () => Promise<string>,
+    syncIndexesFn?: () => Promise<void>,
+  ) {
+    if (!connection) {
+      throw new Error('${loggerPrefix} | MongooseConnect | No connection fn')
+    }
     if (!MongooseConnect.client) {
       try {
-        const connectionString = await mongo.connection()
+        if (!MongooseConnect.connectionFn) {
+          MongooseConnect.connectionFn = connection
+        }
+        const connectionString = await connection()
         mongoose.set('strictQuery', true)
         MongooseConnect.client = await mongoose.connect(`${connectionString}`, {
           maxPoolSize: +MONGO_DB_MAX_POOL_SIZE || 100,
         })
+        if (!MongooseConnect.synced) {
+          MongooseConnect.synced = true
+          if (syncIndexesFn) {
+            syncIndexesFn()
+          }
+        }
       } catch (e) {
         logger.error(
           `${loggerPrefix} | MongooseConnect | ${(e as Error)?.message ?? e}`,
@@ -118,8 +136,8 @@ class MongoCrud<T = any> {
   /**
    * Get mongoose client
    */
-  private getClient() {
-    return MongooseConnect.getClient()
+  protected getClient() {
+    return MongooseConnect.getClient(mongo.connection, syncIndexes)
   }
   /**
    * Prepare error message

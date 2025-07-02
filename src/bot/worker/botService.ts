@@ -1,6 +1,6 @@
 import { parentPort, threadId } from 'worker_threads'
 import BotHelper from '../../bot/helper'
-import DCABotHelper from '../../bot/dcaHelper'
+import createDCABotHelper from '../../bot/dcaHelper'
 import ComboBotHelper from '../../bot/comboHelper'
 import {
   BotType,
@@ -13,6 +13,7 @@ import {
 } from '../../../types'
 import { IdMute, IdMutex } from '../../utils/mutex'
 import logger from '../../utils/logger'
+import v8 from 'v8'
 import { v4 } from 'uuid'
 import HedgeBot from '../hedgeHelper'
 
@@ -38,7 +39,7 @@ class BotOperations {
 
   private dcaBots: {
     id: string
-    b: DCABotHelper
+    b: InstanceType<ReturnType<typeof createDCABotHelper>>
     userId: string
     exchange: ExchangeEnum
   }[] = []
@@ -71,8 +72,10 @@ class BotOperations {
         if (this.dcaBots.find((b) => b.id === botId)) {
           create = true
         } else {
-          //@ts-ignore
-          const bot = new DCABotHelper(...args)
+          const DCABotClass = createDCABotHelper()
+          const bot = new DCABotClass(
+            ...(args as ConstructorParameters<typeof DCABotClass>),
+          )
           this.dcaBots.push({ id: botId, b: bot, userId, exchange })
           create = true
         }
@@ -81,8 +84,9 @@ class BotOperations {
         if (this.bots.find((b) => b.id === botId)) {
           create = true
         } else {
-          //@ts-ignore
-          const bot = new BotHelper(...args)
+          const bot = new BotHelper(
+            ...(args as ConstructorParameters<typeof BotHelper>),
+          )
           this.bots.push({ id: botId, b: bot, userId, exchange })
           create = true
         }
@@ -91,8 +95,9 @@ class BotOperations {
         if (this.comboBots.find((b) => b.id === botId)) {
           create = true
         } else {
-          //@ts-ignore
-          const bot = new ComboBotHelper(...args)
+          const bot = new ComboBotHelper(
+            ...(args as ConstructorParameters<typeof ComboBotHelper>),
+          )
           this.comboBots.push({ id: botId, b: bot, userId, exchange })
           create = true
         }
@@ -101,8 +106,9 @@ class BotOperations {
         if (this.hedgeComboBots.find((b) => b.id === botId)) {
           create = true
         } else {
-          //@ts-ignore
-          const bot = new HedgeBot(...args)
+          const bot = new HedgeBot(
+            ...(args as ConstructorParameters<typeof HedgeBot>),
+          )
           this.hedgeComboBots.push({ id: botId, b: bot, userId })
           create = true
         }
@@ -111,8 +117,9 @@ class BotOperations {
         if (this.hedgeDcaBots.find((b) => b.id === botId)) {
           create = true
         } else {
-          //@ts-ignore
-          const bot = new HedgeBot(...args)
+          const bot = new HedgeBot(
+            ...(args as ConstructorParameters<typeof HedgeBot>),
+          )
           this.hedgeDcaBots.push({ id: botId, b: bot, userId })
           create = true
         }
@@ -137,42 +144,43 @@ class BotOperations {
   @IdMute(mutexConcurrentely, () => `methodBot`)
   public async methodBot(data: MethodBotDto) {
     try {
-      const { botType, botId, method, args, responseId } = data
+      const { botType, botId, method, args, responseId, ping } = data
       let response: unknown = null
       let bot:
-        | typeof this.bots
-        | typeof this.dcaBots
-        | typeof this.comboBots
+        | (typeof this.bots)[0]
+        | (typeof this.dcaBots)[0]
+        | (typeof this.comboBots)[0]
+        | (typeof this.hedgeComboBots)[0]
+        | (typeof this.hedgeDcaBots)[0]
         | undefined
       if (botType === BotType.dca) {
-        //@ts-ignore
         bot = this.dcaBots.find((b) => b.id === botId)
       }
       if (botType === BotType.grid) {
-        //@ts-ignore
         bot = this.bots.find((b) => b.id === botId)
       }
       if (botType === BotType.combo) {
-        //@ts-ignore
         bot = this.comboBots.find((b) => b.id === botId)
       }
       if (botType === BotType.hedgeCombo) {
-        //@ts-ignore
         bot = this.hedgeComboBots.find((b) => b.id === botId)
       }
       if (botType === BotType.hedgeDca) {
-        //@ts-ignore
         bot = this.hedgeDcaBots.find((b) => b.id === botId)
       }
       if (bot) {
-        //@ts-ignore
-        if (typeof bot.b[method] === 'function') {
-          //@ts-ignore
-          response = await bot.b[method](...args)
+        if (method in bot.b) {
+          const fn = bot.b[method as keyof typeof bot.b]
+          if (typeof fn === 'function') {
+            response = await (fn as any).apply(bot.b, args as any[])
+          }
         } else {
           if (botType === BotType.hedgeCombo || botType === BotType.hedgeDca) {
-            //@ts-ignore
-            response = await bot.b.sendCommandToBotService(method, ...args)
+            response = await (
+              bot as
+                | (typeof this.hedgeComboBots)[0]
+                | (typeof this.hedgeDcaBots)[0]
+            ).b.sendCommandToBotService(method, ...args)
           }
         }
       }
@@ -185,6 +193,20 @@ class BotOperations {
           responseId,
           botId,
           response,
+        })
+      }
+      if (ping) {
+        const data = v8.getHeapStatistics()
+        parentPort?.postMessage({
+          event: 'pong',
+          pong: {
+            ping,
+            heap: {
+              limit: data.heap_size_limit,
+              used: data.total_physical_size,
+              code: data.total_heap_size_executable,
+            },
+          },
         })
       }
     } catch (e) {
@@ -255,8 +277,7 @@ class BotOperations {
     if (botType === BotType.dca) {
       this.dcaBots = this.dcaBots.filter((b) => {
         if (b.id === botId) {
-          //@ts-ignore
-          delete b.b
+          ;(b as any).b = undefined
           return false
         }
         return true
@@ -265,8 +286,7 @@ class BotOperations {
     if (botType === BotType.grid) {
       this.bots = this.bots.filter((b) => {
         if (b.id === botId) {
-          //@ts-ignore
-          delete b.b
+          ;(b as any).b = undefined
           return false
         }
         return true
@@ -275,8 +295,7 @@ class BotOperations {
     if (botType === BotType.combo) {
       this.comboBots = this.comboBots.filter((b) => {
         if (b.id === botId) {
-          //@ts-ignore
-          delete b.b
+          ;(b as any).b = undefined
           return false
         }
         return true
@@ -292,6 +311,10 @@ const processMessage = (data: BotWorkerDto) => {
         data.do === 'exchangeInfo' ? '' : JSON.stringify(data)
       }`,
     )
+  }
+  if (data.do === 'ramDump') {
+    logger.info(`ramDump for ${threadId}`)
+    v8.writeHeapSnapshot()
   }
   if (data.do === 'create') {
     BotOperations.getInstance().createBot(data)

@@ -63,9 +63,9 @@ export const tvToExchangeIntervalMap = {
 }
 
 class Backtester {
-  private gridBacktestDb = new DB(model.gridBacktest)
-  private dcaBacktestDb = new DB(model.backtest)
-  private comboBacktestDb = new DB(model.comboBacktest)
+  protected gridBacktestDb = new DB(model.gridBacktest)
+  protected dcaBacktestDb = new DB(model.backtest)
+  protected comboBacktestDb = new DB(model.comboBacktest)
   private pairsDb = new DB(model.pair)
   private feesDb = new DB(model.fee)
   private ratesDb = new DB(model.rate)
@@ -78,13 +78,14 @@ class Backtester {
       to?: number
       interval?: ExchangeIntervals
     },
+    protected fromBacktest?: boolean,
   ) {}
 
-  private getExchangeMultiplier(exchange: ExchangeEnum) {
+  protected getExchangeMultiplier(exchange: ExchangeEnum) {
     return exchange === ExchangeEnum.kucoin ? 100 : 1
   }
 
-  private returnReason(reason: string) {
+  protected returnReason(reason: string) {
     return {
       status: StatusEnum.notok as const,
       data: null,
@@ -92,7 +93,7 @@ class Backtester {
     }
   }
 
-  private async getPair(pairs: string[], exchange: ExchangeEnum) {
+  protected async getPair(pairs: string[], exchange: ExchangeEnum) {
     const pair = await this.pairsDb.readData(
       {
         pair: { $in: pairs },
@@ -115,7 +116,7 @@ class Backtester {
     return pair
   }
 
-  private async getFee(symbol: string, exchangeUUID: string, userId: string) {
+  protected async getFee(symbol: string, exchangeUUID: string, userId: string) {
     const fee = await this.feesDb.readData({
       pair: symbol,
       exchangeUUID,
@@ -134,7 +135,7 @@ class Backtester {
     return fee
   }
 
-  private async getDCABacktest(_id: string) {
+  protected async getDCABacktest(_id: string) {
     const backtest = await this.dcaBacktestDb.readData({ _id })
     if (backtest.status === StatusEnum.notok) {
       return this.returnReason(
@@ -147,7 +148,7 @@ class Backtester {
     return backtest
   }
 
-  private async getGridBacktest(_id: string) {
+  protected async getGridBacktest(_id: string) {
     const backtest = await this.gridBacktestDb.readData({ _id })
     if (backtest.status === StatusEnum.notok) {
       return this.returnReason(
@@ -160,7 +161,7 @@ class Backtester {
     return backtest
   }
 
-  private async getComboBacktest(_id: string) {
+  protected async getComboBacktest(_id: string) {
     const backtest = await this.comboBacktestDb.readData({ _id })
     if (backtest.status === StatusEnum.notok) {
       return this.returnReason(
@@ -173,7 +174,9 @@ class Backtester {
     return backtest
   }
 
-  private async getPrice(exchange: ExchangeEnum): Promise<BaseReturn<Prices>> {
+  protected async getPrice(
+    exchange: ExchangeEnum,
+  ): Promise<BaseReturn<Prices>> {
     const exchangeInstance = ExchangeChooser.chooseExchangeFactory(exchange)
     if (exchangeInstance) {
       const e = exchangeInstance('', '')
@@ -220,7 +223,7 @@ class Backtester {
     return this.returnReason(`Not found exchange instance ${exchange}`)
   }
 
-  private async getUserWithExchange(userId: string, exchangeUUID: string) {
+  protected async getUserWithExchange(userId: string, exchangeUUID: string) {
     const user = await this.userDb.readData({
       _id: userId,
       'exchanges.uuid': exchangeUUID,
@@ -235,14 +238,17 @@ class Backtester {
   }
 
   private updateDCASettings(settings: DCABotSettings, pair: ClearPairsSchema) {
-    const orderSize = `${
-      pair.quoteAsset.minAmount *
-      5 *
-      this.budgetMultiplier *
-      this.getExchangeMultiplier(pair.exchange)
-    }`
-    settings.orderSize = orderSize
-    settings.baseOrderSize = orderSize
+    if (!this.fromBacktest) {
+      const orderSize = `${
+        pair.quoteAsset.minAmount *
+        5 *
+        this.budgetMultiplier *
+        this.getExchangeMultiplier(pair.exchange)
+      }`
+      settings.orderSize = orderSize
+      settings.baseOrderSize = orderSize
+    }
+
     return settings
   }
 
@@ -250,16 +256,19 @@ class Backtester {
     settings: ComboBotSettings,
     pair: ClearPairsSchema,
   ) {
-    settings.pair = [pair.pair]
-    const orderSize = `${
-      pair.quoteAsset.minAmount *
-      1.1 *
-      +(settings.gridLevel ?? '1') *
-      this.budgetMultiplier *
-      this.getExchangeMultiplier(pair.exchange)
-    }`
-    settings.orderSize = orderSize
-    settings.baseOrderSize = orderSize
+    if (!this.fromBacktest) {
+      settings.pair = [pair.pair]
+      const orderSize = `${
+        pair.quoteAsset.minAmount *
+        1.1 *
+        +(settings.gridLevel ?? '1') *
+        this.budgetMultiplier *
+        this.getExchangeMultiplier(pair.exchange)
+      }`
+      settings.orderSize = orderSize
+      settings.baseOrderSize = orderSize
+    }
+
     return settings
   }
 
@@ -268,18 +277,21 @@ class Backtester {
     pair: ClearPairsSchema,
     fee: number,
   ) {
-    settings.pair = pair.pair
-    const minQuote = Math.max(
-      pair.quoteAsset.minAmount,
-      pair.baseAsset.minAmount * +settings.topPrice,
-    )
-    settings.budget =
-      minQuote *
-      +settings.levels *
-      1.1 *
-      this.budgetMultiplier *
-      this.getExchangeMultiplier(pair.exchange)
-    settings.sellDisplacement = fee * 2
+    if (!this.fromBacktest) {
+      settings.pair = pair.pair
+      const minQuote = Math.max(
+        pair.quoteAsset.minAmount,
+        pair.baseAsset.minAmount * +settings.topPrice,
+      )
+      settings.budget =
+        minQuote *
+        +settings.levels *
+        1.1 *
+        this.budgetMultiplier *
+        this.getExchangeMultiplier(pair.exchange)
+      settings.sellDisplacement = fee * 2
+    }
+
     return settings
   }
 
@@ -364,7 +376,7 @@ class Backtester {
       to: this.range?.to ?? now,
       multi: preset.data.result.multi,
       fullResult: true,
-      useFile: true,
+      useFile: this.fromBacktest,
     })
 
     backtester.loadData = this.loadFn
@@ -457,7 +469,7 @@ class Backtester {
       to: this.range?.to ?? now,
       combo: true,
       fullResult: true,
-      useFile: true,
+      useFile: this.fromBacktest,
     })
 
     backtester.loadData = this.loadFn
@@ -550,7 +562,7 @@ class Backtester {
       from: this.range?.from ?? now - 30 * 24 * 60 * 60 * 1000,
       to: this.range?.to ?? now,
       fullResult: true,
-      useFile: true,
+      useFile: this.fromBacktest,
     })
     backtester.loadData = this.loadFn
     const result = await backtester.test()

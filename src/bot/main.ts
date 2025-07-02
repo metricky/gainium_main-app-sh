@@ -178,7 +178,7 @@ type AllowedMethods =
   | 'sendHundredAlert'
   | 'checkDCALevel'
 
-type RedisKeys =
+export type RedisKeys =
   | 'usedOrderId'
   | 'minigrids'
   | 'deals'
@@ -1753,6 +1753,12 @@ class MainBot<T extends IMainBot> {
       )
     }
   }
+  protected shouldContinueLoad(): boolean {
+    return true
+  }
+  protected async updatePairs(): Promise<undefined> {
+    return
+  }
   /**
    * Read bot data from {@link MainBot#db}<br />
    *
@@ -1887,6 +1893,11 @@ class MainBot<T extends IMainBot> {
           keys.keysType,
           keys.okxSource,
         )
+        if (!this.shouldContinueLoad()) {
+          this.handleLog('Should not continue load')
+          this.endMethod(id)
+          return true
+        }
         this.handleLog('Choose exchange provider')
         if (this.exchange) {
           this.handleLog('Load broker code')
@@ -1897,6 +1908,7 @@ class MainBot<T extends IMainBot> {
             this.brokerCode = code.data.result.code
             this.handleLog(`Broker code: ${this.brokerCode}`)
           }
+          await this.updatePairs()
           ;[this.data.settings.pair].flat().forEach((p) => this.pairs.add(p))
           if (
             this.botType === BotType.dca &&

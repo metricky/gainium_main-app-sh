@@ -1,4 +1,3 @@
-import DCABotHelper from './dcaHelper'
 import Big from 'big.js'
 import type {
   ComboBotSchema,
@@ -59,6 +58,7 @@ import utils from '../utils'
 const { sleep } = utils
 import { RunWithDelay } from '../utils/delay'
 import { DealStats } from './worker/statsService'
+import createDCABotHelper from './dcaHelper'
 
 const mutex = new IdMutex()
 const mutexConcurrently = new IdMutex(300)
@@ -75,7 +75,7 @@ type LastMinigridOrdes = {
   price: number
 }
 
-class ComboBot extends DCABotHelper<ComboBotSchema, ComboDealsSchema> {
+class ComboBot extends createDCABotHelper<ComboBotSchema, ComboDealsSchema>() {
   private minigridDb = minigridDb
   private minigrids: Map<string, FullMinigrid> = new Map()
   transactionsDb = comboTransactionsDb

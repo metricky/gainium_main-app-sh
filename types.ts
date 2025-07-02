@@ -1674,6 +1674,8 @@ export interface MainBot<T = BaseSettings> extends SchemaI {
     thresholdPassed?: boolean
     thresholdPassedTime?: number
   }
+  share?: boolean
+  shareId?: string
 }
 
 export type BotVars = {
@@ -3392,6 +3394,7 @@ export enum BacktestRequestStatus {
 }
 
 export interface BacktestRequestSchema extends SchemaI {
+  cost: number
   symbols: {
     pair: string
     baseAsset: string
@@ -3997,7 +4000,6 @@ export type BacktestOnboardingWorkerDto = {
       to?: number
       interval?: ExchangeIntervals
       fromBacktest?: boolean
-      trades?: boolean
     }[]
     userId: string
     encryptedToken: string
@@ -4451,6 +4453,8 @@ export interface HedgeBotSchema
       | 'workingShift'
       | 'isDeleted'
       | 'deleteTime'
+      | 'share'
+      | 'shareId'
     >,
     Pick<
       DCABotSchema,

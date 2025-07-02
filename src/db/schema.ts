@@ -316,6 +316,8 @@ const Symbols = {
 }
 
 const botCommon = {
+  share: Boolean,
+  shareId: String,
   pendingClose: Boolean,
   pendingCloseTime: Number,
   userId: RequiredString,
@@ -1973,6 +1975,7 @@ const periodicStats: Schema<PeriodicStats> = new Schema({
 })
 
 const backtestRequest: Schema<BacktestRequestSchema> = new Schema({
+  cost: Number,
   symbols: [
     {
       pair: String,
@@ -2516,6 +2519,8 @@ const globalVariablesSchema = new Schema<GlobalVariablesSchema>({
 })
 
 const hedgeComboBotSchema = new Schema<HedgeBotSchema>({
+  share: Boolean,
+  shareId: String,
   paperContext: Boolean,
   profitByAssets,
   showErrorWarning: Boolean,

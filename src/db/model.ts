@@ -152,7 +152,7 @@ const models = {
   ),
 }
 
-;(async () => {
+export const syncIndexes = async () => {
   await models.botEvent.syncIndexes()
   await models.balance.syncIndexes()
   await models.backtest.syncIndexes()
@@ -182,6 +182,6 @@ const models = {
   await models.userProfitByHour.syncIndexes()
   await models.hedgeComboBot.syncIndexes()
   await models.hedgeDcaBot.syncIndexes()
-})()
+}
 
 export default models

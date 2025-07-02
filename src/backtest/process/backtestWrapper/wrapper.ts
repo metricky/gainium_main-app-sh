@@ -42,7 +42,7 @@ type ResultType = {
 }[]
 
 class BacktestWrapper {
-  private math = new MathHelper()
+  protected math = new MathHelper()
 
   private exchange: AbstractExchange
 
@@ -54,13 +54,13 @@ class BacktestWrapper {
 
   private gridBacktestDb = new DB(model.gridBacktest)
 
-  private filesDb = new DB(model.userFiles)
+  protected filesDb = new DB(model.userFiles)
 
   private id = ''
 
   constructor(
     private data: ServerSideBacktestPayload,
-    private userId: string,
+    protected userId: string,
     private requestId?: string,
   ) {
     this.exchange = ExchangeChooser.chooseExchangeFactory(
@@ -73,7 +73,7 @@ class BacktestWrapper {
     this.handleBacktestLog = this.handleBacktestLog.bind(this)
   }
 
-  private handleLog(msg: string, type: 'info' | 'error' = 'info') {
+  protected handleLog(msg: string, type: 'info' | 'error' = 'info') {
     logger[type](`SSB | ${this.id} | ${msg}`)
   }
 
@@ -102,7 +102,7 @@ class BacktestWrapper {
     return symbols.data?.result ?? []
   }
 
-  private async saveFile(
+  protected async saveFile(
     data: Record<string, unknown>,
     meta: Record<string, unknown>,
   ) {
@@ -437,7 +437,7 @@ class BacktestWrapper {
     return resultSave
   }
 
-  private handleBacktestLog(value: number, text: string) {
+  protected handleBacktestLog(value: number, text: string) {
     this.handleLog(`Done ${this.math.round(value * 100, 0)}% ${text}`)
   }
 

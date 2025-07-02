@@ -35,7 +35,7 @@ type UserType = {
   _id: string
 }
 
-class SharedStore<T, D = T & SchemaI> {
+export class SharedStore<T, D = T & SchemaI> {
   private redisSub: RedisWrapper | null = null
 
   private map: Map<string, T> = new Map()
@@ -292,7 +292,7 @@ class BotSharedData {
     this.redis = await RedisClient.getInstance()
   }
 
-  private async updateUserStore(msg: string) {
+  protected async updateUserStore(msg: string) {
     try {
       const { userId, uuid } = JSON.parse(msg) as {
         userId: string
