@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.4] – 2025-07-02
+### Changed
+- Updated all dependencies to their latest versions
+- Updated private dependencies (@gainium/indicators, @gainium/backtester)
+- Updated package-lock.json with latest dependency versions
+
+### Fixed
+- Fixed database reference in deal monitor
+
 ## [1.0.3] – 2025-06-30
 ### Changed
 - Switched to npm package manager

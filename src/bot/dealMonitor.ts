@@ -7,7 +7,7 @@ import {
   InputDeal,
   DCADealFlags,
 } from '../../types'
-import { comboDealsDb, dcaDealsDb } from '../db/dbInit'
+import { comboBotDb, comboDealsDb, dcaBotDb, dcaDealsDb } from '../db/dbInit'
 
 type DealStatsMap = {
   start: number
@@ -341,6 +341,7 @@ export class DealMonitor {
       },
     )
     if (stats.unrealizedProfit) {
+      const db = (combo ? comboBotDb : dcaBotDb) as typeof dcaBotDb
       await db.updateData(
         { _id: stats.botId },
         { $set: { unrealizedProfit: stats.unrealizedProfit } },
