@@ -164,10 +164,6 @@ const filterIndicatorIntervalsByExchange = (
   return intervals
 }
 
-const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
-
-const indicatorsPerWorker = +INIDCATORS_PER_WORKER
-
 export const getId = (
   indicatorConfig: IndicatorConfig,
   exchange: ExchangeEnum,
@@ -225,9 +221,10 @@ class InternalIndicatorsFactory {
       subcribersSet: Set<string>
     }
   >()
-  private subscribersCount = 0
+  protected loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
+  protected subscribersCount = 0
   private splitPhrase = `@gainium@`
-  private workers: WorkerType[] = []
+  protected workers: WorkerType[] = []
 
   private pairs = new ExpirableMap(10 * 60 * 1000, true, true)
   private pairsSize = 0
@@ -235,11 +232,11 @@ class InternalIndicatorsFactory {
     this.handleWorkerTerminate = this.handleWorkerTerminate.bind(this)
   }
 
-  private handleLog(msg: string) {
+  protected handleLog(msg: string) {
     logger.info(`${msg}`)
   }
 
-  private handleError(msg: string) {
+  protected handleError(msg: string) {
     logger.error(`${msg}`)
   }
 
@@ -285,7 +282,7 @@ class InternalIndicatorsFactory {
     const indicator = this.indicators.get(id)
     if (!indicator) {
       this.handleError(
-        `${loggerPrefix} Indicator not found in unsubscribe: ${id}`,
+        `${this.loggerPrefix} Indicator not found in unsubscribe: ${id}`,
       )
       return null
     }
@@ -322,7 +319,7 @@ class InternalIndicatorsFactory {
     const indicator = this.indicators.get(idi)
     if (!indicator) {
       this.handleError(
-        `${loggerPrefix} Indicator not found in subscribe: ${idi}`,
+        `${this.loggerPrefix} Indicator not found in subscribe: ${idi}`,
       )
       return null
     }
@@ -358,7 +355,7 @@ class InternalIndicatorsFactory {
     const indicator = this.indicators.get(idi)
     if (!indicator) {
       this.handleError(
-        `${loggerPrefix} Indicator not found in unsubscribe: ${idi}`,
+        `${this.loggerPrefix} Indicator not found in unsubscribe: ${idi}`,
       )
       return null
     }
@@ -392,7 +389,7 @@ class InternalIndicatorsFactory {
     const indicator = this.indicators.get(id)
     if (!indicator) {
       this.handleError(
-        `${loggerPrefix} Indicator not found in unsubscribe: ${id}`,
+        `${this.loggerPrefix} Indicator not found in unsubscribe: ${id}`,
       )
       return null
     }
@@ -407,8 +404,8 @@ class InternalIndicatorsFactory {
   }
 
   @IdMute(mutex, (id: number) => `handleWorkerTerminate${id}`)
-  private async handleWorkerTerminate(id: number) {
-    this.handleLog(`${loggerPrefix} Worker terminated: ${id}`)
+  protected async handleWorkerTerminate(id: number) {
+    this.handleLog(`${this.loggerPrefix} Worker terminated: ${id}`)
     const worker = this.workers.find((w) => w.id === id)
     this.workers = this.workers.filter((w) => w.id !== id)
     if (worker && worker.indicators > 0) {
@@ -419,7 +416,7 @@ class InternalIndicatorsFactory {
         for (const i of indicators) {
           this.indicators.delete(i.id)
           this.handleLog(
-            `${loggerPrefix} Worker terminated: ${id} | Indicator ${i.id} restarted`,
+            `${this.loggerPrefix} Worker terminated: ${id} | Indicator ${i.id} restarted`,
           )
           await this.createIndicator(i.id, i.config)
           for (const s of i.subcribersSet) {
@@ -435,8 +432,8 @@ class InternalIndicatorsFactory {
   }
 
   @IdMute(mutex, () => 'workerUpdate')
-  private async getWorkerForNewIndicator() {
-    const limit = indicatorsPerWorker
+  protected async getWorkerForNewIndicator() {
+    const limit = +INIDCATORS_PER_WORKER
     const lowestWorker = [...this.workers]
       .filter((w) => w.indicators < limit)
       .sort((a, b) => b.indicators - a.indicators)?.[0]
@@ -453,7 +450,7 @@ class InternalIndicatorsFactory {
       const threadId = +`${worker.threadId}`
       worker.on('error', (e) => {
         this.handleError(
-          `${loggerPrefix} Worker ${threadId} error: ${
+          `${this.loggerPrefix} Worker ${threadId} error: ${
             (e as Error)?.message || e
           } `,
         )
@@ -463,7 +460,7 @@ class InternalIndicatorsFactory {
         }
       })
       worker.on('exit', () => {
-        this.handleError(`${loggerPrefix} Worker ${threadId} exited`)
+        this.handleError(`${this.loggerPrefix} Worker ${threadId} exited`)
         this.handleWorkerTerminate(threadId)
       })
       const time = +new Date()
@@ -501,7 +498,7 @@ class InternalIndicatorsFactory {
   @IdMute(mutex, () => 'checkPair')
   private async checkPair(pair: string, exchange: ExchangeEnum) {
     if (this.pairsSize !== this.pairs.size || !this.pairsSize) {
-      this.handleLog(`${loggerPrefix} Loading pairs from db`)
+      this.handleLog(`${this.loggerPrefix} Loading pairs from db`)
       const pairs = await pairDb.readData(
         { exchange: { $nin: paperExchanges } },
         {},
@@ -510,12 +507,14 @@ class InternalIndicatorsFactory {
       )
       if (pairs.status === StatusEnum.notok) {
         this.handleError(
-          `${loggerPrefix} Error reading pairs in db: ${pairs.reason}`,
+          `${this.loggerPrefix} Error reading pairs in db: ${pairs.reason}`,
         )
         return true
       } else {
         this.pairsSize = (pairs.data?.result ?? []).length
-        this.handleLog(`${loggerPrefix} Loaded ${this.pairsSize} pairs from db`)
+        this.handleLog(
+          `${this.loggerPrefix} Loaded ${this.pairsSize} pairs from db`,
+        )
         for (const p of pairs.data?.result ?? []) {
           this.pairs.set(`${p.pair}-${p.exchange}`, true)
         }
@@ -595,7 +594,7 @@ class InternalIndicatorsFactory {
       if (find) {
         const result = await this.subscribeIndicator(id, undefined, load1d)
         if (!result) {
-          this.handleError(`${loggerPrefix} Error in subscribe: ${id}`)
+          this.handleError(`${this.loggerPrefix} Error in subscribe: ${id}`)
           return null
         }
         find.subcribersSet.add(result.id)
@@ -622,7 +621,7 @@ class InternalIndicatorsFactory {
           load1d,
         )
         if (!subscriberId) {
-          this.handleError(`${loggerPrefix} Error in subscribe: ${id}`)
+          this.handleError(`${this.loggerPrefix} Error in subscribe: ${id}`)
           return null
         }
         const get = this.indicators.get(id)
@@ -634,7 +633,7 @@ class InternalIndicatorsFactory {
       }
     } catch (e) {
       this.handleError(
-        `${loggerPrefix} Error in subscribe: ${getId(
+        `${this.loggerPrefix} Error in subscribe: ${getId(
           indicatorConfig,
           exchange,
           symbol,
@@ -650,7 +649,7 @@ class InternalIndicatorsFactory {
     if (find) {
       const left = await this.unsubscribeIndicator(idToFind, subscriberId)
       this.handleLog(
-        `${loggerPrefix} Unsubscribed: ${id} (${idToFind}), left: ${left}`,
+        `${this.loggerPrefix} Unsubscribed: ${id} (${idToFind}), left: ${left}`,
       )
       if (left === 0) {
         await this.deleteIndicator(idToFind)

@@ -1,5 +1,5 @@
 import { model } from 'mongoose'
-import schema from './schema'
+import schema, { registerIndexes } from './schema'
 import { collections } from './config'
 
 import {
@@ -36,6 +36,7 @@ import {
   GlobalVariablesSchema,
   BrokerCodesSchema,
 } from '../../types'
+import { SYNC_USER } from '../config'
 
 const models = {
   bot: model<BotSchema>(`${collections.bot}`, schema.bot),
@@ -152,7 +153,8 @@ const models = {
   ),
 }
 
-export const syncIndexes = async () => {
+export const syncIndexes = async (user = true) => {
+  registerIndexes()
   await models.botEvent.syncIndexes()
   await models.balance.syncIndexes()
   await models.backtest.syncIndexes()
@@ -173,7 +175,9 @@ export const syncIndexes = async () => {
   await models.pair.syncIndexes()
   await models.snapshot.syncIndexes()
   await models.transaction.syncIndexes()
-  await models.user.syncIndexes()
+  if (user && SYNC_USER === 'true') {
+    await models.user.syncIndexes()
+  }
   await models.userFiles.syncIndexes()
   await models.dcaBacktestRequest.syncIndexes()
   await models.comboBacktestRequest.syncIndexes()

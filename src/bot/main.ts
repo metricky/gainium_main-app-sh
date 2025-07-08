@@ -1384,6 +1384,10 @@ class MainBot<T extends IMainBot> {
     )
   }
 
+  protected getErrorSubType(errorString: string): string {
+    return getErrorSubType(errorString)
+  }
+
   /**
    * Prepare message
    *
@@ -1419,7 +1423,7 @@ class MainBot<T extends IMainBot> {
     }`
     let messageToSet = errorString
     const time = new Date().getTime()
-    const subType = getErrorSubType(errorString)
+    const subType = this.getErrorSubType(errorString)
 
     if (message.indexOf('PERCENT_PRICE') !== -1) {
       return
@@ -3120,7 +3124,13 @@ class MainBot<T extends IMainBot> {
 
   getOrderId(prefix: string) {
     const maxLength = this.okx || this.mexc ? 32 : 36
-    const exchangePrefix = this.brokerCode
+    const exchangePrefix =
+      this.okx ||
+      this.data?.exchange === ExchangeEnum.binance ||
+      this.data?.exchange === ExchangeEnum.binanceUsdm ||
+      this.data?.exchange === ExchangeEnum.binanceCoinm
+        ? this.brokerCode
+        : ''
     let idString = `${exchangePrefix}${prefix}-${id(
       maxLength - exchangePrefix.length - (prefix.length + 1) - 1,
     )}`
@@ -5762,6 +5772,12 @@ class MainBot<T extends IMainBot> {
       }
     }
     return []
+  }
+  protected shouldProceed(): boolean {
+    return true
+  }
+  protected notProceedMessage(_method: string): string {
+    return ''
   }
 }
 

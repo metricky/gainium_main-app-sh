@@ -1,5 +1,9 @@
+import {
+  comboBacktestRequestDb,
+  dcaBacktestRequestDb,
+  gridBacktestRequestDb,
+} from '../../db/dbInit'
 import { BacktestRequestStatus, BotType } from '../../../types'
-import DB, { model } from '../../db'
 
 export const updateRequest = async (
   type: BotType,
@@ -11,10 +15,10 @@ export const updateRequest = async (
   if (requestId) {
     const instance =
       type === BotType.dca
-        ? new DB(model.dcaBacktestRequest)
+        ? dcaBacktestRequestDb
         : type === BotType.combo
-          ? new DB(model.comboBacktestRequest)
-          : new DB(model.gridBacktestRequest)
+          ? comboBacktestRequestDb
+          : gridBacktestRequestDb
     const $set: Record<string, unknown> = { status }
     if (backtestId) {
       $set.backtestId = backtestId

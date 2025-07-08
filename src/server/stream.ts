@@ -1,5 +1,4 @@
 import { Server } from 'socket.io'
-import DB, { model } from '../db'
 import { StatusEnum, BotType, liveupdate } from '../../types'
 import http from 'http'
 import logger from '../utils/logger'
@@ -16,6 +15,7 @@ import type {
 import type { Socket } from 'socket.io'
 import { WS_PORT } from '../config'
 import { HealthServer } from '../utils/healthServer'
+import { userDb } from '../db/dbInit'
 
 type UserConnectinput = {
   userId: string
@@ -95,11 +95,9 @@ class UserStreamService {
   /** Socket IO server instance */
   private server: Server
   /** DB instance */
-  private db: DB<UserSchema>
+  private db = userDb
   private redisClient: RedisWrapper | null = null
   constructor() {
-    /** Determine variables */
-    this.db = new DB(model.user)
     /** Start server */
     const httpServer = http.createServer()
 

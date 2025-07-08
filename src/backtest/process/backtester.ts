@@ -1,4 +1,3 @@
-import DB, { model } from '../../db'
 import DCABacktesting from '@gainium/backtester/dist/dca'
 import GridBacktesting from '@gainium/backtester/dist/grid'
 import Candles from '../data/candles'
@@ -8,6 +7,7 @@ import {
   PeriodParams,
   ExchangeEnum as _ExchangeEnum,
 } from '@gainium/backtester/dist/types'
+import DB from '../../db'
 
 import {
   StatusEnum,
@@ -22,6 +22,7 @@ import type {
   ClearPairsSchema,
   DCABotSettings,
   ComboBotSettings,
+  UserSchema,
 } from '../../../types'
 import type {
   DCABacktestingResult,
@@ -29,6 +30,14 @@ import type {
   GridBacktestingResult,
   Prices,
 } from '@gainium/backtester/dist/types'
+import {
+  backtestDb,
+  comboBacktestDb,
+  feeDb,
+  gridBacktestDb,
+  pairDb,
+  rateDb,
+} from '../../db/dbInit'
 
 export type DCABacktestingResultFull = DCABacktestingResult & {
   settings: DCABotSettings
@@ -62,14 +71,14 @@ export const tvToExchangeIntervalMap = {
   '1W': ExchangeIntervals.oneW,
 }
 
-class Backtester {
-  protected gridBacktestDb = new DB(model.gridBacktest)
-  protected dcaBacktestDb = new DB(model.backtest)
-  protected comboBacktestDb = new DB(model.comboBacktest)
-  private pairsDb = new DB(model.pair)
-  private feesDb = new DB(model.fee)
-  private ratesDb = new DB(model.rate)
-  private userDb = new DB(model.user)
+class Backtester<T extends UserSchema> {
+  protected gridBacktestDb = gridBacktestDb
+  protected dcaBacktestDb = backtestDb
+  protected comboBacktestDb = comboBacktestDb
+  private pairsDb = pairDb
+  private feesDb = feeDb
+  private ratesDb = rateDb
+
   private budgetMultiplier = 10
 
   constructor(
@@ -79,6 +88,7 @@ class Backtester {
       interval?: ExchangeIntervals
     },
     protected fromBacktest?: boolean,
+    private userDb: DB<T> = userDb,
   ) {}
 
   protected getExchangeMultiplier(exchange: ExchangeEnum) {

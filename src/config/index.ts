@@ -37,4 +37,5 @@ export const {
   INIDCATORS_PER_WORKER = '5000',
   SERVER_HOST,
   CORS_ORIGIN,
+  SYNC_USER = 'true',
 } = process.env

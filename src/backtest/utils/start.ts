@@ -1,4 +1,3 @@
-import DB, { model } from '../../db'
 import {
   BacktestRequestStatus,
   BotType,
@@ -7,14 +6,15 @@ import {
 import logger from '../../utils/logger'
 import { updateRequest } from './backtestRequest'
 import Backtester from '../process'
+import {
+  comboBacktestRequestDb,
+  dcaBacktestRequestDb,
+  gridBacktestRequestDb,
+} from '../../db/dbInit'
 
 const backteser = Backtester.getInstance()
 
 export const checkPendingBacktests = async () => {
-  const dcaBacktestRequestDb = new DB(model.dcaBacktestRequest)
-  const comboBacktestRequestDb = new DB(model.comboBacktestRequest)
-  const gridBacktestRequestDb = new DB(model.gridBacktestRequest)
-
   const search = {
     status: {
       $in: [

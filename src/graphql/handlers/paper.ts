@@ -6,17 +6,25 @@ import {
   feeDb,
   globalVarsDb,
   snapshotDb,
-  userDb,
+  userDb as _userDb,
   userProfitByHourDb,
 } from '../../db/dbInit'
 import userUtils from '../../utils/user'
 import logger from '../../utils/logger'
 import utils from '../../db/scripts/cleanDb'
 import { updateRelatedBotsInVar } from '../../bot/utils'
+import DB from '../../db'
 
-const Bot = BotInstance.getInstance()
-
-export const resetPaperData = async (userData: ExcludeDoc<UserSchema>) => {
+export const resetPaperData = async <
+  T extends UserSchema = UserSchema,
+  B extends ReturnType<typeof BotInstance.getInstance> = ReturnType<
+    typeof BotInstance.getInstance
+  >,
+>(
+  userData: ExcludeDoc<UserSchema>,
+  userDb: DB<T> = _userDb as unknown as DB<T>,
+  Bot: B = BotInstance.getInstance() as B,
+) => {
   const requests: Promise<{ status: StatusEnum } | null>[] = [
     Bot.deleteAllUserPaperBots(userData._id),
   ]

@@ -1,30 +1,24 @@
+import DB from '../db'
 import { v4 } from 'uuid'
 import { Worker, isMainThread, threadId } from 'worker_threads'
-import DB, { model } from '../db'
 import logger from '../utils/logger'
 import { isPaper } from '../utils'
-import { Types, type PipelineStage } from 'mongoose'
+import { ProjectionFields, Types, type PipelineStage } from 'mongoose'
 import ExchangeChooser from '../exchange/exchangeChooser'
 import {
   Symbols,
   MultiAssets,
-  PairsSchema,
   BOT_CHANGE_EVENT,
   BOT_STATUS_EVENT,
   PositionSide,
   ExcludeDoc,
   StrategyEnum,
   ComboBotSchema,
-  ComboDealsSchema,
   ComboBotSettings,
   ComboDealsSettings,
   ComboMinigridStatusEnum,
-  ComboMinigridSchema,
-  BotMessageSchema,
   AddFundsSettings,
   OrderSizeTypeEnum,
-  ComboProfitSchema,
-  ComboTransactionSchema,
   BotParentEventsDto,
   CreateBotDto,
   UpdateBotExchangeDto,
@@ -52,10 +46,10 @@ import {
   SettingsIndicators,
   DCACustom,
   MultiTP,
+  MainBot,
 } from '../../types'
 import {
   BaseReturn,
-  BotEventSchema,
   BotSchema,
   BotSettings,
   BotStatus,
@@ -72,10 +66,8 @@ import {
   DCATypeEnum,
   ExchangeEnum,
   InitialPriceFromEnum,
-  OrderSchema,
   OrderStatusType,
   StatusEnum,
-  TransactionSchema,
   UserSchema,
   WebhookActionEnum,
 } from '../../types'
@@ -94,7 +86,24 @@ import DCAUtils from './dca/utils'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { mapDataGridOptionsToMongoOptions } from '../db/utils'
 import RabbitClient from '../db/rabbit'
-import { hedgeComboBotDb, hedgeDCABotDb } from '../db/dbInit'
+import {
+  botDb,
+  botEventDb,
+  botMessageDb,
+  comboBotDb,
+  comboDealsDb,
+  comboProfitDb,
+  comboTransactionsDb,
+  dcaBotDb,
+  dcaDealsDb,
+  hedgeComboBotDb,
+  hedgeDCABotDb,
+  minigridDb,
+  orderDb,
+  pairDb,
+  transactionDb,
+  userDb as _userDb,
+} from '../db/dbInit'
 import {
   BOTS_PER_WORKER,
   BotServiceType,
@@ -126,34 +135,6 @@ type WebhookData = {
 
 const defaultBotsPerWorker = 100
 
-let botsPerWorker = +`${BOTS_PER_WORKER ?? defaultBotsPerWorker}`
-let comboPerWorker = +`${COMBO_PER_WORKER ?? botsPerWorker}`
-let dcaPerWorker = +`${DCA_PER_WORKER ?? botsPerWorker}`
-let gridPerWorker = +`${GRID_PER_WORKER ?? botsPerWorker}`
-let hedgeComboPerWorker = +`${
-  HEDGE_COMBO_PER_WORKER ?? HEDGE_PER_WORKER ?? botsPerWorker
-}`
-let hedgeDcaPerWorker = +`${
-  HEDGE_DCA_PER_WORKER ?? HEDGE_PER_WORKER ?? botsPerWorker
-}`
-if (isNaN(botsPerWorker)) {
-  botsPerWorker = defaultBotsPerWorker
-}
-if (isNaN(comboPerWorker)) {
-  comboPerWorker = defaultBotsPerWorker
-}
-if (isNaN(dcaPerWorker)) {
-  dcaPerWorker = defaultBotsPerWorker
-}
-if (isNaN(gridPerWorker)) {
-  gridPerWorker = defaultBotsPerWorker
-}
-if (isNaN(hedgeComboPerWorker)) {
-  hedgeComboPerWorker = defaultBotsPerWorker
-}
-if (isNaN(hedgeDcaPerWorker)) {
-  hedgeDcaPerWorker = defaultBotsPerWorker
-}
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 
 const notAvailable = 'Bots service is unavailable, please try again later'
@@ -167,9 +148,9 @@ type BotServicePayload = {
 
 const bosServiceType = BotServiceType
 
-class Bot {
-  private personalLimits = new Map<string, number>()
-  private workers: {
+class Bot<T extends UserSchema = UserSchema> {
+  protected personalLimits = new Map<string, number>()
+  protected workers: {
     type: BotType
     worker: Worker
     bots: number
@@ -201,7 +182,7 @@ class Bot {
     botIds: Map<string, string>
   }[] = []
 
-  private static instance: Bot
+  protected static instance: Bot
 
   public bots: {
     id: string
@@ -249,33 +230,31 @@ class Bot {
     paperContext: boolean
   }[]
 
-  private botDb: DB<BotSchema>
+  protected botDb = botDb
 
-  private dcaBotDb: DB<DCABotSchema>
+  protected dcaBotDb = dcaBotDb
 
-  private comboBotDb: DB<ComboBotSchema>
+  protected comboBotDb = comboBotDb
 
-  private orderDb: DB<OrderSchema>
+  private orderDb = orderDb
 
-  private botEventDb: DB<BotEventSchema>
+  protected botEventDb = botEventDb
 
-  private botMessageDb: DB<BotMessageSchema>
+  private botMessageDb = botMessageDb
 
-  private transactionDb: DB<TransactionSchema>
+  private transactionDb = transactionDb
 
-  private dcaDealsDb: DB<DCADealsSchema>
+  private dcaDealsDb = dcaDealsDb
 
-  private comboDealsDb: DB<ComboDealsSchema>
+  private comboDealsDb = comboDealsDb
 
-  private comboMinigridDb: DB<ComboMinigridSchema>
+  private comboMinigridDb = minigridDb
 
-  private comboProfitDb: DB<ComboProfitSchema>
+  private comboProfitDb = comboProfitDb
 
-  private comboTransactionDb: DB<ComboTransactionSchema>
+  private comboTransactionDb = comboTransactionsDb
 
-  private userDb: DB<UserSchema>
-
-  private pairsDb: DB<PairsSchema> = new DB(model.pair)
+  protected pairsDb = pairDb
 
   private runAfterBotCreated: Map<string, (() => Promise<void> | void)[]> =
     new Map()
@@ -285,36 +264,64 @@ class Bot {
     ((response?: unknown) => Promise<void> | void)[]
   > = new Map()
 
-  private rabbit = new RabbitClient()
+  protected rabbit = new RabbitClient()
 
-  private estimatedRestart = 0
+  protected estimatedRestart = 0
   private restarted = 0
 
-  public constructor(private useBots?: boolean) {
+  public constructor(
+    protected useBots?: boolean,
+    protected userDb: DB<T> = _userDb as unknown as DB<T>,
+  ) {
     this.bots = []
     this.dcaBots = []
     this.comboBots = []
     this.hedgeComboBots = []
     this.hedgeDcaBots = []
-    this.botDb = new DB(model.bot)
-    this.dcaBotDb = new DB(model.dcaBot)
-    this.comboBotDb = new DB(model.comboBot)
-    this.comboMinigridDb = new DB(model.comboMinigrids)
-    this.orderDb = new DB(model.order)
-    this.transactionDb = new DB(model.transaction)
-    this.dcaDealsDb = new DB(model.dcaDeal)
-    this.comboDealsDb = new DB(model.comboDeal)
-    this.comboProfitDb = new DB(model.comboProfit)
-    this.comboTransactionDb = new DB(model.comboTransactions)
-    this.userDb = new DB(model.user)
-    this.botEventDb = new DB(model.botEvent)
-    this.botMessageDb = new DB(model.botMessage)
     this.closeDCADeal = this.closeDCADeal.bind(this)
     this.processWorkerMessage = this.processWorkerMessage.bind(this)
     this.handleWorkerTerminate = this.handleWorkerTerminate.bind(this)
     this.processBotClosedMessage = this.processBotClosedMessage.bind(this)
     this.updateRestart = this.updateRestart.bind(this)
     this.setServiceListener = this.setServiceListener.bind(this)
+  }
+
+  public get botPerWorker() {
+    let botsPerWorker = +`${BOTS_PER_WORKER ?? defaultBotsPerWorker}`
+    let comboPerWorker = +`${COMBO_PER_WORKER ?? botsPerWorker}`
+    let dcaPerWorker = +`${DCA_PER_WORKER ?? botsPerWorker}`
+    let gridPerWorker = +`${GRID_PER_WORKER ?? botsPerWorker}`
+    let hedgeComboPerWorker = +`${
+      HEDGE_COMBO_PER_WORKER ?? HEDGE_PER_WORKER ?? botsPerWorker
+    }`
+    let hedgeDcaPerWorker = +`${
+      HEDGE_DCA_PER_WORKER ?? HEDGE_PER_WORKER ?? botsPerWorker
+    }`
+    if (isNaN(botsPerWorker)) {
+      botsPerWorker = defaultBotsPerWorker
+    }
+    if (isNaN(comboPerWorker)) {
+      comboPerWorker = defaultBotsPerWorker
+    }
+    if (isNaN(dcaPerWorker)) {
+      dcaPerWorker = defaultBotsPerWorker
+    }
+    if (isNaN(gridPerWorker)) {
+      gridPerWorker = defaultBotsPerWorker
+    }
+    if (isNaN(hedgeComboPerWorker)) {
+      hedgeComboPerWorker = defaultBotsPerWorker
+    }
+    if (isNaN(hedgeDcaPerWorker)) {
+      hedgeDcaPerWorker = defaultBotsPerWorker
+    }
+    return {
+      grid: botsPerWorker,
+      dca: dcaPerWorker,
+      combo: comboPerWorker,
+      hedgeCombo: hedgeComboPerWorker,
+      hedgeDca: hedgeDcaPerWorker,
+    }
   }
 
   public async updateExchangeCredentials(
@@ -389,7 +396,7 @@ class Bot {
   }
 
   @IdMute(mutex, () => 'updateResponseQueue')
-  private async updateResponseQueue(
+  protected async updateResponseQueue(
     responseId: string,
     callback: (response?: unknown) => Promise<void> | void,
   ) {
@@ -516,7 +523,7 @@ class Bot {
   }
 
   @IdMute(mutex, (data: BotParentEventsDto) => `workerMessage${data.botId}`)
-  private async processWorkerMessage(data: BotParentEventsDto) {
+  protected async processWorkerMessage(data: BotParentEventsDto) {
     if (data.event === 'createBot' && data.create) {
       this.processCreateBotMessage(data.botId)
     }
@@ -529,7 +536,7 @@ class Bot {
   }
 
   @IdMute(mutex, (id: number) => `handleWorkerTerminate${id}`)
-  private async handleWorkerTerminate(id: number) {
+  protected async handleWorkerTerminate(id: number) {
     this.handleLog(`${loggerPrefix} Worker terminated: ${id}`)
     const worker = this.workers.find((w) => w.id === id)
     this.workers = this.workers.filter((w) => w.id !== id)
@@ -974,7 +981,7 @@ class Bot {
     return null
   }
 
-  private async createNewBot(
+  protected async createNewBot(
     botId: string,
     botType: BotType,
     userId: string,
@@ -1061,18 +1068,18 @@ class Bot {
   }
 
   @IdMute(mutex, () => 'workerUpdate')
-  private async getWorkerForNewBot(type: BotType, userId?: string) {
+  protected async getWorkerForNewBot(type: BotType, userId?: string) {
     const hedge = type === BotType.hedgeDca || type === BotType.hedgeCombo
     const limitPerWorker =
       type === BotType.combo
-        ? (comboPerWorker ?? botsPerWorker)
+        ? this.botPerWorker.combo
         : type === BotType.dca
-          ? (dcaPerWorker ?? botsPerWorker)
+          ? this.botPerWorker.dca
           : type === BotType.hedgeCombo
-            ? (hedgeComboPerWorker ?? botsPerWorker)
+            ? this.botPerWorker.hedgeCombo
             : type === BotType.hedgeDca
-              ? (hedgeDcaPerWorker ?? botsPerWorker)
-              : (gridPerWorker ?? botsPerWorker)
+              ? this.botPerWorker.hedgeDca
+              : this.botPerWorker.grid
     const limit =
       userId && !hedge
         ? (this.personalLimits.get(userId) ?? limitPerWorker)
@@ -1197,7 +1204,7 @@ class Bot {
       }
     }
   }
-  private entityNotFound(entity?: string) {
+  protected entityNotFound(entity?: string) {
     return {
       status: StatusEnum.notok as const,
       reason: `${entity ?? 'Entity'} not found`,
@@ -1216,21 +1223,53 @@ class Bot {
     type = BotType.grid,
     userId: string,
     id: string,
+    publicBot = false,
     paperContext: boolean,
+    shareId?: string,
   ) {
     if (type === BotType.grid) {
-      return await this.getBotFromDb(userId, id, paperContext)
+      return await this.getBotFromDb(
+        userId,
+        id,
+        publicBot,
+        paperContext,
+        shareId,
+      )
     }
     if (type === BotType.combo) {
-      return await this.getComboBotFromDb(userId, id, paperContext)
+      return await this.getComboBotFromDb(
+        userId,
+        id,
+        publicBot,
+        paperContext,
+        shareId,
+      )
     }
     if (type === BotType.hedgeCombo) {
-      return await this.getHedgeComboBotFromDb(userId, id, paperContext)
+      return await this.getHedgeComboBotFromDb(
+        userId,
+        id,
+        publicBot,
+        paperContext,
+        shareId,
+      )
     }
     if (type === BotType.hedgeDca) {
-      return await this.getHedgeDcaBotFromDb(userId, id, paperContext)
+      return await this.getHedgeDcaBotFromDb(
+        userId,
+        id,
+        publicBot,
+        paperContext,
+        shareId,
+      )
     }
-    return await this.getDCABotFromDb(userId, id, paperContext)
+    return await this.getDCABotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext,
+      shareId,
+    )
   }
 
   public async getDCADealList(
@@ -2292,6 +2331,7 @@ class Bot {
   public async getBotList(
     type = BotType.grid,
     userId: string,
+    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all?: boolean,
@@ -2300,6 +2340,7 @@ class Bot {
     if (type === BotType.grid) {
       return await this.getGridBotList(
         userId,
+        token,
         status,
         paperContext,
         dataGridInput,
@@ -2308,6 +2349,7 @@ class Bot {
     if (type === BotType.combo) {
       return await this.getComboBotList(
         userId,
+        token,
         status,
         paperContext,
         all,
@@ -2317,6 +2359,7 @@ class Bot {
     if (type === BotType.hedgeCombo) {
       return await this.getHedgeComboBotList(
         userId,
+        token,
         status,
         paperContext,
         all,
@@ -2326,6 +2369,7 @@ class Bot {
     if (type === BotType.hedgeDca) {
       return await this.getHedgeDcaBotList(
         userId,
+        token,
         status,
         paperContext,
         all,
@@ -2334,6 +2378,7 @@ class Bot {
     }
     return await this.getDCABotList(
       userId,
+      token,
       status,
       paperContext,
       all,
@@ -2341,11 +2386,19 @@ class Bot {
     )
   }
 
-  public async getDCABotSettings(userId: string, botId: string) {
+  public async getDCABotSettings(
+    userId: string,
+    botId: string,
+    shareId?: string,
+  ) {
     const bot = await this.dcaBotDb.readData({
       $and: [
         {
-          $or: [{ userId }],
+          $or: [
+            { userId },
+            { public: true },
+            { shareId, share: { $eq: true } },
+          ],
         },
         { _id: botId, 'settings.type': { $ne: DCATypeEnum.terminal } },
         { isDeleted: { $ne: true } },
@@ -2372,17 +2425,28 @@ class Bot {
           data.status === BotStatusEnum.closed
             ? data.updated
             : new Date(),
-        vars: data.vars ?? { list: [], paths: [] },
+        vars:
+          shareId && `${data.userId}` !== `${userId}`
+            ? { list: [], paths: [] }
+            : (data.vars ?? { list: [], paths: [] }),
       },
       reason: null,
     }
   }
 
-  public async getComboBotSettings(userId: string, botId: string) {
+  public async getComboBotSettings(
+    userId: string,
+    botId: string,
+    shareId?: string,
+  ) {
     const bot = await this.comboBotDb.readData({
       $and: [
         {
-          $or: [{ userId }],
+          $or: [
+            { userId },
+            { public: true },
+            { shareId, share: { $eq: true } },
+          ],
         },
         { _id: botId },
         { isDeleted: { $ne: true } },
@@ -2409,18 +2473,29 @@ class Bot {
           data.status === BotStatusEnum.closed
             ? data.updated
             : new Date(),
-        vars: data.vars ?? { list: [], paths: [] },
+        vars:
+          shareId && `${data.userId}` !== `${userId}`
+            ? { list: [], paths: [] }
+            : (data.vars ?? { list: [], paths: [] }),
       },
       reason: null,
     }
   }
 
-  public async getHedgeComboBotSettings(userId: string, botId: string) {
+  public async getHedgeComboBotSettings(
+    userId: string,
+    botId: string,
+    shareId?: string,
+  ) {
     const bot = await hedgeComboBotDb.readData(
       {
         $and: [
           {
-            $or: [{ userId }],
+            $or: [
+              { userId },
+              { public: true },
+              { shareId, share: { $eq: true } },
+            ],
           },
           { _id: botId },
           { isDeleted: { $ne: true } },
@@ -2492,12 +2567,20 @@ class Bot {
     }
   }
 
-  public async getHedgeDcaBotSettings(userId: string, botId: string) {
+  public async getHedgeDcaBotSettings(
+    userId: string,
+    botId: string,
+    shareId?: string,
+  ) {
     const bot = await hedgeDCABotDb.readData(
       {
         $and: [
           {
-            $or: [{ userId }],
+            $or: [
+              { userId },
+              { public: true },
+              { shareId, share: { $eq: true } },
+            ],
           },
           { _id: botId },
           { isDeleted: { $ne: true } },
@@ -2569,11 +2652,19 @@ class Bot {
     }
   }
 
-  public async getGridBotSettings(userId: string, botId: string) {
+  public async getGridBotSettings(
+    userId: string,
+    botId: string,
+    shareId?: string,
+  ) {
     const bot = await this.botDb.readData({
       $and: [
         {
-          $or: [{ userId }],
+          $or: [
+            { userId },
+            { public: true },
+            { shareId, share: { $eq: true } },
+          ],
         },
         { _id: botId },
         { isDeleted: { $ne: true } },
@@ -2599,7 +2690,10 @@ class Bot {
           bot.data.result.status === BotStatusEnum.closed
             ? bot.data.result?.updated
             : new Date(),
-        vars: bot.data.result?.vars ?? { list: [], paths: [] },
+        vars:
+          shareId && `${bot.data.result?.userId}` !== `${userId}`
+            ? { list: [], paths: [] }
+            : (bot.data.result?.vars ?? { list: [], paths: [] }),
       },
       reason: null,
     }
@@ -2697,7 +2791,7 @@ class Bot {
     }
   }
 
-  private async checkBotPairsBySettings(
+  protected async checkBotPairsBySettings(
     exchange: ExchangeEnum,
     settings: DCABotSettings,
     pairs: ClearPairsSchema[],
@@ -3307,7 +3401,7 @@ class Bot {
             ? BotServiceQueues.hedgeDcaQueue
             : BotServiceQueues.dcaQueue
   }
-  private async callExternalBotService<R>(
+  protected async callExternalBotService<R>(
     type: BotType | 'all' | 'allWithHedge',
     method: string,
     ignoreParamsInLog = false,
@@ -3449,7 +3543,7 @@ class Bot {
     return saveBotRequest
   }
 
-  private async prepareDCABot(
+  protected async prepareDCABot(
     userId: string,
     _settings: DCABotSettings & {
       baseAsset?: string[]
@@ -3582,7 +3676,7 @@ class Bot {
     }
   }
 
-  private async prepareComboBot(
+  protected async prepareComboBot(
     userId: string,
     _settings: CreateComboBotInput,
     paperContext: boolean,
@@ -4406,7 +4500,13 @@ class Bot {
           await this.setInitialPrice(userId, id, initialPrice)
         }
       }
-      return await this.getBot(BotType.grid, userId, id, paperContext)
+      return await this.getBot(
+        BotType.grid,
+        userId,
+        id,
+        undefined,
+        paperContext,
+      )
     }
     return saveBotRequest
   }
@@ -4631,7 +4731,7 @@ class Bot {
             }
           })
       }
-      return await this.getBot(BotType.dca, userId, id, paperContext)
+      return await this.getBot(BotType.dca, userId, id, undefined, paperContext)
     }
     return saveBotRequest
   }
@@ -4895,7 +4995,13 @@ class Bot {
             }
           })
       }
-      return await this.getBot(BotType.combo, userId, id, paperContext)
+      return await this.getBot(
+        BotType.combo,
+        userId,
+        id,
+        undefined,
+        paperContext,
+      )
     }
     return saveBotRequest
   }
@@ -5016,7 +5122,13 @@ class Bot {
       ),
     )
 
-    return await this.getBot(BotType.hedgeCombo, userId, id, paperContext)
+    return await this.getBot(
+      BotType.hedgeCombo,
+      userId,
+      id,
+      undefined,
+      paperContext,
+    )
   }
 
   public async changeHedgeDcaBot(
@@ -5135,7 +5247,13 @@ class Bot {
       ),
     )
 
-    return await this.getBot(BotType.hedgeDca, userId, id, paperContext)
+    return await this.getBot(
+      BotType.hedgeDca,
+      userId,
+      id,
+      undefined,
+      paperContext,
+    )
   }
 
   @IdMute(
@@ -5551,7 +5669,7 @@ class Bot {
         paperContext,
       })
     }
-    return await this.getBot(type, userId, id, paperContext)
+    return await this.getBot(type, userId, id, undefined, paperContext)
   }
 
   public async restartBot(
@@ -5759,7 +5877,12 @@ class Bot {
     if (type && type === BotType.dca) {
       const bot = this.dcaBots.find((b) => b.id === id && b.userId === userId)
       if (bot) {
-        const getBot = await this.getDCABotFromDb(userId, id, paperContext)
+        const getBot = await this.getDCABotFromDb(
+          userId,
+          id,
+          undefined,
+          paperContext,
+        )
         if (getBot.status === StatusEnum.notok) {
           return getBot
         }
@@ -5841,7 +5964,12 @@ class Bot {
     } else if (type && type === BotType.combo) {
       const bot = this.comboBots.find((b) => b.id === id && b.userId === userId)
       if (bot) {
-        const getBot = await this.getComboBotFromDb(userId, id, paperContext)
+        const getBot = await this.getComboBotFromDb(
+          userId,
+          id,
+          undefined,
+          paperContext,
+        )
         if (getBot.status === StatusEnum.notok) {
           return getBot
         }
@@ -5935,6 +6063,7 @@ class Bot {
         const getBot = await this.getHedgeComboBotFromDb(
           userId,
           id,
+          undefined,
           paperContext,
         )
         if (getBot.status === StatusEnum.notok) {
@@ -6034,7 +6163,12 @@ class Bot {
         (b) => b.id === id && b.userId === userId,
       )
       if (bot) {
-        const getBot = await this.getHedgeDcaBotFromDb(userId, id, paperContext)
+        const getBot = await this.getHedgeDcaBotFromDb(
+          userId,
+          id,
+          undefined,
+          paperContext,
+        )
         if (getBot.status === StatusEnum.notok) {
           return getBot
         }
@@ -6704,7 +6838,7 @@ class Bot {
     }
   }
 
-  private async handleBotRestartFromServiceStart(
+  protected async handleBotRestartFromServiceStart(
     botId: string,
     botType: BotType,
     userId: string,
@@ -6891,7 +7025,7 @@ class Bot {
     }
   }
 
-  private setListener() {
+  protected setListener() {
     if (this.useBots) {
       this.setServiceListener()
     }
@@ -6919,7 +7053,7 @@ class Bot {
     }
   }
 
-  private setServiceListener() {
+  protected setServiceListener() {
     if (!!bosServiceType) {
       const queue = this.getRabbitQueueName()
       this.handleLog(`Set service listener for ${queue}`)
@@ -9233,7 +9367,9 @@ class Bot {
   public async getBotOrders(
     userId: string,
     id: string,
+    shareId?: string,
     type?: BotType,
+    publicBot = false,
     paperContext?: boolean,
     status?: OrderStatusType,
     page = 0,
@@ -9243,14 +9379,44 @@ class Bot {
   ) {
     const bot =
       type === BotType.hedgeDca
-        ? await this.getHedgeDcaBotFromDb(userId, id, paperContext ?? false)
+        ? await this.getHedgeDcaBotFromDb(
+            userId,
+            id,
+            publicBot,
+            paperContext ?? false,
+            shareId,
+          )
         : type === BotType.hedgeCombo
-          ? await this.getHedgeComboBotFromDb(userId, id, paperContext ?? false)
+          ? await this.getHedgeComboBotFromDb(
+              userId,
+              id,
+              publicBot,
+              paperContext ?? false,
+              shareId,
+            )
           : type === BotType.grid
-            ? await this.getBotFromDb(userId, id, paperContext ?? false)
+            ? await this.getBotFromDb(
+                userId,
+                id,
+                publicBot,
+                paperContext ?? false,
+                shareId,
+              )
             : type === BotType.combo
-              ? await this.getComboBotFromDb(userId, id, paperContext ?? false)
-              : await this.getDCABotFromDb(userId, id, paperContext ?? false)
+              ? await this.getComboBotFromDb(
+                  userId,
+                  id,
+                  publicBot,
+                  paperContext ?? false,
+                  shareId,
+                )
+              : await this.getDCABotFromDb(
+                  userId,
+                  id,
+                  publicBot,
+                  paperContext ?? false,
+                  shareId,
+                )
     if (bot.status === StatusEnum.ok && bot.data) {
       const { filter, ...rest } = mapDataGridOptionsToMongoOptions({
         page,
@@ -9297,10 +9463,18 @@ class Bot {
     userId: string,
     id: string,
     dealId: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     all = false,
   ) {
-    const bot = await this.getDCABotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findOrderRequest = await this.orderDb.readData(
         {
@@ -9331,10 +9505,18 @@ class Bot {
     userId: string,
     id: string,
     dealId: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     all = false,
   ) {
-    const bot = await this.getComboBotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getComboBotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findOrderRequest = await this.orderDb.readData(
         {
@@ -9365,13 +9547,17 @@ class Bot {
     userId: string,
     id: string,
     dealId: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     all = false,
   ) {
     const bot = await this.getHedgeComboBotFromDb(
       userId,
       id,
+      publicBot,
       paperContext ?? false,
+      shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findOrderRequest = await this.orderDb.readData(
@@ -9403,13 +9589,17 @@ class Bot {
     userId: string,
     id: string,
     dealId: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     all = false,
   ) {
     const bot = await this.getHedgeDcaBotFromDb(
       userId,
       id,
+      publicBot,
       paperContext ?? false,
+      shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findOrderRequest = await this.orderDb.readData(
@@ -9440,10 +9630,18 @@ class Bot {
   public async getBotTransactions(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     page = 0,
   ) {
-    const bot = await this.getBotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getBotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findTransactionsRequest = await this.transactionDb.readData(
         {
@@ -9473,6 +9671,8 @@ class Bot {
   public async getBotDeals(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     status?: DCADealStatusEnum,
     page = 0,
@@ -9480,7 +9680,13 @@ class Bot {
     sortModel?: GridSortModel[],
     filterModel?: { items: GridFilterItem[]; linkOperator?: string },
   ) {
-    const bot = await this.getDCABotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     pageSize = Math.min(100, pageSize ?? 100)
     const { filter, limit, sort, skip } = mapDataGridOptionsToMongoOptions({
       page,
@@ -9527,9 +9733,17 @@ class Bot {
   public async getBotDealsStats(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
   ) {
-    const bot = await this.getDCABotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     if (bot.status === StatusEnum.ok && bot.data) {
       const stats = await this.dcaDealsDb.aggregate([
         { $match: { botId: id.toString(), status: DCADealStatusEnum.closed } },
@@ -9651,6 +9865,8 @@ class Bot {
   public async getComboBotDeals(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     status?: DCADealStatusEnum,
     page = 0,
@@ -9658,7 +9874,13 @@ class Bot {
     sortModel?: GridSortModel[],
     filterModel?: { items: GridFilterItem[]; linkOperator?: string },
   ) {
-    const bot = await this.getComboBotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getComboBotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     pageSize = Math.min(100, pageSize ?? 100)
     const { filter, limit, sort, skip } = mapDataGridOptionsToMongoOptions({
       page,
@@ -9705,6 +9927,8 @@ class Bot {
   public async getHedgeComboBotDeals(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     status?: DCADealStatusEnum,
     page = 0,
@@ -9715,7 +9939,9 @@ class Bot {
     const bot = await this.getHedgeComboBotFromDb(
       userId,
       id,
+      publicBot,
       paperContext ?? false,
+      shareId,
     )
     pageSize = Math.min(100, pageSize ?? 100)
     const { filter, limit, sort, skip } = mapDataGridOptionsToMongoOptions({
@@ -9763,6 +9989,8 @@ class Bot {
   public async getHedgeDcaBotDeals(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     status?: DCADealStatusEnum,
     page = 0,
@@ -9773,7 +10001,9 @@ class Bot {
     const bot = await this.getHedgeDcaBotFromDb(
       userId,
       id,
+      publicBot,
       paperContext ?? false,
+      shareId,
     )
     pageSize = Math.min(100, pageSize ?? 100)
     const { filter, limit, sort, skip } = mapDataGridOptionsToMongoOptions({
@@ -9821,9 +10051,17 @@ class Bot {
   public async getComboBotDealsStats(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
   ) {
-    const bot = await this.getComboBotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getComboBotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     if (bot.status === StatusEnum.ok && bot.data) {
       const stats = await this.comboDealsDb.aggregate([
         { $match: { botId: id.toString(), status: DCADealStatusEnum.closed } },
@@ -9951,6 +10189,7 @@ class Bot {
     const bot = await this.getComboBotFromDb(
       userId,
       botId,
+      false,
       paperContext ?? false,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
@@ -9983,7 +10222,12 @@ class Bot {
     id: string[],
     paperContext: boolean,
   ) {
-    const bot = await this.getDCABotFromDb(userId, botId, paperContext ?? false)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      botId,
+      false,
+      paperContext ?? false,
+    )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findTransactionsRequest = await this.dcaDealsDb.readData(
         {
@@ -10011,12 +10255,16 @@ class Bot {
   public async getHedgeComboBotDealsStats(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
   ) {
     const bot = await this.getHedgeComboBotFromDb(
       userId,
       id,
+      publicBot,
       paperContext ?? false,
+      shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
       const stats = await this.comboDealsDb.aggregate([
@@ -10144,12 +10392,16 @@ class Bot {
   public async getHedgeDcaBotDealsStats(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
   ) {
     const bot = await this.getHedgeDcaBotFromDb(
       userId,
       id,
+      publicBot,
       paperContext ?? false,
+      shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
       const stats = await this.dcaDealsDb.aggregate([
@@ -10277,11 +10529,19 @@ class Bot {
   public async getComboBotMinigrids(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     status?: 'open' | 'closed',
     page = 0,
   ) {
-    const bot = await this.getComboBotFromDb(userId, id, paperContext ?? false)
+    const bot = await this.getComboBotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findTransactionsRequest = await this.comboMinigridDb.readData(
         {
@@ -10318,6 +10578,8 @@ class Bot {
   public async getHedgeComboBotMinigrids(
     userId: string,
     id: string,
+    shareId?: string,
+    publicBot = false,
     paperContext?: boolean,
     status?: 'open' | 'closed',
     page = 0,
@@ -10325,7 +10587,9 @@ class Bot {
     const bot = await this.getHedgeComboBotFromDb(
       userId,
       id,
+      publicBot,
       paperContext ?? false,
+      shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
       const findTransactionsRequest = await this.comboMinigridDb.readData(
@@ -10363,15 +10627,25 @@ class Bot {
   private async getBotFromDb(
     userId: string,
     id: string,
+    publicBot = false,
     paperContext: boolean,
+    shareId?: string,
   ) {
-    const or: Record<string, unknown>[] = [{ userId }]
+    const or: Record<string, unknown>[] = [
+      { userId },
+      { share: { $eq: true }, shareId },
+    ]
+    if (publicBot && !shareId) {
+      or.push({ public: true })
+    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
       isDeleted: { $ne: true },
     }
-    filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    if (!publicBot && !shareId) {
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    }
 
     const findBotRequest = await this.botDb.readData(
       filter,
@@ -10387,6 +10661,10 @@ class Bot {
       return this.entityNotFound('Bot')
     }
     const botData = { ...findBotRequest.data.result }
+    if (shareId && userId !== botData.userId) {
+      botData.uuid = ''
+      botData.vars = { list: [], paths: [] }
+    }
     return {
       status: StatusEnum.ok,
       reason: null,
@@ -10399,16 +10677,26 @@ class Bot {
   private async getDCABotFromDb(
     userId: string,
     id: string,
+    publicBot = false,
     paperContext: boolean,
+    shareId?: string,
   ) {
-    const or: Record<string, unknown>[] = [{ userId }]
+    const or: Record<string, unknown>[] = [
+      { userId },
+      { share: { $eq: true }, shareId },
+    ]
+    if (publicBot && !shareId) {
+      or.push({ public: true })
+    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
       isDeleted: { $ne: true },
     }
 
-    filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    if (!publicBot && !shareId) {
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    }
 
     const findBotRequest = await this.dcaBotDb.readData(
       filter,
@@ -10423,7 +10711,7 @@ class Bot {
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
     }
-    if (userId !== findBotRequest.data.result.userId) {
+    if (shareId && userId !== findBotRequest.data.result.userId) {
       findBotRequest.data.result.uuid = ''
       findBotRequest.data.result.vars = { list: [], paths: [] }
     }
@@ -10440,16 +10728,26 @@ class Bot {
   private async getComboBotFromDb(
     userId: string,
     id: string,
+    publicBot = false,
     paperContext: boolean,
+    shareId?: string,
   ) {
-    const or: Record<string, unknown>[] = [{ userId }]
+    const or: Record<string, unknown>[] = [
+      { userId },
+      { share: { $eq: true }, shareId },
+    ]
+    if (publicBot && !shareId) {
+      or.push({ public: true })
+    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
       isDeleted: { $ne: true },
     }
 
-    filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    if (!publicBot && !shareId) {
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    }
 
     const findBotRequest = await this.comboBotDb.readData(
       filter,
@@ -10464,7 +10762,7 @@ class Bot {
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
     }
-    if (userId !== findBotRequest.data.result.userId) {
+    if (shareId && userId !== findBotRequest.data.result.userId) {
       findBotRequest.data.result.uuid = ''
       findBotRequest.data.result.vars = { list: [], paths: [] }
     }
@@ -10481,17 +10779,26 @@ class Bot {
   private async getHedgeComboBotFromDb(
     userId: string,
     id: string,
+    publicBot = false,
     paperContext: boolean,
+    shareId?: string,
   ) {
-    const or: Record<string, unknown>[] = [{ userId }]
+    const or: Record<string, unknown>[] = [
+      { userId },
+      { share: { $eq: true }, shareId },
+    ]
+    if (publicBot && !shareId) {
+      or.push({ public: true })
+    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
       isDeleted: { $ne: true },
     }
 
-    filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
-
+    if (!publicBot && !shareId) {
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    }
     const findBotRequest = await hedgeComboBotDb.readData(
       filter,
       undefined,
@@ -10504,6 +10811,9 @@ class Bot {
     }
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
+    }
+    if (shareId) {
+      findBotRequest.data.result.uuid = ''
     }
     const longBot = findBotRequest.data?.result.bots.find(
       (b) => b.settings.strategy === StrategyEnum.long,
@@ -10535,16 +10845,26 @@ class Bot {
   private async getHedgeDcaBotFromDb(
     userId: string,
     id: string,
+    publicBot = false,
     paperContext: boolean,
+    shareId?: string,
   ) {
-    const or: Record<string, unknown>[] = [{ userId }]
+    const or: Record<string, unknown>[] = [
+      { userId },
+      { share: { $eq: true }, shareId },
+    ]
+    if (publicBot && !shareId) {
+      or.push({ public: true })
+    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
       isDeleted: { $ne: true },
     }
 
-    filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    if (!publicBot && !shareId) {
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+    }
 
     const findBotRequest = await hedgeDCABotDb.readData(
       filter,
@@ -10558,6 +10878,9 @@ class Bot {
     }
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
+    }
+    if (shareId) {
+      findBotRequest.data.result.uuid = ''
     }
     const longBot = findBotRequest.data?.result.bots.find(
       (b) => b.settings.strategy === StrategyEnum.long,
@@ -10588,6 +10911,7 @@ class Bot {
 
   private async getGridBotList(
     userId: string,
+    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     dataGridInput: DataGridFilterInput = {},
@@ -10596,6 +10920,9 @@ class Bot {
       [x: string]: unknown
     } = {
       userId: userId,
+    }
+    if (token === 'demo') {
+      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -10652,6 +10979,7 @@ class Bot {
 
   private async getComboBotList(
     userId: string,
+    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -10662,6 +10990,9 @@ class Bot {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
+    }
+    if (token === 'demo') {
+      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -10719,6 +11050,7 @@ class Bot {
 
   private async getHedgeComboBotList(
     userId: string,
+    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -10729,6 +11061,9 @@ class Bot {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
+    }
+    if (token === 'demo') {
+      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -10792,6 +11127,7 @@ class Bot {
 
   private async getHedgeDcaBotList(
     userId: string,
+    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -10802,6 +11138,9 @@ class Bot {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
+    }
+    if (token === 'demo') {
+      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -10865,6 +11204,7 @@ class Bot {
 
   private async getDCABotList(
     userId: string,
+    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -10875,6 +11215,9 @@ class Bot {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
+    }
+    if (token === 'demo') {
+      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -10932,12 +11275,194 @@ class Bot {
     }
   }
 
-  private handleLog(msg: string) {
+  protected handleLog(msg: string) {
     logger.info(`${msg}`)
   }
 
   private handleError(msg: string) {
     logger.error(`${msg}`)
+  }
+
+  public async changeBotShare(
+    {
+      botId,
+      share,
+      type,
+      userId,
+    }: {
+      type: BotType
+      botId: string
+      share: boolean
+      userId: string
+    },
+    paperContext: boolean,
+  ) {
+    let shareId = ''
+    if (share) {
+      shareId = v4()
+    }
+    this.botEventDb.createData({
+      userId: userId,
+      botId: botId,
+      botType: type,
+      event: 'Change bot share',
+      metadata: { share, shareId },
+      paperContext,
+    })
+    const filter = { userId, _id: botId }
+    if (type === BotType.dca) {
+      if (share) {
+        const get = await this.dcaBotDb.readData(filter)
+        if (get.status === StatusEnum.notok) {
+          return get
+        }
+        if (get.data.result.shareId) {
+          return {
+            status: StatusEnum.ok,
+            data: {
+              share,
+              shareId: get.data.result.shareId,
+            },
+            reason: null,
+          }
+        }
+      }
+      const result = await this.dcaBotDb.updateData(
+        filter,
+        { $set: { share, shareId } },
+        true,
+      )
+      if (result.status !== StatusEnum.ok) {
+        return result
+      }
+      if (!result.data) {
+        return this.entityNotFound('Bot')
+      }
+    }
+    if (type === BotType.combo) {
+      if (share) {
+        const get = await this.comboBotDb.readData(filter)
+        if (get.status === StatusEnum.notok) {
+          return get
+        }
+        if (get.data.result.shareId) {
+          return {
+            status: StatusEnum.ok,
+            data: {
+              share,
+              shareId: get.data.result.shareId,
+            },
+            reason: null,
+          }
+        }
+      }
+      const result = await this.comboBotDb.updateData(
+        filter,
+        { $set: { share, shareId } },
+        true,
+      )
+      if (result.status !== StatusEnum.ok) {
+        return result
+      }
+      if (!result.data) {
+        return this.entityNotFound('Bot')
+      }
+    }
+    if (type === BotType.grid) {
+      if (share) {
+        const get = await this.botDb.readData(filter)
+        if (get.status === StatusEnum.notok) {
+          return get
+        }
+        if (get.data.result.shareId) {
+          return {
+            status: StatusEnum.ok,
+            data: {
+              share,
+              shareId: get.data.result.shareId,
+            },
+            reason: null,
+          }
+        }
+      }
+      const result = await this.botDb.updateData(
+        filter,
+        { $set: { share, shareId } },
+        true,
+      )
+      if (result.status !== StatusEnum.ok) {
+        return result
+      }
+      if (!result.data) {
+        return this.entityNotFound('Bot')
+      }
+    }
+    if (type === BotType.hedgeCombo) {
+      if (share) {
+        const get = await hedgeComboBotDb.readData(filter)
+        if (get.status === StatusEnum.notok) {
+          return get
+        }
+        if (get.data.result.shareId) {
+          return {
+            status: StatusEnum.ok,
+            data: {
+              share,
+              shareId: get.data.result.shareId,
+            },
+            reason: null,
+          }
+        }
+      }
+      const result = await hedgeComboBotDb.updateData(
+        filter,
+        { $set: { share, shareId } },
+        true,
+      )
+      if (result.status !== StatusEnum.ok) {
+        return result
+      }
+      if (!result.data) {
+        return this.entityNotFound('Bot')
+      }
+    }
+    if (type === BotType.hedgeDca) {
+      if (share) {
+        const get = await hedgeDCABotDb.readData(filter)
+        if (get.status === StatusEnum.notok) {
+          return get
+        }
+        if (get.data.result.shareId) {
+          return {
+            status: StatusEnum.ok,
+            data: {
+              share,
+              shareId: get.data.result.shareId,
+            },
+            reason: null,
+          }
+        }
+      }
+      const result = await hedgeDCABotDb.updateData(
+        filter,
+        { $set: { share, shareId } },
+        true,
+      )
+      if (result.status !== StatusEnum.ok) {
+        return result
+      }
+      if (!result.data) {
+        return this.entityNotFound('Bot')
+      }
+    }
+    return {
+      status: StatusEnum.ok,
+      data: {
+        share,
+        shareId,
+      },
+      reason: null,
+    }
   }
 
   public async addDealFunds(
@@ -10961,7 +11486,12 @@ class Bot {
         fromWebhook,
       )
     }
-    const bot = await this.getDCABotFromDb(userId, botId, paperContext)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      botId,
+      undefined,
+      paperContext,
+    )
     if (bot.status === StatusEnum.notok) {
       return bot
     }
@@ -11027,7 +11557,12 @@ class Bot {
         fromWebhook,
       )
     }
-    const bot = await this.getDCABotFromDb(userId, botId, paperContext)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      botId,
+      undefined,
+      paperContext,
+    )
     if (bot.status === StatusEnum.notok) {
       return bot
     }
@@ -11091,7 +11626,12 @@ class Bot {
         paperContext,
       )
     }
-    const bot = await this.getDCABotFromDb(userId, botId, paperContext)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      botId,
+      undefined,
+      paperContext,
+    )
     if (bot.status === StatusEnum.notok) {
       return bot
     }
@@ -11155,7 +11695,12 @@ class Bot {
         paperContext,
       )
     }
-    const bot = await this.getDCABotFromDb(userId, botId, paperContext)
+    const bot = await this.getDCABotFromDb(
+      userId,
+      botId,
+      undefined,
+      paperContext,
+    )
     if (bot.status === StatusEnum.notok) {
       return bot
     }
@@ -12041,6 +12586,63 @@ class Bot {
       data: null,
       reason: 'Rebalancing order scheduled',
     }
+  }
+  async checkNotEnoughBalanceError() {
+    const prefix = `Checking not enough balance error bots`
+    this.handleLog(`${prefix} start`)
+    const filter = {
+      'notEnoughBalance.thresholdPassed': true,
+      'notEnoughBalance.thresholdPassedTime': {
+        $lt: +new Date() - 7 * 24 * 60 * 60 * 1000,
+      },
+      status: {
+        $in: [
+          BotStatusEnum.error,
+          BotStatusEnum.monitoring,
+          BotStatusEnum.range,
+          BotStatusEnum.open,
+        ],
+      },
+    }
+    const fields = {
+      _id: 1,
+      parentBotId: 1,
+    } as ProjectionFields<MainBot>
+    const dcaBots = await this.dcaBotDb.readData(filter, fields, {}, true)
+    const comboBots = await this.comboBotDb.readData(filter, fields, {}, true)
+    const gridBots = await this.botDb.readData(filter, fields, {}, true)
+    const singleBots: Map<string, { type: BotType; id: string }> = new Map()
+    for (const bot of dcaBots.data?.result ?? []) {
+      singleBots.set(
+        bot.parentBotId ?? `${bot._id}`,
+        bot.parentBotId
+          ? { type: BotType.hedgeDca, id: bot.parentBotId }
+          : { type: BotType.dca, id: `${bot._id}` },
+      )
+    }
+    for (const bot of comboBots.data?.result ?? []) {
+      singleBots.set(
+        bot.parentBotId ?? `${bot._id}`,
+        bot.parentBotId
+          ? { type: BotType.hedgeCombo, id: bot.parentBotId }
+          : { type: BotType.combo, id: `${bot._id}` },
+      )
+    }
+    for (const bot of gridBots.data?.result ?? []) {
+      singleBots.set(`${bot._id}`, {
+        type: BotType.grid,
+        id: `${bot._id}`,
+      })
+    }
+    this.handleLog(
+      `${prefix} Found ${
+        singleBots.size
+      } bots with not enough balance error ${JSON.stringify([
+        ...singleBots.values(),
+      ])}`,
+    )
+    /** TODO: stop logic here */
+    this.handleLog(`${prefix} end`)
   }
 }
 

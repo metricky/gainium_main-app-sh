@@ -12,7 +12,7 @@ import { Resolvers, Schema } from '../graphql'
 import userUtils from '../utils/user'
 import { liveupdate, StatusEnum } from '../../types'
 import methods from '../exchange/additionalAPIs'
-import API, { middleware } from './api'
+import _API, { middleware as _middleware, bodyMiddleware } from './api'
 import swaggerUi from 'swagger-ui-express'
 import cookieParser from 'cookie-parser'
 import logger from '../utils/logger'
@@ -114,15 +114,26 @@ async function start() {
   // Add health endpoint
   addHealthEndpoint(app)
 
-  API.get.forEach((fn, r) => app.get(r, apiLimiter, middleware, fn))
+  const API = _API()
+  const middleware = _middleware()
 
-  API.put.forEach((fn, r) => app.put(r, apiLimiter, middleware, fn))
+  API.get.forEach((fn, r) =>
+    app.get(r, apiLimiter, bodyMiddleware, middleware, fn),
+  )
 
-  API.getPublic.forEach((fn, r) => app.get(r, apiLimiter, fn))
+  API.put.forEach((fn, r) =>
+    app.put(r, apiLimiter, bodyMiddleware, middleware, fn),
+  )
 
-  API.post.forEach((fn, r) => app.post(r, apiLimiter, middleware, fn))
+  API.getPublic.forEach((fn, r) => app.get(r, apiLimiter, bodyMiddleware, fn))
 
-  API.delete.forEach((fn, r) => app.delete(r, apiLimiter, middleware, fn))
+  API.post.forEach((fn, r) =>
+    app.post(r, apiLimiter, bodyMiddleware, middleware, fn),
+  )
+
+  API.delete.forEach((fn, r) =>
+    app.delete(r, apiLimiter, bodyMiddleware, middleware, fn),
+  )
 
   app.get('/datafeed_ws', async (_req, res) => {
     const result = await methods.getWSKucoin()
@@ -290,7 +301,7 @@ async function start() {
 
   const apolloServer = new ApolloServer<ApolloContext>({
     typeDefs: Schema,
-    resolvers: Resolvers,
+    resolvers: Resolvers(),
     plugins: [ApolloServerPluginLandingPageDisabled()],
   })
 

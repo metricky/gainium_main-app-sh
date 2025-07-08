@@ -1,7 +1,5 @@
 import { parentPort, threadId } from 'worker_threads'
-import BotHelper from '../../bot/helper'
 import createDCABotHelper from '../../bot/dcaHelper'
-import ComboBotHelper from '../../bot/comboHelper'
 import {
   BotType,
   CreateBotDto,
@@ -15,7 +13,9 @@ import { IdMute, IdMutex } from '../../utils/mutex'
 import logger from '../../utils/logger'
 import v8 from 'v8'
 import { v4 } from 'uuid'
-import HedgeBot from '../hedgeHelper'
+import createComboBotHelper from '../../bot/comboHelper'
+import createHedgeBotHelper from '../hedgeHelper'
+import createBotHelper from '../../bot/helper'
 
 const mutex = new IdMutex()
 
@@ -32,7 +32,7 @@ class BotOperations {
 
   private bots: {
     id: string
-    b: BotHelper
+    b: InstanceType<ReturnType<typeof createBotHelper>>
     userId: string
     exchange: ExchangeEnum
   }[] = []
@@ -46,20 +46,20 @@ class BotOperations {
 
   private comboBots: {
     id: string
-    b: ComboBotHelper
+    b: InstanceType<ReturnType<typeof createComboBotHelper>>
     userId: string
     exchange: ExchangeEnum
   }[] = []
 
   private hedgeComboBots: {
     id: string
-    b: HedgeBot
+    b: InstanceType<ReturnType<typeof createHedgeBotHelper>>
     userId: string
   }[] = []
 
   private hedgeDcaBots: {
     id: string
-    b: HedgeBot
+    b: InstanceType<ReturnType<typeof createHedgeBotHelper>>
     userId: string
   }[] = []
 
@@ -84,8 +84,9 @@ class BotOperations {
         if (this.bots.find((b) => b.id === botId)) {
           create = true
         } else {
-          const bot = new BotHelper(
-            ...(args as ConstructorParameters<typeof BotHelper>),
+          const BotClass = createBotHelper()
+          const bot = new BotClass(
+            ...(args as ConstructorParameters<typeof BotClass>),
           )
           this.bots.push({ id: botId, b: bot, userId, exchange })
           create = true
@@ -95,8 +96,9 @@ class BotOperations {
         if (this.comboBots.find((b) => b.id === botId)) {
           create = true
         } else {
-          const bot = new ComboBotHelper(
-            ...(args as ConstructorParameters<typeof ComboBotHelper>),
+          const ComboBotClass = createComboBotHelper()
+          const bot = new ComboBotClass(
+            ...(args as ConstructorParameters<typeof ComboBotClass>),
           )
           this.comboBots.push({ id: botId, b: bot, userId, exchange })
           create = true
@@ -106,8 +108,9 @@ class BotOperations {
         if (this.hedgeComboBots.find((b) => b.id === botId)) {
           create = true
         } else {
-          const bot = new HedgeBot(
-            ...(args as ConstructorParameters<typeof HedgeBot>),
+          const HedgeBotClass = createHedgeBotHelper()
+          const bot = new HedgeBotClass(
+            ...(args as ConstructorParameters<typeof HedgeBotClass>),
           )
           this.hedgeComboBots.push({ id: botId, b: bot, userId })
           create = true
@@ -117,8 +120,9 @@ class BotOperations {
         if (this.hedgeDcaBots.find((b) => b.id === botId)) {
           create = true
         } else {
-          const bot = new HedgeBot(
-            ...(args as ConstructorParameters<typeof HedgeBot>),
+          const HedgeBotClass = createHedgeBotHelper()
+          const bot = new HedgeBotClass(
+            ...(args as ConstructorParameters<typeof HedgeBotClass>),
           )
           this.hedgeDcaBots.push({ id: botId, b: bot, userId })
           create = true

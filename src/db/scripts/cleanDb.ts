@@ -1,25 +1,31 @@
-import DB, { model } from '..'
 import logger from '../../utils/logger'
 import { decrypt } from '../../utils/crypto'
-import { ExchangeInUser, MessageTypeEnum, StatusEnum } from '../../../types'
+import {
+  ExchangeInUser,
+  MessageTypeEnum,
+  StatusEnum,
+  UserSchema,
+} from '../../../types'
 import { isPaper } from '../../utils'
 import { resetPaperData } from '../../graphql/handlers/paper'
-
-const usersDb = new DB(model.user)
-const paperUsersDb = new DB(model.paperUsers)
-const paperFuturesDb = new DB(model.paperPositions)
-const paperHedgeDb = new DB(model.paperHedge)
-const paperLeverageDb = new DB(model.paperLeverages)
-const paperOrdersDb = new DB(model.paperOrder)
-const paperTradesDb = new DB(model.paperTrades)
-const paperWallets = new DB(model.paperWallets)
-const balancesDb = new DB(model.balance)
-const ordersDb = new DB(model.order)
-const feeDb = new DB(model.fee)
-const snapshotDb = new DB(model.snapshot)
-const userProfitByHour = new DB(model.userProfitByHour)
-const botEventDb = new DB(model.botEvent)
-const rateDb = new DB(model.rate)
+import {
+  balanceDb,
+  botEventDb,
+  feeDb,
+  orderDb,
+  paperHedgeDb,
+  paperLeverageDb,
+  paperOrderDb,
+  paperPositionDb,
+  paperTradesDb,
+  paperUserDb,
+  paperWalletsDb,
+  rateDb,
+  snapshotDb,
+  userDb as _userDb,
+  userProfitByHourDb,
+} from '../dbInit'
+import DB from '../'
 
 const removeOldRates = async () => {
   await rateDb
@@ -40,8 +46,11 @@ const removeOldBotWarnings = async () => {
     .then((res) => logger.info(`Delete old bot warnings ${res.reason}`))
 }
 
-const getUserExchanges = async (paper = false) => {
-  const users = await usersDb.readData(
+const getUserExchanges = async <T extends UserSchema = UserSchema>(
+  paper = false,
+  userDb: DB<T> = _userDb as unknown as DB<T>,
+) => {
+  const users = await userDb.readData(
     { exchanges: { $not: { $size: 0 } } },
     { _id: 1, username: 1, exchanges: 1 },
     {},
@@ -62,12 +71,12 @@ const getUserExchanges = async (paper = false) => {
   return exchanges
 }
 
-const clearNotUsedPaperData = async () => {
+const clearNotUsedPaperData = async (_getUserExchanges = getUserExchanges) => {
   logger.info('Clear not used paper data')
 
-  const exchanges: ExchangeInUser[] = await getUserExchanges(true)
+  const exchanges: ExchangeInUser[] = await _getUserExchanges(true)
 
-  const notUsedPaperAccounts = await paperUsersDb.readData(
+  const notUsedPaperAccounts = await paperUserDb.readData(
     { key: { $nin: exchanges.map((e) => e.key) } },
     {},
     {},
@@ -81,7 +90,7 @@ const clearNotUsedPaperData = async () => {
     `Found ${notUsedPaperAccounts.data.count} not used paper accounts`,
   )
   const userIds = notUsedPaperAccounts.data.result.map((u) => u._id)
-  await paperFuturesDb
+  await paperPositionDb
     .deleteManyData({ user: { $in: userIds } })
     .then((res) => logger.info(`Delete futures ${res.reason}`))
   await paperHedgeDb
@@ -90,7 +99,7 @@ const clearNotUsedPaperData = async () => {
   await paperLeverageDb
     .deleteManyData({ user: { $in: userIds } })
     .then((res) => logger.info(`Delete leverage ${res.reason}`))
-  const ordersToDelete = await paperOrdersDb.readData(
+  const ordersToDelete = await paperOrderDb.readData(
     { user: { $in: userIds } },
     { _id: 1 },
     {},
@@ -105,29 +114,29 @@ const clearNotUsedPaperData = async () => {
   await paperTradesDb
     .deleteManyData({ order: { $in: orderIds } })
     .then((res) => logger.info(`Delete trades ${res.reason}`))
-  await paperOrdersDb
+  await paperOrderDb
     .deleteManyData({ user: { $in: userIds } })
     .then((res) => logger.info(`Delete orders ${res.reason}`))
-  await paperWallets
+  await paperWalletsDb
     .deleteManyData({ user: { $in: userIds } })
     .then((res) => logger.info(`Delete wallets ${res.reason}`))
-  await paperUsersDb
+  await paperUserDb
     .deleteManyData({ _id: { $in: userIds } })
     .then((res) => logger.info(`Delete users ${res.reason}`))
-  await userProfitByHour
+  await userProfitByHourDb
     .deleteManyData({ userId: { $in: userIds } })
     .then((res) => logger.info(`Delete user profit by hour ${res.reason}`))
 }
 
 const clearPaperOldOrders = async () => {
   logger.info('Clear paper canceled paper orders')
-  await paperOrdersDb
+  await paperOrderDb
     .deleteManyData({
       updatedAt: { $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000) },
       status: { $in: ['CANCELED', 'EXPIRED'] },
     })
     .then((res) => logger.info(`Delete paper CANCELED orders ${res.reason}`))
-  await paperOrdersDb
+  await paperOrderDb
     .deleteManyData({
       updatedAt: { $lt: new Date(+new Date() - 60 * 24 * 60 * 60 * 1000) },
       status: 'FILLED',
@@ -137,7 +146,7 @@ const clearPaperOldOrders = async () => {
 
 const clearRealOldCanceledOrders = async () => {
   logger.info('Clear real canceled paper orders')
-  await ordersDb
+  await orderDb
     .deleteManyData({
       updated: { $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000) },
       exchange: { $ne: 'bybit' },
@@ -146,7 +155,7 @@ const clearRealOldCanceledOrders = async () => {
     .then((res) =>
       logger.info(`Delete real not bybit CANCELED orders ${res.reason}`),
     )
-  await ordersDb
+  await orderDb
     .deleteManyData({
       updated: { $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000) },
       exchange: { $eq: 'bybit' },
@@ -170,11 +179,11 @@ const clearRealOldCanceledOrders = async () => {
     )
 }
 
-const clearBalances = async () => {
+const clearBalances = async (_getUserExchanges = getUserExchanges) => {
   logger.info(`Start clean balances`)
-  const exchanges: ExchangeInUser[] = await getUserExchanges()
+  const exchanges: ExchangeInUser[] = await _getUserExchanges()
   if (exchanges.length) {
-    await balancesDb
+    await balanceDb
       .deleteManyData({
         exchangeUUID: { $nin: exchanges.map((e) => e.uuid) },
       })
@@ -182,9 +191,12 @@ const clearBalances = async () => {
   }
 }
 
-const clearOldUserPaperData = async () => {
+const clearOldUserPaperData = async <T extends UserSchema = UserSchema>(
+  userDb: DB<T> = _userDb as unknown as DB<T>,
+  _clearNotUsedPaperData = clearNotUsedPaperData,
+) => {
   logger.info('Clear old user paper data')
-  const users = await usersDb.readData(
+  const users = await userDb.readData(
     {
       exchanges: { $not: { $size: 0 } },
       $or: [
@@ -214,12 +226,12 @@ const clearOldUserPaperData = async () => {
       logger.info(`Reset paper for user ${u._id} ${u.username} ${res.reason}`),
     )
   }
-  await clearNotUsedPaperData()
+  await _clearNotUsedPaperData()
 }
 
-const cleanNotUsedUserFee = async () => {
+const cleanNotUsedUserFee = async (_getUserExchanges = getUserExchanges) => {
   logger.info('Clean not used fee start')
-  const exchanges = await getUserExchanges()
+  const exchanges = await _getUserExchanges()
 
   await feeDb
     .deleteManyData({
@@ -271,6 +283,7 @@ const utils = {
   removeOldBotWarnings,
   removeOldRates,
   clearBotEvents,
+  getUserExchanges,
 }
 
 export default utils

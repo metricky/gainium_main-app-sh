@@ -1,11 +1,11 @@
-import DB, { model } from '../../db'
 import { Types } from 'mongoose'
 import fs from 'fs'
-
-const filesDb = new DB(model.userFiles)
-const backtestDb = new DB(model.backtest)
-const comboBacktestDb = new DB(model.comboBacktest)
-const gridBacktestDb = new DB(model.gridBacktest)
+import {
+  backtestDb,
+  comboBacktestDb,
+  filesDb,
+  gridBacktestDb,
+} from '../../db/dbInit'
 
 const removeOldFiles = async () => {
   const files = await filesDb.readData(

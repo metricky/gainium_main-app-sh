@@ -65,6 +65,7 @@ export class MongooseConnect {
   static async getClient(
     connection: () => Promise<string>,
     syncIndexesFn?: () => Promise<void>,
+    forceSync = false,
   ) {
     if (!connection) {
       throw new Error('${loggerPrefix} | MongooseConnect | No connection fn')
@@ -79,7 +80,7 @@ export class MongooseConnect {
         MongooseConnect.client = await mongoose.connect(`${connectionString}`, {
           maxPoolSize: +MONGO_DB_MAX_POOL_SIZE || 100,
         })
-        if (!MongooseConnect.synced) {
+        if (!MongooseConnect.synced || forceSync) {
           MongooseConnect.synced = true
           if (syncIndexesFn) {
             syncIndexesFn()

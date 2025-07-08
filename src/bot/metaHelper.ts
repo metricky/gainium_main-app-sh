@@ -52,13 +52,14 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
   public data?: ExcludeDoc<Schema>
   public bots: Map<string, ChildBotType<T>> = new Map()
   public initDone = false
-  private bot = Bot.getInstance()
+
   public queueAfterInit: (() => Promise<void>)[] = []
   private redisDb: RedisWrapper | null = null
-  private closeTimer: NodeJS.Timeout | null = null
+  protected closeTimer: NodeJS.Timeout | null = null
   constructor(
     public options: MetaBotOptions,
     public db: DB<Schema>,
+    private bot = Bot.getInstance(),
   ) {
     this.init()
   }
@@ -244,7 +245,7 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
     )
   }
 
-  private updateBotData(data: Record<string, unknown>) {
+  protected updateBotData(data: Record<string, unknown>) {
     this.db.updateData({ _id: this.options.id } as any, { $set: data })
     this.emit('bot settings update', data)
   }
@@ -259,10 +260,17 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
     status: BotStatusEnum,
     closeType?: CloseDCATypeEnum,
     serverRestart?: boolean,
+    _skipCheck?: boolean,
   ) {
     if (!this.initDone) {
       this.queueAfterInit.push(() =>
-        this.setStatus.bind(this)(_botId, status, closeType, serverRestart),
+        this.setStatus.bind(this)(
+          _botId,
+          status,
+          closeType,
+          serverRestart,
+          _skipCheck,
+        ),
       )
       return
     }
@@ -351,6 +359,7 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
       this.data?.status ?? BotStatusEnum.open,
       undefined,
       false,
+      true,
     )
   }
 }

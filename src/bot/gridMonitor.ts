@@ -2,13 +2,12 @@ import { IdMute, IdMutex } from '../utils/mutex'
 import {
   PriceMessage,
   ProfitLossStats,
-  BotSchema,
   InputGrid,
   PositionSide,
   BotMarginTypeEnum,
 } from '../../types'
-import DB, { model } from '../db'
 import { isFutures } from '../utils/index'
+import { botDb } from '../db/dbInit'
 
 type GridStatsMap = {
   start: number
@@ -24,13 +23,12 @@ type GridStatsMap = {
 const mutex = new IdMutex()
 
 export class GridMonitor {
-  private gridBotDb: DB<BotSchema>
+  private gridBotDb = botDb
   private stats: Map<string, GridStatsMap>
   private callBacks: Map<string, (data: ProfitLossStats) => void>
   private static instance: GridMonitor
 
   private constructor() {
-    this.gridBotDb = new DB(model.bot)
     this.stats = new Map()
     this.callBacks = new Map()
   }

@@ -1,10 +1,11 @@
-import { userDb } from '../../db/dbInit'
+import { userDb as _userDb } from '../../db/dbInit'
 import { StatusEnum } from '../../../types'
 import jwt from 'jsonwebtoken'
 import { encrypt } from '../../utils/crypto'
-import type { ClearUserSchema } from '../../../types'
+import type { ClearUserSchema, UserSchema } from '../../../types'
 import { getFullLocationByIp } from './ip'
 import { JWT_SECRET } from '../../config'
+import DB from '../../db'
 
 if (!JWT_SECRET) {
   throw Error('missing jwt secret')
@@ -34,7 +35,7 @@ export const createOrUpdateUser = async (
     }
   }
   email = email.toLowerCase()
-  const findUser = await userDb.readData({
+  const findUser = await _userDb.readData({
     username: email,
   })
   if (findUser.status === StatusEnum.notok) {
@@ -86,7 +87,7 @@ export const createOrUpdateUser = async (
       }
     }
     set.last_active = +new Date()
-    const saveDataRequest = await userDb.updateData(
+    const saveDataRequest = await _userDb.updateData(
       { username: email },
       {
         ...set,
@@ -142,7 +143,7 @@ export const createOrUpdateUser = async (
       ],
       weekStart: weekStart || 'm',
     }
-    const createDataRequest = await userDb.createData(userToAdd)
+    const createDataRequest = await _userDb.createData(userToAdd)
     if (createDataRequest.status === StatusEnum.notok) {
       return createDataRequest
     }
@@ -155,5 +156,38 @@ export const createOrUpdateUser = async (
         shouldOnBoardExchange: true,
       },
     }
+  }
+}
+
+export const findUser = async <T extends UserSchema>(
+  token: string,
+  userDb: DB<T> = _userDb as unknown as DB<T>,
+) => {
+  if (token !== '') {
+    const userFind =
+      token === 'demo'
+        ? await userDb.readData({
+            demo: true,
+          })
+        : await userDb.readData({
+            tokens: { $elemMatch: { token } },
+          })
+    if (userFind.status === StatusEnum.ok) {
+      if (userFind.data && userFind.data.result) {
+        return {
+          status: StatusEnum.ok as typeof StatusEnum.ok,
+          reason: null,
+          data: userFind.data.result,
+        }
+      }
+    }
+    if (userFind.status === StatusEnum.notok) {
+      return userFind
+    }
+  }
+  return {
+    status: StatusEnum.notok as typeof StatusEnum.notok,
+    reason: 'User not found',
+    data: null,
   }
 }

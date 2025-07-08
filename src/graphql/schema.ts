@@ -1,4 +1,4 @@
-const BasicSchema = /* GraphQL */ `
+export const BasicSchema = /* GraphQL */ `
   scalar Date
   scalar StringOrArrayOfStrings
   scalar StringOrNumber
@@ -91,12 +91,49 @@ const BasicSchema = /* GraphQL */ `
   }
 `
 
-const UserSchema = /* GraphQL */ `
+const UserForm = /* GraphQL */ `
   type Query {
     checkUserExist: checkUserExistResponse
+  }
+  type Mutation {
+    setLicenseKey(input: setLicenseKeyInput!): setLicenseKeyResponse
+    deleteLicenseKey: setLicenseKeyResponse
+    registerAccount(input: registerAccountInput!): tokenResponse
+  }
+  type checkUserExistResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: Boolean
+  }
+  input setLicenseKeyInput {
+    key: String!
+  }
+  type setLicenseKeyResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: String
+  }
+  input registerAccountInput {
+    email: String!
+    password: String!
+    picture: String
+    lastName: String
+    name: String
+    timezone: String!
+    weekStart: String
+  }
+`
+
+const UserResponse = /* GraphQL */ `
+  type Query {
+    user: userResponse
+  }
+`
+
+export const UserSchema = /* GraphQL */ `
+  type Query {
     getUserFiles: getUserFilesResponse
     getExchange(input: getExchangeInput!): exchangeResponse
-    user: userResponse
     userFee(input: userFeeInput!): userFeeResponse
     multipleUserFees(input: multipleUserFeesInput!): multipleUserFeesResponse
     getBalances(input: getBalancesInput!): getBalancesResponse
@@ -107,9 +144,6 @@ const UserSchema = /* GraphQL */ `
     getUserFavoriteIndicators: userFavoriteIndicatorsResponse
   }
   type Mutation {
-    setLicenseKey(input: setLicenseKeyInput!): setLicenseKeyResponse
-    deleteLicenseKey: setLicenseKeyResponse
-    registerAccount(input: registerAccountInput!): tokenResponse
     resetAccount(input: resetAccountInput!): resetAccountResponse
     removeUserFiles(input: removeUserFilesInput!): removeUserFilesResponse
     token(input: tokenInput!): tokenResponse
@@ -145,14 +179,7 @@ const UserSchema = /* GraphQL */ `
     setZeroFee(input: setZeroFeeInput!): setHedgeResponse
     setVideoUpdate(input: setVideoUpdateInput!): setVideoUpdateResponse
   }
-  input setLicenseKeyInput {
-    key: String!
-  }
-  type setLicenseKeyResponse implements BasicResponse {
-    status: Status
-    reason: String
-    data: String
-  }
+
   enum resetAccountTypeEnum {
     paper
     live
@@ -160,20 +187,6 @@ const UserSchema = /* GraphQL */ `
   }
   input resetAccountInput {
     type: resetAccountTypeEnum
-  }
-  input registerAccountInput {
-    email: String!
-    password: String!
-    picture: String
-    lastName: String
-    name: String
-    timezone: String!
-    weekStart: String
-  }
-  type checkUserExistResponse implements BasicResponse {
-    status: Status
-    reason: String
-    data: Boolean
   }
   type resetAccountResponse implements BasicResponse {
     status: Status
@@ -459,8 +472,10 @@ const UserSchema = /* GraphQL */ `
     balance: Float
     keysType: String
     okxSource: String
+    affiliate: Boolean
     updateTime: Float
     lastUpdated: Float
+    waitingForConfirmation: Boolean
   }
   type deleteExchangeResponse implements BasicResponse {
     status: Status
@@ -547,10 +562,11 @@ const UserSchema = /* GraphQL */ `
     shouldOnBoardExchange: Boolean
     name: String
     lastName: String
+    nickname: String
   }
 `
 
-const BotSchema = /* GraphQL */ `
+export const BotSchema = /* GraphQL */ `
   type Query {
     searchByBotName(input: searchByBotNameInput!): searchByBotNameResponse
     getServerSideBacktestRequests(
@@ -682,6 +698,7 @@ const BotSchema = /* GraphQL */ `
     changeHedgeDCABot(
       input: changeHedgeComboBotInput!
     ): getHedgeComboBotResponse
+    changeBotShare(input: changeBotShareInput!): changeBotShareResponse
     changeBot(input: changeBotInput!): getBotResponse
     changeDCABot(input: changeDCABotInput!): getDCABotResponse
     changeComboBot(input: changeComboBotInput!): getComboBotResponse
@@ -719,6 +736,9 @@ const BotSchema = /* GraphQL */ `
     deleteBacktests(input: deleteBacktestsInput!): saveBacktestsResponse
     deleteComboBacktests(input: deleteBacktestsInput!): saveBacktestsResponse
     deleteGridBacktests(input: deleteBacktestsInput!): saveBacktestsResponse
+    shareBacktest(input: shareBacktestInput): shareBacktestResponse
+    shareComboBacktest(input: shareBacktestInput): shareBacktestResponse
+    shareGridBacktest(input: String): shareBacktestResponse
     setArchive(input: setArchiveInput!): setArchiveResponse
     closeOrderOnExchange(
       input: closeOrderOnExchangeInput!
@@ -729,6 +749,28 @@ const BotSchema = /* GraphQL */ `
     ): closePositionOnExchangeResponse
     resetShowError(input: resetShowErrorInput!): resetShowErrorResponse
     manageBalanceDiff(input: manageBalanceDiffInput!): manageBalanceDiffResponse
+  }
+  input shareBacktestInput {
+    _id: String
+  }
+  type shareBacktestResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: String
+  }
+  input changeBotShareInput {
+    botId: String!
+    type: botTypeEnum!
+    share: Boolean!
+  }
+  type botShare {
+    share: Boolean
+    shareId: String
+  }
+  type changeBotShareResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: botShare
   }
   input getComboBotDealsByIdInput {
     botId: String!
@@ -1089,6 +1131,7 @@ const BotSchema = /* GraphQL */ `
   }
   input getBotOrdersInput {
     id: String!
+    shareId: String
     type: botTypeEnum!
     status: String!
     page: Int
@@ -1098,15 +1141,18 @@ const BotSchema = /* GraphQL */ `
   }
   input getDealOrdersInput {
     id: String!
+    shareId: String
     dealId: String!
     all: Boolean
   }
   input getBotTransactionsInput {
     id: String!
+    shareId: String
     page: Int!
   }
   input getBotDealsInput {
     id: String!
+    shareId: String
     page: Int!
     status: String!
     pageSize: Int
@@ -1115,11 +1161,16 @@ const BotSchema = /* GraphQL */ `
   }
   input getBotDealsStatsInput {
     id: String!
+    shareId: String
   }
   type fullOrders {
     orders: [botOrder]
     page: Int
     total: Int
+  }
+  type botShare {
+    share: Boolean
+    shareId: String
   }
   type dealOrdersResponse implements BasicResponse {
     status: Status
@@ -1218,6 +1269,7 @@ const BotSchema = /* GraphQL */ `
   }
   input getBotSettingsInput {
     botId: String!
+    shareId: String
   }
   input getBotEventsInput {
     botId: String!
@@ -2102,6 +2154,7 @@ const BotSchema = /* GraphQL */ `
   }
   input getBotInput {
     id: String!
+    shareId: String
   }
   input getDCADealsInput {
     terminal: Boolean
@@ -2321,6 +2374,8 @@ const BotSchema = /* GraphQL */ `
     avgPrice: Float
     uuid: String
     progress: botProgress
+    share: Boolean
+    shareId: String
     workingTimeTotal: Float
     position: BotPosition
     exchangeUnassigned: Boolean
@@ -3014,6 +3069,8 @@ const BotSchema = /* GraphQL */ `
     dealsInBot: dealsInBot
     flags: [String]
     uuid: String
+    share: Boolean
+    shareId: String
     deals: [dcaDeal]
     orders: [botOrder]
     workingTimeTotal: Float
@@ -3085,6 +3142,8 @@ const BotSchema = /* GraphQL */ `
     paperContext: Boolean
     profitByAssets: [ProfitByAssets]
     public: Boolean
+    share: Boolean
+    shareId: String
     showErrorWarning: String
     status: BotStatus
     statusReason: String
@@ -3132,6 +3191,8 @@ const BotSchema = /* GraphQL */ `
     dealsInBot: dealsInBot
     flags: [String]
     uuid: String
+    share: Boolean
+    shareId: String
     deals: [dcaDeal]
     orders: [botOrder]
     minigrids: [minigrids]
@@ -4946,7 +5007,7 @@ const BotSchema = /* GraphQL */ `
   }
 `
 
-const GlobalVariablesSchema = /* GraphQL */ `
+export const GlobalVariablesSchema = /* GraphQL */ `
   enum GlobalVariableTypeEnum {
     text
     int
@@ -5044,4 +5105,11 @@ const GlobalVariablesSchema = /* GraphQL */ `
   }
 `
 
-export default [BasicSchema, UserSchema, BotSchema, GlobalVariablesSchema]
+export default [
+  BasicSchema,
+  UserSchema,
+  UserForm,
+  UserResponse,
+  BotSchema,
+  GlobalVariablesSchema,
+]

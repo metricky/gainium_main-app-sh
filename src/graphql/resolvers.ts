@@ -1,4 +1,5 @@
 import { v4 } from 'uuid'
+import DB from '../db'
 import type { PipelineStage, ProjectionFields } from 'mongoose'
 import { Types } from 'mongoose'
 import {
@@ -49,6 +50,8 @@ import {
   ResetAccountTypeEnum,
   DCACloseTriggerEnum,
   MainBot,
+  InputRequest,
+  UserSchema,
 } from '../../types'
 import BotInstance from '../bot'
 import utils, { isFutures } from '../utils'
@@ -72,7 +75,6 @@ import {
   rateDb,
   snapshotDb,
   transactionDb,
-  userDb,
   userPeriodDb,
   comboBotDb,
   comboDealsDb,
@@ -87,6 +89,7 @@ import {
   hedgeComboBotDb,
   globalVarsDb,
   hedgeDCABotDb,
+  userDb as _userDb,
 } from '../db/dbInit'
 import { errorAccess } from './errorResponse'
 import {
@@ -100,7 +103,7 @@ import {
 import { decrypt, encrypt } from '../utils/crypto'
 import logger from '../utils/logger'
 import { verifyPassword } from './handlers/password'
-import { createOrUpdateUser } from './handlers/user'
+import { createOrUpdateUser, findUser as _findUser } from './handlers/user'
 import { resetUser } from '../utils/user'
 import { mapDataGridOptionsToMongoOptions } from '../db/utils'
 import Exchange from '../exchange/exchange'
@@ -120,8 +123,7 @@ import RedisClient from '../db/redis'
 import moment from 'moment-timezone'
 import { getBotsByGlobalVar } from '../bot/utils'
 import { JWT_SECRET } from '../config'
-
-const Bot = BotInstance.getInstance()
+import { DataResponse, ErrorResponse } from '../db/crud'
 
 const math = new MathHelper()
 
@@ -131,46 +133,21 @@ if (!JWT_SECRET) {
   throw Error('missing jwt secret')
 }
 
-const findUser = async (token: string) => {
-  if (token !== '') {
-    const userFind = await userDb.readData({
-      tokens: { $elemMatch: { token } },
-    })
-    if (userFind.status === StatusEnum.ok) {
-      if (userFind.data && userFind.data.result) {
-        return {
-          status: StatusEnum.ok as typeof StatusEnum.ok,
-          reason: null,
-          data: userFind.data.result,
-        }
-      }
-    }
-    if (userFind.status === StatusEnum.notok) {
-      return userFind
-    }
-  }
-  return {
-    status: StatusEnum.notok as typeof StatusEnum.notok,
-    reason: 'User not found',
-    data: null,
-  }
-}
-
-type InputRequest = {
-  token: string
-  userAgent?: string
-  req: {
-    user?: { username: string; authorized: boolean }
-    cookies: { a?: string; aid?: string }
-  }
-  paperContext: boolean
-  ip?: string
-}
-
 const rabbitClient = new Rabbit()
 
-const resolvers = {
-  Query: {
+const resolvers = <
+  R extends UserSchema = UserSchema,
+  T extends ErrorResponse | DataResponse<ExcludeDoc<R>> =
+    | ErrorResponse
+    | DataResponse<ExcludeDoc<R>>,
+>(
+  findUser: (token: string) => Promise<T> = _findUser as unknown as (
+    token: string,
+  ) => Promise<T>,
+  userDb: DB<R> = _userDb as unknown as DB<R>,
+  Bot: BotInstance = BotInstance.getInstance(),
+) => {
+  const Query = {
     checkUserExist: async () => {
       const user = await userDb.countData({})
 
@@ -318,7 +295,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -346,7 +323,7 @@ const resolvers = {
       }
     },
     getUserPeriods: async (_parent: any, {}, { token, req }: InputRequest) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -377,7 +354,7 @@ const resolvers = {
       const exchangeRequest =
         info.fieldNodes[0].selectionSet.loc.source.body.indexOf('exchanges') !==
         -1
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -478,7 +455,7 @@ const resolvers = {
       { input }: { input?: { skipSnapshot?: boolean } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -508,7 +485,7 @@ const resolvers = {
       {},
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -616,6 +593,7 @@ const resolvers = {
       return await Bot.getBotList(
         BotType.grid,
         user.data._id,
+        token,
         input?.status,
         paperContext,
         undefined,
@@ -701,6 +679,7 @@ const resolvers = {
       const result = await Bot.getBotList(
         BotType.dca,
         user.data._id,
+        token,
         input?.status,
         paperContext,
         input?.all,
@@ -728,6 +707,7 @@ const resolvers = {
       const result = await Bot.getBotList(
         BotType.combo,
         user.data._id,
+        token,
         input?.status,
         paperContext,
         input?.all,
@@ -755,6 +735,7 @@ const resolvers = {
       const result = await Bot.getBotList(
         BotType.hedgeCombo,
         user.data._id,
+        token,
         input?.status,
         paperContext,
         input?.all,
@@ -782,6 +763,7 @@ const resolvers = {
       const result = await Bot.getBotList(
         BotType.hedgeDca,
         user.data._id,
+        token,
         input?.status,
         paperContext,
         input?.all,
@@ -943,7 +925,7 @@ const resolvers = {
     },
     getBot: async (
       _parent: any,
-      { input }: { input: { id: string } },
+      { input }: { input: { id: string; shareId?: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
       if (!req.user?.authorized) {
@@ -958,7 +940,9 @@ const resolvers = {
         BotType.grid,
         user.data?._id.toString() ?? '',
         input.id,
+        token === 'demo',
         paperContext,
+        input.shareId,
       )
     },
     getBotEvents: async (
@@ -978,7 +962,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1025,7 +1009,7 @@ const resolvers = {
     },
     getDCABot: async (
       _parent: any,
-      { input }: { input: { id: string } },
+      { input }: { input: { id: string; shareId?: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
       if (!req.user?.authorized) {
@@ -1039,64 +1023,72 @@ const resolvers = {
         BotType.dca,
         user.data?._id.toString() ?? '',
         input.id,
+        token === 'demo',
         paperContext,
+        input.shareId,
       )
     },
     getComboBot: async (
       _parent: any,
-      { input }: { input: { id: string } },
+      { input }: { input: { id: string; shareId?: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
-      if (user.status === StatusEnum.notok) {
+      if (user.status === StatusEnum.notok && !input.shareId) {
         return user
       }
       return await Bot.getBot(
         BotType.combo,
         user.data?._id.toString() ?? '',
         input.id,
+        token === 'demo',
         paperContext,
+        input.shareId,
       )
     },
     getHedgeComboBot: async (
       _parent: any,
-      { input }: { input: { id: string } },
+      { input }: { input: { id: string; shareId?: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
-      if (user.status === StatusEnum.notok) {
+      if (user.status === StatusEnum.notok && !input.shareId) {
         return user
       }
       return await Bot.getBot(
         BotType.hedgeCombo,
         user.data?._id.toString() ?? '',
         input.id,
+        token === 'demo',
         paperContext,
+        input.shareId,
       )
     },
     getHedgeDCABot: async (
       _parent: any,
-      { input }: { input: { id: string } },
+      { input }: { input: { id: string; shareId?: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
-      if (user.status === StatusEnum.notok) {
+      if (user.status === StatusEnum.notok && !input.shareId) {
         return user
       }
       return await Bot.getBot(
         BotType.hedgeDca,
         user.data?._id.toString() ?? '',
         input.id,
+        token === 'demo',
         paperContext,
+        input.shareId,
       )
     },
     getBotOrders: async (
@@ -1106,6 +1098,7 @@ const resolvers = {
       }: {
         input: {
           id: string
+          shareId?: string
           type: BotType
           status: OrderStatusType
           page?: number
@@ -1116,7 +1109,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
 
@@ -1127,7 +1120,9 @@ const resolvers = {
       return await Bot.getBotOrders(
         user.data._id.toString(),
         input.id,
+        input.shareId,
         input.type,
+        token === 'demo',
         paperContext,
         input.status,
         input.page,
@@ -1143,6 +1138,7 @@ const resolvers = {
       }: {
         input: {
           id: string
+          shareId?: string
           type: BotType
           page: number
           dealId: string
@@ -1151,7 +1147,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
 
@@ -1163,6 +1159,8 @@ const resolvers = {
         user.data._id.toString(),
         input.id,
         input.dealId,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.all,
       )
@@ -1174,6 +1172,7 @@ const resolvers = {
       }: {
         input: {
           id: string
+          shareId?: string
           type: BotType
           page: number
           dealId: string
@@ -1194,6 +1193,8 @@ const resolvers = {
         user.data._id.toString(),
         input.id,
         input.dealId,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.all,
       )
@@ -1205,7 +1206,7 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           type: BotType
           page: number
           dealId: string
@@ -1226,6 +1227,8 @@ const resolvers = {
         user.data._id.toString(),
         input.id,
         input.dealId,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.all,
       )
@@ -1237,7 +1240,7 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           type: BotType
           page: number
           dealId: string
@@ -1246,7 +1249,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
 
@@ -1258,16 +1261,18 @@ const resolvers = {
         user.data._id.toString(),
         input.id,
         input.dealId,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.all,
       )
     },
     getBotTransactions: async (
       _parent: any,
-      { input }: { input: { id: string; page: number } },
+      { input }: { input: { id: string; shareId?: string; page: number } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1277,6 +1282,8 @@ const resolvers = {
       return await Bot.getBotTransactions(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.page,
       )
@@ -1288,7 +1295,7 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           page: number
           status: DCADealStatusEnum
           pageSize?: number
@@ -1298,7 +1305,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1308,6 +1315,8 @@ const resolvers = {
       return await Bot.getBotDeals(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.status,
         input.page,
@@ -1323,7 +1332,7 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           page: number
           status: DCADealStatusEnum
           pageSize?: number
@@ -1333,7 +1342,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1343,6 +1352,8 @@ const resolvers = {
       return await Bot.getComboBotDeals(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.status,
         input.page,
@@ -1358,7 +1369,7 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           page: number
           status: DCADealStatusEnum
           pageSize?: number
@@ -1368,7 +1379,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1378,6 +1389,8 @@ const resolvers = {
       return await Bot.getHedgeComboBotDeals(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.status,
         input.page,
@@ -1393,7 +1406,7 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           page: number
           status: DCADealStatusEnum
           pageSize?: number
@@ -1403,7 +1416,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1413,6 +1426,8 @@ const resolvers = {
       return await Bot.getHedgeDcaBotDeals(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.status,
         input.page,
@@ -1430,7 +1445,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1444,32 +1459,6 @@ const resolvers = {
         paperContext,
       )
     },
-    getDCABotDealsById: async (
-      _parent: any,
-      {
-        input,
-      }: {
-        input: {
-          botId: string
-          id: string[]
-        }
-      },
-      { token, req, paperContext }: InputRequest,
-    ) => {
-      if (!req.user?.authorized) {
-        return errorAccess()
-      }
-      const user = await findUser(token)
-      if (user.status === StatusEnum.notok) {
-        return user
-      }
-      return await Bot.getDCABotDealsById(
-        user.data._id.toString(),
-        input.botId,
-        input.id,
-        paperContext,
-      )
-    },
     getBotDealsStats: async (
       _parent: any,
       {
@@ -1477,11 +1466,12 @@ const resolvers = {
       }: {
         input: {
           id: string
+          shareId?: string
         }
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1491,6 +1481,8 @@ const resolvers = {
       return await Bot.getBotDealsStats(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
       )
     },
@@ -1501,11 +1493,12 @@ const resolvers = {
       }: {
         input: {
           id: string
+          shareId?: string
         }
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1515,6 +1508,8 @@ const resolvers = {
       return await Bot.getComboBotDealsStats(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
       )
     },
@@ -1525,11 +1520,12 @@ const resolvers = {
       }: {
         input: {
           id: string
+          shareId?: string
         }
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1539,6 +1535,8 @@ const resolvers = {
       return await Bot.getHedgeComboBotDealsStats(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
       )
     },
@@ -1549,11 +1547,12 @@ const resolvers = {
       }: {
         input: {
           id: string
+          shareId?: string
         }
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1563,6 +1562,8 @@ const resolvers = {
       return await Bot.getHedgeDcaBotDealsStats(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
       )
     },
@@ -1573,14 +1574,14 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           page: number
           status: 'open' | 'closed'
         }
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1590,6 +1591,8 @@ const resolvers = {
       return await Bot.getComboBotMinigrids(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.status,
         input.page,
@@ -1602,14 +1605,14 @@ const resolvers = {
       }: {
         input: {
           id: string
-
+          shareId?: string
           page: number
           status: 'open' | 'closed'
         }
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1619,6 +1622,8 @@ const resolvers = {
       return await Bot.getHedgeComboBotMinigrids(
         user.data._id.toString(),
         input.id,
+        input.shareId,
+        token === 'demo',
         paperContext,
         input.status,
         input.page,
@@ -1626,24 +1631,28 @@ const resolvers = {
     },
     getDCABotSettings: async (
       _parent: any,
-      { input }: { input: { botId: string } },
+      { input }: { input: { botId: string; shareId?: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
       }
-      return await Bot.getDCABotSettings(user.data._id.toString(), input.botId)
+      return await Bot.getDCABotSettings(
+        user.data._id.toString(),
+        input.botId,
+        input.shareId,
+      )
     },
     getComboBotSettings: async (
       _parent: any,
-      { input }: { input: { botId: string } },
+      { input }: { input: { botId: string; shareId?: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1653,14 +1662,15 @@ const resolvers = {
       return await Bot.getComboBotSettings(
         user.data._id.toString(),
         input.botId,
+        input.shareId,
       )
     },
     getHedgeComboBotSettings: async (
       _parent: any,
-      { input }: { input: { botId: string } },
+      { input }: { input: { botId: string; shareId?: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1670,14 +1680,15 @@ const resolvers = {
       return await Bot.getHedgeComboBotSettings(
         user.data._id.toString(),
         input.botId,
+        input.shareId,
       )
     },
     getHedgeDCABotSettings: async (
       _parent: any,
-      { input }: { input: { botId: string } },
+      { input }: { input: { botId: string; shareId?: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1687,28 +1698,33 @@ const resolvers = {
       return await Bot.getHedgeDcaBotSettings(
         user.data._id.toString(),
         input.botId,
+        input.shareId,
       )
     },
     getGridBotSettings: async (
       _parent: any,
-      { input }: { input: { botId: string } },
+      { input }: { input: { botId: string; shareId: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
       }
-      return await Bot.getGridBotSettings(user.data._id.toString(), input.botId)
+      return await Bot.getGridBotSettings(
+        user.data._id.toString(),
+        input.botId,
+        input.shareId,
+      )
     },
     getTradingTerminalBotsList: async (
       _parent: any,
       {},
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1725,7 +1741,7 @@ const resolvers = {
       { input }: { input: { symbol: string; uuid: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { symbol, uuid } = input
@@ -1770,7 +1786,7 @@ const resolvers = {
       { input }: { input: { symbol: string[]; uuid: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { symbol, uuid } = input
@@ -1814,7 +1830,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const { assets, uuid, shouldSumBalance } = input
@@ -2046,7 +2062,6 @@ const resolvers = {
                                     timezone,
                                   },
                                 },
-
                                 year: {
                                   $year: {
                                     date: '$date',
@@ -2404,7 +2419,6 @@ const resolvers = {
                 paperContext: paperContext ? { $eq: true } : { $ne: true },
               },
             },
-
             {
               $group: {
                 _id: null,
@@ -2467,7 +2481,6 @@ const resolvers = {
                                       timezone,
                                     },
                                   },
-
                                   year: {
                                     $year: {
                                       date: '$date',
@@ -2577,7 +2590,6 @@ const resolvers = {
               time: { $gt: startTime },
             },
           },
-
           {
             $project: {
               _id: 1,
@@ -2612,6 +2624,229 @@ const resolvers = {
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
+      }
+      if (token === 'demo') {
+        const agg: PipelineStage[] = [
+          {
+            $match: {
+              _id: user.data._id,
+            },
+          },
+          {
+            $facet: {
+              grid: [
+                {
+                  $lookup: {
+                    let: {
+                      search: {
+                        $toString: '$_id',
+                      },
+                    },
+                    pipeline: [
+                      {
+                        $match: {
+                          $expr: {
+                            $and: [
+                              {
+                                $eq: ['$userId', '$$search'],
+                              },
+                              {
+                                $eq: ['$public', true],
+                              },
+                              // @ts-ignore
+                              {
+                                [paperContext ? '$eq' : '$ne']: [
+                                  '$paperContext',
+                                  true,
+                                ],
+                              },
+                            ],
+                          },
+                        },
+                      },
+                      {
+                        $project: {
+                          _id: 1,
+                        },
+                      },
+                    ],
+                    as: 'grid',
+                    from: 'bots',
+                  },
+                },
+                {
+                  $unwind: '$grid',
+                },
+                {
+                  $replaceRoot: {
+                    newRoot: '$grid',
+                  },
+                },
+              ],
+              dca: [
+                {
+                  $lookup: {
+                    let: {
+                      search: {
+                        $toString: '$_id',
+                      },
+                    },
+                    pipeline: [
+                      {
+                        $match: {
+                          $expr: {
+                            $and: [
+                              {
+                                $eq: ['$userId', '$$search'],
+                              },
+                              {
+                                $eq: ['$public', true],
+                              },
+                              // @ts-ignore
+                              {
+                                [paperContext ? '$eq' : '$ne']: [
+                                  '$paperContext',
+                                  true,
+                                ],
+                              },
+                            ],
+                          },
+                        },
+                      },
+                      {
+                        $project: {
+                          _id: 1,
+                        },
+                      },
+                    ],
+                    as: 'dca',
+                    from: 'dcabots',
+                  },
+                },
+                {
+                  $unwind: '$dca',
+                },
+                {
+                  $replaceRoot: {
+                    newRoot: '$dca',
+                  },
+                },
+              ],
+              combo: [
+                {
+                  $lookup: {
+                    let: {
+                      search: {
+                        $toString: '$_id',
+                      },
+                    },
+                    pipeline: [
+                      {
+                        $match: {
+                          $expr: {
+                            $and: [
+                              {
+                                $eq: ['$userId', '$$search'],
+                              },
+                              {
+                                $eq: ['$public', true],
+                              },
+                              // @ts-ignore
+                              {
+                                [paperContext ? '$eq' : '$ne']: [
+                                  '$paperContext',
+                                  true,
+                                ],
+                              },
+                            ],
+                          },
+                        },
+                      },
+                      {
+                        $project: {
+                          _id: 1,
+                        },
+                      },
+                    ],
+                    as: 'combo',
+                    from: 'combobots',
+                  },
+                },
+                {
+                  $unwind: '$combo',
+                },
+                {
+                  $replaceRoot: {
+                    newRoot: '$combo',
+                  },
+                },
+              ],
+            },
+          },
+          {
+            $project: {
+              ids: {
+                $setUnion: ['$grid', '$dca', '$combo'],
+              },
+            },
+          },
+          {
+            $unwind: {
+              path: '$ids',
+              includeArrayIndex: 'ind',
+              preserveNullAndEmptyArrays: false,
+            },
+          },
+          {
+            $lookup: {
+              let: {
+                search: {
+                  $toString: '$ids._id',
+                },
+              },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        {
+                          $eq: ['$botId', '$$search'],
+                        },
+                        {
+                          $eq: ['$status', 'FILLED'],
+                        },
+                      ],
+                    },
+                  },
+                },
+                {
+                  $sort: {
+                    updated: -1,
+                  },
+                },
+                {
+                  $limit: 10,
+                },
+              ],
+              as: 'orders',
+              from: 'orders',
+            },
+          },
+          {
+            $unwind: {
+              path: '$orders',
+              includeArrayIndex: 'ind',
+              preserveNullAndEmptyArrays: false,
+            },
+          },
+          {
+            $replaceRoot: {
+              newRoot: '$orders',
+            },
+          },
+        ]
+        const res = await userDb.aggregate(agg)
+        return res
       }
       const orders = await orderDb.readData(
         {
@@ -2857,7 +3092,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -2883,7 +3118,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3265,7 +3500,7 @@ const resolvers = {
       {},
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3289,7 +3524,7 @@ const resolvers = {
       {},
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3380,42 +3615,8 @@ const resolvers = {
         data: bots,
       }
     },
-    getGlobalVariablesByIds: async (
-      _parent: any,
-      {
-        input,
-      }: {
-        input: {
-          ids: string[]
-        }
-      },
-      { token }: InputRequest,
-    ) => {
-      const user = await findUser(token)
-      if (user.status === StatusEnum.notok) {
-        return user
-      }
-      const response = await globalVarsDb.readData(
-        {
-          _id: { $in: input.ids.map((id) => new Types.ObjectId(id)) },
-          userId: `${user.data._id}`,
-        },
-        {},
-        {},
-        true,
-        true,
-      )
-      return {
-        status: response.status,
-        data:
-          response.status === StatusEnum.ok
-            ? response.data.result.map((i) => ({ id: `${i._id}`, ...i }))
-            : null,
-        reason: response.status === StatusEnum.ok ? null : response.reason,
-      }
-    },
-  },
-  Mutation: {
+  }
+  const Mutation = {
     resetAccount: async (
       _parents: any,
       { input }: { input: { type: ResetAccountTypeEnum } },
@@ -4125,7 +4326,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4157,7 +4358,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4186,7 +4387,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4215,7 +4416,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4236,7 +4437,7 @@ const resolvers = {
       { input: { data } }: { input: { data: { id: string; type: BotType }[] } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4268,7 +4469,7 @@ const resolvers = {
       { input: { hedge, uuid } }: { input: { hedge: boolean; uuid: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4376,7 +4577,7 @@ const resolvers = {
       { input: { value, uuid } }: { input: { value: boolean; uuid: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4594,11 +4795,12 @@ const resolvers = {
           shouldOnBoardExchange?: boolean
           name?: string
           lastName?: string
+          nickname?: string
         }
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const {
@@ -4609,6 +4811,7 @@ const resolvers = {
         shouldOnBoard,
         name,
         lastName,
+        nickname,
       } = input
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
@@ -4623,6 +4826,7 @@ const resolvers = {
         displayName?: string
         name?: string
         lastName?: string
+        nickname?: string
       } = {}
       if (name) {
         $set.name = name
@@ -4644,6 +4848,9 @@ const resolvers = {
       }
       if (shouldOnBoardExchange !== undefined) {
         $set.shouldOnBoardExchange = shouldOnBoardExchange
+      }
+      if (nickname !== undefined) {
+        $set.nickname = nickname
       }
       if (Object.keys($set).length > 0) {
         const saveDataRequest = await userDb.updateData(
@@ -4685,7 +4892,7 @@ const resolvers = {
       { token, req }: InputRequest,
     ) => {
       try {
-        if (!req.user?.authorized) {
+        if (token === 'demo' || !req.user?.authorized) {
           return errorAccess()
         }
         const {
@@ -5126,7 +5333,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { stablecoinBalance, coinToTopUp } = input
@@ -5338,7 +5545,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { uuid } = input
@@ -5435,7 +5642,7 @@ const resolvers = {
       { input }: { input: { timezone: string; weekStart: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { timezone, weekStart } = input
@@ -5461,7 +5668,7 @@ const resolvers = {
       }
     },
     deleteToken: async (_parent: any, {}, { token, req }: InputRequest) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5525,7 +5732,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5548,7 +5755,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5574,7 +5781,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5600,7 +5807,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5634,7 +5841,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5771,7 +5978,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5785,7 +5992,7 @@ const resolvers = {
       { input }: { input: DCABotSettings & { id: string; vars: BotVars } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5812,7 +6019,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5839,7 +6046,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5857,7 +6064,7 @@ const resolvers = {
       { input }: { input: ComboBotSettings & { id: string; vars: BotVars } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5868,6 +6075,26 @@ const resolvers = {
         input,
         user.data._id.toString(),
         paperContext,
+      )
+    },
+    changeBotShare: async (
+      _parent: any,
+      { input }: { input: { botId: string; share: boolean; type: BotType } },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return await Bot.changeBotShare(
+        {
+          ...input,
+          userId: user.data._id.toString(),
+        },
+        !!user.data.paperContext,
       )
     },
     changeStatus: async (
@@ -5891,7 +6118,7 @@ const resolvers = {
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5913,7 +6140,7 @@ const resolvers = {
         userDb.updateData(
           { _id: user.data._id.toString() },
           {
-            //TODO: shoudl be in bot service
+            //TODO: should be in bot service
             $inc: {
               'bot_stats.total_bots': type.startsWith('hedge') ? inc * 2 : inc,
               'bot_stats.total_real_bots': paperContext
@@ -5975,7 +6202,7 @@ const resolvers = {
       { input }: { input: { id: string; type?: BotType } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5996,7 +6223,7 @@ const resolvers = {
       { input }: { input: { id?: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6010,7 +6237,7 @@ const resolvers = {
       { input }: { input: { picture: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { picture } = input
@@ -6048,7 +6275,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6074,7 +6301,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6101,7 +6328,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6130,7 +6357,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6159,7 +6386,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6201,7 +6428,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6295,7 +6522,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6322,7 +6549,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6349,7 +6576,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6399,7 +6626,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6425,7 +6652,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6529,7 +6756,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6556,7 +6783,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6583,7 +6810,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6610,7 +6837,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6644,7 +6871,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6678,7 +6905,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6723,7 +6950,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6750,7 +6977,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6788,7 +7015,7 @@ const resolvers = {
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6808,7 +7035,7 @@ const resolvers = {
       _input: unknown,
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
 
@@ -6858,7 +7085,7 @@ const resolvers = {
       { input }: { input: { key: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6890,7 +7117,7 @@ const resolvers = {
       { input }: { input: { key: string; permission: APIPermission } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6921,7 +7148,7 @@ const resolvers = {
       { input }: { input: { key: string; name: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6952,7 +7179,7 @@ const resolvers = {
       { input }: { input: { key: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6980,6 +7207,121 @@ const resolvers = {
         data: saveDataRequest.data.apiKeys,
       }
     },
+    shareBacktest: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { _id: string }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const filter = { _id: input._id, userId: user.data._id.toString() }
+      const get = await backtestDb.readData(filter)
+      if (get.status === StatusEnum.notok) {
+        return get
+      }
+      if (get.data.result.shareId) {
+        return {
+          status: StatusEnum.ok,
+          data: get.data.result.shareId,
+          reason: null,
+        }
+      }
+      const shareId = v4()
+      const result = await backtestDb.updateData(filter, {
+        $set: { shareId },
+      })
+
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? shareId : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    shareComboBacktest: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { _id: string }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const filter = { _id: input._id, userId: user.data._id.toString() }
+      const get = await comboBacktestDb.readData(filter)
+      if (get.status === StatusEnum.notok) {
+        return get
+      }
+      if (get.data.result.shareId) {
+        return {
+          status: StatusEnum.ok,
+          data: get.data.result.shareId,
+          reason: null,
+        }
+      }
+      const shareId = v4()
+      const result = await comboBacktestDb.updateData(filter, {
+        $set: { shareId },
+      })
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? shareId : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    shareGridBacktest: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { _id: string }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const filter = { _id: input._id, userId: user.data._id.toString() }
+      const get = await gridBacktestDb.readData(filter)
+      if (get.status === StatusEnum.notok) {
+        return get
+      }
+      if (get.data.result.shareId) {
+        return {
+          status: StatusEnum.ok,
+          data: get.data.result.shareId,
+          reason: null,
+        }
+      }
+      const shareId = v4()
+      const result = await gridBacktestDb.updateData(filter, {
+        $set: { shareId },
+      })
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? shareId : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
     changePassword: async (
       _parent: any,
       {
@@ -6990,7 +7332,7 @@ const resolvers = {
       { token, req }: InputRequest,
     ) => {
       const { password } = input
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -7029,7 +7371,7 @@ const resolvers = {
       { input }: { input: Omit<CleanUserPeriod, '_id' | 'userId'> },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -7043,18 +7385,14 @@ const resolvers = {
       if (periods.status === StatusEnum.notok) {
         return periods
       }
-      return resolvers.Query.getUserPeriods(
-        _parent,
-        {},
-        { token, req, paperContext },
-      )
+      return Query.getUserPeriods(_parent, {}, { token, req, paperContext })
     },
     updateUserPeriod: async (
       _parent: any,
       { input }: { input: Omit<CleanUserPeriod, '_id'> },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -7070,18 +7408,14 @@ const resolvers = {
       if (periods.status === StatusEnum.notok) {
         return periods
       }
-      return resolvers.Query.getUserPeriods(
-        _parent,
-        {},
-        { token, req, paperContext },
-      )
+      return Query.getUserPeriods(_parent, {}, { token, req, paperContext })
     },
     deleteUserPeriod: async (
       _parent: any,
       { input }: { input: { uuid: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -7095,18 +7429,14 @@ const resolvers = {
       if (periods.status === StatusEnum.notok) {
         return periods
       }
-      return resolvers.Query.getUserPeriods(
-        _parent,
-        {},
-        { token, req, paperContext },
-      )
+      return Query.getUserPeriods(_parent, {}, { token, req, paperContext })
     },
     addUserFavoritePair: async (
       _parent: any,
       { input }: { input: { provider: ExchangeEnum; pair: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { pair, provider } = input
@@ -7171,7 +7501,7 @@ const resolvers = {
       { input }: { input: { provider: ExchangeEnum; pair: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { pair, provider } = input
@@ -7212,7 +7542,7 @@ const resolvers = {
       { input }: { input: { indicator: IndicatorEnum } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { indicator } = input
@@ -7244,7 +7574,7 @@ const resolvers = {
       { input }: { input: { indicator: IndicatorEnum } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
       const { indicator } = input
@@ -7269,7 +7599,12 @@ const resolvers = {
         reason: null,
       }
     },
-  },
+  }
+
+  return {
+    Query,
+    Mutation,
+  }
 }
 
 export default resolvers

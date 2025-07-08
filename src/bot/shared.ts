@@ -170,7 +170,7 @@ export class SharedStore<T, D = T & SchemaI> {
   }
 }
 
-class SimpleStore<T> {
+export class SimpleStore<T> {
   private map: Map<string, T> = new Map()
 
   private subscribers: Map<string, Set<string>> = new Map()
@@ -256,7 +256,7 @@ class BotSharedData {
 
   private redis: RedisWrapper | null = null
 
-  private userStore = new SharedStore<UserType, UserSchema>(
+  protected userStore = new SharedStore<UserType, UserSchema>(
     userDb,
     'userStore',
     this.updateUserStore.bind(this),

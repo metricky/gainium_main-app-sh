@@ -4493,3 +4493,13 @@ export interface BrokerCodesSchema extends SchemaI {
 }
 
 export type CleanBrokerCodesSchema = ExcludeDoc<BrokerCodesSchema>
+export type InputRequest = {
+  token: string
+  userAgent?: string
+  req: {
+    user?: { username: string; authorized: boolean }
+    cookies: { a?: string; aid?: string }
+  }
+  paperContext: boolean
+  ip?: string
+}

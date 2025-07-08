@@ -1,6 +1,5 @@
 import ExchangeChooser from '../../../exchange/exchangeChooser'
 import AbstractExchange from '../../../exchange'
-import DB, { model } from '../../../db'
 import DCABackteser from './dca'
 import GridBacktester from './grid'
 import logger from '../../../utils/logger'
@@ -33,6 +32,13 @@ import type {
 } from '@gainium/backtester/dist/types'
 import { v4 } from 'uuid'
 import { GRAPH_QL_PORT, MAIN_SERVICE_HOST } from '../../../config'
+import {
+  backtestDb,
+  comboBacktestDb,
+  filesDb,
+  gridBacktestDb,
+  pairDb,
+} from '../../../db/dbInit'
 
 type ResultType = {
   id: string
@@ -46,15 +52,15 @@ class BacktestWrapper {
 
   private exchange: AbstractExchange
 
-  private symbolsDb = new DB(model.pair)
+  private symbolsDb = pairDb
 
-  private comboBacktestDb = new DB(model.comboBacktest)
+  private comboBacktestDb = comboBacktestDb
 
-  private dcaBacktestDb = new DB(model.backtest)
+  private dcaBacktestDb = backtestDb
 
-  private gridBacktestDb = new DB(model.gridBacktest)
+  private gridBacktestDb = gridBacktestDb
 
-  protected filesDb = new DB(model.userFiles)
+  protected filesDb = filesDb
 
   private id = ''
 

@@ -176,7 +176,7 @@ const favoriteIndicatorsSchema: Schema<FavoriteIndicatorsSchema> = new Schema({
   ...CreatedUpdated,
 })
 
-const userAPIKeys: Schema<UserSchema['apiKeys']> = new Schema({
+export const userAPIKeys: Schema<UserSchema['apiKeys']> = new Schema({
   secret: RequiredString,
   created: RequiredDate,
   expired: RequiredDate,
@@ -2626,70 +2626,72 @@ const brokerCodes = new Schema<BrokerCodesSchema>({
   code: String,
 })
 
-userProfitByHour.index({ userId: 1 })
+export const registerIndexes = () => {
+  userProfitByHour.index({ userId: 1 })
 
-backtestRequest.index({ userid: 1 })
+  backtestRequest.index({ userid: 1 })
 
-storeFilesSchema.index({ userId: 1 })
+  storeFilesSchema.index({ userId: 1 })
 
-botEventSchema.index({ botId: 1 })
+  botEventSchema.index({ botId: 1 })
 
-balancesSchema.index({ userId: 1 })
+  balancesSchema.index({ userId: 1 })
 
-dcaBacktestingResult.index({ userId: 1 })
-dcaBacktestingResult.index({ shareId: 1 })
+  dcaBacktestingResult.index({ userId: 1 })
+  dcaBacktestingResult.index({ shareId: 1 })
 
-gridBacktestingResult.index({ userId: 1 })
-gridBacktestingResult.index({ shareId: 1 })
+  gridBacktestingResult.index({ userId: 1 })
+  gridBacktestingResult.index({ shareId: 1 })
 
-comboBacktestingResult.index({ userId: 1 })
-comboBacktestingResult.index({ shareId: 1 })
+  comboBacktestingResult.index({ userId: 1 })
+  comboBacktestingResult.index({ shareId: 1 })
 
-comboTransactionSchema.index({ userId: 1 })
+  comboTransactionSchema.index({ userId: 1 })
 
-botMessageSchema.index({
-  userId: 1,
-})
+  botMessageSchema.index({
+    userId: 1,
+  })
 
-botSchema.index({ userId: 1 })
+  botSchema.index({ userId: 1 })
 
-comboBotSchema.index({ userId: 1 })
+  comboBotSchema.index({ userId: 1 })
 
-comboDealSchema.index({ userId: 1 })
-comboDealSchema.index({ botId: 1 })
+  comboDealSchema.index({ userId: 1 })
+  comboDealSchema.index({ botId: 1 })
 
-comboMinigrid.index({ botId: 1 })
+  comboMinigrid.index({ botId: 1 })
 
-comboProfitSchema.index({ userId: 1 })
+  comboProfitSchema.index({ userId: 1 })
 
-dcaBotSchema.index({ userId: 1 })
+  dcaBotSchema.index({ userId: 1 })
 
-hedgeComboBotSchema.index({ userId: 1 })
-hedgeDcaBotSchema.index({ userId: 1 })
+  hedgeComboBotSchema.index({ userId: 1 })
+  hedgeDcaBotSchema.index({ userId: 1 })
 
-dcaDealSchema.index({ userId: 1 })
-dcaDealSchema.index({ botId: 1 })
+  dcaDealSchema.index({ userId: 1 })
+  dcaDealSchema.index({ botId: 1 })
 
-favoritePairsSchema.index({ userId: 1 })
+  favoritePairsSchema.index({ userId: 1 })
 
-favoriteIndicatorsSchema.index({ userId: 1 })
+  favoriteIndicatorsSchema.index({ userId: 1 })
 
-feesSchema.index({ userId: 1 })
+  feesSchema.index({ userId: 1 })
 
-orderSchema.index({ userId: 1 })
-orderSchema.index({ botId: 1 })
+  orderSchema.index({ userId: 1 })
+  orderSchema.index({ botId: 1 })
 
-pairsSchema.index({ exchange: 1 })
+  pairsSchema.index({ exchange: 1 })
 
-paperTrades.index({ order: 1 })
+  paperTrades.index({ order: 1 })
 
-snapshotsSchema.index({ userId: 1 })
+  snapshotsSchema.index({ userId: 1 })
 
-transactionSchema.index({ userId: 1 })
+  transactionSchema.index({ userId: 1 })
 
-userPeriod.index({ userId: 1 })
+  userPeriod.index({ userId: 1 })
 
-botProfitChart.index({ botId: 1 })
+  botProfitChart.index({ botId: 1 })
+}
 
 const schema = {
   globalVariables: globalVariablesSchema,

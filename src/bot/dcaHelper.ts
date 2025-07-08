@@ -155,7 +155,7 @@ const notionalReasons = ['The order funds should be more than', 'NOTIONAL']
 const maxTimeout = 2 ** 31 - 1
 
 // Helper function to apply decorators to methods
-function applyMethodDecorator(
+export function applyMethodDecorator(
   decorator: MethodDecorator,
   target: any,
   propertyKey: string,
@@ -1185,9 +1185,6 @@ function createDCABotHelper<
         }
       }
     }
-    protected shouldSaveToDb(): boolean {
-      return true
-    }
     /**
      * Save deal after changes
      * @param {FullDeal} FullDeal
@@ -1213,7 +1210,7 @@ function createDCABotHelper<
         this.setDeal(fullResult)
       }
 
-      if (deal && Object.entries(deal).length && this.shouldSaveToDb()) {
+      if (deal && Object.entries(deal).length && this.shouldProceed()) {
         this.dealsDb
           .updateData({ _id: dealId }, { $set: { ...deal } as any })
           .then((res) => {
@@ -1254,6 +1251,10 @@ function createDCABotHelper<
       sizes?: Sizes | null,
       orderSizeType?: OrderSizeTypeEnum,
     ): Promise<string | undefined> {
+      if (!this.shouldProceed()) {
+        this.handleLog(this.notProceedMessage('create deal'))
+        return
+      }
       const _id = this.startMethod('createDeal')
       const time = new Date().getTime()
       let symbolData: Symbols | undefined
@@ -2170,16 +2171,18 @@ function createDCABotHelper<
             })
           }
 
-          this.botEventDb.createData({
-            userId: this.userId,
-            botId: this.botId,
-            event: 'Deal',
-            botType: this.botType,
-            description: `Deal closed, id: ${deal.deal._id}, profit: ${deal.deal.profit.totalUsd}$`,
-            paperContext: !!this.data?.paperContext,
-            deal: deal.deal._id,
-            symbol: deal.deal.symbol.symbol,
-          })
+          if (this.shouldProceed()) {
+            this.botEventDb.createData({
+              userId: this.userId,
+              botId: this.botId,
+              event: 'Deal',
+              botType: this.botType,
+              description: `Deal closed, id: ${deal.deal._id}, profit: ${deal.deal.profit.totalUsd}$`,
+              paperContext: !!this.data?.paperContext,
+              deal: deal.deal._id,
+              symbol: deal.deal.symbol.symbol,
+            })
+          }
         }
         this.deleteDeal(dealId)
 
@@ -2914,7 +2917,16 @@ function createDCABotHelper<
               BotStartTypeEnum.indicators ||
               this.data.settings.botActualStart === BotStartTypeEnum.price)
           ) {
-            this.setStatus(this.botId, BotStatusEnum.open)
+            this.setStatus(
+              this.botId,
+              BotStatusEnum.open,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              true,
+            )
           }
         }
       }
@@ -2952,7 +2964,16 @@ function createDCABotHelper<
         }
         if ((this.indicatorActions.startBot.get(symbol) ?? 0) < lastData.time) {
           this.indicatorActions.startBot.set(symbol, lastData.time)
-          this.setStatus(this.botId, BotStatusEnum.open)
+          this.setStatus(
+            this.botId,
+            BotStatusEnum.open,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            true,
+          )
         }
       }
       const openDealGroupsStatus = !allOpen.length
@@ -5034,9 +5055,10 @@ function createDCABotHelper<
         }
       }
     }
-    /**
-     * Is this bot used LONG strategy
-     */
+
+    async sendDealOpenedAlert(_deal: ExcludeDoc<Deal>, _order: Order) {
+      return
+    }
 
     /**
      * Start deal when BO is filled
@@ -5101,6 +5123,7 @@ function createDCABotHelper<
         findDeal.deal.lastPrice = initialPrice
         const avgs = await this.getAvgPrice(dealId)
         findDeal.deal.avgPrice = avgs.avg || initialPrice
+        findDeal.deal.displayAvg = avgs.display
         findDeal.deal.settings.avgPrice = avgs.avg || initialPrice
         this.handleLog(
           `Set deal avg prices ${findDeal.deal.avgPrice}, ${findDeal.deal.settings.avgPrice} (display ${findDeal.deal.displayAvg})`,
@@ -5127,6 +5150,7 @@ function createDCABotHelper<
           await this.checkDealsAllowedMethods()
           await this.setCloseByTimer(findDeal.deal)
           this.updateUsage(dealId)
+          this.sendDealOpenedAlert(findDeal.deal, orderBo)
           this.updateAssets(dealId)
         })
         await this.placeOrders(
@@ -5418,25 +5442,27 @@ function createDCABotHelper<
                 }
               : dealData.assets.required
 
-            this.dealsDb
-              .updateData({ _id: dealId } as any, {
-                $set: {
-                  commission: dealData.commission,
-                  profit: dealData.profit,
-                  updateTime: dealData.updateTime,
-                  lastPrice: dealData.lastPrice,
-                  currentBalances: dealData.currentBalances,
-                  'levels.complete': dealData.levels.complete,
-                  assets: dealData.assets,
-                },
-              })
-              .then((res) => {
-                if (res.status === StatusEnum.notok) {
-                  this.handleLog(
-                    `Error saving deal: ${dealId}. Reason: ${res.reason}`,
-                  )
-                }
-              })
+            if (this.shouldProceed()) {
+              this.dealsDb
+                .updateData({ _id: dealId } as any, {
+                  $set: {
+                    commission: dealData.commission,
+                    profit: dealData.profit,
+                    updateTime: dealData.updateTime,
+                    lastPrice: dealData.lastPrice,
+                    currentBalances: dealData.currentBalances,
+                    'levels.complete': dealData.levels.complete,
+                    assets: dealData.assets,
+                  },
+                })
+                .then((res) => {
+                  if (res.status === StatusEnum.notok) {
+                    this.handleLog(
+                      `Error saving deal: ${dealId}. Reason: ${res.reason}`,
+                    )
+                  }
+                })
+            }
           }
           const getDeal = this.deals.get(`${dealId}`)
           if (getDeal && getDeal.deal.status === DCADealStatusEnum.open) {
@@ -5533,6 +5559,14 @@ function createDCABotHelper<
         }
       }
       return { avg, display }
+    }
+
+    async sendDealClosedAlert(
+      _deal: ExcludeDoc<Deal>,
+      _order?: Order,
+      _partial = false,
+    ) {
+      return
     }
     /**
      * Update deal when Regular order is filled
@@ -5777,6 +5811,7 @@ function createDCABotHelper<
             if (isReduce) {
               this.updateUsage(dealId)
               this.updateAssets(dealId)
+              this.sendDealClosedAlert(findDeal.deal, order, true)
             }
           })
 
@@ -6249,9 +6284,11 @@ function createDCABotHelper<
                   ? find.free
                   : find.free + find.locked
               if (dealId) {
-                await this.dealsDb.updateData({ _id: `${dealId}` } as any, {
-                  $set: { balanceStart: useQty },
-                })
+                if (this.shouldProceed()) {
+                  await this.dealsDb.updateData({ _id: `${dealId}` } as any, {
+                    $set: { balanceStart: useQty },
+                  })
+                }
 
                 const findDeal = this.getDeal(`${dealId}`)
                 if (findDeal) {
@@ -6452,6 +6489,10 @@ function createDCABotHelper<
       sizes?: Sizes | null,
       orderSizeType?: OrderSizeTypeEnum,
     ) {
+      if (!this.shouldProceed()) {
+        this.handleLog(this.notProceedMessage('place base order'))
+        return
+      }
       const _id = this.startMethod('placeBaseOrder')
       let dealId: string | undefined
       if (!oldDealId) {
@@ -7134,6 +7175,12 @@ function createDCABotHelper<
       )
       return { base, quote }
     }
+    sendEightyAlert(_findDeal: FullDeal<ExcludeDoc<Deal>>) {
+      return
+    }
+    async sendHundredAlert(_findDeal: FullDeal<ExcludeDoc<Deal>>) {
+      return
+    }
     /**
      * Update usage for bot and deal
      * @param {string} dealId Id of the deal
@@ -7141,7 +7188,12 @@ function createDCABotHelper<
      * @param {boolean} [noBotUsage] Not calculate bot usage. Default = false
      */
 
-    async updateUsage(dealId: string, reset = false, noBotUsage = false) {
+    async updateUsage(
+      dealId: string,
+      reset = false,
+      noBotUsage = false,
+      sendAlert = true,
+    ) {
       const findDeal = this.getDeal(dealId)
       const runBot = () => {
         if (!noBotUsage) {
@@ -7268,6 +7320,10 @@ function createDCABotHelper<
           : long
             ? currentQuote * rate
             : currentBase * rate
+        if (sendAlert) {
+          this.sendEightyAlert(findDeal)
+          await this.sendHundredAlert(findDeal)
+        }
         let relative = currentUsd / maxUsd
         if (isNaN(relative) || !isFinite(relative)) {
           relative = 0
@@ -7656,11 +7712,11 @@ function createDCABotHelper<
      * Calculate usage
      */
 
-    async calculateUsage() {
+    async calculateUsage(sendAlert = true) {
       const openDeals = this.getOpenDeals()
       if (this.data) {
         for (const d of openDeals) {
-          await this.updateUsage(d.deal._id, false, true)
+          await this.updateUsage(d.deal._id, false, true, sendAlert)
         }
       }
       this.calculateBotUsage(this.botId)
@@ -7821,6 +7877,10 @@ function createDCABotHelper<
     /** Check orders after socket reconnect */
 
     async checkOrdersAfterReconnect(_botId: string) {
+      if (!this.shouldProceed()) {
+        this.handleLog(this.notProceedMessage('orders check after reconnect'))
+        return
+      }
       if (this.blockCheck) {
         this.handleLog(`Block check skip orders check after reconnect`)
         return
@@ -7895,6 +7955,10 @@ function createDCABotHelper<
     }
     /** Check orders after service restart */
     async checkOrders(_botId: string, partiallyFilled?: boolean) {
+      if (!this.shouldProceed()) {
+        this.handleLog(this.notProceedMessage('orders check'))
+        return
+      }
       if (this.blockCheck) {
         return
       }
@@ -8235,13 +8299,10 @@ function createDCABotHelper<
       this.endMethod(_id)
     }
 
-    private async filterCoinsByVolume(
+    protected async filterCoinsByVolume(
       _botId: string,
       pairs: string[],
     ): Promise<string[]> {
-      if (!this.allowedMethods.has('filterCoinsByVolume')) {
-        return pairs
-      }
       //TODO: self-hosted logic to filter coins by volume
       return pairs
     }
@@ -12519,14 +12580,15 @@ function createDCABotHelper<
       ignoreErrors?: boolean,
       indicators?: boolean,
       closeTypeFromWebhook?: CloseDCATypeEnum,
-    ): Promise<void> {
+      skipAvailable?: boolean,
+    ): Promise<boolean> {
       const _id = this.startMethod('setStatus')
       this.ignoreErrors = !!ignoreErrors
       const currentStatus = this.data?.status
       this.handleLog(`Set status ${status}, current status ${currentStatus}`)
       if (status === currentStatus) {
         this.endMethod(_id)
-        return
+        return false
       }
       const setMonitoring =
         this.isMonitoring &&
@@ -12541,7 +12603,7 @@ function createDCABotHelper<
           (setMonitoring && currentStatus === BotStatusEnum.monitoring))
       ) {
         this.endMethod(_id)
-        return
+        return false
       }
 
       const settings = await this.getAggregatedSettings()
@@ -12555,34 +12617,37 @@ function createDCABotHelper<
         }
         await this.stop(closeType)
       } else if (status === 'open') {
-        await this.start(undefined, undefined, undefined)
+        await this.start(undefined, undefined, undefined, skipAvailable)
       } else {
         await this.stop()
       }
 
-      const postFix = `${
-        indicators ? ' (bot controller)' : webhook ? ' (webhook)' : ''
-      }`
-      if (
-        !this.data?.parentBotId ||
-        (this.data.parentBotId &&
-          this.data.settings.strategy === StrategyEnum.long)
-      ) {
-        this.botEventDb.createData({
-          userId: this.userId,
-          botId: this.botId,
-          event: BOT_STATUS_EVENT,
-          botType: this.botType,
-          description: currentStatus
-            ? `${currentStatus} -> ${status}${postFix}`
-            : `${
-                setMonitoring ? BotStatusEnum.monitoring : status
-              } status is set${postFix}`,
-          paperContext: !!this.data?.paperContext,
-        })
+      if (this.shouldProceed()) {
+        const postFix = `${
+          indicators ? ' (bot controller)' : webhook ? ' (webhook)' : ''
+        }`
+        if (
+          !this.data?.parentBotId ||
+          (this.data.parentBotId &&
+            this.data.settings.strategy === StrategyEnum.long)
+        ) {
+          this.botEventDb.createData({
+            userId: this.userId,
+            botId: this.botId,
+            event: BOT_STATUS_EVENT,
+            botType: this.botType,
+            description: currentStatus
+              ? `${currentStatus} -> ${status}${postFix}`
+              : `${
+                  setMonitoring ? BotStatusEnum.monitoring : status
+                } status is set${postFix}`,
+            paperContext: !!this.data?.paperContext,
+          })
+        }
       }
 
       this.endMethod(_id)
+      return true
     }
 
     async handleUnknownOrder(order: Order): Promise<void> {
@@ -12634,6 +12699,12 @@ function createDCABotHelper<
      */
 
     async processFilledOrder(order: Order): Promise<void> {
+      if (!this.shouldProceed()) {
+        this.handleLog(
+          this.notProceedMessage(`processFilledOrder ${order.clientOrderId}`),
+        )
+        return
+      }
       if (!this.loadingComplete) {
         if (
           this.data?.status === BotStatusEnum.open ||
@@ -14046,6 +14117,7 @@ function createDCABotHelper<
       reload = false,
       restart = false,
       realStatus?: BotStatusEnum,
+      _skipAvailable?: boolean,
     ): Promise<void> {
       const _id = this.startMethod('start')
       this.finishLoad = false
@@ -15014,7 +15086,16 @@ function createDCABotHelper<
             this.handleLog(
               `Start bot by price condition ${msg.price} ${this.data.settings.startBotPriceCondition} ${this.data.settings.startBotPriceValue}`,
             )
-            this.setStatus(this.botId, BotStatusEnum.open)
+            this.setStatus(
+              this.botId,
+              BotStatusEnum.open,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              true,
+            )
           }
         }
         if (
@@ -15696,6 +15777,10 @@ function createDCABotHelper<
      */
 
     async mergeDeals(_deals: string[]) {
+      if (!this.shouldProceed()) {
+        this.handleLog(this.notProceedMessage('merge deals'))
+        return
+      }
       const _id = this.startMethod('mergeDeals')
       const prefix = `Merge Deals | `
       if (this.data) {
@@ -16128,14 +16213,16 @@ function createDCABotHelper<
             }
             const changedOrder = { ...o, data }
 
-            await this.ordersDb.updateData(
-              { clientOrderId: changedOrder.clientOrderId },
-              {
-                $set: {
-                  ...data,
+            if (this.shouldProceed()) {
+              await this.ordersDb.updateData(
+                { clientOrderId: changedOrder.clientOrderId },
+                {
+                  $set: {
+                    ...data,
+                  },
                 },
-              },
-            )
+              )
+            }
 
             this.emit('bot update', changedOrder)
           }
@@ -17253,6 +17340,10 @@ function createDCABotHelper<
     }
 
     async botUpdateStats(_botId: string, d: FullDeal<ExcludeDoc<Deal>>) {
+      if (!this.shouldProceed()) {
+        this.handleLog(this.notProceedMessage('Bot update stats'))
+        return
+      }
       const _id = this.startMethod('botUpdateStats')
       if (!this.data) {
         this.endMethod(_id)
@@ -17900,6 +17991,15 @@ function createDCABotHelper<
     ),
     DCABotHelper.prototype,
     'setDealToRedis',
+  )
+
+  applyMethodDecorator(
+    RunWithDelay(
+      (deal: ExcludeDoc<Deal>) => `${deal._id}sendDealClosedAlert`,
+      5 * 1000,
+    ),
+    DCABotHelper.prototype,
+    'sendDealClosedAlert',
   )
 
   applyMethodDecorator(
