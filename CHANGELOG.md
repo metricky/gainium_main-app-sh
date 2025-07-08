@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.5] – 2025-07-08
+### Changed
+- Updated indicator service connection and publish channel logic
+- Enhanced hedge bot to use callback after successful start
+
 ## [1.0.4] – 2025-07-02
 ### Changed
 - Updated all dependencies to their latest versions

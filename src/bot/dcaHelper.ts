@@ -186,6 +186,7 @@ type LocalIndicators = {
   interval: ExchangeIntervals
   cb?: (_msg: string) => void
   groupId: string
+  is1d: boolean
 }
 
 type TrailingDeal = {
@@ -227,6 +228,8 @@ function createDCABotHelper<
       ) => MainBot<Schema>
 
   class DCABotHelper extends ActualBaseClass {
+    indicatorRoomConfigMap: Map<string, Set<string>> = new Map()
+    indicatorConfigIdMap: Map<string, string> = new Map()
     indicatorGroupsToUse: SettingsIndicatorGroup[] = []
     botProfitDb = botProfitChartDb
     /** Bot deals */
@@ -295,6 +298,7 @@ function createDCABotHelper<
         data: IndicatorHistory[]
         uuid: string
         symbol: string
+        is1d?: boolean
       }[]
     > = new Map()
     equityTimer: NodeJS.Timeout | null = null
@@ -545,12 +549,19 @@ function createDCABotHelper<
           const msg = JSON.parse(_msg) as {
             data: IndicatorHistory[]
             price: number
+            id1d?: boolean
           }
-          const response = room.split('@')
-          this.indicatorDataCb(this.botId, {
-            ...msg,
-            responseParams: { uuid: response[1], symbol: response[2] },
-          })
+          const findRoom = this.indicatorRoomConfigMap.get(room)
+          if (!findRoom) {
+            return
+          }
+          for (const key of findRoom) {
+            const response = key.split('@')
+            this.indicatorDataCb(this.botId, {
+              ...msg,
+              responseParams: { uuid: response[0], symbol: response[1] },
+            })
+          }
         } catch (e) {
           this.handleErrors(
             `Catch error ${e}`,
@@ -570,6 +581,7 @@ function createDCABotHelper<
         data: IndicatorHistory[]
         price: number
         responseParams: { uuid: string; symbol: string }
+        is1d?: boolean
       },
     ) {
       const settings = await this.getAggregatedSettings()
@@ -598,7 +610,12 @@ function createDCABotHelper<
             const key = `${find.action}@${find.interval}@${lastTime}`
             done = true
             const get = this.checkIndicatorsQueue.get(key) ?? []
-            get.push({ data: msg.data, uuid: find.uuid, symbol: find.symbol })
+            get.push({
+              data: msg.data,
+              uuid: find.uuid,
+              symbol: find.symbol,
+              is1d: msg.is1d,
+            })
             if (
               get.length ===
               (this.indicatorsIntervalActionMap.get(
@@ -620,6 +637,7 @@ function createDCABotHelper<
                   d.uuid,
                   d.data,
                   d.symbol,
+                  d.is1d,
                 )
                 await sleep(0)
               }
@@ -650,6 +668,7 @@ function createDCABotHelper<
           msg.responseParams.uuid,
           msg.data,
           msg.responseParams.symbol,
+          msg.is1d,
         )
       }
     }
@@ -3078,6 +3097,7 @@ function createDCABotHelper<
       uuid: string,
       data: IndicatorHistory[],
       symbol: string,
+      is1d = false,
     ) {
       if (data.length === 0) {
         return
@@ -3093,7 +3113,7 @@ function createDCABotHelper<
           `Indicator ${uuid}@${symbol} not connected yet, will be processed after`,
         )
         this.afterIndicatorsConnected.push(() =>
-          this.checkIndicatorConditions(_botId, uuid, data, symbol),
+          this.checkIndicatorConditions(_botId, uuid, data, symbol, is1d),
         )
 
         if (this.scaleAr) {
@@ -3125,6 +3145,9 @@ function createDCABotHelper<
       if (this.data) {
         const [lastData, prevData] = sortedByTime
         const i = this.indicators.get(key)
+        if (!i?.is1d && is1d) {
+          return
+        }
         let action = false
         let skipAction = false
         let trendFilterAction = false
@@ -8716,7 +8739,12 @@ function createDCABotHelper<
         >(rabbitIndicatorsKey, data, timeout)
         if (result && result?.response) {
           if (result.response.status) {
-            const room = `${result.response.room}@${data.responseParams.uuid}@${data.responseParams.symbol}`
+            const room = `${result.response.room}`
+            const get = this.indicatorRoomConfigMap.get(room) ?? new Set()
+            const config = `${data.responseParams.uuid}@${data.responseParams.symbol}`
+            get.add(config)
+            this.indicatorRoomConfigMap.set(room, get)
+            this.indicatorConfigIdMap.set(result.response.id, config)
             const cb = this.indicatorDataCbRedis(room)
             if (this.redisSubIndicators) {
               this.redisSubIndicators.subscribe(room, cb)
@@ -8773,6 +8801,19 @@ function createDCABotHelper<
             if (this.redisSubIndicators && cb) {
               this.redisSubIndicators.unsubscribe(room, cb)
             }
+            const get = this.indicatorConfigIdMap.get(id)
+            this.indicatorConfigIdMap.delete(id)
+            if (get) {
+              const getRoom = this.indicatorRoomConfigMap.get(room)
+              if (getRoom) {
+                getRoom.delete(get)
+                if (getRoom.size === 0) {
+                  this.indicatorRoomConfigMap.delete(room)
+                } else {
+                  this.indicatorRoomConfigMap.set(room, getRoom)
+                }
+              }
+            }
             return true
           }
         }
@@ -8800,6 +8841,8 @@ function createDCABotHelper<
     }
 
     async openIndicators(_botId: string, _serviceRestart?: boolean) {
+      this.indicatorConfigIdMap = new Map()
+      this.indicatorRoomConfigMap = new Map()
       this.afterIndicatorsConnected = []
       this.handleLog('Open indicators')
       this.indicatorGroupsToUse = (
@@ -8945,8 +8988,6 @@ function createDCABotHelper<
                   xOscillator2voShort: _xOscillator2voShort,
                   xoUUID,
                   percentile,
-                  percentileLookback,
-                  percentilePercentage,
                   mar1length: _mar1length,
                   mar1type,
                   mar2length,
@@ -8976,6 +9017,9 @@ function createDCABotHelper<
                   kcRange,
                   kcRangeLength: _kcRangeLength,
                 } = i
+                let { percentileLookback, percentilePercentage } = i
+                percentileLookback = percentileLookback ?? 150
+                percentilePercentage = percentilePercentage ?? 80
                 const macdFast = +(_macdFast ?? 12)
                 const macdSlow = +(_macdSlow ?? 26)
                 const indicatorLength = +(_indicatorLength ?? 14)
@@ -9541,6 +9585,7 @@ function createDCABotHelper<
                     childIndicator: maChild ? maUUID : xoChild ? xoUUID : '',
                     cb,
                     groupId: i.groupId,
+                    is1d: rrOrAr || hasLower,
                   })
                   this.handleLog(
                     `Bot connected to ${type} indicator. Id: ${id}, room: ${room}`,
@@ -9609,6 +9654,7 @@ function createDCABotHelper<
                       childIndicator: '',
                       cb: cbChild,
                       groupId: '',
+                      is1d: false,
                     })
                     this.handleLog(
                       `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
@@ -9682,6 +9728,7 @@ function createDCABotHelper<
                       parentIndicator: uuid,
                       cb: cbChild,
                       groupId: '',
+                      is1d: false,
                     })
                     this.handleLog(
                       `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
@@ -15020,6 +15067,8 @@ function createDCABotHelper<
       this.zeroFee = false
       this.startSent = false
       this.stopSent = false
+      this.indicatorConfigIdMap = new Map()
+      this.indicatorRoomConfigMap = new Map()
       for (const [id, timer] of this.closeDealTimer.entries()) {
         if (timer) {
           clearTimeout(timer)

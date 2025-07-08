@@ -1,4 +1,4 @@
-import { isMainThread, parentPort, threadId } from 'worker_threads'
+import { isMainThread, threadId } from 'worker_threads'
 import utils from '../utils'
 import {
   RSI,
@@ -62,12 +62,10 @@ import ExpirableMap from '../utils/expirableMap'
 import type {
   TradeMessage,
   IndicatorHistory,
-  IndicatorConfig,
   CandleResponse,
   BaseReturn,
   IndicatorSubscribers,
   IndicatorCb,
-  IndicatorWorkerResponsePayload,
   IndicatorCreationConfig,
   SubscribeInternalIndicatorReponse,
 } from '../../types'
@@ -76,6 +74,7 @@ import { isKucoin, isOkx, isUsdmKucoin } from '../utils/exchange'
 import RedisClient, { RedisWrapper } from '../db/redis'
 import { removePaperFormExchangeName } from '../exchange/helpers'
 import RabbitClient from '../db/rabbit'
+import { getId } from '.'
 
 const { sleep } = utils
 
@@ -338,6 +337,7 @@ class InternalIndicator {
   private loaded = false
   private splitPhrase = `@gainium@`
   private id: string
+  private cb?: IndicatorCb
   private indicator?:
     | RSI
     | MFI
@@ -401,7 +401,7 @@ class InternalIndicator {
   private v = 0
   private timer: NodeJS.Timeout | null
   private to = 0
-  private updateCandlesHistory: number[] = []
+  private updateCandlesHistory: Set<number> = new Set()
   private checkCandleTimer: NodeJS.Timeout | null = null
   private waitCandlePeriod = 8000
   private lastCandle = {
@@ -414,6 +414,7 @@ class InternalIndicator {
   private closed = false
   private allowedToProcessPriceUpdate = false
   private redisClient: RedisWrapper | null = null
+  private redisPublisher: RedisWrapper | null = null
   private test = false
   private limitMultiplier = 0
   private is1d?: boolean = false
@@ -890,15 +891,20 @@ class InternalIndicator {
     this.exchange = _exchange
     this.test = !!test
     this.limitMultiplier = limitMultiplier ?? 0
-    this.id = `${indicatorConfig.type}-${Object.keys(indicatorConfig).reduce(
-      (acc, k) => `${acc}${indicatorConfig[k as keyof IndicatorConfig]}`,
-      '',
-    )}-${this.exchange}-${this.symbol}-${this.interval}${
-      limitMultiplier ? `-${limitMultiplier}` : ''
-    }`
+    this.id = getId(
+      indicatorConfig,
+      this.exchange,
+      this.symbol,
+      this.interval,
+      limitMultiplier,
+    )
     this.updateCandle = this.updateCandle.bind(this)
     this.connectCandle = this.connectCandle.bind(this)
-
+    this.publishToRedis = this.publishToRedis.bind(this)
+    this.cb = (data, price, is1d) => {
+      this.publishToRedis(this.id, { data, price, is1d })
+    }
+    this.cb = this.cb.bind(this)
     this.redisCb = this.redisCb.bind(this)
     this.processServiceLog = this.processServiceLog.bind(this)
     const time = new Date().getTime()
@@ -928,29 +934,37 @@ class InternalIndicator {
   private addSplitPhrase(text: string) {
     return `${text}${this.splitPhrase}${this.id}`
   }
+  private async publishToRedis(room: string, data: any) {
+    try {
+      if (!this.redisPublisher) {
+        this.redisPublisher = await RedisClient.getInstance(
+          false,
+          'indicators-publisher',
+        )
+      }
+      if (this.redisPublisher) {
+        await this.redisPublisher.publish(room, JSON.stringify(data))
+      }
+    } catch (error) {
+      this.handleError('Failed to publish to Redis:', error)
+    }
+  }
   public async subscribe(
     _id?: string,
     load1d?: boolean,
-    returnData?: boolean,
   ): Promise<SubscribeInternalIndicatorReponse> {
     const id = _id ?? v4()
     const externalId = this.addSplitPhrase(id)
-    const cb: IndicatorCb = (data, price) =>
-      parentPort?.postMessage({
-        event: 'indicatorUpdate',
-        payload: { id: externalId, data, price },
-      } as IndicatorWorkerResponsePayload)
     this.subscribers.push({
-      fn: cb,
       id,
       is1d: load1d,
     })
     const c = () => {
       if (this.lastPrice && this.data.length) {
-        cb(this.data, this.lastPrice)
+        this.cb?.(this.data, this.lastPrice)
       }
     }
-    if ((load1d || returnData) && !this.is1d && !this.data.length) {
+    if (load1d && !this.is1d && !this.data.length) {
       if (this.timer) {
         clearTimeout(this.timer)
       }
@@ -963,19 +977,13 @@ class InternalIndicator {
       this.loadData(true, undefined, c)
     }
     this.handleLog(`Add subscriber ${id}. Size - ${this.subscribers.length}`)
-    if (returnData) {
-      return {
-        id: externalId,
-        data: this.data,
-        lastPrice: this.lastPrice,
-      }
-    } else if (load1d) {
+    if (load1d) {
       setTimeout(c, 10 * 1000)
     }
     return { id: externalId }
   }
   public removeCallback(id: string) {
-    this.subscribers = this.subscribers.filter((s) => s.id !== id)
+    this.subscribers = []
     this.handleLog(`Remove subscriber ${id}. Left - ${this.subscribers.length}`)
   }
   public unsubscribe(id: string) {
@@ -1003,7 +1011,7 @@ class InternalIndicator {
       return
     }
     if (
-      !this.updateCandlesHistory.includes(start) &&
+      !this.updateCandlesHistory.has(start) &&
       _start + this.period >= this.start
     ) {
       this.handleLog(
@@ -1107,11 +1115,18 @@ class InternalIndicator {
     const startIndex = start - (!forceOld ? this.period : 0)
     if (
       ((start > this.start && this.start !== 0) || forceOld) &&
-      !this.updateCandlesHistory.includes(startIndex)
+      !this.updateCandlesHistory.has(startIndex)
     ) {
-      this.updateCandlesHistory.push(startIndex)
-      if (this.updateCandlesHistory.length > 10) {
-        this.updateCandlesHistory.shift()
+      this.updateCandlesHistory.add(startIndex)
+      if (this.updateCandlesHistory.size > 10) {
+        // Keep only the most recent 10 entries by clearing old ones
+        const entries = Array.from(this.updateCandlesHistory).sort(
+          (a, b) => b - a,
+        )
+        this.updateCandlesHistory.clear()
+        entries
+          .slice(0, 10)
+          .forEach((entry) => this.updateCandlesHistory.add(entry))
       }
       if (+old.o === 0 || +old.h === 0 || +old.l === 0 || +old.c === 0) {
         const candle = await this.getCandles(
@@ -1302,12 +1317,7 @@ class InternalIndicator {
         this.lastPrice = price
 
         if (callCB) {
-          for (const sub of is1d
-            ? this.subscribers.filter((s) => s.is1d)
-            : this.subscribers) {
-            sub.fn(this.data, this.lastPrice)
-            await sleep(0)
-          }
+          this.cb?.(this.data, price, is1d)
         }
       }
     } catch {}
@@ -1380,41 +1390,47 @@ class InternalIndicator {
         return result
       }
       const candles = result.data
-      candles
-        .filter((c) =>
-          isUsdmKucoin(this.exchange) || isOkx(this.exchange)
-            ? c.time <= localTo
-            : true,
-        )
-        .forEach((d, i) => {
-          const obj = [d]
-          if (i !== 0) {
-            const prevCandle = candles[i - 1]
-            if (d.time - prevCandle.time > step) {
-              const missed = Math.ceil((d.time - prevCandle.time) / step)
-              for (const m of [...Array(missed).keys()]) {
-                const time = prevCandle.time + step * (m + 1)
-                if (!obj.find((o) => o.time === time)) {
-                  obj.push({
-                    open: prevCandle.close,
-                    high: prevCandle.close,
-                    low: prevCandle.close,
-                    close: prevCandle.close,
-                    volume: '0',
-                    time,
-                    symbol: prevCandle.symbol,
-                  })
-                }
+      // Process candles in chunks to avoid blocking event loop
+      for (let candleIndex = 0; candleIndex < candles.length; candleIndex++) {
+        const d = candles[candleIndex]
+        if (isUsdmKucoin(this.exchange) || isOkx(this.exchange)) {
+          if (d.time > localTo) continue
+        }
+
+        const obj = [d]
+        if (candleIndex !== 0) {
+          const prevCandle = candles[candleIndex - 1]
+          if (d.time - prevCandle.time > step) {
+            const missed = Math.ceil((d.time - prevCandle.time) / step)
+            for (const m of [...Array(missed).keys()]) {
+              const time = prevCandle.time + step * (m + 1)
+              if (!obj.find((o) => o.time === time)) {
+                obj.push({
+                  open: prevCandle.close,
+                  high: prevCandle.close,
+                  low: prevCandle.close,
+                  close: prevCandle.close,
+                  volume: '0',
+                  time,
+                  symbol: prevCandle.symbol,
+                })
               }
             }
           }
-          obj.forEach((o) => {
-            if (!dataHasSet.has(o.time)) {
-              data.push(o)
-              dataHasSet.add(o.time)
-            }
-          })
-        })
+        }
+
+        for (const o of obj) {
+          if (!dataHasSet.has(o.time)) {
+            data.push(o)
+            dataHasSet.add(o.time)
+          }
+        }
+
+        // Yield control every 100 candles to prevent blocking
+        if (candleIndex % 100 === 0) {
+          await sleep(0)
+        }
+      }
       await sleep(0)
     }
     return {
@@ -1446,7 +1462,8 @@ class InternalIndicator {
           `${this.indicatorName}@${this.symbol}@${this.exchange}@${this.interval} | loaded ${data.length} candles | last time: `,
           new Date(lastTime),
         )
-        for (const c of data) {
+        for (let i = 0; i < data.length; i++) {
+          const c = data[i]
           if (c.time < this.start) {
             this.updateValue(
               { o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume },
@@ -1459,10 +1476,14 @@ class InternalIndicator {
               filter1d,
             )
           }
-          await sleep(0)
+          // Yield control every 50 candles to prevent blocking
+          if (i % 50 === 0) {
+            await sleep(0)
+          }
         }
         if (!lastCandleLast) {
           let time = +lastCandle.time + this.period
+          let fillCount = 0
           do {
             this.handleLog(
               `${this.indicatorName}@${this.symbol}@${this.exchange}@${this.interval} | filled with last candle `,
@@ -1482,6 +1503,12 @@ class InternalIndicator {
             )
             lastTime = time
             time += this.period
+            fillCount++
+
+            // Yield control every 10 fills to prevent blocking
+            if (fillCount % 10 === 0) {
+              await sleep(0)
+            }
           } while (time < limit)
           this.start = +time
         }

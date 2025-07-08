@@ -249,6 +249,10 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
     this.emit('bot settings update', data)
   }
 
+  async afterSuccessStart() {
+    return
+  }
+
   @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
   async setStatus(
     _botId: string,
@@ -297,6 +301,10 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
       closeType !== CloseDCATypeEnum.leave
     ) {
       this.sendBotClosed()
+    }
+    if (status === BotStatusEnum.open) {
+      this.handleLog(`Run after success start`)
+      await this.afterSuccessStart()
     }
   }
   async sendBotClosed(process = false) {

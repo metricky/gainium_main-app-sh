@@ -7,9 +7,7 @@ import {
   PaperExchangeType,
 } from '../exchange/paper/utils'
 import type {
-  IndicatorHistory,
   IndicatorConfig,
-  IndicatorWorkerResponsePayload,
   IndicatorCreationConfig,
   SubscribeInternalIndicatorReponse,
   IndicatorServiceParentMessageCreateIndicator,
@@ -21,7 +19,6 @@ import type {
   IndicatorServiceParentMessageRemoveCallback,
   IndicatorServiceChildMessageDeleteIndicator,
   IndicatorServiceParentMessageDeleteIndicator,
-  IndicatorServiceChildMessage,
 } from '../../types'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { v4 } from 'uuid'
@@ -30,8 +27,6 @@ import ExpirableMap from '../utils/expirableMap'
 import { INIDCATORS_PER_WORKER } from '../config'
 
 const mutex = new IdMutex()
-
-type IndicatorCb = (data: IndicatorHistory[], price: number) => any
 
 const binanceSupported = [
   ExchangeIntervals.oneM,
@@ -173,7 +168,7 @@ const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 
 const indicatorsPerWorker = +INIDCATORS_PER_WORKER
 
-const getId = (
+export const getId = (
   indicatorConfig: IndicatorConfig,
   exchange: ExchangeEnum,
   symbol: string,
@@ -230,14 +225,13 @@ class InternalIndicatorsFactory {
       subcribersSet: Set<string>
     }
   >()
+  private subscribersCount = 0
   private splitPhrase = `@gainium@`
   private workers: WorkerType[] = []
-  private cbsMap = new Map<string, IndicatorCb>()
 
   private pairs = new ExpirableMap(10 * 60 * 1000, true, true)
   private pairsSize = 0
   constructor() {
-    this.processWorkerMessage = this.processWorkerMessage.bind(this)
     this.handleWorkerTerminate = this.handleWorkerTerminate.bind(this)
   }
 
@@ -253,38 +247,19 @@ class InternalIndicatorsFactory {
     return this.workers.find((w) => `${w.id}` === `${workerId}`)?.worker
   }
 
-  @IdMute(
-    mutex,
-    (data: IndicatorWorkerResponsePayload | IndicatorServiceChildMessage) =>
-      `workerMessage${
-        'event' in data
-          ? data.event === 'indicatorUpdate'
-            ? data.payload.id
-            : null
-          : null
-      }`,
-  )
-  private async processWorkerMessage(data: IndicatorWorkerResponsePayload) {
-    if (data.event === 'indicatorUpdate' && data?.payload?.id) {
-      const findCb = this.cbsMap.get(data.payload.id)
-      if (findCb) {
-        findCb(data.payload.data, data.payload.price)
-      } else {
-        this.handleLog(
-          `${loggerPrefix} Callback not found for ${data.payload.id}`,
-        )
-      }
-    }
-  }
-
   private async createIndicator(id: string, config: IndicatorCreationConfig) {
     const worker = await this.getWorkerForNewIndicator()
     await this.changeWorkerIndicators(worker.threadId, 1)
-    await new Promise(async (resolve) => {
+    await new Promise(async (resolve, reject) => {
       const response = v4()
+      const timeoutId = setTimeout(() => {
+        worker.off('message', cb)
+        reject(new Error('Create indicator timeout'))
+      }, 30000) // 30 second timeout
       const cb = (m: any) => {
         const msg = m as IndicatorServiceChildMessageCreateIndicator
         if (msg && msg.response === response) {
+          clearTimeout(timeoutId)
           worker.off('message', cb)
           resolve([])
         }
@@ -295,8 +270,8 @@ class InternalIndicatorsFactory {
         response,
         id,
       }
-      worker.postMessage(payload)
       worker.on('message', cb)
+      worker.postMessage(payload)
     })
     this.indicators.set(id, {
       id,
@@ -310,16 +285,21 @@ class InternalIndicatorsFactory {
     const indicator = this.indicators.get(id)
     if (!indicator) {
       this.handleError(
-        `${loggerPrefix} Indicator not found in unsubcsribe: ${id}`,
+        `${loggerPrefix} Indicator not found in unsubscribe: ${id}`,
       )
       return null
     }
     const worker = this.getWorkerById(indicator.workerId)
-    await new Promise(async (resolve) => {
+    await new Promise(async (resolve, reject) => {
       const response = v4()
+      const timeoutId = setTimeout(() => {
+        worker?.off('message', cb)
+        reject(new Error('Delete indicator timeout'))
+      }, 30000)
       const cb = (m: any) => {
         const msg = m as IndicatorServiceChildMessageDeleteIndicator
         if (msg && msg.response === response) {
+          clearTimeout(timeoutId)
           worker?.off('message', cb)
           resolve([])
         }
@@ -329,8 +309,8 @@ class InternalIndicatorsFactory {
         response,
         id,
       }
-      worker?.postMessage(payload)
       worker?.on('message', cb)
+      worker?.postMessage(payload)
     })
     if (worker) {
       await this.changeWorkerIndicators(worker.threadId, -1)
@@ -338,12 +318,7 @@ class InternalIndicatorsFactory {
     this.indicators.delete(id)
   }
 
-  private async subscribeIndicator(
-    idi: string,
-    id?: string,
-    load1d?: boolean,
-    returnData?: boolean,
-  ) {
+  private async subscribeIndicator(idi: string, id?: string, load1d?: boolean) {
     const indicator = this.indicators.get(idi)
     if (!indicator) {
       this.handleError(
@@ -353,23 +328,28 @@ class InternalIndicatorsFactory {
     }
     const worker = this.getWorkerById(indicator.workerId)
     return await new Promise<SubscribeInternalIndicatorReponse>(
-      async (resolve) => {
+      async (resolve, reject) => {
         const response = v4()
+        const timeoutId = setTimeout(() => {
+          worker?.off('message', cb)
+          reject(new Error('Subscribe indicator timeout'))
+        }, 30000)
         const cb = (m: any) => {
           const msg = m as IndicatorServiceChildMessageSubscribeIndicator
           if (msg && msg.response === response) {
+            clearTimeout(timeoutId)
             worker?.off('message', cb)
             resolve(msg.data)
           }
         }
         const payload: IndicatorServiceParentMessageSubscribeIndicator = {
           event: 'subscribe',
-          payload: [id, load1d, returnData],
+          payload: [id, load1d],
           id: idi,
           response,
         }
-        worker?.postMessage(payload)
         worker?.on('message', cb)
+        worker?.postMessage(payload)
       },
     )
   }
@@ -378,16 +358,21 @@ class InternalIndicatorsFactory {
     const indicator = this.indicators.get(idi)
     if (!indicator) {
       this.handleError(
-        `${loggerPrefix} Indicator not found in unsubcsribe: ${idi}`,
+        `${loggerPrefix} Indicator not found in unsubscribe: ${idi}`,
       )
       return null
     }
     const worker = this.getWorkerById(indicator.workerId)
-    return await new Promise<number>(async (resolve) => {
+    return await new Promise<number>(async (resolve, reject) => {
       const response = v4()
+      const timeoutId = setTimeout(() => {
+        worker?.off('message', cb)
+        reject(new Error('Unsubscribe indicator timeout'))
+      }, 30000)
       const cb = (m: any) => {
         const msg = m as IdicatorServiceChildMessageUnsubscribeIndicator
         if (msg && msg.response === response) {
+          clearTimeout(timeoutId)
           worker?.off('message', cb)
           resolve(msg.data)
         }
@@ -398,16 +383,16 @@ class InternalIndicatorsFactory {
         id: idi,
         response,
       }
-      worker?.postMessage(payload)
       worker?.on('message', cb)
+      worker?.postMessage(payload)
     })
   }
 
-  private async removeCallbackIndicator(idi: string, id: string) {
-    const indicator = this.indicators.get(idi)
+  private async removeCallbackIndicator(id: string) {
+    const indicator = this.indicators.get(id)
     if (!indicator) {
       this.handleError(
-        `${loggerPrefix} Indicator not found in unsubcsribe: ${idi}`,
+        `${loggerPrefix} Indicator not found in unsubscribe: ${id}`,
       )
       return null
     }
@@ -415,7 +400,7 @@ class InternalIndicatorsFactory {
     const payload: IndicatorServiceParentMessageRemoveCallback = {
       event: 'removeCallback',
       payload: [id],
-      id: idi,
+      id: id,
       response: '',
     }
     worker?.postMessage(payload)
@@ -438,13 +423,10 @@ class InternalIndicatorsFactory {
           )
           await this.createIndicator(i.id, i.config)
           for (const s of i.subcribersSet) {
-            const findCb = this.cbsMap.get(s)
-            if (findCb) {
-              await this.subscribeIndicator(i.id, s.split(this.splitPhrase)[0])
-              const find = this.indicators.get(i.id)
-              if (find) {
-                find.subcribersSet.add(s)
-              }
+            await this.subscribeIndicator(i.id, s.split(this.splitPhrase)[0])
+            const find = this.indicators.get(i.id)
+            if (find) {
+              find.subcribersSet.add(s)
             }
           }
         }
@@ -460,17 +442,15 @@ class InternalIndicatorsFactory {
       .sort((a, b) => b.indicators - a.indicators)?.[0]
     if (lowestWorker && lowestWorker.indicators < limit) {
       lowestWorker.updated = +new Date()
-      this.workers = this.workers.map((w) => {
-        if (`${w.id}` === `${lowestWorker.id}`) {
-          return lowestWorker
-        }
-        return w
-      })
+      // Update in place instead of reconstructing array
+      const index = this.workers.findIndex((w) => w.id === lowestWorker.id)
+      if (index !== -1) {
+        this.workers[index] = lowestWorker
+      }
       return lowestWorker.worker
     } else {
       const worker = new Worker(`${__dirname}/worker.js`)
       const threadId = +`${worker.threadId}`
-      worker.on('message', (msg) => this.processWorkerMessage(msg))
       worker.on('error', (e) => {
         this.handleError(
           `${loggerPrefix} Worker ${threadId} error: ${
@@ -568,11 +548,9 @@ class InternalIndicatorsFactory {
     exchange: ExchangeEnum,
     symbol: string,
     interval: ExchangeIntervals,
-    cb: IndicatorCb,
     test = false,
     limitMultiplier?: number,
     load1d = false,
-    returnCb?: boolean,
   ) {
     try {
       if ([ExchangeEnum.mexc, ExchangeEnum.paperMexc].includes(exchange)) {
@@ -586,13 +564,15 @@ class InternalIndicatorsFactory {
       const ex = paperExchanges.includes(exchange)
         ? mapPaperToReal(exchange as PaperExchangeType)
         : exchange
-      const pairExists = await this.checkPair(symbol, ex)
-      if (!pairExists) {
-        return {
-          id: '',
-          indicator: null,
-          room: '',
-          message: `Pair ${symbol} not found in exchange ${ex}`,
+      if (!test) {
+        const pairExists = await this.checkPair(symbol, ex)
+        if (!pairExists) {
+          return {
+            id: '',
+            indicator: null,
+            room: '',
+            message: `Pair ${symbol} not found in exchange ${ex}`,
+          }
         }
       }
 
@@ -613,18 +593,13 @@ class InternalIndicatorsFactory {
       )
       const find = this.indicators.get(id)
       if (find) {
-        const result = await this.subscribeIndicator(
-          id,
-          undefined,
-          load1d,
-          returnCb,
-        )
+        const result = await this.subscribeIndicator(id, undefined, load1d)
         if (!result) {
           this.handleError(`${loggerPrefix} Error in subscribe: ${id}`)
           return null
         }
         find.subcribersSet.add(result.id)
-        this.cbsMap.set(result.id, cb)
+        this.subscribersCount += 1
         return {
           id: result.id,
           room: id,
@@ -645,7 +620,6 @@ class InternalIndicatorsFactory {
           id,
           undefined,
           load1d,
-          returnCb,
         )
         if (!subscriberId) {
           this.handleError(`${loggerPrefix} Error in subscribe: ${id}`)
@@ -654,8 +628,8 @@ class InternalIndicatorsFactory {
         const get = this.indicators.get(id)
         if (get) {
           get.subcribersSet.add(subscriberId.id)
+          this.subscribersCount += 1
         }
-        this.cbsMap.set(subscriberId.id, cb)
         return { id: subscriberId.id, room: id }
       }
     } catch (e) {
@@ -681,16 +655,17 @@ class InternalIndicatorsFactory {
       if (left === 0) {
         await this.deleteIndicator(idToFind)
       }
-      find.subcribersSet.delete(subscriberId)
-      this.cbsMap.delete(id)
+      find.subcribersSet.delete(id)
+      this.subscribersCount -= 1
     }
   }
   public async removeCallback(id: string) {
-    const [subscriberId, idToFind] = id.split(this.splitPhrase)
-    const find = this.indicators.get(idToFind)
+    const find = this.indicators.get(id)
     if (find) {
-      await this.removeCallbackIndicator(idToFind, subscriberId)
-      this.cbsMap.delete(id)
+      this.subscribersCount -= find.subcribersSet.size
+      find.subcribersSet = new Set()
+      this.indicators.set(id, find)
+      await this.removeCallbackIndicator(id)
     }
   }
 }

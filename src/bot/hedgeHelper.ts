@@ -178,6 +178,10 @@ class HedgeBot extends MetaBot<
     }
   }
 
+  override async afterSuccessStart() {
+    this.setTpSlTimer()
+  }
+
   @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
   override async setStatus(
     _botId: string,
@@ -223,11 +227,7 @@ class HedgeBot extends MetaBot<
     if (status === BotStatusEnum.closed) {
       this.resetTimers()
     }
-    super.setStatus(_botId, status, closeType, serverRestart).then(() => {
-      if (status === BotStatusEnum.open) {
-        this.setTpSlTimer()
-      }
-    })
+    super.setStatus(_botId, status, closeType, serverRestart)
   }
 
   @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)

@@ -61,10 +61,8 @@ class IndicatorOperations {
       const { event, payload, response, id } = data
       const i = this.indicators.get(id)
       if (i) {
-        //@ts-ignore
         if (typeof i.instance[event] === 'function') {
-          //@ts-ignore
-          const result = await i.instance[event](...payload)
+          const result = await (i.instance[event] as any)(...payload)
           parentPort?.postMessage({ response, data: result })
         }
       }
@@ -84,8 +82,7 @@ class IndicatorOperations {
     const { id, response } = data
     const get = this.indicators.get(id)
     if (get) {
-      //@ts-ignore
-      delete get.instance
+      delete (get as any).instance
     }
     this.indicators.delete(id)
     parentPort?.postMessage({

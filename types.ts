@@ -4273,10 +4273,13 @@ export const liveupdate = 'liveupdate'
 export const rabbitUsersStreamKey = 'usersStreamAction'
 export const setToRedisDelay = 750
 
-export type IndicatorCb = (data: IndicatorHistory[], price: number) => any
+export type IndicatorCb = (
+  data: IndicatorHistory[],
+  price: number,
+  is1d?: boolean,
+) => any
 
 export type IndicatorSubscribers = {
-  fn: IndicatorCb
   id: string
   is1d?: boolean
 }
@@ -4330,7 +4333,7 @@ export type IndicatorServiceChildMessageSubscribeIndicator = {
 
 export type IndicatorServiceParentMessageSubscribeIndicator = {
   event: 'subscribe'
-  payload: [string | undefined, boolean | undefined, boolean | undefined]
+  payload: [string | undefined, boolean | undefined]
   id: string
   response: string
 }

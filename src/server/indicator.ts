@@ -20,12 +20,11 @@ type RequestMessage =
   | BotParentUnsubscribeIndicatorEventDto
 
 class IndicatorsService {
-  private rabbitClient: Rabbit | null = null
+  private rabbitClient: Rabbit = new Rabbit()
   private redisClient: RedisWrapper | null = null
   private redisSubClient: RedisWrapper | null = null
-  private redisChannels: Set<string> = new Set()
-  private rabbitIdRoomsMapDca: Map<string, string> = new Map()
-  private rabbitIdRoomsMapCombo: Map<string, string> = new Map()
+  private rabbitIdRoomsMapDca: Map<string, Set<string>> = new Map()
+  private rabbitIdRoomsMapCombo: Map<string, Set<string>> = new Map()
   private indicatorsFactory = Indicators.getInstance()
   constructor() {
     this.redisServiceLogListener = this.redisServiceLogListener.bind(this)
@@ -35,7 +34,6 @@ class IndicatorsService {
     const healthServer = new HealthServer()
     healthServer.start()
 
-    this.rabbitClient = new Rabbit()
     this.initRedis()
 
     this.requestCallback = this.requestCallback.bind(this)
@@ -74,10 +72,9 @@ class IndicatorsService {
           type === BotType.dca
             ? this.rabbitIdRoomsMapDca
             : this.rabbitIdRoomsMapCombo
-        for (const [k, v] of map) {
+        for (const k of map.keys()) {
           this.indicatorsFactory.removeCallback(k)
           map.delete(k)
-          this.redisChannels.delete(v)
         }
       }
     } catch (e) {
@@ -132,7 +129,6 @@ class IndicatorsService {
         msg.data.exchange,
         msg.data.symbol,
         msg.data.interval,
-        (data, price) => cb(data, price),
         msg.data.test,
         msg.data.limitMultiplier,
         msg.data.load1d,
@@ -142,34 +138,25 @@ class IndicatorsService {
         return null
       }
       const { room, id, message, data, lastPrice } = subscriptionResult
-      const fullRoom = `${room}@${msg.responseParams.uuid}@${msg.responseParams.symbol}`
-      let cb = (_data: unknown[], _price: number) => {
-        return
-      }
-      if (this.redisChannels.has(fullRoom) && msg.data.load1d) {
-        cb = (data: unknown[], price: number) => {
-          this.getRedisCb(fullRoom, { data, price })
-          cb = (_data: unknown[], _price: number) => {
-            return
-          }
-        }
-      }
-      if (!this.redisChannels.has(fullRoom)) {
-        this.logger(false, 'Create room:', fullRoom, 'room', room, 'id', id)
-        this.redisChannels.add(fullRoom)
-        const map =
-          msg.type === BotType.dca
-            ? this.rabbitIdRoomsMapDca
-            : this.rabbitIdRoomsMapCombo
-        map.set(id, fullRoom)
-        cb = (data: unknown[], price: number) =>
-          this.getRedisCb(fullRoom, { data, price })
-      }
+      const map =
+        msg.type === BotType.dca
+          ? this.rabbitIdRoomsMapDca
+          : this.rabbitIdRoomsMapCombo
+      const get = map.get(room) ?? new Set()
+      get.add(id)
+      map.set(room, get)
       if (id && room) {
         this.logger(false, 'Subscribed:', 'room', room, 'id', id)
       }
       if (this.rabbitClient) {
-        return { id, status: !!id && !!room, room, message, data, lastPrice }
+        return {
+          id,
+          status: !!id && !!room,
+          room: room,
+          message,
+          data,
+          lastPrice,
+        }
       }
     } catch (e) {
       logger.error(`Failed to subscribe indicator: ${JSON.stringify(msg)}`, e)
@@ -188,9 +175,15 @@ class IndicatorsService {
       msg.type === BotType.dca
         ? this.rabbitIdRoomsMapDca
         : this.rabbitIdRoomsMapCombo
-    const get = map.get(id)
-    if (get) {
-      this.redisChannels.delete(get)
+    for (const [room, ids] of map.entries()) {
+      if (ids.has(id)) {
+        ids.delete(id)
+        if (ids.size === 0) {
+          map.delete(room)
+        }
+        this.logger(false, 'Unsubscribed:', 'room', room, 'id', id)
+        return true
+      }
     }
     return true
   }
