@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.6] – 2025-07-14
+### Fixed
+- Fixed TP order size calculation in coinm futures for limit-based orders placed after base order is filled
+
 ## [1.0.5] – 2025-07-08
 ### Changed
 - Updated indicator service connection and publish channel logic

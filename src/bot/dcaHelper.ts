@@ -11381,7 +11381,11 @@ function createDCABotHelper<
               qtyNew = nqtyNew
             }
           }
-          if (this.coinm && !this.isBitget) {
+          const startPrice =
+            +(bo?.price || 0) ||
+            +(bo?.origPrice || 0) ||
+            +(deal?.initialPrice || 0)
+          if (this.coinm && !this.isBitget && startPrice) {
             const contracts = Math.max(
               1,
               this.math.round(
@@ -11389,7 +11393,7 @@ function createDCABotHelper<
                   (acc, v) => acc + +v.executedQty * +v.price,
                   0,
                 ) +
-                  boQty * +(bo?.price ?? 0) -
+                  boQty * startPrice -
                   (
                     deal?.tpHistory ??
                     ([] as unknown as NonNullable<Deal['tpHistory']>)
