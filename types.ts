@@ -2582,6 +2582,11 @@ export type amountUsdAsset = {
   name: string
   amount: number
   amountUsd: number
+  exchanges?: {
+    uuid: string
+    amount: number
+    amountUsd: number
+  }[]
 }
 
 export interface SnapshotSchema extends SchemaI {

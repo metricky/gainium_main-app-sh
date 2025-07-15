@@ -763,12 +763,19 @@ const userSnapshots = async (
               if (find) {
                 find.amount += amount
                 find.amountUsd += amountUsd
+                find.exchanges = find.exchanges || []
+                find.exchanges.push({
+                  uuid: b.exchangeUUID,
+                  amount,
+                  amountUsd,
+                })
                 assets = [...assets.filter((a) => a.name !== asset), find]
               } else {
                 assets.push({
                   name: asset,
                   amount,
                   amountUsd,
+                  exchanges: [{ uuid: b.exchangeUUID, amount, amountUsd }],
                 })
               }
               const findExchange = exchangesTotal.find(
@@ -1293,15 +1300,24 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
   }
 }
 
-export const checkLicenseKey = async () => {
+export const checkLicenseKey = async (
+  licenseKey?: string,
+  register?: boolean,
+) => {
   const defaultResponse = { valid: false, isPremium: false }
-  const user = await userDb.readData()
-  if (user.status === StatusEnum.notok) {
-    logger.error(`checkLicenseKey | Cannot get user ${user.reason}`)
-    return defaultResponse
-  }
-  if (!user.data.result || !user.data.result.licenseKey) {
-    return defaultResponse
+  let lk = licenseKey
+  let u: ClearUserSchema | undefined
+  if (!lk) {
+    const user = await userDb.readData()
+    if (user.status === StatusEnum.notok) {
+      logger.error(`checkLicenseKey | Cannot get user ${user.reason}`)
+      return defaultResponse
+    }
+    if (!user.data.result || !user.data.result.licenseKey) {
+      return defaultResponse
+    }
+    u = user.data.result
+    lk = u.licenseKey
   }
   try {
     const getLicenseStatus = await axios
@@ -1309,17 +1325,15 @@ export const checkLicenseKey = async () => {
         'https://api.gainium.io/license',
         {
           params: {
-            key: user.data.result.licenseKey,
+            key: lk,
+            register,
           },
         },
       )
       .then(async (res) => {
-        if (!res.data.valid) {
+        if (!res.data.valid && !licenseKey && u) {
           logger.error(`checkLicenseKey | License key is not valid.`)
-          await userDb.updateData(
-            { _id: user.data.result._id },
-            { $set: { licenseKey: '' } },
-          )
+          await userDb.updateData({ _id: u._id }, { $set: { licenseKey: '' } })
         }
         return res.data
       })

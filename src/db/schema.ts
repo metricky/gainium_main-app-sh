@@ -774,6 +774,13 @@ const snapshotsSchema: Schema<SnapshotSchema> = new Schema({
       name: String,
       amount: Number,
       amountUsd: Number,
+      exchanges: [
+        {
+          uuid: String,
+          amount: Number,
+          amountUsd: Number,
+        },
+      ],
     },
   ],
   exchangesTotal: [

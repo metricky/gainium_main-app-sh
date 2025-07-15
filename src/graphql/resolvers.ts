@@ -3615,6 +3615,40 @@ const resolvers = <
         data: bots,
       }
     },
+    getGlobalVariablesByIds: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: {
+          ids: string[]
+        }
+      },
+      { token }: InputRequest,
+    ) => {
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const response = await globalVarsDb.readData(
+        {
+          _id: { $in: input.ids.map((id) => new Types.ObjectId(id)) },
+          userId: `${user.data._id}`,
+        },
+        {},
+        {},
+        true,
+        true,
+      )
+      return {
+        status: response.status,
+        data:
+          response.status === StatusEnum.ok
+            ? response.data.result.map((i) => ({ id: `${i._id}`, ...i }))
+            : null,
+        reason: response.status === StatusEnum.ok ? null : response.reason,
+      }
+    },
   }
   const Mutation = {
     resetAccount: async (
@@ -4745,6 +4779,7 @@ const resolvers = <
           name?: string
           timezone: string
           weekStart?: string
+          licenseKey: string
         }
       },
       { userAgent, ip }: InputRequest,
@@ -4765,6 +4800,16 @@ const resolvers = <
         return {
           status: StatusEnum.notok,
           reason: 'Registration is closed',
+          data: null,
+        }
+      }
+
+      const validateLicense = await checkLicenseKey(input.licenseKey, true)
+
+      if (!validateLicense.valid) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Invalid license key',
           data: null,
         }
       }

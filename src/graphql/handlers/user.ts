@@ -20,6 +20,7 @@ export const createOrUpdateUser = async (
     timezone?: string
     name?: string
     weekStart?: string
+    licenseKey?: string
   },
   userAgent?: string,
   ip?: string,
@@ -142,6 +143,7 @@ export const createOrUpdateUser = async (
         },
       ],
       weekStart: weekStart || 'm',
+      licenseKey: user.licenseKey,
     }
     const createDataRequest = await _userDb.createData(userToAdd)
     if (createDataRequest.status === StatusEnum.notok) {

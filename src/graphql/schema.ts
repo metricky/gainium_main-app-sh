@@ -121,6 +121,7 @@ const UserForm = /* GraphQL */ `
     name: String
     timezone: String!
     weekStart: String
+    licenseKey: String!
   }
 `
 
@@ -4960,10 +4961,16 @@ export const BotSchema = /* GraphQL */ `
     reason: String
     data: getProfitResult
   }
+  type assetUsdDataExchangesData {
+    uuid: String
+    amount: Float
+    amountUsd: Float
+  }
   type assetUsdData {
     name: String
     amount: Float
     amountUsd: Float
+    exchanges: [assetUsdDataExchangesData]
   }
   type exchangesInPortfolio {
     uuid: String

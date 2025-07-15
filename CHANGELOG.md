@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.7] – 2025-07-15
+### Added
+- Added license key validation to user registration form
+- Enhanced license key checking functionality with registration support
+- Snapshot assets aggregation by exchange UUID
+
+### Changed
+- Updated user registration GraphQL schema to include required license key field
+- Modified license key validation to support both registration and existing user checks
+  
+### Fixed
+- Return getGlobalVariablesByIds request
+
 ## [1.0.6] – 2025-07-14
 ### Fixed
 - Fixed TP order size calculation in coinm futures for limit-based orders placed after base order is filled
