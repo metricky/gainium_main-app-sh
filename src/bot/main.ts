@@ -27,6 +27,7 @@ import type {
   ClearDCABotSchema,
   BaseReturn,
   PriceMessage,
+  BybitHost,
 } from '../../types'
 import {
   PositionSide,
@@ -916,7 +917,7 @@ class MainBot<T extends IMainBot> {
       )
       return
     }
-    const { uuid, keysType, provider, okxSource } = exchange
+    const { uuid, keysType, provider, okxSource, bybitHost } = exchange
     let { key, secret, passphrase } = exchange
     key = decrypt(key)
     secret = decrypt(secret)
@@ -928,6 +929,7 @@ class MainBot<T extends IMainBot> {
       passphrase,
       keysType,
       okxSource,
+      bybitHost,
       provider,
     }
   }
@@ -982,6 +984,7 @@ class MainBot<T extends IMainBot> {
         exchange.passphrase,
         exchange.keysType,
         exchange.okxSource,
+        exchange.bybitHost,
         true,
       )
     } catch (e) {
@@ -1025,6 +1028,7 @@ class MainBot<T extends IMainBot> {
     passphrase?: string,
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
+    bybitHost?: BybitHost,
     update?: boolean,
   ) {
     if (!this.data) {
@@ -1043,6 +1047,7 @@ class MainBot<T extends IMainBot> {
         undefined,
         keysType,
         okxSource,
+        bybitHost,
       )
       this.handleLog('Load exchange provider')
       if (update) {
@@ -1251,6 +1256,10 @@ class MainBot<T extends IMainBot> {
     return
   }
 
+  cbEmit(_setError: boolean, _message: string) {
+    return
+  }
+
   @IdMute(mutex, (botId: string) => `${botId}processError`)
   async processError(
     _botId: string,
@@ -1359,6 +1368,7 @@ class MainBot<T extends IMainBot> {
             symbol: this.data?.settings.pair[0],
             exchange: this.data?.exchange,
           })
+          this.cbEmit(setError, messageToSet)
         }
       }
     }
@@ -1896,6 +1906,7 @@ class MainBot<T extends IMainBot> {
           keys?.passphrase ?? '',
           keys.keysType,
           keys.okxSource,
+          keys.bybitHost,
         )
         if (!this.shouldContinueLoad()) {
           this.handleLog('Should not continue load')

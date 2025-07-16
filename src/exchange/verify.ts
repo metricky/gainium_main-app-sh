@@ -1,6 +1,7 @@
 import axios from 'axios'
 import http from 'http'
 import {
+  BybitHost,
   CoinbaseKeysType,
   ExchangeEnum,
   OKXSource,
@@ -37,6 +38,7 @@ const verifyNormal = async (
   passphrase?: string,
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
+  bybitHost?: BybitHost,
 ): Promise<VerifyResponse> => {
   const authHeaders: Record<string, string> = {
     'Content-type': 'application/json',
@@ -51,6 +53,9 @@ const verifyNormal = async (
   }
   if (okxSource) {
     authHeaders.okxSource = okxSource
+  }
+  if (bybitHost) {
+    authHeaders.bybitHost = bybitHost
   }
   authHeaders.exchange = provider
   authHeaders.sendtoall = 'true'
@@ -116,6 +121,7 @@ const verifyExchange = async (
   passphrase?: string,
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
+  bybitHost?: BybitHost,
 ): Promise<VerifyResponse> => {
   if (paperExchanges.includes(provider)) {
     return verifyPaper(key, secret)
@@ -128,6 +134,7 @@ const verifyExchange = async (
     passphrase,
     keysType,
     okxSource,
+    bybitHost,
   )
 }
 

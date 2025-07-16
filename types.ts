@@ -1483,6 +1483,7 @@ export type ExchangeInUser = {
   keysType?: CoinbaseKeysType
   okxSource?: OKXSource
   zeroFee?: boolean
+  bybitHost?: BybitHost
 }
 
 export interface FavoritePairsSchema extends SchemaI {
@@ -3968,6 +3969,7 @@ export type UpdateBotExchangeDto = {
   userId: string
   keysType?: CoinbaseKeysType
   okxSource?: OKXSource
+  bybitHost?: BybitHost
 }
 
 export type UpdateBotExchangeInfoDto = {
@@ -4507,4 +4509,13 @@ export type InputRequest = {
   }
   paperContext: boolean
   ip?: string
+}
+
+export enum BybitHost {
+  eu = 'eu',
+  com = 'com',
+  nl = 'nl',
+  tr = 'tr',
+  kz = 'kz',
+  ge = 'ge',
 }

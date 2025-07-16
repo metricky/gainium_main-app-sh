@@ -44,6 +44,7 @@ export const getAllOpenOrders = async (
       undefined,
       exchange.keysType,
       exchange.okxSource,
+      exchange.bybitHost,
     )
     queries.push(
       exchangeInstance
@@ -193,6 +194,7 @@ export const getAllOpenPositions = async (
       undefined,
       exchange.keysType,
       exchange.okxSource,
+      exchange.bybitHost,
     )
     queries.push(
       exchangeInstance
@@ -335,6 +337,7 @@ export const cancelOrderOnExchange = async (
     undefined,
     exchange.keysType,
     exchange.okxSource,
+    exchange.bybitHost,
   )
   const result = await exchangeInstance.cancelOrderByOrderIdAndSymbol({
     orderId,
@@ -367,6 +370,7 @@ export const placeOrderOnExchange = async (
     undefined,
     exchange.keysType,
     exchange.okxSource,
+    exchange.bybitHost,
   )
   const result = await exchangeInstance.openOrder(order)
   return result

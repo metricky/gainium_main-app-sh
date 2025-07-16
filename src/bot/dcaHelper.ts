@@ -228,6 +228,7 @@ function createDCABotHelper<
       ) => MainBot<Schema>
 
   class DCABotHelper extends ActualBaseClass {
+    indicatorTimeout = 60 * 1000
     indicatorRoomConfigMap: Map<string, Set<string>> = new Map()
     indicatorConfigIdMap: Map<string, string> = new Map()
     indicatorGroupsToUse: SettingsIndicatorGroup[] = []
@@ -8785,7 +8786,6 @@ function createDCABotHelper<
       lastPrice?: number
       cb?: (_msg: string) => void
     }> {
-      const timeout = 60 * 1000
       if (this.rabbitClient) {
         const result = await this.rabbitClient.sendWithCallback<
           BotParentIndicatorEventDto,
@@ -8797,7 +8797,7 @@ function createDCABotHelper<
             data?: IndicatorHistory[]
             lastPrice?: number
           }
-        >(rabbitIndicatorsKey, data, timeout)
+        >(rabbitIndicatorsKey, data, this.indicatorTimeout)
         if (result && result?.response) {
           if (result.response.status) {
             const room = `${result.response.room}`
@@ -8850,7 +8850,7 @@ function createDCABotHelper<
         responseId,
         type: this.botType,
       }
-      const timeout = wait ? 60 * 1000 : 0
+      const timeout = wait ? this.indicatorTimeout : 0
       if (this.rabbitClient) {
         const result = await this.rabbitClient.sendWithCallback<
           BotParentUnsubscribeIndicatorEventDto,

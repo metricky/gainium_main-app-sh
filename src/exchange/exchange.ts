@@ -19,6 +19,7 @@ import {
   CoinbaseKeysType,
   ExchangeRequestTimeProfile,
   OKXSource,
+  BybitHost,
 } from '../../types'
 import axios, { AxiosError } from 'axios'
 import http from 'http'
@@ -28,14 +29,15 @@ import TimeProfiler from './timeProfiler'
 import RedisClient from '../db/redis'
 import { EXCHANGE_SERVICE_API_URL } from '../config'
 import { brokerCodesDb } from '../db/dbInit'
+import ExpirableMap from '../utils/expirableMap'
 
 const { sleep } = utils
-
-const timeProfiler = TimeProfiler.getInstance()
 
 class Exchange extends AbstractExchange {
   private readonly exchange: ExchangeEnum
   private isOkx: boolean
+  private brokerCodes = new ExpirableMap<ExchangeEnum, string>(60 * 60 * 1000) // 1 hour cache
+  protected timeProfiler = TimeProfiler.getInstance()
   constructor(
     exchange: ExchangeEnum,
     key: string,
@@ -44,8 +46,9 @@ class Exchange extends AbstractExchange {
     _environment?: 'live' | 'sandbox',
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
+    bybitHost?: BybitHost,
   ) {
-    super(key, secret, passphrase, undefined, keysType, okxSource)
+    super(key, secret, passphrase, undefined, keysType, okxSource, bybitHost)
     this.exchange = exchange
     this.isOkx = [
       ExchangeEnum.okx,
@@ -54,22 +57,26 @@ class Exchange extends AbstractExchange {
     ].includes(this.exchange)
   }
 
+  protected saveTimeProfile(_profile: ExchangeRequestTimeProfile) {
+    return
+  }
+
   protected getEmptyTimeProfile(
     requestName: string,
   ): ExchangeRequestTimeProfile {
-    return timeProfiler.getEmptyTimeProfile(requestName, this.exchange)
+    return this.timeProfiler.getEmptyTimeProfile(requestName, this.exchange)
   }
 
   private startProfilerTime(
     profiler: ExchangeRequestTimeProfile,
   ): ExchangeRequestTimeProfile {
-    return timeProfiler.startProfilerTime(profiler)
+    return this.timeProfiler.startProfilerTime(profiler)
   }
 
   private endProfilerTime(
     profiler: ExchangeRequestTimeProfile,
   ): ExchangeRequestTimeProfile {
-    return timeProfiler.endProfilerTime(profiler)
+    return this.timeProfiler.endProfilerTime(profiler)
   }
 
   async cancelOrder(
@@ -92,7 +99,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.cancelOrder, order, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     if ((result.data.reason ?? '').indexOf(`ECONNRESET`) !== -1) {
       logger.error(
         `Got ECONNRESET in cancel order. Exchange: ${this.exchange}, symbol: ${order.symbol}`,
@@ -116,7 +123,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getAllExchangeInfo, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -154,7 +161,7 @@ class Exchange extends AbstractExchange {
         timeProfile,
       ),
     )
-
+    this.saveTimeProfile(result.timeProfile)
     const orders = result.data as BaseReturn<CommonOrder[]>
     const number = result.data as BaseReturn<number>
     return returnOrders ? orders : number
@@ -190,7 +197,7 @@ class Exchange extends AbstractExchange {
         }
       })
       .catch(this.handleError(this.getAllUserFees, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -205,7 +212,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getBalance, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -224,7 +231,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getExchangeInfo, symbol, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -248,7 +255,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getOrder, data, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -264,7 +271,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getUserFees, _symbol, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -338,7 +345,7 @@ class Exchange extends AbstractExchange {
         logger.error(`Error in getAllPrices redis cache: ${e}`)
       }
     }
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -366,7 +373,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.openOrder, order, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     if ((result.data.reason ?? '').indexOf(`ECONNRESET`) !== -1) {
       logger.error(
         `Got ECONNRESET in new order. Exchange: ${this.exchange}, symbol: ${order.symbol}`,
@@ -424,7 +431,7 @@ class Exchange extends AbstractExchange {
         timeProfile,
       ),
     )
-
+    this.saveTimeProfile(result.timeProfile)
     if (
       result.data.status === StatusEnum.notok &&
       result.data.reason.includes('parameter verification failed')
@@ -466,7 +473,7 @@ class Exchange extends AbstractExchange {
         timeProfile,
       ),
     )
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -535,7 +542,7 @@ class Exchange extends AbstractExchange {
         logger.error(`Error in getAllPrices redis cache: ${e}`)
       }
     }
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -560,7 +567,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.changeLeverage, data, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -594,7 +601,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.futures_getPositions, symbol, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -611,7 +618,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.setHedge, value, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -626,7 +633,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.futures_leverageBracket, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -641,7 +648,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getUid, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -658,7 +665,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getAffiliate, uid, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -684,7 +691,7 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.changeMargin, data, timeProfile))
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -706,7 +713,7 @@ class Exchange extends AbstractExchange {
     ).catch(
       this.handleError(this.cancelOrderByOrderIdAndSymbol, order, timeProfile),
     )
-
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 
@@ -763,9 +770,15 @@ class Exchange extends AbstractExchange {
     }
     let code = ''
     if (endpoint === 'order' && method === 'post') {
-      code =
-        (await brokerCodesDb.readData({ exchange: this.exchange }))?.data
-          ?.result.code ?? ''
+      const get = this.brokerCodes.get(this.exchange)
+      if (get) {
+        code = get
+      } else {
+        code =
+          (await brokerCodesDb.readData({ exchange: this.exchange }))?.data
+            ?.result?.code ?? ''
+        this.brokerCodes.set(this.exchange, code)
+      }
     }
     if (request.isPrivate) {
       if (this.key != null) {
@@ -779,6 +792,9 @@ class Exchange extends AbstractExchange {
       }
       if (this.okxSource != null) {
         authHeaders.okxsource = this.okxSource
+      }
+      if (this.bybitHost != null) {
+        authHeaders.bybithost = this.bybitHost
       }
       if (this.passphrase) {
         authHeaders.passphrase = this.passphrase

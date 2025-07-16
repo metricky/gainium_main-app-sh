@@ -1,4 +1,4 @@
-import { CoinbaseKeysType, OKXSource } from '../../types'
+import { BybitHost, CoinbaseKeysType, OKXSource } from '../../types'
 import AbsctractExchange from './index'
 
 export interface BoundExchangeType<T, A extends unknown[]> extends Function {
@@ -16,6 +16,7 @@ export type ExchangeArgs = [
   'live' | 'sandbox' | undefined,
   CoinbaseKeysType | undefined,
   OKXSource | undefined,
+  BybitHost | undefined,
 ]
 
 export type ExchangeType<
@@ -30,6 +31,7 @@ export type ExchangeFactory<T extends AbsctractExchange> = (
   _environment?: 'live' | 'sandbox',
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
+  bybitHost?: BybitHost,
 ) => T
 
 export function createExchangeFactory<

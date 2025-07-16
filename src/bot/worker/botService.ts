@@ -233,6 +233,7 @@ class BotOperations {
         userId,
         keysType,
         okxSource,
+        bybitHost,
       } = data
       for (const b of this.bots.filter((b) => b.userId === userId)) {
         b.b.setExchangeCredentials(
@@ -242,6 +243,7 @@ class BotOperations {
           passphrase,
           keysType,
           okxSource,
+          bybitHost,
           true,
         )
       }
@@ -253,6 +255,7 @@ class BotOperations {
           passphrase,
           keysType,
           okxSource,
+          bybitHost,
           true,
         )
       }
@@ -264,6 +267,7 @@ class BotOperations {
           passphrase,
           keysType,
           okxSource,
+          bybitHost,
           true,
         )
       }

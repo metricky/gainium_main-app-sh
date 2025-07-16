@@ -98,6 +98,7 @@ import {
   DCValueEnum,
   ActionsEnum,
   DCACloseTriggerEnum,
+  BybitHost,
 } from '../../types'
 import { collections } from './config'
 
@@ -246,6 +247,7 @@ const userSchema: Schema<UserSchema> = new Schema({
       uid: Schema.Types.Mixed,
       affiliate: Boolean,
       waitingForConfirmation: Boolean,
+      bybitHost: { type: String, enum: BybitHost },
     },
   ],
   timezone: RequiredString,

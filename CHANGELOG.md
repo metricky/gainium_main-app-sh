@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.8] – 2025-07-16
+### Added
+- Added support for changing Bybit host configuration (com, eu, nl, tr, kz, ge)
+- Enhanced exchange factory to support Bybit host parameter
+- Added BybitHost enum for different regional hosts
+
+### Changed
+- Updated exchange types and interfaces to include bybitHost parameter
+- Modified bot exchange update functionality to support Bybit host selection
+
+### Fixed
+- Undefined broker code
+- Indicator connect timeout
+
 ## [1.0.7] – 2025-07-15
 ### Added
 - Added license key validation to user registration form

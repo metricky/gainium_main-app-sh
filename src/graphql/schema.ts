@@ -424,6 +424,14 @@ export const UserSchema = /* GraphQL */ `
     spot
     futures
   }
+  enum BybitHost {
+    eu
+    com
+    nl
+    tr
+    kz
+    ge
+  }
   input addExchangeInput {
     key: String!
     secret: String!
@@ -435,6 +443,7 @@ export const UserSchema = /* GraphQL */ `
     tradeType: TradeTypeEnum
     keysType: String
     okxSource: String
+    bybitHost: BybitHost
   }
   input updateExchangeInput {
     uuid: String!
@@ -446,6 +455,7 @@ export const UserSchema = /* GraphQL */ `
     coinToTopUp: String
     keysType: String
     okxSource: String
+    bybitHost: BybitHost
   }
   type exchangeResponse implements BasicResponse {
     status: Status
@@ -473,6 +483,7 @@ export const UserSchema = /* GraphQL */ `
     balance: Float
     keysType: String
     okxSource: String
+    bybitHost: BybitHost
     affiliate: Boolean
     updateTime: Float
     lastUpdated: Float
@@ -932,6 +943,7 @@ export const BotSchema = /* GraphQL */ `
     _id: String
     statusHistory: [ssbStatusHistory]
     statusReason: String
+    cost: Float
   }
   type getServerSideBacktestRequestsResponse implements BasicResponse {
     status: Status

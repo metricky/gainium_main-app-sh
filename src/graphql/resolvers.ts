@@ -523,10 +523,19 @@ const resolvers = <
               passphrase || '',
               e.keysType,
               e.okxSource,
+              e.bybitHost,
             )
             const exchangeInstance = ExchangeChooser.chooseExchangeFactory(
               e.provider,
-            )(e.key, e.secret, e.passphrase, undefined, e.keysType, e.okxSource)
+            )(
+              e.key,
+              e.secret,
+              e.passphrase,
+              undefined,
+              e.keysType,
+              e.okxSource,
+              e.bybitHost,
+            )
             const hedge = isFutures(e.provider)
               ? !!(await exchangeInstance.getHedge()).data
               : false
@@ -4584,6 +4593,7 @@ const resolvers = <
         undefined,
         exchange.keysType,
         exchange.okxSource,
+        exchange.bybitHost,
       )
       const result = await exchangeInstance.setHedge(hedge)
       if (result.status === StatusEnum.notok) {
@@ -4948,6 +4958,7 @@ const resolvers = <
           tradeType: _tradeType,
           keysType,
           okxSource,
+          bybitHost,
         } = input
         const tradeType = _tradeType ?? TradeTypeEnum.spot
         const { passphrase } = input
@@ -4973,6 +4984,7 @@ const resolvers = <
               passphrase || '',
               keysType,
               okxSource,
+              bybitHost,
             )
             if (!verifyResult.status) {
               logger.error(
@@ -5107,6 +5119,7 @@ const resolvers = <
               undefined,
               keysType,
               okxSource,
+              bybitHost,
             )
 
             const saveDataRequest = await userDb.updateData(
@@ -5213,6 +5226,7 @@ const resolvers = <
                       uuid,
                       keysType,
                       okxSource,
+                      bybitHost,
                       passphrase: passphrase ? encrypt(passphrase) : undefined,
                       status: true,
                       lastUpdated: +new Date(),
@@ -5383,7 +5397,7 @@ const resolvers = <
       }
       const { stablecoinBalance, coinToTopUp } = input
       let { key, secret, passphrase } = input
-      const { uuid, name, keysType, okxSource } = input
+      const { uuid, name, keysType, okxSource, bybitHost } = input
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
@@ -5395,6 +5409,7 @@ const resolvers = <
         const oldPassphrase = find.passphrase ? decrypt(find.passphrase) : ''
         const oldKeysType = find.keysType
         const oldOkxSource = find.okxSource
+        const oldBybitHost = find.bybitHost
         if (!paperExchanges.includes(find.provider)) {
           if (
             oldKey !== key ||
@@ -5404,7 +5419,8 @@ const resolvers = <
               ? Math.abs(find.lastUpdated - +new Date()) > 24 * 60 * 60 * 1000
               : true) ||
             keysType !== oldKeysType ||
-            oldOkxSource !== okxSource
+            oldOkxSource !== okxSource ||
+            oldBybitHost !== bybitHost
           ) {
             const keyToUse = key || oldKey
             const secretToUse = secret || oldSecret
@@ -5417,6 +5433,7 @@ const resolvers = <
               passphraseToUse,
               keysType,
               okxSource,
+              bybitHost,
             )
             if (!status) {
               return {
@@ -5434,6 +5451,7 @@ const resolvers = <
               undefined,
               keysType,
               okxSource,
+              bybitHost,
             )
             const hedge = isFutures(find.provider)
               ? !!(await exchangeInstance.getHedge()).data
@@ -5460,6 +5478,7 @@ const resolvers = <
                     ue.lastUpdated = find.lastUpdated
                     ue.keysType = keysType || find.keysType
                     ue.okxSource = okxSource || find.okxSource
+                    ue.bybitHost = bybitHost || find.bybitHost
                   }
                   return ue
                 }),
@@ -5491,7 +5510,8 @@ const resolvers = <
               oldSecret !== decrypt(secret) ||
               oldPassphrase !== decrypt(passphrase ?? '') ||
               keysType !== oldKeysType ||
-              okxSource !== oldOkxSource)
+              okxSource !== oldOkxSource ||
+              bybitHost !== oldBybitHost)
           ) {
             rabbitClient?.send(rabbitUsersStreamKey, {
               event: 'close stream',
@@ -5506,6 +5526,7 @@ const resolvers = <
                 provider: find.provider,
                 keysType,
                 okxSource,
+                bybitHost,
               },
               uuid,
             })

@@ -17,6 +17,7 @@ import type {
   TradeResponse,
   CoinbaseKeysType,
   OKXSource,
+  BybitHost,
 } from '../../types'
 import { decrypt } from '../utils/crypto'
 
@@ -111,6 +112,7 @@ abstract class AbsctractExchange implements Exchange {
   public allPricesCachePeriod = 1 * 60 * 1000
   public keysType?: CoinbaseKeysType
   public okxSource?: OKXSource
+  public bybitHost?: BybitHost
   constructor(
     key?: string,
     secret?: string,
@@ -118,12 +120,14 @@ abstract class AbsctractExchange implements Exchange {
     _environment?: 'live' | 'sandbox',
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
+    bybitHost?: BybitHost,
   ) {
     this.key = key ? decrypt(key) : key
     this.secret = secret ? decrypt(secret) : secret
     this.passphrase = passphrase ? decrypt(passphrase) : passphrase
     this.keysType = keysType
     this.okxSource = okxSource
+    this.bybitHost = bybitHost
   }
   /** Function to handle and format success result */
   returnGood<T>() {

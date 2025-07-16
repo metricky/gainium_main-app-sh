@@ -336,6 +336,7 @@ const updateUserBalance = async (
           undefined,
           e.keysType,
           e.okxSource,
+          e.bybitHost,
         )
         const balances = await provider.getBalance()
         if (balances.status === 'OK' && userBalances.status === StatusEnum.ok) {
@@ -460,6 +461,7 @@ const connectUserBalance = async (id?: string, uuid?: string) => {
           provider: e.provider,
           keysType: e.keysType,
           okxSource: e.okxSource,
+          bybitHost: e.bybitHost,
         }
         const redisClient = await RedisClient.getInstance(true, 'app')
 
@@ -533,6 +535,7 @@ const updateUserFee = async (id?: string, uuid?: string, log = true) => {
             undefined,
             e.keysType,
             e.okxSource,
+            e.bybitHost,
           )
           const userId = u._id.toString()
           const fees = await provider.getAllUserFees()

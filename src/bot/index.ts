@@ -47,6 +47,7 @@ import {
   DCACustom,
   MultiTP,
   MainBot,
+  BybitHost,
 } from '../../types'
 import {
   BaseReturn,
@@ -332,6 +333,7 @@ class Bot<T extends UserSchema = UserSchema> {
     passphrase?: string,
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
+    bybitHost?: BybitHost,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService(
@@ -345,6 +347,7 @@ class Bot<T extends UserSchema = UserSchema> {
         passphrase,
         keysType,
         okxSource,
+        bybitHost,
       )
     }
     for (const w of this.workers) {
@@ -357,6 +360,7 @@ class Bot<T extends UserSchema = UserSchema> {
         passphrase,
         keysType,
         okxSource,
+        bybitHost,
       } as UpdateBotExchangeDto)
     }
   }
