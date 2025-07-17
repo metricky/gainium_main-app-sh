@@ -31,12 +31,11 @@ const math = new MathHelper()
 
 export const getAllOpenOrders = async (
   exchanges: ExchangeInUser[],
+  ec = ExchangeChooser,
 ): Promise<BaseReturn<GeneralOpenOrder[]>> => {
   const queries: Promise<any>[] = []
   for (const exchange of exchanges) {
-    const exchangeFactory = ExchangeChooser.chooseExchangeFactory(
-      exchange.provider,
-    )
+    const exchangeFactory = ec.chooseExchangeFactory(exchange.provider)
     const exchangeInstance = exchangeFactory(
       exchange.key,
       exchange.secret,
@@ -181,12 +180,11 @@ export const getAllOpenOrders = async (
 export const getAllOpenPositions = async (
   exchanges: ExchangeInUser[],
   userId: string,
+  ec = ExchangeChooser,
 ): Promise<BaseReturn<GeneralFuture[]>> => {
   const queries: Promise<any>[] = []
   for (const exchange of exchanges.filter((e) => isFutures(e.provider))) {
-    const exchangeFactory = ExchangeChooser.chooseExchangeFactory(
-      exchange.provider,
-    )
+    const exchangeFactory = ec.chooseExchangeFactory(exchange.provider)
     const exchangeInstance = exchangeFactory(
       exchange.key,
       exchange.secret,
@@ -326,10 +324,9 @@ export const cancelOrderOnExchange = async (
   exchange: ExchangeInUser,
   orderId: string,
   symbol: string,
+  ec = ExchangeChooser,
 ) => {
-  const exchangeFactory = ExchangeChooser.chooseExchangeFactory(
-    exchange.provider,
-  )
+  const exchangeFactory = ec.chooseExchangeFactory(exchange.provider)
   const exchangeInstance = exchangeFactory(
     exchange.key,
     exchange.secret,
@@ -359,10 +356,9 @@ export const placeOrderOnExchange = async (
     positionSide?: PositionSide
     leverage?: number
   },
+  ec = ExchangeChooser,
 ) => {
-  const exchangeFactory = ExchangeChooser.chooseExchangeFactory(
-    exchange.provider,
-  )
+  const exchangeFactory = ec.chooseExchangeFactory(exchange.provider)
   const exchangeInstance = exchangeFactory(
     exchange.key,
     exchange.secret,

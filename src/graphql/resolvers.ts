@@ -636,6 +636,7 @@ const resolvers = <
         `${user.data._id}`,
         input.type,
         !!paperContext,
+        input.terminal,
       )
     },
     dealDashboardStats: async (

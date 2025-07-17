@@ -45,11 +45,11 @@ const providers = [
   ExchangeEnum.paperBitgetCoinm,
 ]
 
-export const updateExchangeInfo = async () => {
+export const updateExchangeInfo = async (ec = ExchangeChooser) => {
   const updateBotMap: Map<ExchangeEnum, ClearPairsSchema[]> = new Map()
   const deleteBotMap: Map<ExchangeEnum, string[]> = new Map()
   for (const provider of providers) {
-    const choose = ExchangeChooser.chooseExchangeFactory(provider)
+    const choose = ec.chooseExchangeFactory(provider)
     if (choose) {
       const exchange = choose('', '')
       const exchangeInfo = await exchange.getAllExchangeInfo()

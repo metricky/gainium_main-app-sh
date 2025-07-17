@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.9] – 2025-07-17
+### Added
+- Increased core compatibilities
+
+### Fixed
+- Fixed bot dashboard stats for bigAccount, prevent showing terminal bots in DCA bots stats
+
 ## [1.0.8] – 2025-07-16
 ### Added
 - Added support for changing Bybit host configuration (com, eu, nl, tr, kz, ge)

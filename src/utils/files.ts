@@ -4,8 +4,8 @@ import { v4 } from 'uuid'
 
 const userFilesDir = 'user-files'
 
-const resolvePath = (_path: string) => {
-  return path.resolve(__dirname, '../../../', _path)
+const resolvePath = (_path: string, dirDepth: string) => {
+  return path.resolve(__dirname, dirDepth, _path)
 }
 
 const saveFile = (
@@ -13,9 +13,10 @@ const saveFile = (
   name: string,
   resolution?: string,
   _path?: string,
+  dirDepth = '../../../',
 ) => {
   const pathToUse = _path ? `${userFilesDir}/${_path}` : userFilesDir
-  const fullPath = resolvePath(pathToUse)
+  const fullPath = resolvePath(pathToUse, dirDepth)
   if (!fs.existsSync(fullPath)) {
     fs.mkdirSync(fullPath, { recursive: true })
   }

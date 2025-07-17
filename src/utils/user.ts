@@ -303,6 +303,7 @@ const updateUserBalance = async (
   user: ClearUserSchema,
   uuid?: string,
   paperContext?: boolean,
+  ec = ExchangeChooser,
 ) => {
   const userId = user._id.toString()
   const filter: Record<string, unknown> = { userId }
@@ -326,7 +327,7 @@ const updateUserBalance = async (
     )
     .filter((ue) => !ue.linkedTo)) {
     if ((uuid && uuid === e.uuid) || !uuid) {
-      const exchange = ExchangeChooser.chooseExchangeFactory(e.provider)
+      const exchange = ec.chooseExchangeFactory(e.provider)
 
       if (exchange) {
         const provider = exchange(
@@ -405,7 +406,11 @@ const updateUserBalance = async (
   }
 }
 
-const setCoinbaseTimer = async (user: ClearUserSchema, uuid: string) => {
+const setCoinbaseTimer = async (
+  user: ClearUserSchema,
+  uuid: string,
+  ec = ExchangeChooser,
+) => {
   const key = `${uuid}`
   const get = coinsbaseTimer.get(key)
   if (get) {
@@ -417,14 +422,18 @@ const setCoinbaseTimer = async (user: ClearUserSchema, uuid: string) => {
     setInterval(
       () => (
         logger.info(`Coinbase timer trigger for ${uuid}`),
-        updateUserBalance(user, uuid)
+        updateUserBalance(user, uuid, undefined, ec)
       ),
       coinbaseTimeout,
     ),
   )
 }
 
-const connectUserBalance = async (id?: string, uuid?: string) => {
+const connectUserBalance = async (
+  id?: string,
+  uuid?: string,
+  ec = ExchangeChooser,
+) => {
   const users = await userDb.readData(
     id ? { _id: id } : {},
     undefined,
@@ -435,14 +444,14 @@ const connectUserBalance = async (id?: string, uuid?: string) => {
   if (users.status === 'OK' && users.data.count > 0) {
     if (uuid || id) {
       await Promise.all(
-        users.data.result.map((u) => updateUserBalance(u, uuid)),
+        users.data.result.map((u) => updateUserBalance(u, uuid, undefined, ec)),
       )
     }
     for (const u of users.data.result) {
       const userId = u._id.toString()
       for (const e of u.exchanges.filter((ue) => !ue.linkedTo)) {
         if (e.provider === ExchangeEnum.coinbase) {
-          setCoinbaseTimer(u, e.uuid)
+          setCoinbaseTimer(u, e.uuid, ec)
           continue
         }
         const find = streams.find((s) => s.uuid === e.uuid)
@@ -515,7 +524,12 @@ const disconnectUserBalance = async (uuid: string) => {
   return
 }
 
-const updateUserFee = async (id?: string, uuid?: string, log = true) => {
+const updateUserFee = async (
+  id?: string,
+  uuid?: string,
+  log = true,
+  ec = ExchangeChooser,
+) => {
   const users = await userDb.readData(
     id ? { _id: id } : {},
     undefined,
@@ -526,7 +540,7 @@ const updateUserFee = async (id?: string, uuid?: string, log = true) => {
     const redis = await RedisClient.getInstance()
     for (const u of users.data.result) {
       for (const e of u.exchanges) {
-        const exchange = ExchangeChooser.chooseExchangeFactory(e.provider)
+        const exchange = ec.chooseExchangeFactory(e.provider)
         if (((uuid && e.uuid === uuid) || !uuid) && exchange) {
           const provider = exchange(
             e.key,
@@ -684,6 +698,7 @@ const userSnapshots = async (
   paperContext?: boolean,
   onlyOneCycle?: boolean,
   skipBalance?: boolean,
+  ec = ExchangeChooser,
 ) => {
   let rates: Prices = []
   const users = await userDb.readData(
@@ -700,7 +715,7 @@ const userSnapshots = async (
       }
     }
     for (const e of exchanges) {
-      const provider = ExchangeChooser.chooseExchangeFactory(e)
+      const provider = ec.chooseExchangeFactory(e)
       if (
         userExchangeSet.has(e) &&
         provider &&
@@ -730,7 +745,7 @@ const userSnapshots = async (
     if (!skipBalance) {
       await Promise.all(
         users.data.result.map((u) =>
-          updateUserBalance(u, undefined, !!paperContext),
+          updateUserBalance(u, undefined, !!paperContext, ec),
         ),
       )
     }
@@ -856,7 +871,7 @@ const userSnapshots = async (
     logger.error(`Snapshot | Cannot get users ${users.reason}`)
   }
   if (!paperContext && !onlyOneCycle) {
-    userSnapshots(id, true)
+    userSnapshots(id, true, undefined, undefined, ec)
   }
 }
 

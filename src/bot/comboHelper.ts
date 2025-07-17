@@ -3353,6 +3353,7 @@ function createComboBotHelper<
         )
         await this.checkOpenedDeals()
         this.updateDealLastPrices(this.botId)
+        this.sendDealOpenedAlert(findDeal.deal, orderBo)
       }
       if (
         findDeal &&

@@ -224,6 +224,7 @@ type LastMethod = {
  * Common functions for bot
  */
 class MainBot<T extends IMainBot> {
+  exchangeChooser = ExchangeChooser
   brokerCode = ''
   notEnoughBalanceLogPrefix = 'NOB |'
   notEnoughBalanceThreshold = 10
@@ -1038,7 +1039,9 @@ class MainBot<T extends IMainBot> {
       return
     }
 
-    const exchange = ExchangeChooser.chooseExchangeFactory(this.data.exchange)
+    const exchange = this.exchangeChooser.chooseExchangeFactory(
+      this.data.exchange,
+    )
     if (exchange) {
       this.exchange = exchange(
         key || '',

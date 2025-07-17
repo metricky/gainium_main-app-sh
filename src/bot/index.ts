@@ -150,6 +150,7 @@ type BotServicePayload = {
 const bosServiceType = BotServiceType
 
 class Bot<T extends UserSchema = UserSchema> {
+  protected ec = ExchangeChooser
   protected personalLimits = new Map<string, number>()
   protected workers: {
     type: BotType
@@ -1885,6 +1886,7 @@ class Bot<T extends UserSchema = UserSchema> {
     userId: string,
     type: BotType,
     paperContext: boolean,
+    terminal?: boolean,
   ) {
     if (type === BotType.grid) {
       return await this.botDb.aggregate<{
@@ -2092,6 +2094,12 @@ class Bot<T extends UserSchema = UserSchema> {
           ],
           //@ts-ignore
           parentBotId: { $exists: false },
+          'settings.type': terminal
+            ? { $eq: DCATypeEnum.terminal }
+            : {
+                //@ts-ignore
+                $nin: [DCATypeEnum.terminal],
+              },
         },
       },
       {
@@ -2810,7 +2818,7 @@ class Bot<T extends UserSchema = UserSchema> {
     ) {
       return result
     }
-    const exchangeInstance = ExchangeChooser.chooseExchangeFactory(exchange)
+    const exchangeInstance = this.ec.chooseExchangeFactory(exchange)
     if (exchangeInstance) {
       const prices = await exchangeInstance('', '').getAllPrices(true)
       if (prices && prices.status === StatusEnum.ok) {
@@ -4444,9 +4452,7 @@ class Bot<T extends UserSchema = UserSchema> {
             })
           }
         } else if (profitChanged) {
-          const _ex = ExchangeChooser.chooseExchangeFactory(
-            oldSettings.exchange,
-          )
+          const _ex = this.ec.chooseExchangeFactory(oldSettings.exchange)
           if (_ex) {
             const ex = _ex('', '')
             const price = await ex.latestPrice(oldSettings.symbol.symbol)

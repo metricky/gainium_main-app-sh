@@ -38,4 +38,5 @@ export const {
   SERVER_HOST,
   CORS_ORIGIN,
   SYNC_USER = 'true',
+  CANDLES_OFFSET = '../../../../',
 } = process.env

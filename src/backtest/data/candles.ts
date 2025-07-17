@@ -19,7 +19,7 @@ import { IdMute, IdMutex } from '../../utils/mutex'
 import Logger from '../../utils/logger'
 import { removePaperFormExchangeName } from '../../exchange/helpers'
 import { isKucoin } from '../../utils/exchange'
-import { DATA_PATH } from '../../config'
+import { DATA_PATH, CANDLES_OFFSET } from '../../config'
 
 type GetCandlesInput = {
   symbol: string
@@ -52,7 +52,7 @@ class Candles {
   }
 
   private resolvePath(_path: string) {
-    return path.resolve(__dirname, '../../../../', _path)
+    return path.resolve(__dirname, CANDLES_OFFSET, _path)
   }
 
   private checkAndCreateDir(_path: string) {

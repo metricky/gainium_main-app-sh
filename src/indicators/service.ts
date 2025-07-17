@@ -56,14 +56,11 @@ import {
   serviceLogRedis,
   RangeType,
 } from '../../types'
-import ExchangeChooser from '../exchange/exchangeChooser'
 import logger from '../utils/logger'
-import ExpirableMap from '../utils/expirableMap'
 import type {
   TradeMessage,
   IndicatorHistory,
   CandleResponse,
-  BaseReturn,
   IndicatorSubscribers,
   IndicatorCb,
   IndicatorCreationConfig,
@@ -75,6 +72,7 @@ import RedisClient, { RedisWrapper } from '../db/redis'
 import { removePaperFormExchangeName } from '../exchange/helpers'
 import RabbitClient from '../db/rabbit'
 import { getId } from '.'
+import { CandlesProvider } from './candleProvider'
 
 const { sleep } = utils
 
@@ -201,139 +199,11 @@ const getIntervalByExchange = (
 
 const mutex = new IdMutex()
 const mutexConcurrently = new IdMutex(500)
-const mutexConcurrentlyCandles = new IdMutex(500)
 
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 
-class CandlesProvider {
-  static instance: CandlesProvider
-
-  static getInstance() {
-    if (!CandlesProvider.instance) {
-      CandlesProvider.instance = new CandlesProvider()
-    }
-    return CandlesProvider.instance
-  }
-
-  private handleError(...msg: unknown[]) {
-    logger.error(`${loggerPrefix}`, ...msg)
-  }
-
-  private handleLog(...msg: unknown[]) {
-    logger.info(`${loggerPrefix}`, ...msg)
-  }
-
-  private historyMap: Map<string, ExpirableMap<string, CandleResponse[]>> =
-    new Map()
-  @IdMute(mutexConcurrentlyCandles, () => 'getCandles')
-  @IdMute(
-    mutex,
-    (
-      exchange: ExchangeEnum,
-      symbol: string,
-      interval: ExchangeIntervals,
-      from: number,
-      to: number,
-      count: number,
-    ) => `${exchange}${symbol}${interval}${from}${to}${count}`,
-  )
-  async getCandles(
-    exchange: ExchangeEnum,
-    symbol: string,
-    interval: ExchangeIntervals,
-    from: number,
-    to: number,
-    count?: number,
-    saveResult = true,
-    retryCount = 1,
-  ): Promise<BaseReturn<CandleResponse[]>> {
-    if (isOkx(exchange)) {
-      from = from - 1
-      to = to + 1
-    }
-    const mapId = `${exchange}${symbol}${interval}`
-    const id = `${exchange}${symbol}${interval}${from}${to}${count}`
-    try {
-      const client = await RedisClient.getInstance()
-      if (client.isReady) {
-        const result = await client.hGet('candles', `${mapId}#${id}`)
-        if (result) {
-          const parse = JSON.parse(result) as CandleResponse[]
-          return { status: StatusEnum.ok, data: parse, reason: null }
-        }
-      }
-    } catch (e) {
-      this.handleError(`Error in getAllPrices redis cache: ${e}`)
-    }
-
-    const map = this.historyMap.get(mapId)
-    if (map) {
-      const d = map.get(id)
-      if (d) {
-        return { status: StatusEnum.ok, data: d, reason: null }
-      }
-    }
-    const _exchange = ExchangeChooser.chooseExchangeFactory(exchange)
-    const exchangeClient = _exchange('', '')
-    const data = await exchangeClient.getCandles(
-      symbol,
-      interval,
-      from,
-      to,
-      count,
-    )
-    if (!saveResult) {
-      return data
-    }
-    if (data.status === StatusEnum.ok) {
-      let set = false
-      try {
-        const client = await RedisClient.getInstance()
-        if (client.isReady) {
-          await client.hSet(
-            'candles',
-            `${mapId}#${id}`,
-            JSON.stringify(data.data),
-          )
-          await client.hExpire('candles', `${mapId}#${id}`, 5 * 60)
-          set = true
-        }
-      } catch (e) {
-        this.handleError(`Error in getAllPrices redis cache: ${e}`)
-      }
-      if (!set) {
-        if (!map) {
-          this.historyMap.set(mapId, new ExpirableMap(5 * 60 * 1000))
-        }
-        this.historyMap.get(mapId)?.set(id, data.data)
-      }
-    }
-    if (
-      data.status === StatusEnum.notok &&
-      (data.reason ?? '').includes(`Exchange connector`) &&
-      retryCount <= 5
-    ) {
-      this.handleLog(
-        `Got ${data.reason} error, retry attempts ${retryCount}, retry more in 5s`,
-      )
-      await sleep(5 * 1000)
-      mutex.release(`${exchange}${symbol}${interval}${from}${to}${count}`)
-      return this.getCandles(
-        exchange,
-        symbol,
-        interval,
-        from,
-        to,
-        count,
-        saveResult,
-        retryCount + 1,
-      )
-    }
-    return data
-  }
-}
-
 class InternalIndicator {
+  protected candlesProvider = CandlesProvider
   private loaded = false
   private splitPhrase = `@gainium@`
   private id: string
@@ -1328,7 +1198,7 @@ class InternalIndicator {
     length?: number,
     saveResult = true,
   ) {
-    const instance = CandlesProvider.getInstance()
+    const instance = this.candlesProvider.getInstance()
     return await instance.getCandles(
       this.exchange,
       this.symbol,

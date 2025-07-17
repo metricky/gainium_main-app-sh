@@ -29,8 +29,11 @@ export const getWSKucoin = async () => {
     })
 }
 
-export const getPrices = async (exchange: ExchangeEnum) => {
-  const ex = ExchangeChooser.chooseExchangeFactory(exchange)
+export const getPrices = async (
+  exchange: ExchangeEnum,
+  ec = ExchangeChooser,
+) => {
+  const ex = ec.chooseExchangeFactory(exchange)
   if (ex) {
     const v = await ex('', '').getAllPrices(true)
     delete v['timeProfile']
@@ -43,16 +46,19 @@ export const getPrices = async (exchange: ExchangeEnum) => {
   }
 }
 
-export const getCandles = async (params: {
-  symbol: string
-  type: string
-  startAt: string
-  endAt: string
-  exchange: ExchangeEnum
-  limit?: string
-}) => {
+export const getCandles = async (
+  params: {
+    symbol: string
+    type: string
+    startAt: string
+    endAt: string
+    exchange: ExchangeEnum
+    limit?: string
+  },
+  ec = ExchangeChooser,
+) => {
   const { symbol, type, startAt, endAt, exchange, limit } = params
-  const ex = ExchangeChooser.chooseExchangeFactory(exchange)
+  const ex = ec.chooseExchangeFactory(exchange)
   if (ex) {
     const v = await ex('', '').getCandles(
       symbol,

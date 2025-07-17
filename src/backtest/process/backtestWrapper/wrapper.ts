@@ -64,12 +64,14 @@ class BacktestWrapper {
 
   private id = ''
 
+  protected ec = ExchangeChooser
+
   constructor(
     private data: ServerSideBacktestPayload,
     protected userId: string,
     private requestId?: string,
   ) {
-    this.exchange = ExchangeChooser.chooseExchangeFactory(
+    this.exchange = this.ec.chooseExchangeFactory(
       removePaperFormExchangeName(data.data.exchange),
     )('', '', '')
     this.id = crypto

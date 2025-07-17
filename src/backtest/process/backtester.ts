@@ -78,6 +78,7 @@ class Backtester<T extends UserSchema> {
   private pairsDb = pairDb
   private feesDb = feeDb
   private ratesDb = rateDb
+  protected ec = ExchangeChooser
 
   private budgetMultiplier = 10
 
@@ -187,7 +188,7 @@ class Backtester<T extends UserSchema> {
   protected async getPrice(
     exchange: ExchangeEnum,
   ): Promise<BaseReturn<Prices>> {
-    const exchangeInstance = ExchangeChooser.chooseExchangeFactory(exchange)
+    const exchangeInstance = this.ec.chooseExchangeFactory(exchange)
     if (exchangeInstance) {
       const e = exchangeInstance('', '')
       const prices = await e.getAllPrices()

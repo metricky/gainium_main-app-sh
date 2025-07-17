@@ -2184,6 +2184,9 @@ function createDCABotHelper<
               symbol: deal.deal.symbol.symbol,
             })
           }
+          if (deal.deal.status === DCADealStatusEnum.closed) {
+            this.sendDealClosedAlert(deal.deal, order)
+          }
         }
         this.deleteDeal(dealId)
 

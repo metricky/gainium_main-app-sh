@@ -878,6 +878,7 @@ export const BotSchema = /* GraphQL */ `
   }
   input botDashboardStatsInput {
     type: botTypeEnum!
+    terminal: Boolean
   }
   type botDashboardStatsResult {
     status: BotStatus
