@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.10] – 2025-07-18
+### Changed
+- Backtester update
+
 ## [1.0.9] – 2025-07-17
 ### Added
 - Increased core compatibilities
