@@ -880,6 +880,7 @@ class Exchange extends AbstractExchange {
         if (
           !res.response ||
           res.message.toLowerCase().includes('EPIPE'.toLowerCase()) ||
+          res.message.toLowerCase().includes('Request Timeout'.toLowerCase()) ||
           res.status === 408 ||
           res.status === 404 ||
           res.status === 405 ||

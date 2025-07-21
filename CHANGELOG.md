@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.11] – 2025-07-21
+### Fixed
+- Retry request timeout exchange requests
+
 ## [1.0.10] – 2025-07-18
 ### Changed
 - Backtester update
