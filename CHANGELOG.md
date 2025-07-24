@@ -4,6 +4,9 @@
 ### Fixed
 - Retry 500 error
 
+### Changed
+- Bumped dependencies versions
+
 ## [1.0.11] – 2025-07-21
 ### Fixed
 - Retry request timeout exchange requests
