@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.12] – 2025-07-24
+### Fixed
+- Retry 500 error
+
 ## [1.0.11] – 2025-07-21
 ### Fixed
 - Retry request timeout exchange requests

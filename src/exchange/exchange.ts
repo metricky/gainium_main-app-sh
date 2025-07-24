@@ -885,11 +885,13 @@ class Exchange extends AbstractExchange {
           res.status === 404 ||
           res.status === 405 ||
           res.status === 400 ||
+          res.status === 500 ||
           res.response.status === 408 ||
           res.response.status === 502 ||
           res.response.status === 404 ||
           res.response.status === 405 ||
           res.response.status === 400 ||
+          res.response.status === 500 ||
           (res.response.statusText as string)
             .toLowerCase()
             .indexOf('fetch failed'.toLowerCase()) !== -1 ||
