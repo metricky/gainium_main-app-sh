@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.13] – 2025-07-28
+### Fixed
+- Use static filter in multi coin bot
+
 ## [1.0.12] – 2025-07-24
 ### Fixed
 - Retry 500 error

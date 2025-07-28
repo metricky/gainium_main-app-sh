@@ -2461,7 +2461,7 @@ function createDCABotHelper<
       }
       const dynamic = await this.checkInDynamicRange(symbol, price)
       let staticResult = true
-      if (settings.useStaticPriceFilter) {
+      if (settings.useStaticPriceFilter && !settings.useMulti) {
         let minOpenDeal = parseFloat(settings.minOpenDeal || '0')
         let maxOpenDeal = parseFloat(settings.maxOpenDeal || '0')
         minOpenDeal = isNaN(minOpenDeal) ? 0 : minOpenDeal
