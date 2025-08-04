@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.14] – 2025-08-04
+### Changed
+- Not bypass dynamic price conditiona if not able to load latest price
+
 ## [1.0.13] – 2025-07-28
 ### Fixed
 - Use static filter in multi coin bot

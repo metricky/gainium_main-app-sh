@@ -2337,7 +2337,8 @@ function createDCABotHelper<
       }
       const latestPrice = price || (await this.getLatestPrice(symbol))
       if (!latestPrice) {
-        return true
+        this.handleLog(`Latest price not found for ${symbol}`)
+        return false
       }
       const referencePrice =
         settings.dynamicPriceFilterPriceType ===
