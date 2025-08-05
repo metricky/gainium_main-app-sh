@@ -904,6 +904,15 @@ class Exchange extends AbstractExchange {
           (res.response.statusText as string)
             .toLowerCase()
             .indexOf('ECONNRESET'.toLowerCase()) !== -1 ||
+          (res.message as string)
+            .toLowerCase()
+            .indexOf('ECONNRESET'.toLowerCase()) !== -1 ||
+          (res.response.statusText as string)
+            .toLowerCase()
+            .indexOf('ETIMEDOUT'.toLowerCase()) !== -1 ||
+          (res.message as string)
+            .toLowerCase()
+            .indexOf('ETIMEDOUT'.toLowerCase()) !== -1 ||
           port ||
           (res.response.statusText as string)
             .toLowerCase()

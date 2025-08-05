@@ -1963,7 +1963,11 @@ class MainBot<T extends IMainBot> {
             if (allPositions) {
               this.handleLog(`Get hedge`)
             }
-            let hedge = allPositions ? await this.exchange.getHedge() : null
+            let hedge = allPositions
+              ? skipFutures
+                ? { data: !!keys.hedge, status: StatusEnum.ok }
+                : await this.exchange.getHedge()
+              : null
             if (allPositions) {
               this.handleLog(`Got hedge: ${hedge?.data}`)
             }

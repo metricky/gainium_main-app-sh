@@ -1,8 +1,13 @@
 # Changelog
 
+## [1.0.15] – 2025-08-05
+### Changed
+- Retry reasons in exchange connector
+- Read hedge status from db while in service restart
+
 ## [1.0.14] – 2025-08-04
 ### Changed
-- Not bypass dynamic price conditiona if not able to load latest price
+- Not bypass dynamic price condition if not able to load latest price
 
 ## [1.0.13] – 2025-07-28
 ### Fixed
