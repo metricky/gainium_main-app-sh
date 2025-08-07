@@ -119,7 +119,7 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
               .updateData({ _id: _id }, { $set: { ...data } })
               .then((res) => {
                 if (res.status === StatusEnum.ok) {
-                  logger.info(
+                  logger.debug(
                     `Pairs update | ${data.pair}@${data.exchange} updated`,
                   )
                 }
@@ -142,7 +142,7 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
           for (const data of createMap) {
             await pairDb.createData({ ...data }).then((res) => {
               if (res.status === StatusEnum.ok) {
-                logger.info(
+                logger.debug(
                   `Pairs update | ${data.pair}@${data.exchange} created`,
                 )
               }
@@ -159,7 +159,7 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
               .deleteManyData({ _id: { $in: Array.from(deleteSet) } })
               .then((res) => {
                 if (res.status === StatusEnum.ok) {
-                  logger.info(`Pairs update | ${res.reason}`)
+                  logger.debug(`Pairs update | ${res.reason}`)
                 }
                 if (res.status === StatusEnum.notok) {
                   logger.error(
@@ -261,7 +261,7 @@ const updateBrokerCodes = async () => {
           await brokerCodesDb
             .updateData({ ...item }, { ...item }, false, true, true)
             .then((r) => {
-              logger.info(
+              logger.debug(
                 `updateBrokerCodes | ${item.exchange} code updated: ${item.code}, result: ${r.status}`,
               )
             })

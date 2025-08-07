@@ -34,7 +34,7 @@ const removeOldRates = async () => {
         $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000),
       },
     })
-    .then((res) => logger.info(`Delete old rates ${res.reason}`))
+    .then((res) => logger.debug(`Delete old rates ${res.reason}`))
 }
 
 const removeOldBotWarnings = async () => {
@@ -43,7 +43,7 @@ const removeOldBotWarnings = async () => {
       type: MessageTypeEnum.warning,
       created: { $lt: new Date(+new Date() - 14 * 24 * 60 * 60 * 1000) },
     })
-    .then((res) => logger.info(`Delete old bot warnings ${res.reason}`))
+    .then((res) => logger.debug(`Delete old bot warnings ${res.reason}`))
 }
 
 const getUserExchanges = async <T extends UserSchema = UserSchema>(
@@ -72,7 +72,7 @@ const getUserExchanges = async <T extends UserSchema = UserSchema>(
 }
 
 const clearNotUsedPaperData = async (_getUserExchanges = getUserExchanges) => {
-  logger.info('Clear not used paper data')
+  logger.debug('Clear not used paper data')
 
   const exchanges: ExchangeInUser[] = await _getUserExchanges(true)
 
@@ -84,21 +84,21 @@ const clearNotUsedPaperData = async (_getUserExchanges = getUserExchanges) => {
     true,
   )
   if (notUsedPaperAccounts.status === StatusEnum.notok) {
-    return logger.info(`Cannot get paper users ${notUsedPaperAccounts.reason}`)
+    return logger.debug(`Cannot get paper users ${notUsedPaperAccounts.reason}`)
   }
-  logger.info(
+  logger.debug(
     `Found ${notUsedPaperAccounts.data.count} not used paper accounts`,
   )
   const userIds = notUsedPaperAccounts.data.result.map((u) => u._id)
   await paperPositionDb
     .deleteManyData({ user: { $in: userIds } })
-    .then((res) => logger.info(`Delete futures ${res.reason}`))
+    .then((res) => logger.debug(`Delete futures ${res.reason}`))
   await paperHedgeDb
     .deleteManyData({ user: { $in: userIds } })
-    .then((res) => logger.info(`Delete hedge ${res.reason}`))
+    .then((res) => logger.debug(`Delete hedge ${res.reason}`))
   await paperLeverageDb
     .deleteManyData({ user: { $in: userIds } })
-    .then((res) => logger.info(`Delete leverage ${res.reason}`))
+    .then((res) => logger.debug(`Delete leverage ${res.reason}`))
   const ordersToDelete = await paperOrderDb.readData(
     { user: { $in: userIds } },
     { _id: 1 },
@@ -107,45 +107,45 @@ const clearNotUsedPaperData = async (_getUserExchanges = getUserExchanges) => {
     true,
   )
   if (ordersToDelete.status === StatusEnum.notok) {
-    return logger.info(`Cannot get orders to delete ${ordersToDelete.reason}`)
+    return logger.debug(`Cannot get orders to delete ${ordersToDelete.reason}`)
   }
-  logger.info(`Found ${ordersToDelete.data.count} orders to delete`)
+  logger.debug(`Found ${ordersToDelete.data.count} orders to delete`)
   const orderIds = ordersToDelete.data.result.map((o) => o._id)
   await paperTradesDb
     .deleteManyData({ order: { $in: orderIds } })
-    .then((res) => logger.info(`Delete trades ${res.reason}`))
+    .then((res) => logger.debug(`Delete trades ${res.reason}`))
   await paperOrderDb
     .deleteManyData({ user: { $in: userIds } })
-    .then((res) => logger.info(`Delete orders ${res.reason}`))
+    .then((res) => logger.debug(`Delete orders ${res.reason}`))
   await paperWalletsDb
     .deleteManyData({ user: { $in: userIds } })
-    .then((res) => logger.info(`Delete wallets ${res.reason}`))
+    .then((res) => logger.debug(`Delete wallets ${res.reason}`))
   await paperUserDb
     .deleteManyData({ _id: { $in: userIds } })
-    .then((res) => logger.info(`Delete users ${res.reason}`))
+    .then((res) => logger.debug(`Delete users ${res.reason}`))
   await userProfitByHourDb
     .deleteManyData({ userId: { $in: userIds } })
-    .then((res) => logger.info(`Delete user profit by hour ${res.reason}`))
+    .then((res) => logger.debug(`Delete user profit by hour ${res.reason}`))
 }
 
 const clearPaperOldOrders = async () => {
-  logger.info('Clear paper canceled paper orders')
+  logger.debug('Clear paper canceled paper orders')
   await paperOrderDb
     .deleteManyData({
       updatedAt: { $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000) },
       status: { $in: ['CANCELED', 'EXPIRED'] },
     })
-    .then((res) => logger.info(`Delete paper CANCELED orders ${res.reason}`))
+    .then((res) => logger.debug(`Delete paper CANCELED orders ${res.reason}`))
   await paperOrderDb
     .deleteManyData({
       updatedAt: { $lt: new Date(+new Date() - 60 * 24 * 60 * 60 * 1000) },
       status: 'FILLED',
     })
-    .then((res) => logger.info(`Delete paper FILLED orders ${res.reason}`))
+    .then((res) => logger.debug(`Delete paper FILLED orders ${res.reason}`))
 }
 
 const clearRealOldCanceledOrders = async () => {
-  logger.info('Clear real canceled paper orders')
+  logger.debug('Clear real canceled paper orders')
   await orderDb
     .deleteManyData({
       updated: { $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000) },
@@ -153,7 +153,7 @@ const clearRealOldCanceledOrders = async () => {
       status: { $in: ['CANCELED', 'EXPIRED'] },
     })
     .then((res) =>
-      logger.info(`Delete real not bybit CANCELED orders ${res.reason}`),
+      logger.debug(`Delete real not bybit CANCELED orders ${res.reason}`),
     )
   await orderDb
     .deleteManyData({
@@ -175,19 +175,19 @@ const clearRealOldCanceledOrders = async () => {
       status: 'CANCELED',
     })
     .then((res) =>
-      logger.info(`Delete real bybit CANCELED orders ${res.reason}`),
+      logger.debug(`Delete real bybit CANCELED orders ${res.reason}`),
     )
 }
 
 const clearBalances = async (_getUserExchanges = getUserExchanges) => {
-  logger.info(`Start clean balances`)
+  logger.debug(`Start clean balances`)
   const exchanges: ExchangeInUser[] = await _getUserExchanges()
   if (exchanges.length) {
     await balanceDb
       .deleteManyData({
         exchangeUUID: { $nin: exchanges.map((e) => e.uuid) },
       })
-      .then((res) => logger.info(`Delete balances ${res.reason}`))
+      .then((res) => logger.debug(`Delete balances ${res.reason}`))
   }
 }
 
@@ -195,7 +195,7 @@ const clearOldUserPaperData = async <T extends UserSchema = UserSchema>(
   userDb: DB<T> = _userDb as unknown as DB<T>,
   _clearNotUsedPaperData = clearNotUsedPaperData,
 ) => {
-  logger.info('Clear old user paper data')
+  logger.debug('Clear old user paper data')
   const users = await userDb.readData(
     {
       exchanges: { $not: { $size: 0 } },
@@ -220,17 +220,17 @@ const clearOldUserPaperData = async <T extends UserSchema = UserSchema>(
   const filter = users.data.result.filter(
     (u) => u.exchanges.filter((e) => isPaper(e.provider)).length,
   )
-  logger.info(`Found ${filter.length} users with old paper`)
+  logger.debug(`Found ${filter.length} users with old paper`)
   for (const u of filter) {
     await resetPaperData(u).then((res) =>
-      logger.info(`Reset paper for user ${u._id} ${u.username} ${res.reason}`),
+      logger.debug(`Reset paper for user ${u._id} ${u.username} ${res.reason}`),
     )
   }
   await _clearNotUsedPaperData()
 }
 
 const cleanNotUsedUserFee = async (_getUserExchanges = getUserExchanges) => {
-  logger.info('Clean not used fee start')
+  logger.debug('Clean not used fee start')
   const exchanges = await _getUserExchanges()
 
   await feeDb
@@ -238,38 +238,38 @@ const cleanNotUsedUserFee = async (_getUserExchanges = getUserExchanges) => {
       exchangeUUID: { $nin: exchanges.map((e) => e.uuid) },
     })
     .then((res) => {
-      logger.info(`Clean not used fee ${res.reason}`)
+      logger.debug(`Clean not used fee ${res.reason}`)
     })
 
-  logger.info('Clean not used fee end')
+  logger.debug('Clean not used fee end')
 }
 
 const clearOldSnapshots = async () => {
-  logger.info('Clean old snapshots ')
+  logger.debug('Clean old snapshots ')
 
   await snapshotDb
     .deleteManyData({
       created: { $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000) },
     })
     .then((res) => {
-      logger.info(`Clean old snapshots ${res.reason}`)
+      logger.debug(`Clean old snapshots ${res.reason}`)
     })
 
-  logger.info('Clean old snapshots end')
+  logger.debug('Clean old snapshots end')
 }
 
 const clearBotEvents = async () => {
-  logger.info('Clean old bot events ')
+  logger.debug('Clean old bot events ')
 
   await botEventDb
     .deleteManyData({
       created: { $lt: new Date(+new Date() - 30 * 24 * 60 * 60 * 1000) },
     })
     .then((res) => {
-      logger.info(`Clean old bot events ${res.reason}`)
+      logger.debug(`Clean old bot events ${res.reason}`)
     })
 
-  logger.info('Clean old bot events end')
+  logger.debug('Clean old bot events end')
 }
 
 const utils = {

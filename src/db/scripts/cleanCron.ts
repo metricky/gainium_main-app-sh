@@ -5,7 +5,7 @@ import logger from '../../utils/logger'
 const bot = Bot.getInstance()
 
 const cleanJob = async () => {
-  logger.info('Running clean job')
+  logger.debug('Running clean job')
   await utils.clearNotUsedPaperData()
   await utils.clearPaperOldOrders()
   await utils.clearRealOldCanceledOrders()
@@ -16,7 +16,7 @@ const cleanJob = async () => {
   await utils.removeOldBotWarnings()
   await utils.removeOldRates()
   await utils.clearBotEvents()
-  logger.info('Clean job finished')
+  logger.debug('Clean job finished')
 }
 
 export default cleanJob

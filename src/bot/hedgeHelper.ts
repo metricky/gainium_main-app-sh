@@ -148,7 +148,7 @@ function createHedgeBotHelper<
     }
 
     private async checkTpSl(_botId: string) {
-      this.handleLog(`Check TP/SL`)
+      this.handleDebug(`Check TP/SL`)
       const deals = await this.getDeals()
       const totalUnrealized = deals.reduce(
         (acc, v) => acc + v.unrealizedProfit,
@@ -169,7 +169,7 @@ function createHedgeBotHelper<
         this.data?.sharedSettings?.useTp && this.data.sharedSettings.tpPerc
           ? total >= +this.data.sharedSettings.tpPerc
           : false
-      this.handleLog(
+      this.handleDebug(
         `Total deal ${deals.length}, unrealized ${totalUnrealized}, usage ${totalUsage}, total ${total} (${prevTotal}), slTrigger ${slTrigger}, tpTrigger ${tpTrigger}`,
       )
       if (slTrigger || tpTrigger) {

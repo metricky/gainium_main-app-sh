@@ -1093,17 +1093,17 @@ function createDCABotHelper<
         const toSearch: Set<string> = new Set()
         for (const d of this.allDealsData) {
           if (!(await this.getExchangeInfo(d.deal.symbol.symbol))) {
-            this.handleLog(
+            this.handleWarn(
               `Cannot find exchange info for ${d.deal.symbol.symbol}`,
             )
             toSearch.add(d.deal.symbol.symbol)
           }
           if (!(await this.getUserFee(d.deal.symbol.symbol))) {
-            this.handleLog(`Cannot find fee for ${d.deal.symbol.symbol}`)
+            this.handleWarn(`Cannot find fee for ${d.deal.symbol.symbol}`)
             toSearch.add(d.deal.symbol.symbol)
           }
           if (!this.pairs.has(d.deal.symbol.symbol)) {
-            this.handleLog(`Deal symbol ${d.deal.symbol.symbol} not in pairs`)
+            this.handleWarn(`Deal symbol ${d.deal.symbol.symbol} not in pairs`)
             newSymbols.push(d.deal.symbol.symbol)
           }
         }
@@ -1113,11 +1113,11 @@ function createDCABotHelper<
             await this.getUserFees([...toSearch])
             for (const s of toSearch) {
               if (!(await this.getExchangeInfo(s))) {
-                this.handleLog(`Push ${s} to not found`)
+                this.handleDebug(`Push ${s} to not found`)
                 this.pairsNotFound.add(s)
               }
               if (!(await this.getUserFee(s))) {
-                this.handleLog(`Push ${s} to not found`)
+                this.handleDebug(`Push ${s} to not found`)
                 this.pairsNotFound.add(s)
               }
             }
@@ -1262,7 +1262,7 @@ function createDCABotHelper<
       try {
         const ed = await this.getExchangeInfo(symbol)
         if (!ed) {
-          this.handleLog(`Cannot create deal for ${symbol}. ED not found`)
+          this.handleWarn(`Cannot create deal for ${symbol}. ED not found`)
           this.endMethod(_id)
           return
         }
@@ -1272,7 +1272,7 @@ function createDCABotHelper<
           quoteAsset: ed.quoteAsset.name,
         }
       } catch (e) {
-        this.handleLog(
+        this.handleWarn(
           `Cannot create deal for ${symbol}. Catch error in reading exchange data: ${
             (e as Error)?.message ?? e
           }`,
@@ -1281,7 +1281,7 @@ function createDCABotHelper<
         return
       }
       if (!symbolData) {
-        this.handleLog(
+        this.handleWarn(
           `Cannot create deal for ${symbol}. Symbol data not found. Data size ${this.data?.symbol?.size}`,
         )
         this.endMethod(_id)
@@ -1443,7 +1443,7 @@ function createDCABotHelper<
         this.endMethod(_id)
         return dealId
       }
-      this.handleLog(
+      this.handleWarn(
         `Cannot create deal for ${symbol}, data: ${!!this
           .data}, symbolData: ${!!symbolData}, dealSettings: ${!!dealSettings}`,
       )
@@ -1684,7 +1684,7 @@ function createDCABotHelper<
             ac: findDeal.deal.ac,
             closeTrigger: findDeal.deal.closeTrigger,
           })
-          this.handleLog(
+          this.handleDebug(
             `Deal closed with profit ${total} ${totalUsd} (${findDeal.deal.profit.total} ${findDeal.deal.profit.totalUsd})`,
           )
           const botUpdate = {
@@ -2017,7 +2017,7 @@ function createDCABotHelper<
       const deal = this.getDeal(dealId)
       this.pendingClose.delete(dealId)
       if (!deal) {
-        this.handleLog(`Deal ${dealId} not found in local deals`)
+        this.handleWarn(`Deal ${dealId} not found in local deals`)
         return false
       }
       if (!this.combo) {
@@ -2048,7 +2048,7 @@ function createDCABotHelper<
       const { symbol } = deal.deal.symbol
 
       if (!this.data?.settings.pair.includes(symbol)) {
-        this.handleLog(`Symbol ${symbol} not in settings. Unsubscribe`)
+        this.handleDebug(`Symbol ${symbol} not in settings. Unsubscribe`)
         const openDeals = this.getOpenDeals(false, symbol)
         if (!openDeals.length) {
           for (const [_, indicator] of this.indicators) {
@@ -2198,7 +2198,7 @@ function createDCABotHelper<
         const openDeals = this.getOpenDeals()
         await this.checkClosedDeals()
         await this.afterDealClose(dealId, profit)
-        this.handleLog(`Closed after TP is: ${this.closeAfterTpFilled}`)
+        this.handleDebug(`Closed after TP is: ${this.closeAfterTpFilled}`)
         this.processedFilled.delete(dealId)
         this.feeProcessed.delete(dealId)
         if (openDeals.length === 0) {
@@ -2212,7 +2212,7 @@ function createDCABotHelper<
           }
         }
         if (!reopen) {
-          this.handleLog(`Not reopen after ${dealId}`)
+          this.handleDebug(`Not reopen after ${dealId}`)
         }
         if (reopen) {
           const settings = await this.getAggregatedSettings(deal.deal)
@@ -2224,7 +2224,7 @@ function createDCABotHelper<
                 openDeals.length !== 0 &&
                 !settings.useDynamicPriceFilter
               ) {
-                this.handleLog(`Not open new ASAP deal ${dealId}`)
+                this.handleDebug(`Not open new ASAP deal ${dealId}`)
               } else {
                 const filtered = await this.filterCoinsByVolume(
                   this.botId,
@@ -2263,7 +2263,7 @@ function createDCABotHelper<
             (!settings.useDynamicPriceFilter ||
               (settings.useDynamicPriceFilter && openDeals.length === 0))
           ) {
-            this.handleLog(`Set range after ${dealId}`)
+            this.handleDebug(`Set range after ${dealId}`)
             this.setRangeOrError()
           }
         }
@@ -2337,7 +2337,7 @@ function createDCABotHelper<
       }
       const latestPrice = price || (await this.getLatestPrice(symbol))
       if (!latestPrice) {
-        this.handleLog(`Latest price not found for ${symbol}`)
+        this.handleWarn(`Latest price not found for ${symbol}`)
         return false
       }
       const referencePrice =
@@ -2412,7 +2412,7 @@ function createDCABotHelper<
             return isInRange
           })
           if (isCurrentDealRangeIsInRanges) {
-            this.handleLog(
+            this.handleDebug(
               `Dynamic range overlap with existing deals ${symbol} ${latestPrice} ${currentRange.start} ${currentRange.end}`,
             )
             return false
@@ -3135,7 +3135,7 @@ function createDCABotHelper<
         !this.indicators.has(key) &&
         (this.data?.settings?.pair?.includes(symbol) || this.pairs.has(symbol))
       ) {
-        this.handleLog(
+        this.handleDebug(
           `Indicator ${uuid}@${symbol} not connected yet, will be processed after`,
         )
         this.afterIndicatorsConnected.push(() =>
@@ -3147,7 +3147,7 @@ function createDCABotHelper<
             (ind) => ind.uuid === uuid,
           )
           if (find?.indicatorAction === IndicatorAction.startDca) {
-            this.handleLog(
+            this.handleDebug(
               `AFTER | Scale DCA ${uuid}@${symbol} action: ${
                 find?.indicatorAction
               }, data: ${data?.[(data?.length ?? 0) - 1]?.value}`,
@@ -3279,7 +3279,7 @@ function createDCABotHelper<
               cont = true
             }
             if (this.scaleAr && indicatorAction === IndicatorAction.startDca) {
-              this.handleLog(
+              this.handleDebug(
                 `Scale DCA ${uuid}@${symbol} action: ${indicatorAction}, data: ${
                   data?.[(data?.length ?? 0) - 1]?.value
                 }`,
@@ -3322,7 +3322,7 @@ function createDCABotHelper<
                   (pcCondition === PCConditionEnum.up &&
                     (last.value as PCResult).up)
                 if (action && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${uuid}@${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger action: up: ${
@@ -3350,7 +3350,7 @@ function createDCABotHelper<
                     prevData?.direction === 1 &&
                     lastData?.direction === -1)
                 if (action && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${uuid}@${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger action: ${indicatorAction}. ${
@@ -3378,7 +3378,7 @@ function createDCABotHelper<
                     divType === DivTypeEnum.abull) &&
                     result.posdivergencehidden >= min)
                 if (action && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${uuid}@${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger action: ${indicatorAction}. ${
@@ -3391,7 +3391,7 @@ function createDCABotHelper<
               } else if (type === IndicatorEnum.qfl) {
                 action = (lastData.value as QFLResult).action
                 if (action && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${uuid}@${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger action: ${indicatorAction}, last time ${new Date(
@@ -3449,7 +3449,7 @@ function createDCABotHelper<
                   action = true
                 }
                 if (action && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger. ${
@@ -3499,7 +3499,7 @@ function createDCABotHelper<
                   action = true
                 }
                 if (action && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${uuid}@${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger. ${
@@ -3677,7 +3677,7 @@ function createDCABotHelper<
                         (eq(prevValue, 0) && !eq(value, 0)) ||
                         (eq(value, 0) && !eq(prevValue, 0))
                       ) {
-                        this.handleLog(
+                        this.handleDebug(
                           `Indicator ${maKey} some values are zero: ${value} value, ${prevValue} prevValue | ${new Date(
                             lastData.time,
                           )}`,
@@ -3686,7 +3686,7 @@ function createDCABotHelper<
                         prevValue = 0
                       }
                     } else {
-                      this.handleLog(
+                      this.handleDebug(
                         `Indicator ${maKey} not found | ${new Date(
                           lastData.time,
                         )}`,
@@ -3848,7 +3848,7 @@ function createDCABotHelper<
                         ppValue === ppValueEnum.bearAnyBoS) &&
                         lastData.iBearBoS)
                     if (action && showLog) {
-                      this.handleLog(
+                      this.handleDebug(
                         `${uuid}@${type}@${indicatorInterval}@${this.data.exchange}@${symbol} trigger. Action: ${ppValue}`,
                       )
                     }
@@ -3861,7 +3861,7 @@ function createDCABotHelper<
                       (ppValue === ppValueEnum.bearMarket &&
                         lastData.market === 'bear')
                     if (action && showLog) {
-                      this.handleLog(
+                      this.handleDebug(
                         `${uuid}@${type}@${indicatorInterval}@${this.data.exchange}@${symbol} trigger. Action: ${ppValue}`,
                       )
                     }
@@ -3914,7 +3914,7 @@ function createDCABotHelper<
                     indicatorCondition === IndicatorStartConditionEnum.cd) &&
                   data.length < 2
                 ) {
-                  this.handleLog(
+                  this.handleDebug(
                     `Not enough data to count crossing down/up. Wait for next tick`,
                   )
                 }
@@ -3986,7 +3986,7 @@ function createDCABotHelper<
                   action = trendFilterAction && action
                 }
                 if (action && !trendFilter && !skipAction && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${uuid}@${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger. ${type} prev: ${prevDataString}, value prev: ${prevValue}, ${type} last: ${lastDataString}, value last: ${value} action: ${indicatorAction}, last time ${new Date(
@@ -3995,7 +3995,7 @@ function createDCABotHelper<
                   )
                 }
                 if (action && trendFilter && !skipAction && showLog) {
-                  this.handleLog(
+                  this.handleDebug(
                     `${uuid}@${type}@${indicatorInterval}@${
                       this.data.exchange
                     }@${symbol} trigger. ${type} prev: ${prevDataString}, value prev: ${prevValue}, ${type} last: ${lastDataString}, value last: ${value} action: ${indicatorAction} ${type} trend value ${trendValue}, type: ${trendFilterType}, last time ${new Date(
@@ -4015,7 +4015,7 @@ function createDCABotHelper<
                   i.statusSince = lastData.time + step
                   i.statusTo = lastData.time + step * (2 + toMultiplier) - 1
                   if (i.statusTo < +new Date()) {
-                    this.handleLog(
+                    this.handleDebug(
                       `Indicator ${uuid}@${symbol} statusTo (${new Date(
                         i.statusTo,
                       )}) < now (${new Date()}). Adding step (${step}) to statusTo`,
@@ -4085,7 +4085,7 @@ function createDCABotHelper<
     ) {
       const key = `${symbol}@${index}@${time}`
       if (this.dcaOrdersBySignal.has(key)) {
-        this.handleLog(
+        this.handleDebug(
           `DCA Signals | Received add DCA signal for index ${index}@${symbol}@${new Date(
             time,
           ).toISOString()}, key already processed `,
@@ -4096,7 +4096,7 @@ function createDCABotHelper<
         status: DCADealStatusEnum.open,
         symbol,
       }).filter((d) => d.deal.levels.complete === index + 1)
-      this.handleLog(
+      this.handleDebug(
         `DCA Signals | Received add DCA signal for index ${index}@${symbol}@${new Date(
           time,
         ).toISOString()}, found ${deals.length} deals`,
@@ -4119,7 +4119,7 @@ function createDCABotHelper<
       for (const d of deals) {
         const settings = await this.getAggregatedSettings(d.deal)
         if (settings.dcaCondition !== DCAConditionEnum.indicators) {
-          this.handleLog(
+          this.handleDebug(
             `DCA Signals | deal ${d.deal._id} not started dca orders by signal`,
           )
           continue
@@ -4186,7 +4186,7 @@ function createDCABotHelper<
                 }
               }
             } else {
-              this.handleLog(
+              this.handleDebug(
                 `DCA Signals | calculated precent ${
                   absDiff * 100
                 } less than target ${minPercFromLast}`,
@@ -4194,7 +4194,7 @@ function createDCABotHelper<
             }
           }
         } else {
-          this.handleLog(
+          this.handleDebug(
             `DCA Signals | Cannot find indicator ${index}@${symbol}`,
           )
         }
@@ -4220,7 +4220,7 @@ function createDCABotHelper<
             this.pendingDealsPerPair.set(symbol, (pendingDeals ?? 0) + 1)
             return true
           }
-          this.handleLog(
+          this.handleDebug(
             `Exceed max amount of active deals by max deals per pair ${symbol}`,
           )
           return false
@@ -4252,7 +4252,7 @@ function createDCABotHelper<
               return false
             }
           }
-          this.handleLog(
+          this.handleDebug(
             `Exceed max amount of active deals by max deals ${symbol}`,
           )
           return false
@@ -4324,7 +4324,7 @@ function createDCABotHelper<
               ),
             ) < 1
           ) {
-            return this.handleLog(
+            return this.handleDebug(
               `Combo coinm TP order less than 1 contract, skipping`,
             )
           }
@@ -4376,7 +4376,7 @@ function createDCABotHelper<
         settings.closeByTimerUnits &&
         settings.useTp
       ) {
-        this.handleLog(`Timer | Close by timer deal ${d._id}`)
+        this.handleDebug(`Timer | Close by timer deal ${d._id}`)
         this.closeDealById(
           this.botId,
           d._id,
@@ -4401,15 +4401,15 @@ function createDCABotHelper<
         settings.useTp
       ) {
         if (d.status !== DCADealStatusEnum.open) {
-          this.handleLog(`Timer | Deal ${d._id} is not open`)
+          this.handleDebug(`Timer | Deal ${d._id} is not open`)
         }
-        this.handleLog(`Timer | Set close by timer for deal ${d._id}`)
+        this.handleDebug(`Timer | Set close by timer for deal ${d._id}`)
         const closeByTimerValue = settings.closeByTimerValue ?? 1
         const value = this.utils.convertCooldown(
           closeByTimerValue,
           settings.closeByTimerUnits,
         )
-        this.handleLog(
+        this.handleDebug(
           `Timer | Deal ${d._id} value is ${value} (${closeByTimerValue} ${settings.closeByTimerUnits})`,
         )
         const baseOrder = this.findBaseOrderByDeal(d._id)
@@ -4417,17 +4417,17 @@ function createDCABotHelper<
           ? baseOrder.updateTime + value - +new Date()
           : d.createTime + value - +new Date()
         if (baseOrder) {
-          this.handleLog(
+          this.handleDebug(
             `Timer | Deal ${d._id} base order update time ${baseOrder.updateTime}, creation time ${d.createTime}`,
           )
         }
         if (closeTime < 0) {
-          this.handleLog(
+          this.handleDebug(
             `Timer | Deal ${d._id} will be closed immediately close time (${closeTime}) is lower than 0`,
           )
           return await this.closeByTimer(d)
         }
-        this.handleLog(
+        this.handleDebug(
           `Timer | Deal ${d._id} will be closed after ${closeTime} at ${new Date(
             +new Date() + closeTime,
           ).toUTCString()}`,
@@ -4504,7 +4504,7 @@ function createDCABotHelper<
       let findDeal = this.getDeal(dealId)
       if (!findDeal) {
         this.endMethod(_id)
-        return this.handleLog(`Deal ${dealId} not found when close`)
+        return this.handleWarn(`Deal ${dealId} not found when close`)
       }
       if (
         checkProfit &&
@@ -4515,7 +4515,7 @@ function createDCABotHelper<
         ))
       ) {
         this.endMethod(_id)
-        return this.handleLog(`Deal ${dealId} not fit min profit`)
+        return this.handleDebug(`Deal ${dealId} not fit min profit`)
       }
 
       if (findDeal && closeType === CloseDCATypeEnum.leave) {
@@ -4617,14 +4617,14 @@ function createDCABotHelper<
               if (fastClose) {
                 await closeBuy()
               }
-              this.handleLog(`Tp order qty less than 0 ${tpOrder.qty}`)
+              this.handleDebug(`Tp order qty less than 0 ${tpOrder.qty}`)
               return await this.closeDeal(this.botId, dealId)
             }
             if (this.combo && count === this.slippageRetry) {
               if (fastClose) {
                 await closeBuy()
               }
-              this.handleLog(`Close combo deal ${dealId} without order`)
+              this.handleDebug(`Close combo deal ${dealId} without order`)
               this.endMethod(_id)
               return await this.closeDeal(this.botId, dealId)
             }
@@ -4667,14 +4667,16 @@ function createDCABotHelper<
                     `${result}`.toLowerCase().includes(s.toLowerCase()),
                   )
                 ) {
-                  this.handleLog(
+                  this.handleDebug(
                     `TP order got not enough balance, but adaptive close is on`,
                   )
                   const balances = await this.checkAssets(true)
                   const asset = symbol.baseAsset.name
                   const find = balances?.get(asset)
                   if (!find) {
-                    this.handleLog(`Asset ${asset} not found in user balances`)
+                    this.handleDebug(
+                      `Asset ${asset} not found in user balances`,
+                    )
                   } else {
                     const toPlace = Math.min(
                       this.math.round(
@@ -4684,14 +4686,14 @@ function createDCABotHelper<
                       ),
                       tpOrder.qty,
                     )
-                    this.handleLog(
+                    this.handleDebug(
                       `Found free ${find.free}, to place ${toPlace}`,
                     )
                     if (
                       toPlace < symbol.baseAsset.minAmount ||
                       toPlace * tpOrder.price < symbol.quoteAsset.minAmount
                     ) {
-                      this.handleLog(
+                      this.handleDebug(
                         `Asset ${asset} free amount ${toPlace} is lower than exchange requirements base ${toPlace}, ${
                           symbol.baseAsset.minAmount
                         }, quote - ${toPlace * tpOrder.price}, ${
@@ -4699,7 +4701,7 @@ function createDCABotHelper<
                         }`,
                       )
                     } else {
-                      this.handleLog(
+                      this.handleDebug(
                         `Place new TP order with amount ${toPlace} ${asset} (tp order was ${tpOrder.qty} ${asset})`,
                       )
                       result = await this.sendGridToExchange(
@@ -4748,7 +4750,7 @@ function createDCABotHelper<
                       this.isNotionalReason(result) &&
                       count < this.slippageRetry
                     ) {
-                      this.handleLog(
+                      this.handleDebug(
                         `Cannot place take profit due to slippage ${
                           tpOrder.newClientOrderId
                         }, attempt ${count + 1}`,
@@ -4882,7 +4884,7 @@ function createDCABotHelper<
               if (fastClose) {
                 await closeBuy()
               }
-              this.handleLog(
+              this.handleWarn(
                 `No symbol found. Close ${dealId} ${findDeal.deal.symbol.symbol}`,
               )
             }
@@ -4890,7 +4892,7 @@ function createDCABotHelper<
             if (fastClose) {
               await closeBuy()
             }
-            this.handleLog(`No tp order. Close without order`)
+            this.handleDebug(`No tp order. Close without order`)
             return this.closeDeal(this.botId, dealId)
           }
         } else {
@@ -4977,7 +4979,7 @@ function createDCABotHelper<
         if (isNaN(current) || !isFinite(current)) {
           return false
         }
-        this.handleLog(
+        this.handleDebug(
           `Check minimum profit: deal ${
             d.deal._id
           }, current profit: ${current}, min profit: ${value}${
@@ -5086,7 +5088,6 @@ function createDCABotHelper<
         const qty = parseFloat(orderBo.executedQty)
         await this.clearDealTimer(dealId)
         const long = this.isLong
-        this.handleLog('Update deal')
         findDeal.initialOrders = await this.createInitialDealOrders(
           findDeal.deal.symbol.symbol,
           initialPrice,
@@ -5130,7 +5131,7 @@ function createDCABotHelper<
         findDeal.deal.avgPrice = avgs.avg || initialPrice
         findDeal.deal.displayAvg = avgs.display
         findDeal.deal.settings.avgPrice = avgs.avg || initialPrice
-        this.handleLog(
+        this.handleDebug(
           `Set deal avg prices ${findDeal.deal.avgPrice}, ${findDeal.deal.settings.avgPrice} (display ${findDeal.deal.displayAvg})`,
         )
         findDeal.deal.status =
@@ -5210,13 +5211,13 @@ function createDCABotHelper<
       ) {
         return
       }
-      this.handleLog(
+      this.handleDebug(
         `Sell remainder | Deal ${dealId}, qty ${_qty}, price ${_price}, sellNotByOrder ${sellNotByOrder}, findDeal ${!!findDeal}, updateBalances ${updateBalances}`,
       )
       const _id = this.startMethod('sellRemainder')
       let dealData = findDeal?.deal
       if (!dealData) {
-        this.handleLog(`Sell remainder | Deal not found, check in DB`)
+        this.handleDebug(`Sell remainder | Deal not found, check in DB`)
         const realDeal = await this.dealsDb.readData({ _id: dealId } as any)
         if (realDeal.status === StatusEnum.notok) {
           this.endMethod(_id)
@@ -5231,7 +5232,7 @@ function createDCABotHelper<
         }
         if (!realDeal.data.result) {
           this.endMethod(_id)
-          return this.handleLog(
+          return this.handleWarn(
             `Sell remainder | Deal ${dealId} not found in DB`,
           )
         }
@@ -5239,7 +5240,7 @@ function createDCABotHelper<
         dealData._id = `${dealData._id}`
       }
       if (dealData.sellRemainder) {
-        this.handleLog(`Sell remainder | Deal ${dealId} already sold`)
+        this.handleDebug(`Sell remainder | Deal ${dealId} already sold`)
         this.endMethod(_id)
         return
       }
@@ -5258,14 +5259,14 @@ function createDCABotHelper<
         }
         const { symbol } = dealData.symbol
         if (!symbol) {
-          this.handleLog(`Sell remainder | Symbol not found`)
+          this.handleWarn(`Sell remainder | Symbol not found`)
           this.endMethod(_id)
           return
         }
         const ed = await this.getExchangeInfo(symbol)
         const _fee = await this.getUserFee(symbol)
         if (!ed || !_fee) {
-          this.handleLog(
+          this.handleWarn(
             `Sell remainder | ${!ed ? 'Exchange info' : 'Fee'} not found`,
           )
           this.endMethod(_id)
@@ -5330,7 +5331,7 @@ function createDCABotHelper<
           if (result) {
             const srQty = +result.executedQty
             const srPrice = +result.price
-            this.handleLog(
+            this.handleDebug(
               `Sell remainder order filled for deal ${dealId} ${
                 result.clientOrderId
               }, price: ${srPrice}, base: ${srQty}, quote: ${
@@ -5462,7 +5463,7 @@ function createDCABotHelper<
                 })
                 .then((res) => {
                   if (res.status === StatusEnum.notok) {
-                    this.handleLog(
+                    this.handleWarn(
                       `Error saving deal: ${dealId}. Reason: ${res.reason}`,
                     )
                   }
@@ -5478,7 +5479,7 @@ function createDCABotHelper<
             $set: { sellRemainder: true },
           })
         } else {
-          this.handleLog(
+          this.handleDebug(
             `Sell remainder | qty less than minimals qty: ${qtyWithoutFee},min: ${
               ed.baseAsset.minAmount
             }, quote: ${qtyWithoutFee * price}, min ${ed.quoteAsset.minAmount} `,
@@ -5587,13 +5588,13 @@ function createDCABotHelper<
         : new Set<string>()
       if (getSet.has(clientOrderId)) {
         this.endMethod(_id)
-        return this.handleLog(
+        return this.handleDebug(
           `Order ${clientOrderId} already processed in update deal`,
         )
       }
       if (!dealId) {
         this.endMethod(_id)
-        return this.handleLog(`Order ${clientOrderId} has no dealId`)
+        return this.handleWarn(`Order ${clientOrderId} has no dealId`)
       }
 
       this.dealUpdateOrders.set(dealId, getSet.add(clientOrderId))
@@ -5878,7 +5879,6 @@ function createDCABotHelper<
           }
         } else {
           this.handleLog(`Regular order FILLED ${order.clientOrderId}`)
-          this.handleLog('Update deal')
           const avgPrice = await this.getAvgPrice(dealId)
 
           if (price !== +order.origPrice) {
@@ -5935,7 +5935,7 @@ function createDCABotHelper<
           if (findDeal.deal.bestPrice) {
             findDeal.deal.bestPrice = 0
           }
-          this.handleLog(
+          this.handleDebug(
             `Avg price ${findDeal.deal.avgPrice} @ ${findDeal.deal.symbol.baseAsset} / ${findDeal.deal.symbol.quoteAsset}`,
           )
           await this.checkDealSlMethods(findDeal)
@@ -6208,7 +6208,7 @@ function createDCABotHelper<
         const precision = await this.baseAssetPrecision(symbol)
         const priceRequest = inputPrice ?? (await this.getLatestPrice(symbol))
         if (priceRequest === 0) {
-          this.handleLog('Get latest price. Latest price = 0. getBaseOrder')
+          this.handleDebug('Get latest price. Latest price = 0. getBaseOrder')
           return
         }
         const baseOrderType = settings.startOrderType ?? OrderTypeEnum.market
@@ -6642,7 +6642,7 @@ function createDCABotHelper<
                   ].includes(deal.deal.action) &&
                   deal.deal.settings.useDca
                 ) {
-                  this.handleLog(`Action ${deal.deal.action} detected`)
+                  this.handleDebug(`Action ${deal.deal.action} detected`)
                   const lp = await this.getLatestPrice(symbol)
                   const orders = await this.createInitialDealOrders(
                     symbol,
@@ -6653,7 +6653,7 @@ function createDCABotHelper<
                   const required = this.isLong
                     ? orders.reduce((acc, v) => acc + v.qty * v.price, 0) / lp
                     : orders.reduce((acc, v) => acc + v.qty, 0) * lp
-                  this.handleLog(
+                  this.handleDebug(
                     `Required amount for ${deal.deal.action} is ${required}, price is ${lp}`,
                   )
                   const ei = await this.getExchangeInfo(symbol)
@@ -6663,14 +6663,14 @@ function createDCABotHelper<
                         ? ei?.baseAsset.name
                         : ei?.quoteAsset.name) ?? '',
                     )?.free ?? 0
-                  this.handleLog(`Available balance is ${balance}`)
+                  this.handleDebug(`Available balance is ${balance}`)
                   const orderSize = [
                     ActionsEnum.buyDiff,
                     ActionsEnum.sellDiff,
                   ].includes(deal.deal.action)
                     ? required - balance
                     : required
-                  this.handleLog(`Order size is ${orderSize}`)
+                  this.handleDebug(`Order size is ${orderSize}`)
                   if (orderSize > 0) {
                     const price = `${this.math.round(
                       lp,
@@ -6731,12 +6731,12 @@ function createDCABotHelper<
                         false,
                       )
                     }
-                    this.handleLog(`Order ${r.clientOrderId} filled`)
+                    this.handleDebug(`Order ${r.clientOrderId} filled`)
                   }
                   proceedBaseOrder = true
                 }
                 if (deal.deal.action === ActionsEnum.useOppositeBalance) {
-                  this.handleLog(`Action ${deal.deal.action} detected`)
+                  this.handleDebug(`Action ${deal.deal.action} detected`)
                   proceedBaseOrder = true
                 }
                 if (proceedBaseOrder) {
@@ -6764,7 +6764,7 @@ function createDCABotHelper<
           if (result) {
             if (typeof result === 'string') {
               if (this.isNotionalReason(result) && count < this.slippageRetry) {
-                this.handleLog(
+                this.handleDebug(
                   `Cannot place base order due to slippage ${
                     baseOrder.clientOrderId
                   }, attempt ${count + 1}`,
@@ -7887,11 +7887,11 @@ function createDCABotHelper<
         return
       }
       if (this.blockCheck) {
-        this.handleLog(`Block check skip orders check after reconnect`)
+        this.handleDebug(`Block check skip orders check after reconnect`)
         return
       }
       if (this.serviceRestart) {
-        this.handleLog(`Service restart skip orders check after reconnect`)
+        this.handleDebug(`Service restart skip orders check after reconnect`)
         return
       }
       const _id = this.startMethod('checkOrdersAfterReconnect')
@@ -7904,11 +7904,11 @@ function createDCABotHelper<
       })) {
         const getOrder = await this.getOrder(o.clientOrderId, o.symbol, false)
         if (!getOrder || !getOrder.data) {
-          this.handleLog(`Not enough data to get order ${o.clientOrderId}`)
+          this.handleWarn(`Not enough data to get order ${o.clientOrderId}`)
           continue
         }
         if (getOrder.status === StatusEnum.notok) {
-          this.handleLog(`Cannot get order ${getOrder.reason}`)
+          this.handleWarn(`Cannot get order ${getOrder.reason}`)
           continue
         }
         const mergedOrder = await this.mergeCommonOrderWithOrder(
@@ -7921,7 +7921,7 @@ function createDCABotHelper<
           if (mergedOrder.status !== 'CANCELED') {
             this.setOrder(mergedOrder)
           }
-          this.handleLog(
+          this.handleDebug(
             `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} is ${
               mergedOrder.status
             }. Base ${mergedOrder.origQty} (${mergedOrder.executedQty}), quote ${
@@ -7938,7 +7938,7 @@ function createDCABotHelper<
             partiallyFilledOrders.push(mergedOrder)
           }
         } else {
-          this.handleLog(
+          this.handleDebug(
             `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} not changed.`,
           )
         }
@@ -7980,7 +7980,7 @@ function createDCABotHelper<
         const ordersWithoutDeal = all.filter((o) => !o.dealId)
         if (ordersWithoutDeal) {
           for (const o of ordersWithoutDeal) {
-            this.handleLog(`Order ${o.clientOrderId} without deal`)
+            this.handleDebug(`Order ${o.clientOrderId} without deal`)
             await this.cancelOrderOnExchange(o, false)
             this.deleteOrder(o.clientOrderId)
           }
@@ -8008,11 +8008,11 @@ function createDCABotHelper<
                 true,
               )
               if (!tpslOrderData || !tpslOrderData.data) {
-                this.handleLog(
+                this.handleWarn(
                   `Not enough data to get order ${activeTPSLOrder.clientOrderId}`,
                 )
               } else if (tpslOrderData.status === StatusEnum.notok) {
-                this.handleLog(`Cannot get order ${tpslOrderData.reason}`)
+                this.handleWarn(`Cannot get order ${tpslOrderData.reason}`)
               } else {
                 const updatedOrder = await this.mergeCommonOrderWithOrder(
                   tpslOrderData.data,
@@ -8020,7 +8020,7 @@ function createDCABotHelper<
                 )
                 if (updatedOrder.status === 'CANCELED') {
                   this.deleteOrder(updatedOrder.clientOrderId)
-                  this.handleLog(
+                  this.handleDebug(
                     `TP/SL order ${updatedOrder.clientOrderId} is CANCELED.`,
                   )
                   this.serviceRestart = false
@@ -8045,7 +8045,7 @@ function createDCABotHelper<
                   }
                 } else if (updatedOrder.status === 'FILLED') {
                   this.setOrder(updatedOrder)
-                  this.handleLog(
+                  this.handleDebug(
                     `TP/SL order ${updatedOrder.clientOrderId} is FILLED.`,
                   )
 
@@ -8058,7 +8058,7 @@ function createDCABotHelper<
                   activeTPSLOrder.status === 'NEW'
                 ) {
                   this.setOrder(updatedOrder)
-                  this.handleLog(
+                  this.handleDebug(
                     `TP/SL order ${updatedOrder.clientOrderId} is PARTIALLY_FILLED.`,
                   )
                   this.emit('bot update', updatedOrder)
@@ -8066,7 +8066,7 @@ function createDCABotHelper<
                   this.processPartiallyFilledOrder(updatedOrder)
                   continue
                 } else {
-                  this.handleLog(
+                  this.handleDebug(
                     `TP/SL order not changed ${updatedOrder.clientOrderId}`,
                   )
                 }
@@ -8095,7 +8095,7 @@ function createDCABotHelper<
               ) {
                 continue
               }
-              this.handleLog(
+              this.handleDebug(
                 `TP order wasn't found in orders, but must be in grid ${
                   tpOrderInCurrent.side
                 }, base: ${tpOrderInCurrent.qty}, quote: ${
@@ -8147,12 +8147,12 @@ function createDCABotHelper<
                   true,
                 )
                 if (!exchangeData || !exchangeData.data) {
-                  this.handleLog(
+                  this.handleWarn(
                     `Not enough data to get order ${o.clientOrderId}`,
                   )
                 } else {
                   if (exchangeData.status === StatusEnum.notok) {
-                    this.handleLog(`Cannot get order ${exchangeData.reason}`)
+                    this.handleWarn(`Cannot get order ${exchangeData.reason}`)
                   } else {
                     const updatedOrder = await this.mergeCommonOrderWithOrder(
                       exchangeData.data,
@@ -8161,7 +8161,7 @@ function createDCABotHelper<
                     if (updatedOrder.status === 'CANCELED') {
                       this.emit('bot update', updatedOrder)
                       this.deleteOrder(updatedOrder.clientOrderId)
-                      this.handleLog(
+                      this.handleDebug(
                         `Order ${updatedOrder.clientOrderId} is CANCELED.`,
                       )
                       this.updateOrderOnDb(updatedOrder)
@@ -8169,7 +8169,7 @@ function createDCABotHelper<
                     } else if (updatedOrder.status === 'FILLED') {
                       this.emit('bot update', updatedOrder)
                       this.setOrder(updatedOrder)
-                      this.handleLog(
+                      this.handleDebug(
                         `Order ${updatedOrder.clientOrderId} is FILLED.`,
                       )
                       this.updateOrderOnDb(updatedOrder)
@@ -8180,12 +8180,12 @@ function createDCABotHelper<
                     ) {
                       this.emit('bot update', updatedOrder)
                       this.setOrder(updatedOrder)
-                      this.handleLog(
+                      this.handleDebug(
                         `Order ${updatedOrder.clientOrderId} is PARTIALLY_FILLED.`,
                       )
                       this.updateOrderOnDb(updatedOrder)
                     } else {
-                      this.handleLog(
+                      this.handleDebug(
                         `Regular order not changed ${updatedOrder.clientOrderId}`,
                       )
                     }
@@ -8198,7 +8198,7 @@ function createDCABotHelper<
                   ? +b.origPrice - +a.origPrice
                   : +a.origPrice - +b.origPrice,
               )) {
-                this.handleLog(
+                this.handleDebug(
                   `Rebuilding grid after ${o.clientOrderId}, ${o.side}, base: ${
                     o.executedQty
                   }, quote: ${+o.executedQty * +o.price}, price: ${o.price}`,
@@ -8206,7 +8206,7 @@ function createDCABotHelper<
                 this.processFilledOrder(o)
               }
               for (const o of canceledOrders) {
-                this.handleLog(
+                this.handleDebug(
                   `Send order again ${o.clientOrderId}, ${o.side}, base: ${
                     o.origQty
                   }, quote: ${+o.price * +o.origQty}, price: ${o.price}`,
@@ -8236,7 +8236,7 @@ function createDCABotHelper<
                     fo.updateTime >= this.startTime,
                 )
                 if (filledOrder) {
-                  this.handleLog(
+                  this.handleDebug(
                     `Order wasn't found in orders, but already filled during check  ${
                       g.side
                     }, base: ${g.qty}, quote: ${g.price * g.qty}, price: ${
@@ -8246,7 +8246,7 @@ function createDCABotHelper<
                   filledOrders.push(filledOrder)
                   continue
                 }
-                this.handleLog(
+                this.handleDebug(
                   `Order wasn't found in orders, but must be in grid ${
                     g.side
                   }, base: ${g.qty}, quote: ${g.price * g.qty}, price: ${
@@ -8269,7 +8269,7 @@ function createDCABotHelper<
                   ? +b.origPrice - +a.origPrice
                   : +a.origPrice - +b.origPrice,
               )) {
-                this.handleLog(
+                this.handleDebug(
                   `Rebuilding grid after ${o.clientOrderId}, ${o.side}, base: ${
                     o.origQty
                   }, quote: ${+o.origQty * +o.price}, price: ${o.price}`,
@@ -8283,7 +8283,7 @@ function createDCABotHelper<
               )
             ) {
               for (const o of orders) {
-                this.handleLog(
+                this.handleDebug(
                   `Deal not found or already closed. Cancel order ${
                     o.clientOrderId
                   }, ${o.side}, base: ${o.origQty}, quote: ${
@@ -8462,7 +8462,7 @@ function createDCABotHelper<
       activeDeals: number,
     ) {
       const isIndicator = await this.isIndicator(serviceRestart, activeDeals)
-      this.handleLog(
+      this.handleDebug(
         `Start indicator init. Service restart: ${serviceRestart}, active deals: ${activeDeals}, check result: ${isIndicator}, status: ${this.data?.status}`,
       )
       if (isIndicator) {
@@ -8486,7 +8486,7 @@ function createDCABotHelper<
       if (!serviceRestart) {
         this.calculateBotDeals()
       } else {
-        this.handleLog('Service restart skip calculate bot deals')
+        this.handleDebug('Service restart skip calculate bot deals')
       }
       this.handleLog('Checking for existing deals')
       const settings = await this.getAggregatedSettings()
@@ -8538,7 +8538,7 @@ function createDCABotHelper<
               if (full.data?.result) {
                 await this.startDeal(full.data.result)
               } else {
-                this.handleLog(
+                this.handleWarn(
                   `Cannot find full order for ${inDb.data.result.clientOrderId}`,
                 )
               }
@@ -8731,7 +8731,7 @@ function createDCABotHelper<
       if (!serviceRestart) {
         this.updateDealLastPrices(this.botId)
       } else {
-        this.handleLog('Service restart skip update last deal price')
+        this.handleDebug('Service restart skip update last deal price')
       }
       if (
         settings.startCondition === StartConditionEnum.asap &&
@@ -8772,7 +8772,9 @@ function createDCABotHelper<
         this.calculateBotBalances()
         this.calculateUsage()
       } else {
-        this.handleLog('Service restart skip calculate bot balances and usage')
+        this.handleDebug(
+          'Service restart skip calculate bot balances and usage',
+        )
       }
       this.endMethod(_id)
     }
@@ -8862,7 +8864,7 @@ function createDCABotHelper<
         >(rabbitIndicatorsKey, payload, timeout)
         if (result) {
           if (result.response) {
-            this.handleLog(`Unsubscribed from indicator ${id}`)
+            this.handleDebug(`Unsubscribed from indicator ${id}`)
             if (this.redisSubIndicators && cb) {
               this.redisSubIndicators.unsubscribe(room, cb)
             }
@@ -8888,7 +8890,7 @@ function createDCABotHelper<
     }
 
     async runAfterIndicatorsConnected(_botId: string) {
-      this.handleLog('Run after indicators connected')
+      this.handleDebug('Run after indicators connected')
       const c = [...this.afterIndicatorsConnected]
       for (const f of c) {
         await f.bind(this)()
@@ -8932,7 +8934,7 @@ function createDCABotHelper<
           this.openAtStartTriggered = true
         }
         if (!this.data) {
-          this.handleLog('Open indicators | No data')
+          this.handleWarn('Open indicators | No data')
           this.endMethod(_id)
           return
         }
@@ -8949,7 +8951,7 @@ function createDCABotHelper<
               !copySymbols.has(i.symbol) &&
               !this.getDealsByStatusAndSymbol({ symbol: i.symbol }).length
             ) {
-              this.handleLog(
+              this.handleDebug(
                 `Indicator ${i.id} ${i.uuid}@${i.symbol} is not needed anymore. Unsubscribe`,
               )
               this.sendIndicatorUnsubscribeEvent(i.id, i.room, i.cb)
@@ -8999,12 +9001,12 @@ function createDCABotHelper<
           const key = this.indicatorKey(i)
           indicatorTypeMap.set(key, [...(indicatorTypeMap.get(key) ?? []), i])
         }
-        this.handleLog(
+        this.handleDebug(
           `Open indicators | Adding indicators ${symbols.size} symbol`,
         )
         for (const symbol of symbols) {
           const time = +new Date()
-          this.handleLog(`Open indicators | Symbol ${symbol} start`)
+          this.handleDebug(`Open indicators | Symbol ${symbol} start`)
           await Promise.all(
             filteredIndicators.map(async (i) => {
               {
@@ -9194,7 +9196,7 @@ function createDCABotHelper<
                     ? false
                     : otherOnType.length > 1 && lowerIntervals > 0 && useAnd
                   if (hasLower) {
-                    this.handleLog(
+                    this.handleDebug(
                       `Indicator ${uuid} ${symbol} ${indicatorAction} has indicators with lower interval: ${lowerIntervals}`,
                     )
                   }
@@ -9564,7 +9566,9 @@ function createDCABotHelper<
                   const { id, room, data, cb } =
                     await this.sendIndicatorSubscribeEvent(indicatorData)
                   if (!id) {
-                    this.handleLog(`Indicator ${uuid} ${symbol} not connected`)
+                    this.handleDebug(
+                      `Indicator ${uuid} ${symbol} not connected`,
+                    )
                     return
                   }
                   const maChild =
@@ -9652,7 +9656,7 @@ function createDCABotHelper<
                     groupId: i.groupId,
                     is1d: rrOrAr || hasLower,
                   })
-                  this.handleLog(
+                  this.handleDebug(
                     `Bot connected to ${type} indicator. Id: ${id}, room: ${room}`,
                   )
                   if (maChild) {
@@ -9684,7 +9688,7 @@ function createDCABotHelper<
                       indicatorChildData,
                     )
                     if (!idChild) {
-                      this.handleLog(
+                      this.handleWarn(
                         `Indicator ${maUUID} ${symbol} not connected`,
                       )
                       return
@@ -9721,7 +9725,7 @@ function createDCABotHelper<
                       groupId: '',
                       is1d: false,
                     })
-                    this.handleLog(
+                    this.handleDebug(
                       `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
                     )
                   }
@@ -9759,7 +9763,7 @@ function createDCABotHelper<
                       indicatorChildData,
                     )
                     if (!idChild) {
-                      this.handleLog(
+                      this.handleWarn(
                         `Indicator ${xoUUID} ${symbol} not connected`,
                       )
                       return
@@ -9795,12 +9799,12 @@ function createDCABotHelper<
                       groupId: '',
                       is1d: false,
                     })
-                    this.handleLog(
+                    this.handleDebug(
                       `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
                     )
                   }
                 } else {
-                  this.handleLog(
+                  this.handleDebug(
                     `Bot start condition set to ${type}, but values wasn't provided.`,
                   )
                 }
@@ -9808,13 +9812,13 @@ function createDCABotHelper<
             }),
           )
           await sleep(0)
-          this.handleLog(
+          this.handleDebug(
             `Open indicators | Symbol ${symbol} end. Took ${
               (+new Date() - time) / 1000
             }s to connect ${filteredIndicators.length} indicators`,
           )
         }
-        this.handleLog(
+        this.handleDebug(
           `Open indicators | Added ${this.indicators.size} indicators to the bot`,
         )
       } catch (e) {
@@ -9976,7 +9980,7 @@ function createDCABotHelper<
       }
       const latestPrice = await this.getLatestPrice(symbol)
       if (latestPrice === 0) {
-        this.handleLog('Latest price is 0, bypass check balance')
+        this.handleDebug('Latest price is 0, bypass check balance')
         return result
       }
       const base = await this.getBaseOrder(
@@ -9986,7 +9990,7 @@ function createDCABotHelper<
         latestPrice,
       )
       if (!base) {
-        this.handleLog('Cannot get base order, bypass check balance')
+        this.handleDebug('Cannot get base order, bypass check balance')
         return result
       }
       const initialGrids = await this.createInitialDealOrders(
@@ -10478,7 +10482,7 @@ function createDCABotHelper<
         return this.handleLog('Loading not complete yet')
       }
       if (!skip && this.data?.status === BotStatusEnum.monitoring) {
-        this.handleLog('Bot is in monitoring mode. Wont open new deal')
+        this.handleDebug('Bot is in monitoring mode. Wont open new deal')
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
@@ -10491,13 +10495,12 @@ function createDCABotHelper<
         clearTimeout(t)
         this.openNewDealTimer.delete(symbol)
       }
-      this.handleLog(`Open new deal ${symbol}`)
       if (!this.pairs.has(symbol)) {
         this.endMethod(_id)
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
-        return this.handleLog(`Bot settings does not contain ${symbol}`)
+        return this.handleWarn(`Bot settings does not contain ${symbol}`)
       }
       if (
         this.pairs.has(symbol) &&
@@ -10507,13 +10510,14 @@ function createDCABotHelper<
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
-        return this.handleLog(
+        return this.handleWarn(
           `Bot settings does not contain ${symbol}. Wont open new deal`,
         )
       }
       const ed = await this.getExchangeInfo(symbol)
       const skipRange = skip && !dynamic
       if (await this.checkMaxDeals(this.botId, symbol)) {
+        this.handleLog(`Open new deal ${symbol}`)
         if (
           ed &&
           (skipRange || (await this.checkInRange(symbol))) &&
@@ -10528,7 +10532,7 @@ function createDCABotHelper<
           )
           let checkBalance = await this.checkBalance(symbol)
           if (!checkBalance.status) {
-            this.handleLog(
+            this.handleDebug(
               `Not enough balance to start new deal. Required: ${checkBalance.required}, available: ${checkBalance.available}, repeat check in 5 seconds`,
             )
             await sleep(5000)
@@ -10541,7 +10545,7 @@ function createDCABotHelper<
                 symbol,
               )
               if (!cooldownStart.status) {
-                this.handleLog(
+                this.handleDebug(
                   `Deal must wait because of cooldown start check. Time: ${cooldownStart.time}, last opened: ${cooldownStart.last}, diff: ${cooldownStart.diff}, cooldown: ${cooldownStart.cooldown} ${symbol} ${settings.cooldownAfterDealStartOption}`,
                 )
                 this.resetPending(this.botId, symbol)
@@ -10568,7 +10572,7 @@ function createDCABotHelper<
                 symbol,
               )
               if (!cooldownStop.status) {
-                this.handleLog(
+                this.handleDebug(
                   `Deal must wait because of cooldown stop check. Time: ${cooldownStop.time}, last closed: ${cooldownStop.last}, diff: ${cooldownStop.diff}, cooldown: ${cooldownStop.cooldown} ${symbol} ${settings.cooldownAfterDealStopOption}`,
                 )
                 if (settings.startCondition === StartConditionEnum.asap) {
@@ -10617,7 +10621,7 @@ function createDCABotHelper<
             let dynamicAr: DynamicArPrices[] = []
             if (this.scaleAr || this.tpAr || this.slAr) {
               const dynamic = this.getDynamicLevels(symbol)
-              this.handleLog(
+              this.handleDebug(
                 `Dynamic levels for ${symbol}: ${dynamic.length}, ${dynamic
                   .map((d) => `${d.id}: ${d.value}`)
                   .join(', ')}`,
@@ -10757,7 +10761,7 @@ function createDCABotHelper<
       if (_symbol) {
         const symbolToUse = await this.convertSymbol(_symbol)
         if (!symbolToUse) {
-          return this.handleLog(`Signal for ${_symbol} cannot be passed`)
+          return this.handleWarn(`Signal for ${_symbol} cannot be passed`)
         }
         if (!settings.pair?.includes(symbolToUse)) {
           return this.handleErrors(
@@ -10777,7 +10781,7 @@ function createDCABotHelper<
         }
         if (symbolToUse) {
           pairsToUse = [symbolToUse]
-          this.handleLog(`Received signal for ${symbolToUse}`)
+          this.handleDebug(`Received signal for ${symbolToUse}`)
         }
       }
       if (
@@ -10788,7 +10792,7 @@ function createDCABotHelper<
           await this.openNewDeal(this.botId, symbol)
         }
       } else {
-        this.handleLog(
+        this.handleDebug(
           `Only ${StartConditionEnum.tradingviewSignals} start condition can start deal by signals`,
         )
       }
@@ -10818,7 +10822,7 @@ function createDCABotHelper<
       ) {
         const symbol = await this.convertSymbol(_symbol, true)
         if (_symbol && !symbol) {
-          return this.handleLog(`Signal for ${symbol} cannot be passed`)
+          return this.handleWarn(`Signal for ${symbol} cannot be passed`)
         }
         this.closeAllDeals(
           ignoreSettings
@@ -10874,7 +10878,7 @@ function createDCABotHelper<
               o.typeOrder === type,
           )
           if (filled) {
-            this.handleLog(
+            this.handleDebug(
               `Order, qty: ${n.qty}, price: ${n.price}, side: ${n.side}, type: ${type} doesn't exists in new, but already filled and not processed yet ${filled.clientOrderId}, skip place new order`,
             )
           }
@@ -10900,7 +10904,7 @@ function createDCABotHelper<
       const _id = this.startMethod('placeOrders')
       const ed = await this.getExchangeInfo(symbol)
       if (!ed) {
-        this.handleLog(`Exchange info not found for ${symbol}`)
+        this.handleWarn(`Exchange info not found for ${symbol}`)
         this.endMethod(_id)
         return
       }
@@ -11279,13 +11283,13 @@ function createDCABotHelper<
           )
           qty -= f
           if (qty < symbol.baseAsset.minAmount && !this.futures) {
-            this.handleLog(
+            this.handleDebug(
               `Order amount less than base min amount. ${qty} qty, ${symbol.baseAsset.minAmount} base min`,
             )
             return []
           }
           if (qty * tpPrice < symbol.quoteAsset.minAmount && !this.futures) {
-            this.handleLog(
+            this.handleDebug(
               `Order amount less than quote min amount. ${qty * tpPrice} qty, ${
                 symbol.quoteAsset.minAmount
               } quote min`,
@@ -11486,7 +11490,7 @@ function createDCABotHelper<
             false,
           )
         }
-        this.handleLog(
+        this.handleDebug(
           `TP order. Base order size: ${boQty}, qty: ${tpOrder.qty}, origQty: ${origQty}, qtyBase: ${qtyBase}, price: ${tpOrder.price}`,
         )
         let tpOrders = [tpOrder]
@@ -11843,7 +11847,7 @@ function createDCABotHelper<
         ),
         breakpoint,
       ]
-      this.handleLog(
+      this.handleDebug(
         `Breakpoint created. Current price ${breakpoint.price}, next order price ${breakpoint.displacedPrice}.`,
       )
       return deal.gridBreakpoints
@@ -12692,7 +12696,7 @@ function createDCABotHelper<
           isFinite(+order.origQty) &&
           +order.executedQty < +order.origQty
         if (skip) {
-          this.handleLog(
+          this.handleDebug(
             `TP order ${order.clientOrderId} FILLED, but executedQty(${order.executedQty}) < origQty(${order.origQty}) and order is in tpHistory. Will be skipped to prevent unexpected deal close`,
           )
         }
@@ -12810,7 +12814,7 @@ function createDCABotHelper<
           { qty, price, id: order.clientOrderId },
         ]
         findDeal.deal.updateTime = order.updateTime
-        this.handleLog('TP order PARTIALLY FILLED')
+        this.handleDebug('TP order PARTIALLY FILLED')
         this.saveDeal(findDeal, {
           tpHistory: findDeal.deal.tpHistory,
           updateTime: findDeal.deal.updateTime,
@@ -13158,7 +13162,7 @@ function createDCABotHelper<
         if (trailingTpPrice && trailingTp && !skipTp) {
           const get = this.dealsForTrailing.get(d.deal._id)
           if (get?.trailingTpPrice !== trailingTpPrice) {
-            this.handleLog(
+            this.handleDebug(
               `Set new trailing price for ${d.deal._id} ${get?.trailingTpPrice} to ${trailingTpPrice}`,
             )
           }
@@ -13192,7 +13196,7 @@ function createDCABotHelper<
         )
         return
       }
-      this.handleLog(
+      this.handleDebug(
         `Trailing: Set trailing level, deal: ${d.deal._id}, level: ${d.deal.trailingLevel}, price: ${price}, symbol: ${d.deal.symbol.symbol}`,
       )
       this.saveDeal(d, {
@@ -13383,7 +13387,7 @@ function createDCABotHelper<
         d.deal.trailingLevel
       ) {
         if (get !== d.deal.trailingLevel) {
-          this.handleLog(
+          this.handleDebug(
             `Set new trailing stop loss price for ${d.deal._id} ${get} to ${d.deal.trailingLevel}`,
           )
         }
@@ -13431,7 +13435,7 @@ function createDCABotHelper<
           isFinite(+fixedSlPrice)
         ) {
           if (get !== +fixedSlPrice) {
-            this.handleLog(
+            this.handleDebug(
               `Set new fixed stop loss price for ${
                 d.deal._id
               } ${get} to ${+fixedSlPrice}`,
@@ -13452,7 +13456,7 @@ function createDCABotHelper<
                 : d.deal.initialPrice
             const price = this.isLong ? ref * (sl + 1) : ref * (1 - sl)
             if (get !== price) {
-              this.handleLog(
+              this.handleDebug(
                 `Set new stop loss price for ${d.deal._id} ${get} to ${price}`,
               )
             }
@@ -13477,7 +13481,7 @@ function createDCABotHelper<
             value *= +(indicator.dynamicArFactor || '1')
             const price = d.deal.avgPrice + value * (this.isLong ? -1 : 1)
             if (get !== price) {
-              this.handleLog(
+              this.handleDebug(
                 `Set new stop loss AR price for ${d.deal._id} ${get} to ${price}`,
               )
             }
@@ -13815,7 +13819,7 @@ function createDCABotHelper<
           }
           this.highestLow.forEach((_, k) => {
             if (!slKeys.includes(k)) {
-              this.handleLog(`Remove ${k} from highest low`)
+              this.handleDebug(`Remove ${k} from highest low`)
               this.highestLow.delete(k)
             }
           })
@@ -13838,7 +13842,7 @@ function createDCABotHelper<
           }
           this.lowestHigh.forEach((_, k) => {
             if (!otherKeys.includes(k)) {
-              this.handleLog(`Remove ${k} from lowest high`)
+              this.handleDebug(`Remove ${k} from lowest high`)
               this.lowestHigh.delete(k)
             }
           })
@@ -13855,7 +13859,7 @@ function createDCABotHelper<
           }
           this.lowestHigh.forEach((_, k) => {
             if (!slKeys.includes(k)) {
-              this.handleLog(`Remove ${k} from lowest high`)
+              this.handleDebug(`Remove ${k} from lowest high`)
               this.lowestHigh.delete(k)
             }
           })
@@ -13878,7 +13882,7 @@ function createDCABotHelper<
           }
           this.highestLow.forEach((_, k) => {
             if (!otherKeys.includes(k)) {
-              this.handleLog(`Remove ${k} from highest low`)
+              this.handleDebug(`Remove ${k} from highest low`)
               this.highestLow.delete(k)
             }
           })
@@ -13944,7 +13948,7 @@ function createDCABotHelper<
       } else {
         this.allowedMethods.delete('checkDCALevel')
       }
-      this.handleLog(
+      this.handleDebug(
         `Check deals allowed methods: ${[...this.allowedMethods].join(', ')}`,
       )
       await this.checkDealsForStopLossMethods()
@@ -14095,7 +14099,7 @@ function createDCABotHelper<
         this.allowedMethods.delete('checkDynamic')
       }
       await this.checkDealsAllowedMethods()
-      this.handleLog(
+      this.handleDebug(
         `Allowed methods: ${Array.from(this.allowedMethods).join(', ')}`,
       )
     }
@@ -14219,7 +14223,7 @@ function createDCABotHelper<
             this.pairsNotFound.size < this.data.settings.pair.length
           ) {
             for (const p of this.pairsNotFound) {
-              this.handleLog(
+              this.handleWarn(
                 `Exchange info not found for ${p}. Will close all deals`,
               )
               this.data.settings.pair = this.data.settings.pair.filter(
@@ -14243,7 +14247,7 @@ function createDCABotHelper<
               this.ignoreErrors = false
             }
           } else {
-            this.handleLog(`Exchange info not found. Bot will stop`)
+            this.handleWarn(`Exchange info not found. Bot will stop`)
             this.loadingComplete = true
             await this.stop(CloseDCATypeEnum.cancel)
             this.loadingComplete = false
@@ -14722,7 +14726,7 @@ function createDCABotHelper<
         if (+new Date() - time < this.priceTimeout) {
           continue
         }
-        this.handleLog(
+        this.handleDebug(
           `Last update time for ${symbol} is ${new Date(
             time,
           ).toISOString()}, more then ${this.priceTimeout / 1000 / 60}m`,
@@ -14730,11 +14734,11 @@ function createDCABotHelper<
         symbols.add(symbol)
       }
       if (this.exchange && symbols.size) {
-        this.handleLog(
+        this.handleDebug(
           `Required prices for ${symbols.size} symbols in price timer`,
         )
         const allPrices = await this.exchange?.getAllPrices(true)
-        this.handleLog(`Get all prices in price timer`)
+        this.handleDebug(`Get all prices in price timer`)
         if (allPrices.status === StatusEnum.ok) {
           const prices = allPrices.data.filter((p) => symbols.has(p.pair))
           for (const p of prices) {
@@ -14784,7 +14788,7 @@ function createDCABotHelper<
         }
         if (!d.deal.bestPrice) {
           d.deal.bestPrice = last
-          this.handleLog(
+          this.handleDebug(
             `Trailing: Set initial best price: ${last}, deal: ${d.deal._id} `,
           )
         } else {
@@ -14797,7 +14801,7 @@ function createDCABotHelper<
         }
         if (!d.deal.trailingMode && trailingSl && !skipSl) {
           d.deal.trailingMode = TrailingModeEnum.tsl
-          this.handleLog(
+          this.handleDebug(
             `Trailing: Set TSL trailing mode, deal: ${d.deal._id}, price: ${last} `,
           )
         }
@@ -14812,7 +14816,7 @@ function createDCABotHelper<
             (!this.isLong && last <= trailingTpPrice)
           ) {
             d.deal.trailingMode = TrailingModeEnum.ttp
-            this.handleLog(
+            this.handleDebug(
               `Trailing: Set TTP trailing mode, deal: ${d.deal._id}, price : ${last}, deal trailing tp price %: ${trailingTpPrice}, price ${last} `,
             )
           }
@@ -14888,7 +14892,7 @@ function createDCABotHelper<
             const lastData = (this.data?.lastPricesPerSymbol ?? []).find(
               (d) => d.symbol === symbol,
             )
-            this.handleLog(
+            this.handleDebug(
               `Price ${price} in range for ${symbol}. Last data: avg - ${lastData?.avg}, entry - ${lastData?.entry}, time - ${lastData?.time}`,
             )
             await this.openNewDeal(this.botId, symbol, true, true, +new Date())
@@ -14910,7 +14914,7 @@ function createDCABotHelper<
         if (value) {
           const trigger = this.isLong ? price <= value : price >= value
           if (trigger) {
-            this.handleLog(
+            this.handleDebug(
               `Deal: ${deal.deal._id} adding DCA level by DCA level check`,
             )
             const order = deal.currentOrders.find((o) => +o.price === value)
@@ -15438,7 +15442,7 @@ function createDCABotHelper<
           quote: findDeal.deal.initialBalances.quote + filledQuote,
         }
         if (this.combo) {
-          this.handleLog(
+          this.handleDebug(
             `Deal ${findDeal.deal._id} balances ${
               findDeal.deal.currentBalances.base
             } base, ${
@@ -16305,7 +16309,7 @@ function createDCABotHelper<
     ) {
       const symbol = convert ? await this.convertSymbol(_symbol, true) : _symbol
       if (_symbol && !symbol) {
-        return this.handleLog(`Signal for ${symbol} cannot be passed`)
+        return this.handleWarn(`Signal for ${symbol} cannot be passed`)
       }
       const deals = this.getOpenDeals(false, symbol ?? undefined)
       for (const d of deals.filter((_d) =>
@@ -16337,7 +16341,7 @@ function createDCABotHelper<
     ) {
       const symbol = convert ? await this.convertSymbol(_symbol, true) : _symbol
       if (_symbol && !symbol) {
-        return this.handleLog(`Signal for ${symbol} cannot be passed`)
+        return this.handleWarn(`Signal for ${symbol} cannot be passed`)
       }
       const deals = this.getOpenDeals(false, symbol ?? undefined)
       for (const d of deals.filter((_d) =>
@@ -16364,7 +16368,7 @@ function createDCABotHelper<
       fromWebhook = false,
     ) {
       const _id = this.startMethod('addDealFunds')
-      this.handleLog(
+      this.handleDebug(
         `Add funds | Received add funds for ${dealId}, use limit price: ${settings.useLimitPrice}, price: ${settings.limitPrice}, size: ${settings.qty}, asset: ${settings.asset}, type: ${settings.type}`,
       )
       if (this.combo) {
@@ -16448,7 +16452,7 @@ function createDCABotHelper<
           : this.isLong
             ? deal.deal.usage.current.quote / deal.deal.lastPrice
             : deal.deal.usage.current.base
-        this.handleLog(`Add funds | qtyPerc ${qtyPerc}`)
+        this.handleDebug(`Add funds | qtyPerc ${qtyPerc}`)
         origQty = `${this.math.round(
           qtyPerc * (+settings.qty / 100),
           await this.baseAssetPrecision(deal.deal.symbol.symbol),
@@ -16529,7 +16533,7 @@ function createDCABotHelper<
           : PositionSide.BOTH,
         addFundsId,
       }
-      this.handleLog(`Add funds | create order ${order.clientOrderId}`)
+      this.handleDebug(`Add funds | create order ${order.clientOrderId}`)
       const result = await this.sendOrderToExchange(order)
       if (result && result.status === 'FILLED') {
         this.processFilledOrder(result)
@@ -16559,7 +16563,7 @@ function createDCABotHelper<
       fromWebhook = false,
     ) {
       const _id = this.startMethod('reduceDealFunds')
-      this.handleLog(
+      this.handleDebug(
         `Reduce funds | Received reduce funds for ${dealId}, use limit price: ${settings.useLimitPrice}, price: ${settings.limitPrice}, size: ${settings.qty}, asset: ${settings.asset}, type: ${settings.type}`,
       )
       if (this.combo) {
@@ -16643,7 +16647,7 @@ function createDCABotHelper<
           : this.isLong
             ? deal.deal.usage.current.quote / deal.deal.lastPrice
             : deal.deal.usage.current.base
-        this.handleLog(`Reduce funds | qtyPerc ${qtyPerc}`)
+        this.handleDebug(`Reduce funds | qtyPerc ${qtyPerc}`)
         origQty = `${this.math.round(
           qtyPerc * (+settings.qty / 100),
           await this.baseAssetPrecision(deal.deal.symbol.symbol),
@@ -16736,7 +16740,7 @@ function createDCABotHelper<
         dealId,
       }).filter((o) => o.typeOrder === TypeOrderEnum.dealTP && !o.reduceFundsId)
       for (const o of orders) {
-        this.handleLog(`Reduce funds | Cancel order ${o.clientOrderId}`)
+        this.handleDebug(`Reduce funds | Cancel order ${o.clientOrderId}`)
         await this.cancelOrderOnExchange(o)
       }
       const reduceFundsId = v4()
@@ -16771,7 +16775,7 @@ function createDCABotHelper<
           : PositionSide.BOTH,
         reduceFundsId,
       }
-      this.handleLog(`Reduce funds | create order ${order.clientOrderId}`)
+      this.handleDebug(`Reduce funds | create order ${order.clientOrderId}`)
       const result = await this.sendOrderToExchange(order)
       if (result && result.status === 'FILLED') {
         this.processFilledOrder(result)
@@ -16799,7 +16803,7 @@ function createDCABotHelper<
       orderId: string,
     ) {
       const _id = this.startMethod('cancelTerminalDealOrder')
-      this.handleLog(
+      this.handleDebug(
         `Cancel terminal deal order | Received cancel for ${dealId}, order: ${orderId}`,
       )
       if (this.combo) {
@@ -16912,7 +16916,7 @@ function createDCABotHelper<
       orderId: string,
     ) {
       const _id = this.startMethod('cancelPendingAddFundsDealOrder')
-      this.handleLog(
+      this.handleDebug(
         `Cancel pending add funds deal order | Received cancel for ${dealId}, order: ${orderId}`,
       )
       if (this.combo) {
@@ -17443,7 +17447,7 @@ function createDCABotHelper<
               (await this.botProfitDb.countData({ botId: this.botId }))?.data
                 ?.result ?? 0
             if (count > 600) {
-              this.handleLog(
+              this.handleDebug(
                 `Bot update stats | Clear profit db. Profit count: ${count}`,
               )
               const last = await this.botProfitDb.readData(
@@ -17453,7 +17457,7 @@ function createDCABotHelper<
               )
               if (last.data?.result) {
                 try {
-                  this.handleLog(
+                  this.handleDebug(
                     `Bot update stats | Clear profit db. Found last record ${new Date(
                       last.data.result.time,
                     ).toISOString()}`,
@@ -17464,7 +17468,7 @@ function createDCABotHelper<
                       time: { $lt: last.data.result.time },
                     })
                     .then((r) => {
-                      this.handleLog(
+                      this.handleDebug(
                         `Bot update stats | Clear profit db. Deleted records result: ${r.reason}`,
                       )
                     })

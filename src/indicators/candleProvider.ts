@@ -34,7 +34,7 @@ export class CandlesProvider {
   }
 
   private handleLog(...msg: unknown[]) {
-    logger.info(`${loggerPrefix}`, ...msg)
+    logger.debug(`${loggerPrefix}`, ...msg)
   }
 
   private historyMap: Map<string, ExpirableMap<string, CandleResponse[]>> =

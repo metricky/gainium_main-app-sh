@@ -1,5 +1,5 @@
 import logger from '../../utils/logger'
 ;(async () => {
-  logger.info('Update')
-  logger.info('Update  end')
+  logger.debug('Update')
+  logger.debug('Update  end')
 })()

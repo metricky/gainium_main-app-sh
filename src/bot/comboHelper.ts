@@ -642,20 +642,20 @@ function createComboBotHelper<
           )
           for (const m of this.allMinigrids) {
             if (!(await this.getExchangeInfo(m.schema.symbol.symbol))) {
-              this.handleLog(
+              this.handleDebug(
                 `Cannot find exchange info for ${m.schema.symbol.symbol}`,
               )
               this.fillExchangeInfo(m.schema.symbol.symbol)
               if (!(await this.getExchangeInfo(m.schema.symbol.symbol))) {
-                this.handleLog(`Push ${m.schema.symbol.symbol} to not found`)
+                this.handleDebug(`Push ${m.schema.symbol.symbol} to not found`)
                 this.pairsNotFound.add(m.schema.symbol.symbol)
               }
             }
             if (!(await this.getUserFee(m.schema.symbol.symbol))) {
-              this.handleLog(`Cannot find fee for ${m.schema.symbol.symbol}`)
+              this.handleDebug(`Cannot find fee for ${m.schema.symbol.symbol}`)
               this.getUserFees(m.schema.symbol.symbol)
               if (!(await this.getUserFee(m.schema.symbol.symbol))) {
-                this.handleLog(`Push ${m.schema.symbol.symbol} to not found`)
+                this.handleDebug(`Push ${m.schema.symbol.symbol} to not found`)
                 this.pairsNotFound.add(m.schema.symbol.symbol)
               }
             }
@@ -764,7 +764,7 @@ function createComboBotHelper<
         index: o.clientOrderId,
       })
       if (read.status === StatusEnum.ok && read.data.result) {
-        this.handleLog(
+        this.handleDebug(
           `Transaction already exists with executor ${o.clientOrderId}`,
         )
         this.endMethod(_id)
@@ -1125,7 +1125,7 @@ function createComboBotHelper<
         )
       }
       if (res.status === StatusEnum.ok) {
-        this.handleLog(
+        this.handleDebug(
           `Transaction saved - ${`${res.data._id}`}, executor - ${
             o.clientOrderId
           }`,
@@ -1378,7 +1378,9 @@ function createComboBotHelper<
       if (!this.data?.settings.autoRebalancing || this.futures) {
         return
       }
-      this.handleLog(`Auto Rebalancing | Start auto rebalancing for ${dealId}`)
+      this.handleDebug(
+        `Auto Rebalancing | Start auto rebalancing for ${dealId}`,
+      )
       const compareBalances = await this.compareBalances(dealId)
       const rawResponse = `raw - ${compareBalances.diffBase} diffBase, ${compareBalances.diffQuote} diffQuote, ${compareBalances.suggestedAction} suggestedAction`
       if (
@@ -1394,19 +1396,19 @@ function createComboBotHelper<
           compareBalances.suggestedAction === BalancesAction.add
             ? OrderSideEnum.buy
             : OrderSideEnum.sell
-        this.handleLog(
+        this.handleDebug(
           `Auto Rebalancing | Found balances diff for ${dealId}. Diff - ${diff}, side - ${side}, ${rawResponse}`,
         )
         this.manageBalanceDiff(dealId, Math.abs(diff), side)
       } else {
-        this.handleLog(
+        this.handleDebug(
           `Auto Rebalancing | No diff for ${dealId}. ${rawResponse}`,
         )
       }
     }
 
     public async compareBalances(dealId: string) {
-      this.handleLog(`Compare balances for ${dealId}`)
+      this.handleDebug(`Compare balances for ${dealId}`)
       const response: CompareBalancesResponse = {
         currentBase: 0,
         currentQuote: 0,
@@ -1422,18 +1424,18 @@ function createComboBotHelper<
       }
       try {
         if (this.futures) {
-          this.handleLog(`Futures bot. Skip compare balances`)
+          this.handleDebug(`Futures bot. Skip compare balances`)
           return response
         }
         const deal = this.getDeal(dealId)
         if (!deal) {
-          this.handleLog(`Deal ${dealId} not found in compareBalances`)
+          this.handleDebug(`Deal ${dealId} not found in compareBalances`)
           return response
         }
         response.currentBase = deal.deal.currentBalances.base
         response.currentQuote = deal.deal.currentBalances.quote
         const fee = await this.getUserFee(deal.deal.symbol.symbol)
-        this.handleLog(`Start getting orders for ${dealId}`)
+        this.handleDebug(`Start getting orders for ${dealId}`)
         const orders = await this.ordersDb.aggregate<{
           side: OrderSideEnum
           qty: number
@@ -1528,7 +1530,7 @@ function createComboBotHelper<
             },
           },
         ])
-        this.handleLog(`Stop getting orders for ${dealId}`)
+        this.handleDebug(`Stop getting orders for ${dealId}`)
         if (orders.status === StatusEnum.notok) {
           this.handleErrors(
             `Error getting orders: ${orders.reason}`,
@@ -1619,15 +1621,15 @@ function createComboBotHelper<
     }
 
     private async processRebalanceOrder(order: Order) {
-      this.handleLog(`Process rebalance order ${order.clientOrderId}`)
+      this.handleDebug(`Process rebalance order ${order.clientOrderId}`)
       const { dealId } = order
       if (!dealId) {
-        this.handleLog('DealId not found in processRebalanceOrder')
+        this.handleWarn('DealId not found in processRebalanceOrder')
         return
       }
       const deal = this.getDeal(dealId)
       if (!deal) {
-        this.handleLog(`Deal ${dealId} not found in processRebalanceOrder`)
+        this.handleWarn(`Deal ${dealId} not found in processRebalanceOrder`)
         return
       }
       const avgs = await this.avgPrice(dealId, dealId)
@@ -1650,15 +1652,15 @@ function createComboBotHelper<
       qty: number,
       side: OrderSideEnum,
     ) {
-      this.handleLog(`Manage balance diff for ${dealId}, ${qty}, ${side}`)
+      this.handleDebug(`Manage balance diff for ${dealId}, ${qty}, ${side}`)
       if (this.futures) {
-        this.handleLog(`Futures bot. Skip manage balance diff`)
+        this.handleDebug(`Futures bot. Skip manage balance diff`)
         return
       }
       try {
         const deal = this.getDeal(dealId)
         if (!deal) {
-          this.handleLog(`Deal ${dealId} not found in manageBalanceDiff`)
+          this.handleWarn(`Deal ${dealId} not found in manageBalanceDiff`)
           return
         }
         const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
@@ -1753,14 +1755,14 @@ function createComboBotHelper<
               (!buys.length && sells.length > 1)) &&
             updatedGrids.length > 1
           ) {
-            this.handleLog(
+            this.handleDebug(
               `Diff in combo orders | Sells ${sells.length}, buys ${buys.length}`,
             )
             const closest = !sells.length
               ? orders.find((o) => o.side === OrderSideEnum.sell)
               : orders.find((o) => o.side === OrderSideEnum.buy)
             if (closest) {
-              this.handleLog(
+              this.handleDebug(
                 `Diff in combo orders | Replace with closest ${closest.newClientOrderId} ${closest.price} ${closest.qty} ${closest.side}`,
               )
               updatedGrids = updatedGrids.slice(0, updatedGrids.length - 1)
@@ -1817,7 +1819,7 @@ function createComboBotHelper<
         findDeal.deal.status === DCADealStatusEnum.open
       ) {
         findDeal.deal.lastPrice = parseFloat(order.price)
-        this.handleLog(
+        this.handleDebug(
           `Deal ${dealId} balances before ${findDeal.deal.currentBalances.base} base, ${findDeal.deal.currentBalances.quote} quote`,
         )
         findDeal.deal.currentBalances = {
@@ -1828,13 +1830,12 @@ function createComboBotHelper<
             findDeal.deal.currentBalances.quote +
             qty * price * (order.side === OrderSideEnum.sell ? 1 : -1),
         }
-        this.handleLog(
+        this.handleDebug(
           `Deal ${dealId} balances after ${findDeal.deal.currentBalances.base} base, ${findDeal.deal.currentBalances.quote} quote`,
         )
         findDeal.deal.updateTime = order.updateTime
 
         this.handleLog(`Regular order FILLED ${order.clientOrderId}`)
-        this.handleLog('Update deal')
         const avgs = await this.avgPrice(dealId, dealId)
         let avgPrice = avgs.real
         avgPrice = isNaN(avgPrice) ? findDeal.deal.avgPrice : avgPrice
@@ -1878,7 +1879,7 @@ function createComboBotHelper<
           false,
         )
         findDeal.deal.allowBaseProcess = false
-        this.handleLog(
+        this.handleDebug(
           `Avg price ${findDeal.deal.avgPrice} @ ${findDeal.deal.symbol.baseAsset} / ${findDeal.deal.symbol.quoteAsset}`,
         )
         findDeal.deal.fullFee = await this.getCommDeal(findDeal.deal)
@@ -1911,7 +1912,7 @@ function createComboBotHelper<
           false,
         )
         if (!gridOrders) {
-          this.handleLog(
+          this.handleWarn(
             `Grid orders not created ${findDeal.deal._id} ${order.clientOrderId}`,
           )
         }
@@ -2254,7 +2255,7 @@ function createComboBotHelper<
       const minigrid = this.getMinigrid(order.minigridId)
 
       if (!minigrid) {
-        this.handleLog(
+        this.handleWarn(
           `Cannot find minigrid for ${order.minigridId} ${order.clientOrderId}`,
         )
         const findInDb = await this.minigridDb.readData({
@@ -2311,7 +2312,7 @@ function createComboBotHelper<
       const pair = minigrid.schema.symbol.symbol
       const tr = await this.createTransaction(order, minigrid)
       if (!tr) {
-        this.handleLog(
+        this.handleWarn(
           `Cannot create transaction for ${order.minigridId} ${order.clientOrderId}`,
         )
       }
@@ -2346,8 +2347,8 @@ function createComboBotHelper<
         deal.deal.profit.pureQuote =
           (deal.deal.profit.pureQuote ?? 0) + (tr?.profitPureQuote ?? 0)
         deal.deal.feePaid = {
-          base: (deal.deal.feePaid?.base ?? 0 ?? 0) + (tr?.pureFeeBase ?? 0),
-          quote: (deal.deal.feePaid?.quote ?? 0 ?? 0) + (tr?.pureFeeQuote ?? 0),
+          base: (deal.deal.feePaid?.base ?? 0) + (tr?.pureFeeBase ?? 0),
+          quote: (deal.deal.feePaid?.quote ?? 0) + (tr?.pureFeeQuote ?? 0),
         }
         deal.deal.transactions = {
           buy:
@@ -2425,7 +2426,7 @@ function createComboBotHelper<
         minigrid.schema._id,
       )
       if (!isLatest) {
-        this.handleLog(
+        this.handleDebug(
           `Not latest order ${order.clientOrderId}, apply previous minigrid orders`,
         )
         grids = minigrid.currentOrders.map((g) => ({
@@ -2438,7 +2439,7 @@ function createComboBotHelper<
       if (grids) {
         const buys = grids.filter((g) => g.side === OrderSideEnum.buy).length
         const sells = grids.filter((g) => g.side === OrderSideEnum.sell).length
-        this.handleLog(
+        this.handleDebug(
           `Minigrid ${minigrid.schema._id} buys - ${buys}, sells - ${sells} after ${order.clientOrderId}`,
         )
         const closeMinigrid =
@@ -2517,7 +2518,7 @@ function createComboBotHelper<
           deal,
         )
       } else {
-        this.handleLog(`Cannot create grid order after ${order.clientOrderId}`)
+        this.handleWarn(`Cannot create grid order after ${order.clientOrderId}`)
       }
       this.saveMinigrid(minigrid, {
         transactions: minigrid.schema.transactions,
@@ -2538,7 +2539,7 @@ function createComboBotHelper<
         order.botId === this.botId &&
         (!deal || deal.deal.status === DCADealStatusEnum.closed)
       ) {
-        this.handleLog(`Deal ${dealId} is closed, will sell the remainder`)
+        this.handleDebug(`Deal ${dealId} is closed, will sell the remainder`)
         await this.sellRemainder(
           dealId,
           +order.origQty,
@@ -2609,7 +2610,7 @@ function createComboBotHelper<
               )
             }
             this.endMethod(_id)
-            return this.handleLog(`Deal ${dealId} already closing`)
+            return this.handleDebug(`Deal ${dealId} already closing`)
           }
           this.updateUsage(dealId).then(async () => {
             const d = this.getDeal(dealId)
@@ -2646,7 +2647,7 @@ function createComboBotHelper<
               !o.hide,
           )
           if (!findOriginOrder) {
-            this.handleLog(
+            this.handleDebug(
               `Minigrid start order not found in current orders. Search in initial orders`,
             )
             const findOrderInInitial = deal.initialOrders.find(
@@ -2656,7 +2657,7 @@ function createComboBotHelper<
                 !io.hide,
             )
             if (findOrderInInitial) {
-              this.handleLog(
+              this.handleDebug(
                 `Minigrid start order found in initial orders. Will be added to current`,
               )
               orders.push({
@@ -2702,7 +2703,7 @@ function createComboBotHelper<
               ),
             )
           } else {
-            this.handleLog(
+            this.handleDebug(
               `Deal ${dealId} is closing, will not place new orders`,
             )
           }
@@ -2753,7 +2754,7 @@ function createComboBotHelper<
         }
       }
       if (!isLatest) {
-        this.handleLog(`Order ${order.clientOrderId} is not latest`)
+        this.handleDebug(`Order ${order.clientOrderId} is not latest`)
         this.endMethod(_id)
         return
       }
@@ -2769,7 +2770,7 @@ function createComboBotHelper<
         await this.placeOrders(this.botId, pair, dealId, toPlace)
         this.autoRebalancing(this.botId, dealId)
       } else {
-        this.handleLog(`Deal ${dealId} is closing, will not place new orders`)
+        this.handleDebug(`Deal ${dealId} is closing, will not place new orders`)
       }
       this.endMethod(_id)
     }
@@ -2975,7 +2976,7 @@ function createComboBotHelper<
             quote: requiredQuote / leverage,
           },
         }
-        this.handleLog(
+        this.handleDebug(
           `Deal ${findDeal.deal._id} assets used: base - ${findDeal.deal.assets.used.base}, quote - ${findDeal.deal.assets.used.quote}, assets required: base - ${findDeal.deal.assets.required.base}, quote - ${findDeal.deal.assets.required.quote}`,
         )
         this.saveDeal(findDeal, { assets: findDeal.deal.assets })
@@ -2994,13 +2995,13 @@ function createComboBotHelper<
       }
       this.feeProcessed.set(dealId ?? '', getSet.add(clientOrderId))
       if (typeOrder !== TypeOrderEnum.fee) {
-        this.handleLog(
+        this.handleWarn(
           `Fee order combo | Order not fee type ${clientOrderId} ${typeOrder}`,
         )
         return
       }
       const fee = await this.getUserFee(symbol)
-      this.handleLog(`Fee order combo | Process fee order ${clientOrderId}`)
+      this.handleDebug(`Fee order combo | Process fee order ${clientOrderId}`)
       const size =
         (this.kucoinSpot && this.data?.flags?.includes(BotFlags.kucoinNewFee)
           ? +executedQty * +price
@@ -3010,7 +3011,7 @@ function createComboBotHelper<
         (1 - (fee?.maker ?? 0))
       const deal = this.getDeal(dealId)
       if (!deal) {
-        this.handleLog(
+        this.handleWarn(
           `Fee order combo | Deal not found for ${dealId} ${clientOrderId}`,
         )
         return
@@ -3106,7 +3107,7 @@ function createComboBotHelper<
     ) {
       const deal = this.getDeal(dealId)
       if (deal?.deal.action === ActionsEnum.useOppositeBalance) {
-        this.handleLog(
+        this.handleDebug(
           `Fee order combo | Deal ${dealId} is using opposite balance, skip fee order`,
         )
         return
@@ -3116,18 +3117,20 @@ function createComboBotHelper<
         this.data?.flags?.includes(BotFlags.kucoinNewFee) &&
         this.isLong
       ) {
-        this.handleLog(`Fee order combo | Kucoin spot long bot, skip fee order`)
+        this.handleDebug(
+          `Fee order combo | Kucoin spot long bot, skip fee order`,
+        )
         if (deal && deal.deal.feeBalance) {
           this.saveDeal(deal, { feeBalance: 0 })
         }
         return
       }
       if (!deal) {
-        this.handleLog(`Fee order combo | Cannot find deal ${dealId}`)
+        this.handleWarn(`Fee order combo | Cannot find deal ${dealId}`)
         return
       }
       if (this.data?.feeBalance && this.data.feeBalance > 0) {
-        this.handleLog(
+        this.handleDebug(
           `Fee order combo | Found fee balance in bot ${this.data.feeBalance}`,
         )
         deal.deal.feeBalance = this.data.feeBalance
@@ -3141,7 +3144,7 @@ function createComboBotHelper<
       }
       const val = this.feeOrderReasons.get(dealId) ?? []
       if (val.includes(orderId)) {
-        this.handleLog(`Fee order combo | Order ${orderId} already processed`)
+        this.handleDebug(`Fee order combo | Order ${orderId} already processed`)
         return
       }
       if (val.length) {
@@ -3151,7 +3154,7 @@ function createComboBotHelper<
       }
       const minigrids = this.getMinigridByDealId({ dealId })
       if (!minigrids.length) {
-        this.handleLog(
+        this.handleWarn(
           `Fee order combo | Cannot find minigrids for deal ${dealId}`,
         )
         return
@@ -3203,7 +3206,6 @@ function createComboBotHelper<
         const qty = parseFloat(orderBo.executedQty)
         await this.clearDealTimer(dealId)
         const long = this.isLong
-        this.handleLog('Update deal')
         findDeal.initialOrders = await this.createInitialDealOrders(
           findDeal.deal.symbol.symbol,
           initialPrice,
@@ -3287,7 +3289,7 @@ function createComboBotHelper<
           false,
         )
         if (!gridOrders) {
-          this.handleLog(
+          this.handleWarn(
             `Grid orders not created ${findDeal.deal._id} ${orderBo.clientOrderId}`,
           )
         }
@@ -3320,7 +3322,7 @@ function createComboBotHelper<
               initialPrice,
             )
             if (!gridOrders) {
-              this.handleLog(
+              this.handleWarn(
                 `Grid orders not created ${findDeal.deal._id} ${h.newClientOrderId}`,
               )
             } else {
@@ -3378,7 +3380,7 @@ function createComboBotHelper<
       dealId: string,
       deal?: ExcludeDoc<ComboDealsSchema>,
     ): Promise<Grid[]> {
-      this.handleLog('Generate initial deal orders')
+      this.handleDebug('Generate initial deal orders')
       const ed = await this.getExchangeInfo(_symbol)
       if (this.data && ed && this.orders) {
         const settings = await this.getAggregatedSettings(deal)
@@ -3801,12 +3803,12 @@ function createComboBotHelper<
         this.data.action !== ActionsEnum.noAction &&
         this.data.action !== ActionsEnum.useBalance
       ) {
-        this.handleLog(`Balance check skipped. Action is ${this.data.action}`)
+        this.handleDebug(`Balance check skipped. Action is ${this.data.action}`)
         return result
       }
       const settings = await this.getAggregatedSettings()
       if (settings.skipBalanceCheck) {
-        this.handleLog(`Balance check skipped`)
+        this.handleDebug(`Balance check skipped`)
         return result
       }
       const ed = await this.getExchangeInfo(symbol)
@@ -3818,7 +3820,7 @@ function createComboBotHelper<
       const leverage = await this.getLeverageMultipler()
       const latestPrice = await this.getLatestPrice(symbol)
       if (latestPrice === 0) {
-        this.handleLog('Latest price is 0, bypass check balance')
+        this.handleDebug('Latest price is 0, bypass check balance')
         return result
       }
       const base = await this.getBaseOrder(
@@ -3828,7 +3830,7 @@ function createComboBotHelper<
         latestPrice,
       )
       if (!base) {
-        this.handleLog('Cannot get base order, bypass check balance')
+        this.handleDebug('Cannot get base order, bypass check balance')
         return result
       }
       const initialGrids = await this.createInitialDealOrders(
@@ -4000,7 +4002,7 @@ function createComboBotHelper<
         const precision = await this.baseAssetPrecision(symbol)
         const priceRequest = await this.getLatestPrice(symbol)
         if (priceRequest === 0) {
-          this.handleLog('Get latest price. Latest price = 0. getBaseOrder')
+          this.handleDebug('Get latest price. Latest price = 0. getBaseOrder')
           return
         }
         const slippage = count === 0 ? 0 : 0.01 * (1 + count / 10)
@@ -4348,7 +4350,7 @@ function createComboBotHelper<
       try {
         const ed = await this.getExchangeInfo(symbol)
         if (!ed) {
-          this.handleLog(`Cannot create deal for ${symbol}. ED not found`)
+          this.handleWarn(`Cannot create deal for ${symbol}. ED not found`)
           this.endMethod(_id)
           return
         }
@@ -4358,7 +4360,7 @@ function createComboBotHelper<
           quoteAsset: ed.quoteAsset.name,
         }
       } catch (e) {
-        this.handleLog(
+        this.handleWarn(
           `Cannot create deal for ${symbol}. Catch error in reading exchange data: ${
             (e as Error)?.message ?? e
           }`,
@@ -4367,7 +4369,7 @@ function createComboBotHelper<
         return
       }
       if (!symbolData) {
-        this.handleLog(
+        this.handleWarn(
           `Cannot create deal for ${symbol}. Symbol data not found. Data size ${this.data?.symbol?.size}`,
         )
         this.endMethod(_id)
@@ -4501,7 +4503,7 @@ function createComboBotHelper<
         this.endMethod(_id)
         return dealId
       }
-      this.handleLog(
+      this.handleWarn(
         `Cannot create deal for ${symbol}, data: ${!!this
           .data}, symbolData: ${!!symbolData}, dealSettings: ${!!dealSettings}`,
       )
@@ -4566,7 +4568,7 @@ function createComboBotHelper<
       }).find((o) => o.typeOrder === TypeOrderEnum.dealStart)
       if (currentBase) {
         this.endMethod(_id)
-        return this.handleLog(
+        return this.handleDebug(
           `Deal ${dealId} already have and active start order`,
         )
       }
@@ -4638,7 +4640,7 @@ function createComboBotHelper<
                   ].includes(deal.deal.action) &&
                   deal.deal.settings.useDca
                 ) {
-                  this.handleLog(`Action ${deal.deal.action} detected`)
+                  this.handleDebug(`Action ${deal.deal.action} detected`)
                   const lp = await this.getLatestPrice(symbol)
                   const orders = await this.createInitialDealOrders(
                     symbol,
@@ -4649,7 +4651,7 @@ function createComboBotHelper<
                   const required = this.isLong
                     ? orders.reduce((acc, v) => acc + v.qty * v.price, 0) / lp
                     : orders.reduce((acc, v) => acc + v.qty, 0) * lp
-                  this.handleLog(
+                  this.handleDebug(
                     `Required amount for ${deal.deal.action} is ${required}, price is ${lp}`,
                   )
                   const ei = await this.getExchangeInfo(symbol)
@@ -4659,14 +4661,14 @@ function createComboBotHelper<
                         ? ei?.baseAsset.name
                         : ei?.quoteAsset.name) ?? '',
                     )?.free ?? 0
-                  this.handleLog(`Available balance is ${balance}`)
+                  this.handleDebug(`Available balance is ${balance}`)
                   const orderSize = [
                     ActionsEnum.buyDiff,
                     ActionsEnum.sellDiff,
                   ].includes(deal.deal.action)
                     ? required - balance
                     : required
-                  this.handleLog(`Order size is ${orderSize}`)
+                  this.handleDebug(`Order size is ${orderSize}`)
                   if (orderSize > 0) {
                     const price = `${this.math.round(
                       lp,
@@ -4727,12 +4729,12 @@ function createComboBotHelper<
                         false,
                       )
                     }
-                    this.handleLog(`Order ${r.clientOrderId} filled`)
+                    this.handleDebug(`Order ${r.clientOrderId} filled`)
                   }
                   proceedBaseOrder = true
                 }
                 if (deal.deal.action === ActionsEnum.useOppositeBalance) {
-                  this.handleLog(`Action ${deal.deal.action} detected`)
+                  this.handleDebug(`Action ${deal.deal.action} detected`)
                   proceedBaseOrder = true
                 }
                 if (proceedBaseOrder) {
@@ -4764,7 +4766,7 @@ function createComboBotHelper<
                   result.indexOf("Order's notional")) !== -1 &&
                 count < this.slippageRetry
               ) {
-                this.handleLog(
+                this.handleDebug(
                   `Cannot place base order due to slippage ${
                     baseOrder.clientOrderId
                   }, attempt ${count + 1}`,
@@ -4818,10 +4820,10 @@ function createComboBotHelper<
             cbIfNotOpened,
           ),
         )
-        return this.handleLog('Loading not complete yet')
+        return this.handleDebug('Loading not complete yet')
       }
       if (!skip && this.data?.status === BotStatusEnum.monitoring) {
-        this.handleLog('Bot is in monitoring mode. Wont open new deal')
+        this.handleDebug('Bot is in monitoring mode. Wont open new deal')
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
@@ -4834,7 +4836,6 @@ function createComboBotHelper<
         clearTimeout(t)
         this.openNewDealTimer.delete(symbol)
       }
-      this.handleLog('Open new deal')
       if (!this.pairs.has(symbol)) {
         this.unsubscribeFromExchangeInfo(symbol)
         this.unsubscribeFromUserFee(symbol)
@@ -4842,11 +4843,12 @@ function createComboBotHelper<
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
-        return this.handleLog(`Bot settings does not contain ${symbol}`)
+        return this.handleWarn(`Bot settings does not contain ${symbol}`)
       }
       const ed = await this.getExchangeInfo(symbol)
       const skipRange = skip && !dynamic
       if (await this.checkMaxDeals(this.botId, symbol)) {
+        this.handleLog('Open new deal')
         if (this.data && ed) {
           const activeOrders = await this.getActiveOrders(symbol)
           const thisActiveOrders =
@@ -4878,7 +4880,7 @@ function createComboBotHelper<
         ) {
           let checkBalance = await this.checkBalance(symbol)
           if (!checkBalance.status) {
-            this.handleLog(
+            this.handleDebug(
               `Not enough balance to start new deal. Required: ${checkBalance.required}, available: ${checkBalance.available}, repeat check in 5 seconds`,
             )
             await sleep(5000)
@@ -4891,7 +4893,7 @@ function createComboBotHelper<
                 symbol,
               )
               if (!cooldownStart.status) {
-                this.handleLog(
+                this.handleDebug(
                   `Deal must wait because of cooldown start check. Time: ${cooldownStart.time}, last opened: ${cooldownStart.last}, diff: ${cooldownStart.diff}, cooldown: ${cooldownStart.cooldown} ${symbol} ${settings.cooldownAfterDealStartOption}`,
                 )
                 this.resetPending(this.botId, symbol)
@@ -4918,7 +4920,7 @@ function createComboBotHelper<
                 symbol,
               )
               if (!cooldownStop.status) {
-                this.handleLog(
+                this.handleDebug(
                   `Deal must wait because of cooldown stop check. Time: ${cooldownStop.time}, last closed: ${cooldownStop.last}, diff: ${cooldownStop.diff}, cooldown: ${cooldownStop.cooldown} ${symbol} ${settings.cooldownAfterDealStartOption}`,
                 )
                 if (settings.startCondition === StartConditionEnum.asap) {
@@ -5051,7 +5053,7 @@ function createComboBotHelper<
         this.allowedMethods.delete('checkDCALevel')
       }
 
-      this.handleLog(
+      this.handleDebug(
         `Check deals allowed methods: ${[...this.allowedMethods].join(', ')}`,
       )
       await this.checkDealsForStopLossMethods()
@@ -5236,11 +5238,11 @@ function createComboBotHelper<
         }
       }
       if (tp !== null && tp <= 0) {
-        this.handleLog(`TP less than 0, skip new tp ${tp}`)
+        this.handleDebug(`TP less than 0, skip new tp ${tp}`)
         tp = null
       }
       if (sl !== null && sl <= 0) {
-        this.handleLog(`SL less than 0, skip new sl ${sl}`)
+        this.handleDebug(`SL less than 0, skip new sl ${sl}`)
         sl = null
       }
       if (tp !== null || sl !== null) {
@@ -5257,12 +5259,12 @@ function createComboBotHelper<
             d.deal.fullFee
           }, profit: ${d.deal.profit.total}`
           if (tpPerc < 0) {
-            this.handleLog(`NEW PERCENT LOWER THAN 0 skip new tp, ${tpLog}`)
+            this.handleDebug(`NEW PERCENT LOWER THAN 0 skip new tp, ${tpLog}`)
             tp = null
           } else if (tpToUse * 0.9 > tpPerc) {
-            this.handleLog(`TP calculated diff more than 10%, ${tpLog}`)
+            this.handleWarn(`TP calculated diff more than 10%, ${tpLog}`)
           } else {
-            this.handleLog(tpLog)
+            this.handleDebug(tpLog)
           }
           if (tp !== null) {
             this.botEventDb.createData({
@@ -5281,7 +5283,7 @@ function createComboBotHelper<
         }
         if (sl !== null && get?.sl !== sl) {
           const slPerc = await this.claculateTpSlFromPrice(d, sl)
-          this.handleLog(
+          this.handleDebug(
             `Deal: ${d.deal._id} new stop loss. SL set level: ${sl}, Sl set: ${
               slToUse * 100
             }%, SL calculated: ${
@@ -5704,7 +5706,7 @@ function createComboBotHelper<
       if (!serviceRestart) {
         this.calculateBotDeals()
       } else {
-        this.handleLog('Service restart skip calculate bot deals')
+        this.handleDebug('Service restart skip calculate bot deals')
       }
       this.handleLog('Checking for existing deals')
       const settings = await this.getAggregatedSettings()
@@ -5772,7 +5774,7 @@ function createComboBotHelper<
               if (full.data?.result) {
                 await this.startDeal(full.data.result)
               } else {
-                this.handleLog(
+                this.handleWarn(
                   `Cannot find full order for ${inDb.data.result.clientOrderId}`,
                 )
               }
@@ -5796,7 +5798,7 @@ function createComboBotHelper<
             dealId: d.deal._id,
           }).filter((m) => m.schema.status !== ComboMinigridStatusEnum.closed)
           if (dealMinigrids.length === 0) {
-            this.handleLog(`Deal doesn't have active minigrid`)
+            this.handleDebug(`Deal doesn't have active minigrid`)
           }
           if (!serviceRestart) {
             this.updateDealBalances(d)
@@ -5861,7 +5863,7 @@ function createComboBotHelper<
       if (!serviceRestart) {
         this.updateDealLastPrices(this.botId)
       } else {
-        this.handleLog('Service restart skip update last deal price')
+        this.handleDebug('Service restart skip update last deal price')
       }
       if (
         settings.startCondition === StartConditionEnum.asap &&
@@ -5901,7 +5903,7 @@ function createComboBotHelper<
       if (!serviceRestart) {
         this.calculateBotBalances()
       } else {
-        this.handleLog('Service restart skip calculate bot balances')
+        this.handleDebug('Service restart skip calculate bot balances')
       }
       await this.calculateUsage()
       this.endMethod(_id)

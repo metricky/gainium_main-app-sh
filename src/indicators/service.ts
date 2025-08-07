@@ -798,8 +798,8 @@ class InternalIndicator {
     logger.error(`${loggerPrefix}`, ...msg)
   }
 
-  private handleLog(...msg: unknown[]) {
-    logger.info(`${loggerPrefix}`, ...msg)
+  private handleDebug(...msg: unknown[]) {
+    logger.debug(`${loggerPrefix}`, ...msg)
   }
   private addSplitPhrase(text: string) {
     return `${text}${this.splitPhrase}${this.id}`
@@ -838,7 +838,7 @@ class InternalIndicator {
       if (this.timer) {
         clearTimeout(this.timer)
       }
-      this.handleLog(
+      this.handleDebug(
         `Force load data for ${this.symbol}@${this.interval}@${this.exchange}`,
       )
       const time = new Date().getTime()
@@ -846,7 +846,7 @@ class InternalIndicator {
       this.to = time - +mod - 1
       this.loadData(true, undefined, c)
     }
-    this.handleLog(`Add subscriber ${id}. Size - ${this.subscribers.length}`)
+    this.handleDebug(`Add subscriber ${id}. Size - ${this.subscribers.length}`)
     if (load1d) {
       setTimeout(c, 10 * 1000)
     }
@@ -854,7 +854,9 @@ class InternalIndicator {
   }
   public removeCallback(id: string) {
     this.subscribers = []
-    this.handleLog(`Remove subscriber ${id}. Left - ${this.subscribers.length}`)
+    this.handleDebug(
+      `Remove subscriber ${id}. Left - ${this.subscribers.length}`,
+    )
   }
   public unsubscribe(id: string) {
     this.subscribers = this.subscribers.filter((s) => s.id !== id)
@@ -871,7 +873,7 @@ class InternalIndicator {
       }
       this.closed = true
     }
-    this.handleLog(`Unsubscriber ${id}. Left - ${this.subscribers.length}`)
+    this.handleDebug(`Unsubscribe ${id}. Left - ${this.subscribers.length}`)
     return this.subscribers.length
   }
 
@@ -884,7 +886,7 @@ class InternalIndicator {
       !this.updateCandlesHistory.has(start) &&
       _start + this.period >= this.start
     ) {
-      this.handleLog(
+      this.handleDebug(
         `${this.symbol}@${this.interval}@${this.exchange} missed `,
         new Date(start),
         'last timestamp',
@@ -908,7 +910,7 @@ class InternalIndicator {
         if (data) {
           this.updateCandle(this.id, { start, ...data }, true)
         } else {
-          this.handleLog(
+          this.handleDebug(
             `${this.symbol}@${this.interval}@${this.exchange} serve last candle `,
             new Date(start),
           )
@@ -1019,7 +1021,7 @@ class InternalIndicator {
               true,
             )
           } else {
-            this.handleLog(
+            this.handleDebug(
               `${this.symbol}@${this.interval}@${this.exchange} serve last candle `,
               new Date(start),
             )
@@ -1328,7 +1330,7 @@ class InternalIndicator {
         let lastTime = +lastCandle.time
         const limit = +new Date() - this.period * (1 + this.limitMultiplier)
         const lastCandleLast = limit < this.start
-        this.handleLog(
+        this.handleDebug(
           `${this.indicatorName}@${this.symbol}@${this.exchange}@${this.interval} | loaded ${data.length} candles | last time: `,
           new Date(lastTime),
         )
@@ -1355,7 +1357,7 @@ class InternalIndicator {
           let time = +lastCandle.time + this.period
           let fillCount = 0
           do {
-            this.handleLog(
+            this.handleDebug(
               `${this.indicatorName}@${this.symbol}@${this.exchange}@${this.interval} | filled with last candle `,
               new Date(time),
             )
@@ -1385,30 +1387,10 @@ class InternalIndicator {
         this.lastCandle = {
           ...lastCandle,
         }
-        this.handleLog(
+        this.handleDebug(
           `${this.indicatorName}@${this.symbol}@${this.exchange}@${this.interval} | processed ${data.length} candles | last time: `,
           new Date(lastTime),
         )
-        /*const lastCandle = data[data.length - 1]
-        if (lastCandle) {
-          const lastCandleTime = lastCandle.time + this.period
-          if (lastCandleTime < this.start) {
-            let time = lastCandleTime + this.period
-            do {
-              this.updateValue(
-                {
-                  o: lastCandle.close,
-                  h: lastCandle.close,
-                  l: lastCandle.close,
-                  c: lastCandle.close,
-                  v: 0,
-                },
-                time,
-              )
-              time += this.period
-            } while (time < this.start)
-          }
-        }*/
       } else {
         this.start = this.to ? +this.to + 1 : new Date().getTime()
         this.handleError(

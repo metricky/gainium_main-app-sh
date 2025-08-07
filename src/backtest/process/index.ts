@@ -67,7 +67,7 @@ class Backtester {
         }
         if (msg.event === 'queueCandle') {
           keys.add(msg.key)
-          logger.info(`Queue candle ${msg.key}`)
+          logger.debug(`Queue candle ${msg.key}`)
           const cb = () => worker.postMessage({ event: msg.responseId })
 
           new Promise((resolve) => {
@@ -78,16 +78,16 @@ class Backtester {
         }
         if (msg.event === 'unQueueCandle') {
           keys.delete(msg.key)
-          logger.info(`Unqueue candle ${msg.key}`)
+          logger.debug(`Unqueue candle ${msg.key}`)
           this.unQueueCandle(msg.key)
         }
       })
       worker.on('error', (err) => {
         const msg = (err as Error).message ?? err
         logger.error(`Server side worker error ${msg}`)
-        console.error(err)
+        logger.error(err)
         for (const key of keys) {
-          logger.info(`Unqueue candle ${key} due to error`)
+          logger.error(`Unqueue candle ${key} due to error`)
           this.unQueueCandle(key)
         }
         updateRequest(

@@ -216,7 +216,7 @@ async function start() {
       )
       res.send(fileResult)
     } catch (e) {
-      console.log(`Cannot save file ${e}`)
+      logger.error(`Cannot save file ${e}`)
       res.sendStatus(400)
     }
   })

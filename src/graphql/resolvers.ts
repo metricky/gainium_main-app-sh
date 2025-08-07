@@ -5254,7 +5254,7 @@ const resolvers = <
                 reason: `Error while saving exchange ${e}`,
               }
             } else {
-              logger.info(
+              logger.debug(
                 `Resolver Exchange | Save ${saveDataRequest.reason}, user ${user.data._id} (${user.data.username}), uuid ${uuid}`,
               )
             }
@@ -5345,11 +5345,11 @@ const resolvers = <
         if (!user.data.onboardingSteps.liveExchange && !isPaper(provider)) {
           updateUserSteps(user.data._id, 'liveExchange')
         }
-        logger.info(
+        logger.debug(
           `Add Exchange for user ${user.data._id} ${uuids.join(', ')}`,
         )
         for (const uuid of uuids) {
-          logger.info(`Add Exchange for user ${user.data._id} ${uuid}`)
+          logger.debug(`Add Exchange for user ${user.data._id} ${uuid}`)
           userUtils.updateUserFee(user.data._id.toString(), uuid)
           userUtils
             .connectUserBalance(user.data._id.toString(), uuid)
@@ -5496,7 +5496,7 @@ const resolvers = <
               reason: `Error while updating exchange ${find.provider} ${find.uuid}`,
             }
           }
-          logger.info(`Update Exchange for user ${user.data._id} ${uuid}`)
+          logger.debug(`Update Exchange for user ${user.data._id} ${uuid}`)
           userUtils
             .connectUserBalance(user.data._id.toString(), uuid)
             .then(() =>
@@ -5653,7 +5653,7 @@ const resolvers = <
             { $set: { 'exchanges.$.linkedTo': null } },
           )
           .then((res) =>
-            logger.info(
+            logger.debug(
               `Resolver Exchange | Delete ${uuid} Update linkedTo ${res.reason}`,
             ),
           )
@@ -5667,7 +5667,7 @@ const resolvers = <
             exchangeUUID: uuid,
           })
           .then((res) => {
-            logger.info(
+            logger.debug(
               `Delete exchange for ${user.data._id} ${uuid}: fee ${res.reason}`,
             )
             return res
@@ -5680,7 +5680,7 @@ const resolvers = <
             exchangeUUID: uuid,
           })
           .then((res) => {
-            logger.info(
+            logger.debug(
               `Delete Exchange for ${user.data._id} ${uuid}: balances ${res.reason}`,
             )
             return res

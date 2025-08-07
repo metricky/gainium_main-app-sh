@@ -127,7 +127,7 @@ export class RedisWrapper {
     if (this.instance && this.instance.isReady) {
       this.retries = 0
       for (const [key, cbs] of this.subscribeMap.entries()) {
-        logger.info(`${prefix} Redis subscribe to ${key} after reconnect`)
+        logger.debug(`${prefix} Redis subscribe to ${key} after reconnect`)
         for (const cb of cbs) {
           this.subscribe(key, cb)
         }
@@ -143,7 +143,7 @@ export class RedisWrapper {
         }
         await this.restart()
       }
-      logger.info(
+      logger.warn(
         `${prefix} Redis is not ready yet, retry subscribe all in 5s, Retry: ${this.retries}`,
       )
       this.checkTimer = setTimeout(this.subscribeAll, 5000)

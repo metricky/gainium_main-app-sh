@@ -19,6 +19,7 @@ import type {
   IndicatorServiceParentMessageRemoveCallback,
   IndicatorServiceChildMessageDeleteIndicator,
   IndicatorServiceParentMessageDeleteIndicator,
+  LogLevel,
 } from '../../types'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { v4 } from 'uuid'
@@ -200,6 +201,7 @@ type WorkerType = {
     used: number
     time: number
   }[]
+  logLevel?: LogLevel
 }
 
 class InternalIndicatorsFactory {
@@ -230,14 +232,6 @@ class InternalIndicatorsFactory {
   private pairsSize = 0
   constructor() {
     this.handleWorkerTerminate = this.handleWorkerTerminate.bind(this)
-  }
-
-  protected handleLog(msg: string) {
-    logger.info(`${msg}`)
-  }
-
-  protected handleError(msg: string) {
-    logger.error(`${msg}`)
   }
 
   private getWorkerById(workerId: number) {
@@ -281,7 +275,7 @@ class InternalIndicatorsFactory {
   private async deleteIndicator(id: string) {
     const indicator = this.indicators.get(id)
     if (!indicator) {
-      this.handleError(
+      logger.error(
         `${this.loggerPrefix} Indicator not found in unsubscribe: ${id}`,
       )
       return null
@@ -318,7 +312,7 @@ class InternalIndicatorsFactory {
   private async subscribeIndicator(idi: string, id?: string, load1d?: boolean) {
     const indicator = this.indicators.get(idi)
     if (!indicator) {
-      this.handleError(
+      logger.error(
         `${this.loggerPrefix} Indicator not found in subscribe: ${idi}`,
       )
       return null
@@ -354,7 +348,7 @@ class InternalIndicatorsFactory {
   private async unsubscribeIndicator(idi: string, id: string) {
     const indicator = this.indicators.get(idi)
     if (!indicator) {
-      this.handleError(
+      logger.error(
         `${this.loggerPrefix} Indicator not found in unsubscribe: ${idi}`,
       )
       return null
@@ -388,7 +382,7 @@ class InternalIndicatorsFactory {
   private async removeCallbackIndicator(id: string) {
     const indicator = this.indicators.get(id)
     if (!indicator) {
-      this.handleError(
+      logger.error(
         `${this.loggerPrefix} Indicator not found in unsubscribe: ${id}`,
       )
       return null
@@ -405,7 +399,7 @@ class InternalIndicatorsFactory {
 
   @IdMute(mutex, (id: number) => `handleWorkerTerminate${id}`)
   protected async handleWorkerTerminate(id: number) {
-    this.handleLog(`${this.loggerPrefix} Worker terminated: ${id}`)
+    logger.error(`${this.loggerPrefix} Worker terminated: ${id}`)
     const worker = this.workers.find((w) => w.id === id)
     this.workers = this.workers.filter((w) => w.id !== id)
     if (worker && worker.indicators > 0) {
@@ -415,7 +409,7 @@ class InternalIndicatorsFactory {
       if (indicators.length) {
         for (const i of indicators) {
           this.indicators.delete(i.id)
-          this.handleLog(
+          logger.debug(
             `${this.loggerPrefix} Worker terminated: ${id} | Indicator ${i.id} restarted`,
           )
           await this.createIndicator(i.id, i.config)
@@ -449,18 +443,18 @@ class InternalIndicatorsFactory {
       const worker = new Worker(`${__dirname}/worker.js`)
       const threadId = +`${worker.threadId}`
       worker.on('error', (e) => {
-        this.handleError(
+        logger.error(
           `${this.loggerPrefix} Worker ${threadId} error: ${
             (e as Error)?.message || e
           } `,
         )
-        console.error(e)
+        logger.error(e)
         if (`${(e as Error)?.message || e}`.includes('terminated')) {
           this.handleWorkerTerminate(threadId)
         }
       })
       worker.on('exit', () => {
-        this.handleError(`${this.loggerPrefix} Worker ${threadId} exited`)
+        logger.error(`${this.loggerPrefix} Worker ${threadId} exited`)
         this.handleWorkerTerminate(threadId)
       })
       const time = +new Date()
@@ -498,7 +492,7 @@ class InternalIndicatorsFactory {
   @IdMute(mutex, () => 'checkPair')
   private async checkPair(pair: string, exchange: ExchangeEnum) {
     if (this.pairsSize !== this.pairs.size || !this.pairsSize) {
-      this.handleLog(`${this.loggerPrefix} Loading pairs from db`)
+      logger.debug(`${this.loggerPrefix} Loading pairs from db`)
       const pairs = await pairDb.readData(
         { exchange: { $nin: paperExchanges } },
         {},
@@ -506,13 +500,13 @@ class InternalIndicatorsFactory {
         true,
       )
       if (pairs.status === StatusEnum.notok) {
-        this.handleError(
+        logger.error(
           `${this.loggerPrefix} Error reading pairs in db: ${pairs.reason}`,
         )
         return true
       } else {
         this.pairsSize = (pairs.data?.result ?? []).length
-        this.handleLog(
+        logger.debug(
           `${this.loggerPrefix} Loaded ${this.pairsSize} pairs from db`,
         )
         for (const p of pairs.data?.result ?? []) {
@@ -594,7 +588,7 @@ class InternalIndicatorsFactory {
       if (find) {
         const result = await this.subscribeIndicator(id, undefined, load1d)
         if (!result) {
-          this.handleError(`${this.loggerPrefix} Error in subscribe: ${id}`)
+          logger.error(`${this.loggerPrefix} Error in subscribe: ${id}`)
           return null
         }
         find.subcribersSet.add(result.id)
@@ -621,7 +615,7 @@ class InternalIndicatorsFactory {
           load1d,
         )
         if (!subscriberId) {
-          this.handleError(`${this.loggerPrefix} Error in subscribe: ${id}`)
+          logger.error(`${this.loggerPrefix} Error in subscribe: ${id}`)
           return null
         }
         const get = this.indicators.get(id)
@@ -632,7 +626,7 @@ class InternalIndicatorsFactory {
         return { id: subscriberId.id, room: id }
       }
     } catch (e) {
-      this.handleError(
+      logger.error(
         `${this.loggerPrefix} Error in subscribe: ${getId(
           indicatorConfig,
           exchange,
@@ -648,7 +642,7 @@ class InternalIndicatorsFactory {
     const find = this.indicators.get(idToFind)
     if (find) {
       const left = await this.unsubscribeIndicator(idToFind, subscriberId)
-      this.handleLog(
+      logger.debug(
         `${this.loggerPrefix} Unsubscribed: ${id} (${idToFind}), left: ${left}`,
       )
       if (left === 0) {

@@ -189,7 +189,7 @@ class BotOperations {
         }
       }
       if (!bot) {
-        logger.info(`Worker ${threadId} bot not found ${botId} ${botType}`)
+        logger.warn(`Worker ${threadId} bot not found ${botId} ${botType}`)
       }
       if (responseId) {
         parentPort?.postMessage({
@@ -314,14 +314,14 @@ class BotOperations {
 
 const processMessage = (data: BotWorkerDto) => {
   if (data.do) {
-    logger.info(
+    logger.debug(
       `Worker ${threadId} Message ${data.do} ${
         data.do === 'exchangeInfo' ? '' : JSON.stringify(data)
       }`,
     )
   }
   if (data.do === 'ramDump') {
-    logger.info(`ramDump for ${threadId}`)
+    logger.debug(`ramDump for ${threadId}`)
     v8.writeHeapSnapshot()
   }
   if (data.do === 'create') {

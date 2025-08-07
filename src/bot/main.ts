@@ -1279,12 +1279,14 @@ class MainBot<T extends IMainBot> {
     }
     const messageToSet = _messageToSet ?? message
     const isMaxDeals = messageToSet === 'Max open deals limit for the bot'
-    if (!isMaxDeals) {
-      logger.error(
-        `${loggerPrefix} Bot (${this.botType}) ${this.botId}${
-          this.data?.parentBotId ? ` (${this.data.parentBotId})` : ''
-        } | Error | ${message}`,
-      )
+    const debug = process.env.LOG_LEVEL === 'debug'
+    const errorText = setError ? `Error | ${message}` : `Warn | ${message}`
+    if (!isMaxDeals && debug) {
+      if (setError) {
+        this.handleError(errorText)
+      } else {
+        this.handleWarn(errorText)
+      }
     }
     this.pushLogs(message, setError ? 'error' : 'warning')
     let botName = terminal ? '' : this.data?.settings?.name
@@ -1333,6 +1335,13 @@ class MainBot<T extends IMainBot> {
       }
 
       if (save) {
+        if (!debug) {
+          if (setError) {
+            this.handleError(errorText)
+          } else {
+            this.handleWarn(errorText)
+          }
+        }
         this.errorsMap.set(subType, +new Date())
         const savedMessage = await this.messagesDb.createData({
           userId: this.userId,
@@ -1690,15 +1699,31 @@ class MainBot<T extends IMainBot> {
    * @param {string} log Message to log
    */
 
-  handleLog(log: string): void {
+  _handleLog(type: 'info' | 'debug' | 'warn' | 'error', log: string): void {
     if (this.log) {
-      logger.info(
+      logger[type](
         `${loggerPrefix} Bot (${this.botType}) ${this.botId}${
           this.data?.parentBotId ? ` (${this.data.parentBotId})` : ''
         } | ${log}`,
       )
       this.pushLogs(log)
     }
+  }
+
+  handleLog(log: string): void {
+    this._handleLog('info', log)
+  }
+
+  handleWarn(log: string): void {
+    this._handleLog('warn', log)
+  }
+
+  handleDebug(log: string): void {
+    this._handleLog('debug', log)
+  }
+
+  handleError(log: string): void {
+    this._handleLog('error', log)
   }
 
   /**
@@ -2428,7 +2453,7 @@ class MainBot<T extends IMainBot> {
       }
       if (!finish) {
         const balances = await this.exchange.getBalance()
-        this.handleLog('Get balance')
+        this.handleDebug('Get balance')
         if (balances.status === StatusEnum.notok) {
           this.handleErrors(balances.reason, 'checkAssets()', 'getBalance')
           if (returnData) {
@@ -2458,9 +2483,9 @@ class MainBot<T extends IMainBot> {
         }
       }
     }
-    this.handleLog('Check assets end')
+    this.handleDebug('Check assets end')
     if (bnfcr) {
-      this.handleLog(`Found BNFCR asset, set USDT and USDC amounts`)
+      this.handleDebug(`Found BNFCR asset, set USDT and USDC amounts`)
       const bnfcrVal = asset.get('BNFCR')
       if (bnfcrVal) {
         asset.set('USDT', bnfcrVal)
@@ -2539,7 +2564,7 @@ class MainBot<T extends IMainBot> {
       const result = await this.exchange.latestPrice(symbol || '', true)
       const end = +new Date()
       if (end - start > 20 * 1000) {
-        this.handleLog(`Get latest price for ${symbol} took ${end - start}ms`)
+        this.handleDebug(`Get latest price for ${symbol} took ${end - start}ms`)
       }
       if (result.status === StatusEnum.ok) {
         const price = result.data
@@ -3020,7 +3045,7 @@ class MainBot<T extends IMainBot> {
       })
       if (findInDb.status === StatusEnum.ok) {
         if (!findInDb.data.result) {
-          this.handleLog(`Order ${orderId} not found in DB`)
+          this.handleDebug(`Order ${orderId} not found in DB`)
         } else {
           find = {
             ...findInDb.data.result,
@@ -3059,7 +3084,7 @@ class MainBot<T extends IMainBot> {
           ExchangeEnum.bitgetUsdm,
         ].includes(find.exchange))
     ) {
-      this.handleLog(`Order ${orderId} already filled`)
+      this.handleDebug(`Order ${orderId} already filled`)
       return null
     }
     const order = { ...find }
@@ -3491,7 +3516,7 @@ class MainBot<T extends IMainBot> {
         })
         let order = await this.convertExecutionReportToOrder(msg, true)
         if (!order) {
-          this.handleLog(`${orderId} not found in orders and in DB`)
+          this.handleDebug(`${orderId} not found in orders and in DB`)
           return next()
         }
         this.handleLog(
@@ -3505,7 +3530,7 @@ class MainBot<T extends IMainBot> {
         )
         if (order.liquidation && onLiquidation && this.futures) {
           await this.saveOrderToDb(order).catch((e) =>
-            this.handleLog(
+            this.handleWarn(
               `Cannot save liquidation order ${(e as Error).message}`,
             ),
           )
@@ -3683,7 +3708,7 @@ class MainBot<T extends IMainBot> {
         [this.data?.settings.pair ?? []].flat().includes(msg.symbol) &&
         msg.orderStatus === 'FILLED'
       if (msg.liquidation) {
-        this.handleLog(
+        this[liquidation ? 'handleLog' : 'handleDebug'](
           `Received liquidation order for ${msg.symbol} ${
             liquidation
               ? 'will be processed in bot'
@@ -4318,13 +4343,13 @@ class MainBot<T extends IMainBot> {
             (this.data.notEnoughBalance.orders?.[notEnoughBalanceId] ?? 0) >
             this.notEnoughBalanceThreshold
           ) {
-            this.handleLog(
+            this.handleDebug(
               `${this.notEnoughBalanceLogPrefix} Not enough balance threshold passed for order id ${notEnoughBalanceId} ${order.clientOrderId}. Checking balance`,
             )
             const { balance, required } =
               await this.getAssetBalanceAndRequiredByOrder(order)
             if ((balance?.free ?? 0) < required) {
-              this.handleLog(
+              this.handleDebug(
                 `${this.notEnoughBalanceLogPrefix} Not enough balance for order id ${notEnoughBalanceId} ${order.clientOrderId}. Balance: ${balance?.free}, required: ${required}`,
               )
               request = {
@@ -4333,7 +4358,7 @@ class MainBot<T extends IMainBot> {
                 data: null,
               }
             } else {
-              this.handleLog(
+              this.handleDebug(
                 `${this.notEnoughBalanceLogPrefix} Balance is enough for order id ${notEnoughBalanceId} ${order.clientOrderId}. Balance: ${balance?.free}, required: ${required}. Reset not enough balance orders`,
               )
               this.updateNotEnoughBalanceErrors(order, -1)
@@ -4730,7 +4755,7 @@ class MainBot<T extends IMainBot> {
           ) !== -1 ||
           request.reason.indexOf('DUPLICATE_CANCEL_REQUEST') !== -1
         ) {
-          this.handleLog(
+          this.handleDebug(
             `Cancellation in progress ${order.clientOrderId}. Sleep 5s`,
           )
           await sleep(5000)
@@ -4802,7 +4827,7 @@ class MainBot<T extends IMainBot> {
       .then((res) => {
         if (res.status === StatusEnum.notok) {
           if ((`${res.reason}` || '').indexOf('E11000') !== -1) {
-            this.handleLog(`Order ${order.clientOrderId} already saved`)
+            this.handleDebug(`Order ${order.clientOrderId} already saved`)
           } else {
             this.handleErrors(
               res.reason,
@@ -5018,12 +5043,12 @@ class MainBot<T extends IMainBot> {
   }): Promise<InitialGrid[] | null> {
     const grids: InitialGrid[] = []
     if (!this.data) {
-      this.handleLog(`Data not found in generate basic grids`)
+      this.handleWarn(`Data not found in generate basic grids`)
       return null
     }
     const exchangeInfo = await this.getExchangeInfo(pair)
     if (!exchangeInfo) {
-      this.handleLog(
+      this.handleWarn(
         `Exchange info not found in generate basic grids for ${pair}`,
       )
       return null

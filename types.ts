@@ -3991,9 +3991,15 @@ export type BotWorkerDto =
   | UpdateBotExchangeInfoDto
   | DeleteBotDto
   | RAMDump
+  | UpdateLogLevel
 
 export type RAMDump = {
   do: 'ramDump'
+}
+
+export type UpdateLogLevel = {
+  do: 'updateLogLevel'
+  logLevel: LogLevel
 }
 
 export type BacktestOnboardingWorkerDto = {
@@ -4325,6 +4331,11 @@ export type IndicatorServiceParentMessageDeleteIndicator = {
   id: string
 }
 
+export type IndicatorUpdateLogLevelIndicator = {
+  event: 'updateLogLevel'
+  logLevel: LogLevel
+}
+
 export type IndicatorServiceChildMessageCreateIndicator = {
   response: string
 }
@@ -4380,6 +4391,7 @@ export type IndicatorServiceParentMessage =
   | IndicatorServiceParentMessageUnsubscribeIndicator
   | IndicatorServiceParentMessageRemoveCallback
   | IndicatorServiceParentMessageDeleteIndicator
+  | IndicatorUpdateLogLevelIndicator
 
 export type IndicatorServiceParentMessageMethods =
   | IndicatorServiceParentMessageSubscribeIndicator
@@ -4519,3 +4531,5 @@ export enum BybitHost {
   kz = 'kz',
   ge = 'ge',
 }
+
+export type LogLevel = 'error' | 'info' | 'warn' | 'debug'

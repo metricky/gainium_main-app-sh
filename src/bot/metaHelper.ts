@@ -64,10 +64,22 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
     this.init()
   }
 
-  handleLog(log: string): void {
-    logger.info(
+  _handleLog(type: 'info' | 'debug' | 'error' | 'warn', log: string): void {
+    logger[type](
       `${loggerPrefix} Bot (${this.options.botType}) ${this.options.id} | ${log}`,
     )
+  }
+
+  handleLog(log: string): void {
+    this._handleLog('info', log)
+  }
+
+  handleDebug(log: string): void {
+    this._handleLog('debug', log)
+  }
+
+  handleWarn(log: string): void {
+    this._handleLog('warn', log)
   }
 
   handleError(
@@ -75,9 +87,7 @@ class MetaBot<Schema extends HedgeBotSchema, T extends CleanMainBot> {
     setError = false,
     type = MessageTypeEnum.error,
   ): void {
-    logger.error(
-      `${loggerPrefix} Bot (${this.options.botType}) ${this.options.id} | ${message}`,
-    )
+    this._handleLog('error', `${message}`)
     if (setError && this.bots.size) {
       const v = this.bots.values().next().value
       if (v) {

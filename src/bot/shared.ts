@@ -55,7 +55,7 @@ export class SharedStore<T, D = T & SchemaI> {
   }
 
   private log(...msg: unknown[]) {
-    logger.info(this.prefix, ...msg)
+    logger.debug(this.prefix, ...msg)
   }
 
   private async init() {

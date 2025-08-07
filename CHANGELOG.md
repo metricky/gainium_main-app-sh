@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.0] – 2025-08-07
+### Changed
+- Updated log level logic
+
 ## [1.0.15] – 2025-08-05
 ### Changed
 - Retry reasons in exchange connector

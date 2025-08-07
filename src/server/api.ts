@@ -151,8 +151,18 @@ declare global {
   }
 }
 
-export const log = (...message: unknown[]) => {
-  logger.info('API Service', ...message)
+const prefix = '[API Service]'
+
+const debug = (...message: unknown[]) => {
+  logger.debug(prefix, ...message)
+}
+
+export const error = (...message: unknown[]) => {
+  logger.error(prefix, ...message)
+}
+
+const warn = (...message: unknown[]) => {
+  logger.warn(prefix, ...message)
 }
 
 export const middleware =
@@ -161,9 +171,11 @@ export const middleware =
   ) =>
   async (req: Request, res: Response, next: NextFunction) => {
     const { token, signature, time } = req.headers
-    log(`API request: ${req.method} ${req.url}`)
+    debug(`API request: ${req.method} ${req.url}`)
     if (!token || !signature || !time) {
-      log('API request: no token or signature or time')
+      error(
+        `API request: ${req.method} ${req.url} no token or signature or time`,
+      )
       res.sendStatus(401)
       return
     }
@@ -174,7 +186,9 @@ export const middleware =
       !user.permission ||
       (req.method !== 'GET' && user.permission !== APIPermission.write)
     ) {
-      log('API request: user not found or permission denied')
+      error(
+        `API request: ${req.method} ${req.url} user not found or permission denied`,
+      )
       res.sendStatus(403)
       return
     }
@@ -188,7 +202,7 @@ export const middleware =
         signature.toString(),
       )
     ) {
-      log('API request: signature not valid')
+      error(`API request: ${req.method} ${req.url} signature not valid`)
       res.sendStatus(401)
       return
     }
@@ -255,7 +269,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
   })
 
   get.set('/api/user/exchanges', async (req, res) => {
-    log('User exchanges request')
+    debug('User exchanges request')
     const { paperContext: _paperContext }: { paperContext?: string } = req.query
     const paperContext =
       `${_paperContext}` === 'true'
@@ -265,7 +279,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
           : null
     const user = req.userData
     if (!user) {
-      log(`User not found`)
+      error(`User not found`)
       res.status(403).send({
         status: StatusEnum.notok,
         reason: 'User not found',
@@ -279,7 +293,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
       { exchanges: 1 },
     )
     if (exchanges.status === StatusEnum.notok) {
-      log(`User error: ${exchanges.reason}`)
+      error(`User error: ${exchanges.reason}`)
       res.status(403).send({
         status: StatusEnum.notok,
         reason: 'Unknown error',
@@ -326,13 +340,13 @@ const allAPI = <R extends UserSchema = UserSchema>(
       assets?: string
     } = req.query
     const start = `User balances paperContext: ${_paperContext}, page: ${_page}, exchangeId: ${_exchangeId}, assets: ${_assets}`
-    log(start)
+    debug(start)
     let assets: string[] = []
     if (typeof _assets !== 'undefined' && _assets) {
       if (typeof _assets === 'string') {
         assets = _assets.split(',').map((a) => `${a}`.trim())
       } else {
-        log(`${start} assets error: ${_assets} is not a string`)
+        error(`${start} assets error: ${_assets} is not a string`)
         res.status(400).send({
           status: StatusEnum.notok,
           reason: 'Assets should be a string',
@@ -350,7 +364,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
       _paperContext === 'true' ? true : _paperContext === 'false' ? false : null
     const user = req.userData
     if (!user) {
-      log(`${start} user error: user not found`)
+      error(`${start} user error: user not found`)
       res.status(403).send({
         status: StatusEnum.notok,
         reason: 'User not found',
@@ -364,7 +378,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
       { exchanges: 1 },
     )
     if (exchanges.status === StatusEnum.notok) {
-      log(`${start}: ${exchanges.reason}`)
+      error(`${start}: ${exchanges.reason}`)
       res.status(403).send({
         status: StatusEnum.notok,
         reason: 'Unknown error',
@@ -392,7 +406,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
       true,
     )
     if (balances.status === StatusEnum.notok) {
-      log(`${start} balance error: ${balances.reason}`)
+      error(`${start} balance error: ${balances.reason}`)
       res.status(403).send({
         status: StatusEnum.notok,
         reason: 'Unknown error',
@@ -614,9 +628,9 @@ const allAPI = <R extends UserSchema = UserSchema>(
     const settings: UpdateDealInputType['settings'] = req.body
     const { dealId }: UpdateDealInputType = req.query
     const user = req.userData
-    log(`Update deal settings ${dealId} DCA ${user.id}`)
+    debug(`Update deal settings ${dealId} DCA ${user.id}`)
     if (!dealId || !settings) {
-      log(`Missed required params`)
+      error(`Missed required params`)
       res.status(400).send({
         status: StatusEnum.notok,
         reason: `Missed required paramas`,
@@ -668,9 +682,9 @@ const allAPI = <R extends UserSchema = UserSchema>(
     const settings: UpdateDealInputType['settings'] = req.body
     const { dealId }: UpdateDealInputType = req.query
     const user = req.userData
-    log(`Update deal settings ${dealId} Combo ${user.id}`)
+    debug(`Update deal settings ${dealId} Combo ${user.id}`)
     if (!dealId || !settings) {
-      log(`Missed required params`)
+      error(`Missed required params`)
       res.status(400).send({
         status: StatusEnum.notok,
         reason: `Missed required paramas`,
@@ -723,20 +737,20 @@ const allAPI = <R extends UserSchema = UserSchema>(
     const { botId }: UpdateBotInputType = req.query
     const user = req.userData
     try {
-      log(
+      debug(
         `Update bot settings ${botId} DCA ${user.id} Body ${JSON.stringify(
           settings ?? {},
         )}`,
       )
     } catch (e) {
-      log(
+      warn(
         `Update bot settings ${botId} DCA ${user.id} Cannot stringify body ${
           (e as Error)?.message ?? e
         }`,
       )
     }
     if (!botId || !settings) {
-      log(`Missed required params`)
+      error(`Missed required params`)
       res.status(400).send({
         status: StatusEnum.notok,
         reason: `Missed required paramas`,
@@ -822,20 +836,20 @@ const allAPI = <R extends UserSchema = UserSchema>(
     const { botId }: UpdateBotInputType = req.query
     const user = req.userData
     try {
-      log(
+      debug(
         `Update bot settings ${botId} Combo ${user.id} Body ${JSON.stringify(
           settings ?? {},
         )}`,
       )
     } catch (e) {
-      log(
+      warn(
         `Update bot settings ${botId} Combo ${user.id} Cannot stringify body ${
           (e as Error)?.message ?? e
         }`,
       )
     }
     if (!botId || !settings) {
-      log(`Missed required params`)
+      error(`Missed required params`)
       res.status(400).send({
         status: StatusEnum.notok,
         reason: `Missed required paramas`,
@@ -1317,9 +1331,9 @@ const allAPI = <R extends UserSchema = UserSchema>(
       const paperContext =
         `${_paperContext}` === 'true' || _paperContext === true
       const user = req.userData
-      log(`Clone bot settings ${botId} Combo ${user.id}`)
+      debug(`Clone bot settings ${botId} Combo ${user.id}`)
       if (!botId) {
-        log(`Missed required params`)
+        error(`Missed required params`)
         res.status(400).send({
           status: StatusEnum.notok,
           reason: `Missed required paramas`,
@@ -1412,14 +1426,14 @@ const allAPI = <R extends UserSchema = UserSchema>(
               }),
         )
         .catch((e) => {
-          log(`Error while cloning DCA bot: ${e.message}`)
+          error(`Error while cloning DCA bot: ${e.message}`)
           res.status(500).send({
             status: StatusEnum.notok,
             reason: 'Internal server error',
           })
         })
     } catch (e) {
-      log(`Error while cloning Combo bot: ${(e as Error)?.message ?? e}`)
+      error(`Error while cloning Combo bot: ${(e as Error)?.message ?? e}`)
       res.status(500).send({
         status: StatusEnum.notok,
         reason: 'Internal server error',
@@ -1435,9 +1449,9 @@ const allAPI = <R extends UserSchema = UserSchema>(
       const paperContext =
         `${_paperContext}` === 'true' || _paperContext === true
       const user = req.userData
-      log(`Clone bot settings ${botId} DCA ${user.id}`)
+      debug(`Clone bot settings ${botId} DCA ${user.id}`)
       if (!botId) {
-        log(`Missed required params`)
+        error(`Missed required params`)
         res.status(400).send({
           status: StatusEnum.notok,
           reason: `Missed required paramas`,
@@ -1531,14 +1545,14 @@ const allAPI = <R extends UserSchema = UserSchema>(
               }),
         )
         .catch((e) => {
-          log(`Error while cloning DCA bot: ${e.message}`)
+          error(`Error while cloning DCA bot: ${e.message}`)
           res.status(500).send({
             status: StatusEnum.notok,
             reason: 'Internal server error',
           })
         })
     } catch (e) {
-      log(`Error while cloning DCA bot: ${(e as Error)?.message ?? e}`)
+      debug(`Error while cloning DCA bot: ${(e as Error)?.message ?? e}`)
       res.status(500).send({
         status: StatusEnum.notok,
         reason: 'Internal server error',

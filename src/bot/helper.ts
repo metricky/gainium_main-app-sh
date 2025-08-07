@@ -694,7 +694,7 @@ function createBotHelper<
             const priceRequest = await this.getLatestPrice(pair)
             if (priceRequest === 0) {
               this.sendEndProcess()
-              this.handleLog('Get latest price. Latest price = 0. swapAssets')
+              this.handleDebug('Get latest price. Latest price = 0. swapAssets')
               this.endMethod(_id)
               return
             }
@@ -850,7 +850,7 @@ function createBotHelper<
               this.lastFilled.updateTime > this.data.lastBalanceChange) ||
               !this.data.lastBalanceChange)
           ) {
-            this.handleLog(
+            this.handleDebug(
               `Found last filled order at price ${this.lastFilled.price}, side ${
                 this.lastFilled.side
               }, qty ${this.lastFilled.origQty}, time ${new Date(
@@ -861,7 +861,7 @@ function createBotHelper<
             )
           }
           if (!this.lastFilled && this.restart) {
-            this.handleLog(`Not found last filled order`)
+            this.handleDebug(`Not found last filled order`)
           }
           if (this.serviceRestart) {
             this.checkOrders(this.lastFilled && +this.lastFilled.price).then(
@@ -905,7 +905,7 @@ function createBotHelper<
      * Calculate buy and sell prices for all grids from low price to top price
      */
     async generateGrids() {
-      this.handleLog('Generate base grids start')
+      this.handleDebug('Generate base grids start')
 
       this.initialGrid = this.data
         ? await this.generateBasicGrids({
@@ -917,7 +917,7 @@ function createBotHelper<
             gridType: this.data.settings.gridType,
           })
         : null
-      this.handleLog('Generate base grids end')
+      this.handleDebug('Generate base grids end')
     }
     /**
      * Generate current grids<br />
@@ -1144,11 +1144,11 @@ function createBotHelper<
       })) {
         const getOrder = await this.getOrder(o.clientOrderId, o.symbol, false)
         if (!getOrder || !getOrder.data) {
-          this.handleLog(`Not enough data to get order ${o.clientOrderId}`)
+          this.handleWarn(`Not enough data to get order ${o.clientOrderId}`)
           continue
         }
         if (getOrder.status === StatusEnum.notok) {
-          this.handleLog(`Cannot get order ${getOrder.reason}`)
+          this.handleWarn(`Cannot get order ${getOrder.reason}`)
           continue
         }
         const mergedOrder = await this.mergeCommonOrderWithOrder(
@@ -1161,7 +1161,7 @@ function createBotHelper<
           if (mergedOrder.status !== 'CANCELED') {
             this.setOrder(mergedOrder)
           }
-          this.handleLog(
+          this.handleDebug(
             `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} is ${mergedOrder.status}.`,
           )
           this.updateOrderOnDb(mergedOrder)
@@ -1169,7 +1169,7 @@ function createBotHelper<
             filledOrders.push(mergedOrder)
           }
         } else {
-          this.handleLog(
+          this.handleDebug(
             `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} not changed.`,
           )
         }
@@ -1178,7 +1178,7 @@ function createBotHelper<
         (a, b) => b.updateTime - a.updateTime,
       )
       if (lastFilled) {
-        this.handleLog(
+        this.handleDebug(
           `Rebuilding grid after ${lastFilled.clientOrderId}, ${lastFilled.side}, base: ${lastFilled.executedQty}, quote: ${lastFilled.cummulativeQuoteQty}, price: ${lastFilled.price}`,
         )
       }
@@ -1227,11 +1227,11 @@ function createBotHelper<
             true,
           )
           if (!tpslOrderData || !tpslOrderData.data) {
-            this.handleLog(
+            this.handleWarn(
               `Not enough data to get order ${activeTPSLOrder.clientOrderId}`,
             )
           } else if (tpslOrderData.status === StatusEnum.notok) {
-            this.handleLog(`Cannot get order ${tpslOrderData.reason}`)
+            this.handleWarn(`Cannot get order ${tpslOrderData.reason}`)
           } else {
             const updatedOrder = await this.mergeCommonOrderWithOrder(
               tpslOrderData.data,
@@ -1239,7 +1239,7 @@ function createBotHelper<
             )
             if (updatedOrder.status === 'CANCELED') {
               this.deleteOrder(updatedOrder.clientOrderId)
-              this.handleLog(
+              this.handleDebug(
                 `TP/SL order ${updatedOrder.clientOrderId} is CANCELED.`,
               )
               this.restart = false
@@ -1254,7 +1254,7 @@ function createBotHelper<
               )
             } else if (updatedOrder.status === 'FILLED') {
               this.setOrder(updatedOrder)
-              this.handleLog(
+              this.handleDebug(
                 `TP/SL order ${updatedOrder.clientOrderId} is FILLED.`,
               )
               this.updateOrderOnDb(updatedOrder)
@@ -1269,14 +1269,14 @@ function createBotHelper<
               activeTPSLOrder.status === 'NEW'
             ) {
               this.setOrder(updatedOrder)
-              this.handleLog(
+              this.handleDebug(
                 `TP/SL order ${updatedOrder.clientOrderId} is PARTIALLY_FILLED.`,
               )
               this.blockCheck = false
               this.endMethod(_id)
               return this.updateOrderOnDb(updatedOrder)
             } else {
-              this.handleLog(
+              this.handleDebug(
                 `TP/SL order not changed ${updatedOrder.clientOrderId}`,
               )
             }
@@ -1292,11 +1292,11 @@ function createBotHelper<
             true,
           )
           if (!swapData || !swapData.data) {
-            this.handleLog(
+            this.handleWarn(
               `Not enough data to get order ${activeSwapOrder.clientOrderId}`,
             )
           } else if (swapData.status === StatusEnum.notok) {
-            this.handleLog(`Cannot get order ${swapData.reason}`)
+            this.handleWarn(`Cannot get order ${swapData.reason}`)
           } else {
             const updatedOrder = await this.mergeCommonOrderWithOrder(
               swapData.data,
@@ -1304,7 +1304,7 @@ function createBotHelper<
             )
             if (updatedOrder.status === 'CANCELED') {
               this.swapAssetData = null
-              this.handleLog(
+              this.handleDebug(
                 `Swap order ${updatedOrder.clientOrderId} is CANCELED.`,
               )
               this.restart = false
@@ -1315,7 +1315,7 @@ function createBotHelper<
               return this.swapAssets()
             } else if (updatedOrder.status === 'FILLED') {
               this.swapAssetData = updatedOrder
-              this.handleLog(
+              this.handleDebug(
                 `Swap order ${updatedOrder.clientOrderId} is FILLED.`,
               )
               this.updateOrderOnDb(updatedOrder)
@@ -1327,14 +1327,14 @@ function createBotHelper<
               activeSwapOrder.status === 'NEW'
             ) {
               this.swapAssetData = updatedOrder
-              this.handleLog(
+              this.handleDebug(
                 `Swap order ${updatedOrder.clientOrderId} is PARTIALLY_FILLED.`,
               )
               this.blockCheck = false
               this.endMethod(_id)
               return this.updateOrderOnDb(updatedOrder)
             } else {
-              this.handleLog(
+              this.handleDebug(
                 `Swap order not changed ${updatedOrder.clientOrderId}`,
               )
             }
@@ -1387,10 +1387,10 @@ function createBotHelper<
               true,
             )
             if (!exchangeData || !exchangeData.data) {
-              this.handleLog(`Not enough data to get order ${o.clientOrderId}`)
+              this.handleWarn(`Not enough data to get order ${o.clientOrderId}`)
             } else {
               if (exchangeData.status === StatusEnum.notok) {
-                this.handleLog(`Cannot get order ${exchangeData.reason}`)
+                this.handleWarn(`Cannot get order ${exchangeData.reason}`)
               } else {
                 const updatedOrder = await this.mergeCommonOrderWithOrder(
                   exchangeData.data,
@@ -1399,7 +1399,7 @@ function createBotHelper<
                 if (updatedOrder.status === 'CANCELED') {
                   this.emit('bot update', updatedOrder)
                   this.deleteOrder(updatedOrder.clientOrderId)
-                  this.handleLog(
+                  this.handleDebug(
                     `Order ${updatedOrder.clientOrderId} is CANCELED.`,
                   )
                   this.updateOrderOnDb(updatedOrder)
@@ -1410,7 +1410,7 @@ function createBotHelper<
                   if (this.data?.settings.profitCurrency === 'base') {
                     this.setOrder(updatedOrder)
                   }
-                  this.handleLog(
+                  this.handleDebug(
                     `Order ${updatedOrder.clientOrderId} is FILLED.`,
                   )
                   this.updateOrderOnDb(updatedOrder)
@@ -1421,13 +1421,13 @@ function createBotHelper<
                 ) {
                   this.emit('bot update', updatedOrder)
                   this.setOrder(updatedOrder)
-                  this.handleLog(
+                  this.handleDebug(
                     `Order ${updatedOrder.clientOrderId} is PARTIALLY_FILLED.`,
                   )
                   this.updateOrderOnDb(updatedOrder)
                   partiallyFilledOrders.push(o)
                 } else {
-                  this.handleLog(
+                  this.handleDebug(
                     `Regular order not changed ${updatedOrder.clientOrderId}`,
                   )
                 }
@@ -1438,7 +1438,7 @@ function createBotHelper<
             const [lastFilled] = filledOrders.sort(
               (a, b) => b.updateTime - a.updateTime,
             )
-            this.handleLog(
+            this.handleDebug(
               `Rebuilding grid after ${lastFilled.clientOrderId}, ${lastFilled.side}, base: ${lastFilled.executedQty}, quote: ${lastFilled.cummulativeQuoteQty}, price: ${lastFilled.price}`,
             )
             for (const o of filledOrders) {
@@ -1450,7 +1450,7 @@ function createBotHelper<
             }
           }
           for (const o of canceledOrders) {
-            this.handleLog(
+            this.handleDebug(
               `Send order again ${o.clientOrderId}, ${o.side}, base: ${
                 o.origQty
               }, quote: ${+o.price * +o.origQty}, price: ${o.price}`,
@@ -1459,7 +1459,7 @@ function createBotHelper<
           }
           for (const g of newOrders) {
             if (!this.filledWhileLoading.has(`${g.side}-${g.price}-${g.qty}`)) {
-              this.handleLog(
+              this.handleDebug(
                 `Order wasn't found in orders, but must be in grid ${
                   g.side
                 }, base: ${g.qty}, quote: ${g.price * g.qty}, price: ${g.price}`,
@@ -1497,7 +1497,7 @@ function createBotHelper<
           ed,
         )
       } else {
-        this.handleLog(
+        this.handleDebug(
           `Grid already exist qty: ${order.qty}, price: ${order.price}, side: ${order.side}`,
         )
       }
@@ -1513,13 +1513,13 @@ function createBotHelper<
       }
       this.feeProcessed.add(clientOrderId)
       if (typeOrder !== TypeOrderEnum.fee) {
-        this.handleLog(
+        this.handleWarn(
           `Fee order grid | Order not fee type ${clientOrderId} ${typeOrder}`,
         )
         return
       }
       const fee = await this.getUserFee(symbol)
-      this.handleLog(`Fee order grid | Process fee order ${clientOrderId}`)
+      this.handleDebug(`Fee order grid | Process fee order ${clientOrderId}`)
       const size =
         (!this.isShort ? +executedQty : +executedQty * +price) *
         (1 - (fee?.maker ?? 0))
@@ -1536,7 +1536,7 @@ function createBotHelper<
         return
       }
       if (this.feeOrders.has(orderId)) {
-        this.handleLog(`Fee order grid | Order ${orderId} already processed`)
+        this.handleDebug(`Fee order grid | Order ${orderId} already processed`)
         return
       }
       this.feeOrders.add(orderId)
@@ -1909,7 +1909,7 @@ function createBotHelper<
         { qty, price, side: order.side, symbol: order.symbol },
         this.data.position,
       )
-      this.handleLog(
+      this.handleDebug(
         `Position after ${order.clientOrderId}, size: ${current.qty}, price: ${current.price}, side: ${current.side}`,
       )
       this.data.position = current
@@ -2254,7 +2254,7 @@ function createBotHelper<
           }
         }
         if (this.pairsNotFound.size) {
-          this.handleLog(`Exchange info not found. Bot will stop`)
+          this.handleWarn(`Exchange info not found. Bot will stop`)
           this.ignoreErrors = true
           this.serviceRestart = false
           await this.stop()
@@ -2434,7 +2434,7 @@ function createBotHelper<
               qtyToSell * price < ed.quoteAsset.minAmount ||
               qtyToSell < ed.baseAsset.minAmount
             ) {
-              this.handleLog(
+              this.handleWarn(
                 `Cannot place close order. Amount is lower than min allowed by exchange ${qtyToSell}. Executing stop method`,
               )
               return await this.stop(true)
@@ -2725,7 +2725,7 @@ function createBotHelper<
       if (!this.data?.realInitialBalances || !this.data.lastBalanceChange) {
         return
       }
-      this.handleLog(`Diff check balances after ${order.clientOrderId}`)
+      this.handleDebug(`Diff check balances after ${order.clientOrderId}`)
       const orders = await this.ordersDb.readData(
         this.data.exchange === ExchangeEnum.bybit
           ? {
@@ -2840,7 +2840,7 @@ function createBotHelper<
       const absDiff = Math.abs(balanceDiff)
       const asset = this.data.symbol.baseAsset
       if (absDiff > 0) {
-        this.handleLog(
+        this.handleDebug(
           `Diff in balance: sell - ${sell} ${asset}, buy - ${buy} ${asset}, real - ${currentBalanceBaseReal} ${asset}, theoretical - ${currentBalanceBaseTheoretical} (${partFilledQty} partially filled) ${asset}, diff - ${balanceDiff} ${asset}`,
         )
         const absDiffRounded = this.math.round(
@@ -2853,7 +2853,7 @@ function createBotHelper<
           const lp = await this.getLatestPrice(pair)
           // slippage 1%
           if (absDiffRounded * lp > ed.quoteAsset.minAmount * 1.01) {
-            this.handleLog(
+            this.handleDebug(
               `Diff is more than min allowed by exchange. Placing order`,
             )
             const res = await this.sendGridToExchange(
@@ -2880,7 +2880,7 @@ function createBotHelper<
                     : avgSell * +res.origQty - +res.price * +res.origQty) -
                   +res.price * +res.origQty * f
               }
-              this.handleLog(
+              this.handleDebug(
                 `Diff order is filled: profit - ${profit}, id - ${
                   res.clientOrderId
                 }, base - ${res.origQty}, quote: - ${
@@ -2891,16 +2891,16 @@ function createBotHelper<
               )
               await this.calculatePosition(res)
             } else {
-              this.handleLog(`Diff order not executed`)
+              this.handleDebug(`Diff order not executed`)
             }
           } else {
-            this.handleLog(`Diff quote is lower than min allowed`)
+            this.handleDebug(`Diff quote is lower than min allowed`)
           }
         } else {
-          this.handleLog(`Diff base is lower than min allowed`)
+          this.handleDebug(`Diff base is lower than min allowed`)
         }
       } else {
-        this.handleLog(`Diff balance is ${absDiff} (${balanceDiff})`)
+        this.handleDebug(`Diff balance is ${absDiff} (${balanceDiff})`)
       }
     }
     get profitBase() {
@@ -2937,7 +2937,7 @@ function createBotHelper<
         index: o.clientOrderId,
       })
       if (read.status === StatusEnum.ok && read.data.result) {
-        this.handleLog(
+        this.handleDebug(
           `Transaction already exists with executor ${o.clientOrderId}`,
         )
         return
@@ -3374,7 +3374,7 @@ function createBotHelper<
             ...transaction,
             _id: `${res.data._id}`,
           })
-          this.handleLog(
+          this.handleDebug(
             `Transaction saved - ${`${res.data._id}`}, executor - ${
               o.clientOrderId
             }`,
@@ -3486,7 +3486,7 @@ function createBotHelper<
           0,
         )
         diff = Math.max(allBuysQuote - currentQuote, 0)
-        this.handleLog(
+        this.handleDebug(
           `Calculate diff in generate initial balance ${diff}, all buy - ${allBuysQuote}, current - ${currentQuote}`,
         )
       }
@@ -3509,7 +3509,7 @@ function createBotHelper<
           (this.data.initialBalances.base !== 0 ||
             this.data.initialBalances.quote !== 0)
         ) {
-          this.handleLog(
+          this.handleDebug(
             'Reset real initial balances by initial balance change',
           )
           this.data.realInitialBalances = null
@@ -3567,7 +3567,7 @@ function createBotHelper<
           0,
         )
         diff = Math.max(allBuysQuote - currentQuote, 0)
-        this.handleLog(
+        this.handleDebug(
           `Calculate diff in generate current balance ${diff}, all buy - ${allBuysQuote}, current - ${currentQuote}`,
         )
       }
@@ -3926,9 +3926,9 @@ function createBotHelper<
         return
       }
       if (this.exchange) {
-        this.handleLog(`Grid Required prices for ${symbol} in price timer`)
+        this.handleDebug(`Grid Required prices for ${symbol} in price timer`)
         const allPrices = await this.exchange?.getAllPrices(true)
-        this.handleLog(`Get all prices in price timer`)
+        this.handleDebug(`Get all prices in price timer`)
         if (allPrices.status === StatusEnum.ok) {
           const prices = allPrices.data.filter((p) => p.pair === symbol)
           for (const p of prices) {

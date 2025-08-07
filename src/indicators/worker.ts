@@ -67,7 +67,7 @@ class IndicatorOperations {
         }
       }
       if (!i) {
-        logger.info(`Worker ${threadId} indicator not found ${id}`)
+        logger.error(`Worker ${threadId} indicator not found ${id}`)
       }
     } catch (e) {
       logger.error(

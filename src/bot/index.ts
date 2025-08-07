@@ -48,6 +48,7 @@ import {
   MultiTP,
   MainBot,
   BybitHost,
+  LogLevel,
 } from '../../types'
 import {
   BaseReturn,
@@ -182,6 +183,7 @@ class Bot<T extends UserSchema = UserSchema> {
       time: number
     }[]
     botIds: Map<string, string>
+    logLevel?: LogLevel
   }[] = []
 
   protected static instance: Bot
@@ -542,7 +544,7 @@ class Bot<T extends UserSchema = UserSchema> {
 
   @IdMute(mutex, (id: number) => `handleWorkerTerminate${id}`)
   protected async handleWorkerTerminate(id: number) {
-    this.handleLog(`${loggerPrefix} Worker terminated: ${id}`)
+    this.handleWarn(`${loggerPrefix} Worker terminated: ${id}`)
     const worker = this.workers.find((w) => w.id === id)
     this.workers = this.workers.filter((w) => w.id !== id)
     if (worker && worker.bots > 0) {
@@ -1116,7 +1118,7 @@ class Bot<T extends UserSchema = UserSchema> {
             (e as Error)?.message || e
           } `,
         )
-        console.error(e)
+        logger.error(e)
         if (`${(e as Error)?.message || e}`.includes('terminated')) {
           this.handleWorkerTerminate(threadId)
         }
@@ -3375,7 +3377,7 @@ class Bot<T extends UserSchema = UserSchema> {
     if (!method) {
       return
     }
-    this.handleLog(
+    this.handleDebug(
       `${loggerPrefix} Bot host | Internal api call ${method} ${
         Array.isArray(params)
           ? params[params.length - 1] === 'ignore'
@@ -3419,7 +3421,7 @@ class Bot<T extends UserSchema = UserSchema> {
     ignoreParamsInLog = false,
     ...payload: unknown[]
   ): Promise<R | null> {
-    this.handleLog(
+    this.handleDebug(
       `${loggerPrefix} Bot client | Api call ${method} ${
         ignoreParamsInLog
           ? ''
@@ -4942,7 +4944,7 @@ class Bot<T extends UserSchema = UserSchema> {
               })
             }
           } else {
-            this.handleLog(`Bot ${id} not found in changeComboBot`)
+            this.handleWarn(`Bot ${id} not found in changeComboBot`)
           }
         }
         if (
@@ -7043,7 +7045,7 @@ class Bot<T extends UserSchema = UserSchema> {
       this.rabbit.listenWithCallback<WebhookData[] | WebhookData, void>(
         webhookQueue,
         (data) => {
-          this.handleLog(
+          this.handleDebug(
             `Webhook data received for ${[data]
               .flat()
               .map((d) => d.uuid)
@@ -7058,7 +7060,7 @@ class Bot<T extends UserSchema = UserSchema> {
   private updateRestart() {
     this.restarted++
     if (this.restarted === this.estimatedRestart) {
-      this.handleLog(`Restarted equal to estimated restart. Set listener`)
+      this.handleDebug(`Restarted equal to estimated restart. Set listener`)
       this.setListener()
     }
   }
@@ -7066,7 +7068,7 @@ class Bot<T extends UserSchema = UserSchema> {
   protected setServiceListener() {
     if (!!bosServiceType) {
       const queue = this.getRabbitQueueName()
-      this.handleLog(`Set service listener for ${queue}`)
+      this.handleDebug(`Set service listener for ${queue}`)
       this.rabbit.listenWithCallback<BotServicePayload, unknown>(
         queue,
         async (payload) => {
@@ -7104,7 +7106,7 @@ class Bot<T extends UserSchema = UserSchema> {
       this.handleLog(`Found ${findDCABotsData.length} active DCA bots`)
       for (const bot of findDCABotsData) {
         const id = bot._id.toString()
-        this.handleLog(`${id} started from server start`)
+        this.handleDebug(`${id} started from server start`)
         await this.handleBotRestartFromServiceStart(
           id,
           BotType.dca,
@@ -7122,7 +7124,7 @@ class Bot<T extends UserSchema = UserSchema> {
       this.handleLog(`Found ${findComboBotsData.length} active combo bots`)
       for (const bot of findComboBotsData) {
         const id = bot._id.toString()
-        this.handleLog(`${bot._id} started from server start`)
+        this.handleDebug(`${bot._id} started from server start`)
         await this.handleBotRestartFromServiceStart(
           id,
           BotType.combo,
@@ -7142,7 +7144,7 @@ class Bot<T extends UserSchema = UserSchema> {
       )
       for (const bot of findHedgeComboBotsData) {
         const id = bot._id.toString()
-        this.handleLog(`${bot._id} started from server start`)
+        this.handleDebug(`${bot._id} started from server start`)
         await this.handleBotRestartFromServiceStart(
           id,
           BotType.hedgeCombo,
@@ -7165,7 +7167,7 @@ class Bot<T extends UserSchema = UserSchema> {
       )
       for (const bot of findHedgeDcaBotsData) {
         const id = bot._id.toString()
-        this.handleLog(`${bot._id} started from server start`)
+        this.handleDebug(`${bot._id} started from server start`)
         await this.handleBotRestartFromServiceStart(
           id,
           BotType.hedgeDca,
@@ -7186,7 +7188,7 @@ class Bot<T extends UserSchema = UserSchema> {
       this.handleLog(`Found ${findBotsData.length} open bots`)
       for (const bot of findBotsData) {
         const id = bot._id.toString()
-        this.handleLog(`${id} started from server start`)
+        this.handleDebug(`${id} started from server start`)
         await this.handleBotRestartFromServiceStart(
           id,
           BotType.grid,
@@ -8205,7 +8207,7 @@ class Bot<T extends UserSchema = UserSchema> {
         return StatusEnum.ok
       } catch (e) {
         if ((e as Error)?.message === notAvailable) {
-          this.handleLog(
+          this.handleWarn(
             'External service not available in webhook process. Will add to the queue',
           )
           this.rabbit.send(webhookQueue, data)
@@ -8266,7 +8268,7 @@ class Bot<T extends UserSchema = UserSchema> {
       }
       if (action === WebhookActionEnum.startBot) {
         if (findBot && findBot.dcaType !== DCATypeEnum.terminal) {
-          this.handleLog(`Received ${action} signal for ${uuid}`)
+          this.handleDebug(`Received ${action} signal for ${uuid}`)
           call = () =>
             findBot &&
             this.getWorkerById(findBot.worker)?.postMessage({
@@ -8325,7 +8327,7 @@ class Bot<T extends UserSchema = UserSchema> {
             botData.data?.result?.settings.type !== DCATypeEnum.terminal
           ) {
             if (botData.data?.result) {
-              this.handleLog(`Received ${action} signal for ${uuid}`)
+              this.handleDebug(`Received ${action} signal for ${uuid}`)
               const id = botData.data.result._id.toString()
               const type = hedgeDca
                 ? BotType.hedgeDca
@@ -8395,13 +8397,13 @@ class Bot<T extends UserSchema = UserSchema> {
               event.metadata = JSON.stringify({ action })
               event.paperContext = !!botData.data.result.paperContext
             } else {
-              this.handleLog(
+              this.handleWarn(
                 `Received ${action} signal for ${uuid}, but bot not found`,
               )
               return this.entityNotFound('Bot')
             }
           } else {
-            this.handleLog(
+            this.handleWarn(
               `Received ${action} signal for ${uuid}, but bot is terminal`,
             )
           }
@@ -8412,7 +8414,7 @@ class Bot<T extends UserSchema = UserSchema> {
         action !== WebhookActionEnum.startBot &&
         action !== WebhookActionEnum.changePairs
       ) {
-        this.handleLog(
+        this.handleDebug(
           `Received ${action} signal for ${uuid}, but bot is not running`,
         )
         return this.entityNotFound('Bot')
@@ -8443,13 +8445,13 @@ class Bot<T extends UserSchema = UserSchema> {
               botData?.data?.result?.settings?.type ?? DCATypeEnum.regular,
             )
           } else {
-            this.handleLog(
+            this.handleWarn(
               `Received ${action} signal for ${uuid}, but bot not found`,
             )
             return this.entityNotFound('Bot')
           }
         } else {
-          this.handleLog(
+          this.handleWarn(
             `Received ${action} signal for ${uuid}, but bot is terminal`,
           )
         }
@@ -8462,7 +8464,7 @@ class Bot<T extends UserSchema = UserSchema> {
         event.paperContext = findBot.paperContext
         if (action === WebhookActionEnum.start) {
           event.metadata = JSON.stringify({ action, symbol })
-          this.handleLog(`Received ${action} signal for ${uuid}`)
+          this.handleDebug(`Received ${action} signal for ${uuid}`)
           call = () =>
             findBot &&
             this.getWorkerById(findBot.worker)?.postMessage({
@@ -8479,7 +8481,7 @@ class Bot<T extends UserSchema = UserSchema> {
         ) {
           event.metadata = JSON.stringify({ action, symbol })
           event.symbol = symbol
-          this.handleLog(`Received ${action} signal for ${uuid}`)
+          this.handleDebug(`Received ${action} signal for ${uuid}`)
           call = () =>
             findBot &&
             this.getWorkerById(findBot.worker)?.postMessage({
@@ -8500,7 +8502,7 @@ class Bot<T extends UserSchema = UserSchema> {
           findBot.dcaType !== DCATypeEnum.terminal
         ) {
           event.metadata = JSON.stringify({ action })
-          this.handleLog(`Received ${action} signal for ${uuid}`)
+          this.handleDebug(`Received ${action} signal for ${uuid}`)
           call = () =>
             findBot &&
             this.getWorkerById(findBot.worker)?.postMessage({
@@ -8534,7 +8536,7 @@ class Bot<T extends UserSchema = UserSchema> {
         ) {
           event.metadata = JSON.stringify({ action, symbol, qty, asset })
           event.symbol = symbol
-          this.handleLog(`Received ${action} signal for ${uuid}`)
+          this.handleDebug(`Received ${action} signal for ${uuid}`)
           call = () =>
             findBot &&
             this.getWorkerById(findBot.worker)?.postMessage({
@@ -8554,7 +8556,7 @@ class Bot<T extends UserSchema = UserSchema> {
         ) {
           event.metadata = JSON.stringify({ action, symbol, qty, asset })
           event.symbol = symbol
-          this.handleLog(`Received ${action} signal for ${uuid}`)
+          this.handleDebug(`Received ${action} signal for ${uuid}`)
           call = () =>
             findBot &&
             this.getWorkerById(findBot.worker)?.postMessage({
@@ -8571,7 +8573,7 @@ class Bot<T extends UserSchema = UserSchema> {
           findBot.dcaType !== DCATypeEnum.terminal
         ) {
           event.metadata = JSON.stringify({ action, pairsToSet })
-          this.handleLog(`Received ${action} signal for ${uuid}`)
+          this.handleDebug(`Received ${action} signal for ${uuid}`)
           call = async () =>
             findBot &&
             (await this.changeDCABotPairs(
@@ -8589,7 +8591,7 @@ class Bot<T extends UserSchema = UserSchema> {
       }
       const result = call && (await call())
       if (result) {
-        this.handleLog(
+        this.handleDebug(
           `Response ${action} signal for ${uuid}: ${JSON.stringify(result)}`,
         )
       }
@@ -9365,7 +9367,7 @@ class Bot<T extends UserSchema = UserSchema> {
         }
       })
       .catch((e) => {
-        console.warn(new Date(), ` | ${e?.message || e}`)
+        logger.warn(new Date(), ` | ${e?.message || e}`)
         return {
           status: StatusEnum.notok,
           reason: 'Failed to delete all user bots',
@@ -11289,6 +11291,14 @@ class Bot<T extends UserSchema = UserSchema> {
     logger.info(`${msg}`)
   }
 
+  protected handleDebug(msg: string) {
+    logger.debug(`${msg}`)
+  }
+
+  protected handleWarn(msg: string) {
+    logger.debug(`${msg}`)
+  }
+
   private handleError(msg: string) {
     logger.error(`${msg}`)
   }
@@ -12513,7 +12523,7 @@ class Bot<T extends UserSchema = UserSchema> {
         }
         timer = setTimeout(
           () => {
-            this.handleLog(`Timeout for compareBalances ${dealId}`)
+            this.handleDebug(`Timeout for compareBalances ${dealId}`)
             worker?.removeListener('message', cb)
             reject(null)
           },
@@ -12599,7 +12609,7 @@ class Bot<T extends UserSchema = UserSchema> {
   }
   async checkNotEnoughBalanceError() {
     const prefix = `Checking not enough balance error bots`
-    this.handleLog(`${prefix} start`)
+    this.handleDebug(`${prefix} start`)
     const filter = {
       'notEnoughBalance.thresholdPassed': true,
       'notEnoughBalance.thresholdPassedTime': {
@@ -12644,7 +12654,7 @@ class Bot<T extends UserSchema = UserSchema> {
         id: `${bot._id}`,
       })
     }
-    this.handleLog(
+    this.handleDebug(
       `${prefix} Found ${
         singleBots.size
       } bots with not enough balance error ${JSON.stringify([
@@ -12652,7 +12662,7 @@ class Bot<T extends UserSchema = UserSchema> {
       ])}`,
     )
     /** TODO: stop logic here */
-    this.handleLog(`${prefix} end`)
+    this.handleDebug(`${prefix} end`)
   }
 }
 

@@ -81,7 +81,7 @@ class BacktestWrapper {
     this.handleBacktestLog = this.handleBacktestLog.bind(this)
   }
 
-  protected handleLog(msg: string, type: 'info' | 'error' = 'info') {
+  protected handleLog(msg: string, type: 'info' | 'error' | 'debug' = 'info') {
     logger[type](`SSB | ${this.id} | ${msg}`)
   }
 
@@ -275,10 +275,10 @@ class BacktestWrapper {
       | BaseReturn<CleanDCABacktestingResult | ComboBacktestingResult>
       | undefined
     if (this.data.type === BotType.dca) {
-      this.handleLog(`Save DCA backtest `)
+      this.handleLog(`Save DCA backtest `, 'debug')
       resultSave = await this.dcaBacktestDb.createData(toSave)
     } else if (this.data.type === BotType.combo) {
-      this.handleLog(`Save Combo backtest `)
+      this.handleLog(`Save Combo backtest `, 'debug')
       resultSave = await this.comboBacktestDb.createData(
         toSave as ComboBacktestingResult,
       )
@@ -301,7 +301,7 @@ class BacktestWrapper {
           data: saveData,
           ...meta,
         }
-        this.handleLog(`${type} backtest saved with id ${id}`)
+        this.handleLog(`${type} backtest saved with id ${id}`, 'debug')
         saved = await this.saveFile(entry, meta)
       }
     } catch (e) {
@@ -314,13 +314,13 @@ class BacktestWrapper {
     }
     if (!saved && resultSave?.data?._id) {
       if (this.data.type === BotType.dca) {
-        this.handleLog(`Update DCA backtest, remove server side`)
+        this.handleLog(`Update DCA backtest, remove server side`, 'debug')
         this.dcaBacktestDb.updateData(
           { _id: `${resultSave.data._id}` },
           { $set: { serverSide: false } },
         )
       } else if (this.data.type === BotType.combo) {
-        this.handleLog(`Update Combo backtest, remove server side`)
+        this.handleLog(`Update Combo backtest, remove server side`, 'debug')
         this.comboBacktestDb.updateData(
           { _id: `${resultSave.data._id}` },
           { $set: { serverSide: false } },
@@ -418,7 +418,7 @@ class BacktestWrapper {
       serverSide: true,
       shareId: v4(),
     }
-    this.handleLog(`Save Grid backtest`)
+    this.handleLog(`Save Grid backtest`, 'debug')
     const resultSave = await this.gridBacktestDb.createData(toSave)
     if (resultSave && resultSave.data?._id) {
       const saveData = JSON.stringify({ ...result, config })
@@ -435,7 +435,7 @@ class BacktestWrapper {
         data: saveData,
         ...meta,
       }
-      this.handleLog(`Grid backtest saved with id ${id}`)
+      this.handleLog(`Grid backtest saved with id ${id}`, 'debug')
       await this.saveFile(entry, meta)
     }
     await this.updateRequest(
@@ -446,15 +446,15 @@ class BacktestWrapper {
   }
 
   protected handleBacktestLog(value: number, text: string) {
-    this.handleLog(`Done ${this.math.round(value * 100, 0)}% ${text}`)
+    this.handleLog(`Done ${this.math.round(value * 100, 0)}% ${text}`, 'debug')
   }
 
   public async run(): Promise<ResultType | null> {
-    this.handleLog('Running backtest')
+    this.handleLog('Running backtest', 'debug')
     const prices = await this.loadPrices()
-    this.handleLog('Prices loaded')
+    this.handleLog('Prices loaded', 'debug')
     const symbols = await this.getSymbols()
-    this.handleLog('Symbols loaded')
+    this.handleLog('Symbols loaded', 'debug')
     const symbolsToUse = this.data.config.multiIdependent
       ? symbols.map((s) => [s])
       : [symbols]
@@ -464,7 +464,10 @@ class BacktestWrapper {
     const name = this.data.data.settings.name
     for (const s of symbolsToUse) {
       if (this.data.config.multiIdependent) {
-        this.handleLog(`Running backtest for ${s[0].pair} ${current}/${total}`)
+        this.handleLog(
+          `Running backtest for ${s[0].pair} ${current}/${total}`,
+          'debug',
+        )
         this.data.data.settings.pair = s[0].pair
         this.data.data.settings.name = `${name || 'multi'}_${s[0].pair}`
       }
@@ -483,7 +486,7 @@ class BacktestWrapper {
             ? new GridBacktester({ ...this.data.data, prices, symbols: s })
             : null
       if (instance) {
-        this.handleLog('Instance created')
+        this.handleLog('Instance created', 'debug')
         this.updateRequest(BacktestRequestStatus.loadingData)
         const result = await instance.test(
           undefined,
@@ -495,7 +498,7 @@ class BacktestWrapper {
             this.data.type === BotType.dca ||
             this.data.type === BotType.combo
           ) {
-            this.handleLog('Prepare to save result DCA/Combo')
+            this.handleLog('Prepare to save result DCA/Combo', 'debug')
             const saveResult = await this.saveDCAComboBacktest(
               result as DCABacktestingResult,
               s[0],
@@ -515,7 +518,7 @@ class BacktestWrapper {
               continue
             }
           } else if (this.data.type === BotType.grid) {
-            this.handleLog('Prepare to save result Grid')
+            this.handleLog('Prepare to save result Grid', 'debug')
             const saveResult = await this.saveGridBacktest(
               result as GridBacktestingResult,
               s[0],

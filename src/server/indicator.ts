@@ -39,7 +39,9 @@ class IndicatorsService {
     this.requestCallback = this.requestCallback.bind(this)
     this.getRedisCb = this.getRedisCb.bind(this)
 
-    logger.info(`>🔬 Indicators service ready in ${rabbitIndicatorsKey} queue`)
+    this.handleLog(
+      `>🔬 Indicators service ready in ${rabbitIndicatorsKey} queue`,
+    )
   }
 
   private async initRedis() {
@@ -65,7 +67,7 @@ class IndicatorsService {
       const parse = JSON.parse(msg) as { restart: string }
       if (parse.restart.startsWith('botService')) {
         const type = parse.restart.replace('botService', '')
-        logger.info(
+        this.handleDebug(
           `Bot service restarted, remove indicator callbacks for ${type}`,
         )
         const map =
@@ -78,7 +80,7 @@ class IndicatorsService {
         }
       }
     } catch (e) {
-      logger.error(`Failed to parse message: ${msg}, ${e}`)
+      this.handleError(`Failed to parse message: ${msg}, ${e}`)
     }
   }
 
@@ -110,11 +112,16 @@ class IndicatorsService {
     )
   }
 
-  private logger(err = false, ...msg: any[]) {
-    if (err) {
-      return logger.error(...msg)
-    }
+  private handleLog(...msg: any[]) {
     return logger.info(...msg)
+  }
+
+  private handleError(...msg: any[]) {
+    return logger.error(...msg)
+  }
+
+  private handleDebug(...msg: any[]) {
+    return logger.debug(...msg)
   }
 
   @IdMute(
@@ -134,7 +141,9 @@ class IndicatorsService {
         msg.data.load1d,
       )
       if (!subscriptionResult) {
-        logger.error(`Failed to subscribe indicator: ${JSON.stringify(msg)}`)
+        this.handleError(
+          `Failed to subscribe indicator: ${JSON.stringify(msg)}`,
+        )
         return null
       }
       const { room, id, message, data, lastPrice } = subscriptionResult
@@ -146,7 +155,7 @@ class IndicatorsService {
       get.add(id)
       map.set(room, get)
       if (id && room) {
-        this.logger(false, 'Subscribed:', 'room', room, 'id', id)
+        this.handleDebug('Subscribed:', 'room', room, 'id', id)
       }
       if (this.rabbitClient) {
         return {
@@ -159,7 +168,10 @@ class IndicatorsService {
         }
       }
     } catch (e) {
-      logger.error(`Failed to subscribe indicator: ${JSON.stringify(msg)}`, e)
+      this.handleError(
+        `Failed to subscribe indicator: ${JSON.stringify(msg)}`,
+        e,
+      )
       return null
     }
   }
@@ -181,14 +193,14 @@ class IndicatorsService {
         if (ids.size === 0) {
           map.delete(room)
         }
-        this.logger(false, 'Unsubscribed:', 'room', room, 'id', id)
+        this.handleDebug('Unsubscribed:', 'room', room, 'id', id)
         return true
       }
     }
     return true
   }
   private async requestCallback(msg: RequestMessage) {
-    this.logger(false, 'Request:', msg.event)
+    this.handleDebug('Request:', msg.event)
     if (msg.event === 'subscribeIndicator') {
       return await this.subscribeIndicatorEvent(msg)
     }

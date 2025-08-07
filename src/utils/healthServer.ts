@@ -18,7 +18,7 @@ export class HealthServer {
 
       this.server.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
-          logger.info(`Health server port ${port} is in use - skipping`)
+          logger.warn(`Health server port ${port} is in use - skipping`)
           return
         }
         logger.error(`Health server error: ${err.message}`)

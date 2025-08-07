@@ -533,7 +533,7 @@ class Rabbit {
 
               const processingTime = performance.now() - processStartTime
               if (processingTime > this.logTimeout) {
-                logger.warn(
+                logger.debug(
                   `${prefix} Message processing took ${processingTime.toFixed(
                     2,
                   )}ms for ${queue}`,
@@ -566,7 +566,7 @@ class Rabbit {
         `${prefix} Error in listenWithCallback for ${queue}: ${e} ${count}`,
       )
       if (count < 5) {
-        logger.info(`${prefix} Retry listenWithCallback for ${queue}`)
+        logger.warn(`${prefix} Retry listenWithCallback for ${queue}`)
         await sleep(retryTimeout)
         return this.listenWithCallback(queue, callback, maxSize, count + 1)
       }

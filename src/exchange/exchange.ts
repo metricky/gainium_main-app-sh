@@ -494,7 +494,7 @@ class Exchange extends AbstractExchange {
                 +new Date() - parse.timeProfile.exchangeRequestEndTime >
                   this.allPricesCachePeriod
               ) {
-                logger.info(
+                logger.debug(
                   `Got all prices from cache but expired, delete ${this.exchange} from cache`,
                 )
                 client.hDel('allPrice', this.exchange)

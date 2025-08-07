@@ -220,11 +220,8 @@ class UserStreamService {
    * @returns {void}
    * @private
    */
-  private logger(socket: Socket, msg: any, err = false) {
-    if (err) {
-      return logger.info(`Socket: ${socket.id} |`, msg)
-    }
-    return logger.info(`Socket: ${socket.id} |`, msg)
+  private handleError(socket: Socket, msg: any) {
+    return logger.error(`Socket: ${socket.id} |`, msg)
   }
   /** Prepare message to return
    * @param {StatusEnum.ok | StatusEnum.notok} status status to send
@@ -254,7 +251,7 @@ class UserStreamService {
         'message',
         this.prepareMessage(StatusEnum.notok, 'Not enough data'),
       )
-      return this.logger(socket, 'Not enough data', true)
+      return this.handleError(socket, 'Not enough data')
     }
     const { userId, userToken } = msg
     /** Check if token exist on user */
@@ -264,14 +261,14 @@ class UserStreamService {
 
     if (user.status === StatusEnum.notok) {
       socket.emit('message', this.prepareMessage(StatusEnum.notok, user.reason))
-      return this.logger(socket, user.reason, true)
+      return this.handleError(socket, user.reason)
     }
     if (user.status === StatusEnum.ok && user.data && !user.data.result) {
       socket.emit(
         'message',
         this.prepareMessage(StatusEnum.notok, 'User not found'),
       )
-      return this.logger(socket, 'User not found', true)
+      return this.handleError(socket, 'User not found')
     }
     const { username } = user.data.result
     if (socket.rooms.has(userId)) {
@@ -318,10 +315,9 @@ class UserStreamService {
   private async botUpdateCallback(socket: Socket, msg: BotUpdateInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botUpdateCallback', msg),
-        true,
       )
     }
     const { userId, botId, data, paperContext } = msg
@@ -341,10 +337,9 @@ class UserStreamService {
   private async botMessageCallback(socket: Socket, msg: BotMessageInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botMessageCallback', msg),
-        true,
       )
     }
     const { userId, botId, data, botType, paperContext } = msg
@@ -369,10 +364,9 @@ class UserStreamService {
   ) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data || !msg.botType) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botSettingsUpdateCallback', msg),
-        true,
       )
     }
     const { userId, ...other } = msg
@@ -390,10 +384,9 @@ class UserStreamService {
   private async botTransactionCallback(socket: Socket, msg: BotUpdateInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botTransactionCallback', msg),
-        true,
       )
     }
     const { userId, botId, data } = msg
@@ -413,10 +406,9 @@ class UserStreamService {
   private async botProcessCallback(socket: Socket, msg: BotProcessInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botProcessCallback', msg),
-        true,
       )
     }
     const { userId, botId, data } = msg
@@ -434,10 +426,9 @@ class UserStreamService {
   private async botDealUpdateCallback(socket: Socket, msg: BotUpdateInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botDealUpdateCallback', msg),
-        true,
       )
     }
     const { userId, ...data } = msg
@@ -448,10 +439,9 @@ class UserStreamService {
   private async botMinigridUpdateCallback(socket: Socket, msg: BotUpdateInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botMinigridUpdateCallback', msg),
-        true,
       )
     }
     const { userId, ...data } = msg
@@ -462,10 +452,9 @@ class UserStreamService {
   private async botStatsUpdateCallback(socket: Socket, msg: BotStatsInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.botId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('botStatsUpdateCallback', msg),
-        true,
       )
     }
     const { userId, ...data } = msg
@@ -476,10 +465,9 @@ class UserStreamService {
   private async balanceUpdateCallback(socket: Socket, msg: BalanceInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('balanceUpdateCallback', msg),
-        true,
       )
     }
     const { userId, ...data } = msg
@@ -493,10 +481,9 @@ class UserStreamService {
   ) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('serverBacktestUpdateCallback', msg),
-        true,
       )
     }
     const { userId, ...data } = msg
@@ -507,10 +494,9 @@ class UserStreamService {
   private async userUpdateCallback(socket: Socket, msg: UserUpdateInput) {
     /** Check if message presented */
     if (!msg || !msg.userId || !msg.data) {
-      return this.logger(
+      return this.handleError(
         socket,
         this.handleNotEnoughData('userUpdateCallback', msg),
-        true,
       )
     }
     const { userId, ...data } = msg

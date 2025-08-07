@@ -43,7 +43,7 @@ class SharedStream {
   }
 
   private log(...msg: unknown[]) {
-    logger.info(`[SharedStream]`, ...msg)
+    logger.debug(`[SharedStream]`, ...msg)
   }
 
   private redisCb(msg: string, key: string) {

@@ -416,12 +416,12 @@ const setCoinbaseTimer = async (
   if (get) {
     clearInterval(get)
   }
-  logger.info(`Coinbase timer set for ${uuid}`)
+  logger.debug(`Coinbase timer set for ${uuid}`)
   coinsbaseTimer.set(
     key,
     setInterval(
       () => (
-        logger.info(`Coinbase timer trigger for ${uuid}`),
+        logger.debug(`Coinbase timer trigger for ${uuid}`),
         updateUserBalance(user, uuid, undefined, ec)
       ),
       coinbaseTimeout,
@@ -489,7 +489,7 @@ const connectUserBalance = async (
         })
         streamsSet.add(e.uuid)
         redisClient?.subscribe(`userStreamInfo${e.uuid}`, (msg) =>
-          logger.info('socket connect on start | ', msg),
+          logger.debug('socket connect on start | ', msg),
         )
 
         if (redisClient) {
@@ -575,7 +575,7 @@ const updateUserFee = async (
                   .then((r) => {
                     if (r.status === 'OK') {
                       if (log) {
-                        logger.info(
+                        logger.debug(
                           `Fee ${f.pair} for user ${userId} created | ${e.provider} | ${e.uuid}`,
                         )
                       }
@@ -589,7 +589,7 @@ const updateUserFee = async (
                 getPair.maker !== f.maker ||
                 getPair.taker !== f.taker
               ) {
-                logger.info(
+                logger.debug(
                   `Fee different ${f.pair}@${userId}@${e.provider}@${e.uuid} old: ${getPair.maker} (maker), ${getPair.taker} (taker), new: ${f.maker} (maker), ${f.taker} (taker)`,
                 )
                 feeDb
@@ -601,7 +601,7 @@ const updateUserFee = async (
                   )
                   .then((r) => {
                     if (r.status === 'OK') {
-                      logger.info(
+                      logger.debug(
                         `Fee ${f.pair} for user ${userId} updated | ${e.provider} | ${e.uuid}`,
                       )
                       redis?.publish(
@@ -632,7 +632,7 @@ const updateUserFee = async (
                 })
                 .then((r) => {
                   if (r.status === 'OK') {
-                    logger.info(
+                    logger.debug(
                       `Fee Delete ${r.reason} | ${userId} | ${e.provider} | ${e.uuid}`,
                     )
                   } else {
@@ -749,7 +749,7 @@ const userSnapshots = async (
         ),
       )
     }
-    logger.info(`Snapshot | Found ${users.data.result.length} users`)
+    logger.debug(`Snapshot | Found ${users.data.result.length} users`)
     for (const u of users.data.result) {
       let totalUsd = 0
       let assets: SnapshotSchema['assets'] = []
@@ -763,7 +763,7 @@ const userSnapshots = async (
         true,
       )
       if (balances.status === 'OK') {
-        logger.info(
+        logger.debug(
           `Snapshot | User ${u.username} found ${balances.data.result.length} balances`,
         )
         const userExchanges = u.exchanges.map((e) => e.uuid)
@@ -847,7 +847,7 @@ const userSnapshots = async (
           },
         )
         if (data.status === 'OK') {
-          logger.info(`Snapshot | ${u.username} ${userId} updated`)
+          logger.debug(`Snapshot | ${u.username} ${userId} updated`)
         } else {
           logger.error(
             `Snapshot | ${u.username} ${userId} error ${data.reason}`,
@@ -859,7 +859,7 @@ const userSnapshots = async (
           paperContext,
         })
         if (data.status === 'OK') {
-          logger.info(`Snapshot | ${u.username} ${userId} saved`)
+          logger.debug(`Snapshot | ${u.username} ${userId} saved`)
         } else {
           logger.error(
             `Snapshot | ${u.username} ${userId} error ${data.reason}`,
@@ -905,11 +905,11 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
   }
   try {
     if (processing.has(userId)) {
-      logger.info(`${prefix} | Already in progress`)
+      logger.debug(`${prefix} | Already in progress`)
     }
     processing.add(userId)
     userId = userId.toString()
-    logger.info(`${prefix} | Start`)
+    logger.debug(`${prefix} | Start`)
     const userRequest = await userDb.readData({ _id: userId })
     if (userRequest.status === StatusEnum.notok) {
       logger.error(`${prefix} | Cannot read user ${userRequest.reason}`)
@@ -943,7 +943,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
     const comboBots =
       (await comboBotDb.readData(userWithPaperFilter, {}, {}, true)).data
         ?.result ?? []
-    logger.info(
+    logger.debug(
       `${prefix} | Found ${bots.length} bots, ${dcaBots.length} dca bots, ${comboBots.length} combo bots`,
     )
     const botIds = [...bots, ...dcaBots, ...comboBots].map((b) =>
@@ -966,7 +966,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
         b.deals.active > 0,
     )
     if (dcaBotsWithDeals.length) {
-      logger.info(
+      logger.debug(
         `${prefix} | Found ${dcaBotsWithDeals.length} dca bots with deals`,
       )
       const deals =
@@ -981,7 +981,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
             true,
           )
         )?.data?.result ?? []
-      logger.info(`${prefix} | Found ${deals.length} dca deals`)
+      logger.debug(`${prefix} | Found ${deals.length} dca deals`)
       for (const d of deals) {
         await Bot.closeDCADeal(
           userId,
@@ -992,10 +992,10 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           d.paperContext,
         )
       }
-      logger.info(`${prefix} | DCA deals closed`)
+      logger.debug(`${prefix} | DCA deals closed`)
     }
     if (comboBotsWithDeals.length) {
-      logger.info(
+      logger.debug(
         `${prefix} | Found ${comboBotsWithDeals.length} combo bots with deals`,
       )
       const deals =
@@ -1010,7 +1010,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
             true,
           )
         )?.data?.result ?? []
-      logger.info(`${prefix} | Found ${deals.length} combo deals`)
+      logger.debug(`${prefix} | Found ${deals.length} combo deals`)
       for (const d of deals) {
         await Bot.closeComboDeal(
           userId,
@@ -1021,7 +1021,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           d.paperContext,
         )
       }
-      logger.info(`${prefix} | Combo deals closed`)
+      logger.debug(`${prefix} | Combo deals closed`)
     }
     const activeBots = bots.filter(
       (b) =>
@@ -1030,7 +1030,9 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
         b.status === BotStatusEnum.error,
     )
     if (activeBots.length) {
-      logger.info(`${prefix} | Found ${activeBots.length} active bots, closing`)
+      logger.debug(
+        `${prefix} | Found ${activeBots.length} active bots, closing`,
+      )
       for (const b of activeBots) {
         await Bot.changeStatus(
           userId,
@@ -1044,7 +1046,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           !!b.paperContext,
         )
       }
-      logger.info(`${prefix} | Bots closed`)
+      logger.debug(`${prefix} | Bots closed`)
     }
 
     const activeDCABots = dcaBots.filter(
@@ -1055,7 +1057,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           b.status === BotStatusEnum.error),
     )
     if (activeDCABots.length) {
-      logger.info(
+      logger.debug(
         `${prefix} | Found ${activeDCABots.length} active bots, closing`,
       )
       for (const b of activeDCABots) {
@@ -1071,7 +1073,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           !!b.paperContext,
         )
       }
-      logger.info(`${prefix} | Bots closed`)
+      logger.debug(`${prefix} | Bots closed`)
     }
 
     const activeComboBots = comboBots.filter(
@@ -1082,7 +1084,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           b.status === BotStatusEnum.error),
     )
     if (activeComboBots.length) {
-      logger.info(
+      logger.debug(
         `${prefix} | Found ${activeComboBots.length} active bots, closing`,
       )
       for (const b of activeComboBots) {
@@ -1098,10 +1100,10 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           !!b.paperContext,
         )
       }
-      logger.info(`${prefix} | Bots closed`)
+      logger.debug(`${prefix} | Bots closed`)
     }
 
-    logger.info(`${prefix} | Bots deleted`)
+    logger.debug(`${prefix} | Bots deleted`)
     const requests: {
       fn: Promise<ErrorResponse | MessageResponse>
       name: string
@@ -1226,7 +1228,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           )
         )?.data?.result ?? []
       if (paperUsers.length) {
-        logger.info(`${prefix} | Found ${paperUsers.length} paper users`)
+        logger.debug(`${prefix} | Found ${paperUsers.length} paper users`)
         const paperIds = paperUsers.map((p) => p._id)
         requests.push({
           fn: paperPositionDb.deleteManyData({
@@ -1272,7 +1274,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
       requests.map((r) =>
         r.fn.then((res) => {
           if (res.status === StatusEnum.ok) {
-            logger.info(`${prefix} | ${r.name} ${res.reason}`)
+            logger.debug(`${prefix} | ${r.name} ${res.reason}`)
           } else {
             logger.error(`${prefix} | ${r.name} delete error ${res.reason}`)
           }
@@ -1297,21 +1299,21 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
       )
       .then((res) => {
         if (res.status === StatusEnum.ok) {
-          logger.info(`${prefix} | User updated`)
+          logger.debug(`${prefix} | User updated`)
         } else {
           logger.error(`${prefix} | User update error ${res.reason}`)
         }
       })
-    logger.info(`${prefix} | User updated. Checking global vars`)
+    logger.debug(`${prefix} | User updated. Checking global vars`)
     const vars = await globalVarsDb.readData({ userId }, {}, {}, true)
-    logger.info(
+    logger.debug(
       `${prefix} | Found ${vars.data?.result?.length ?? 0} global vars`,
     )
     await updateRelatedBotsInVar(
       (vars.data?.result ?? []).map((v) => `${v._id}`),
     )
     processing.delete(userId)
-    logger.info(`${prefix} | End`)
+    logger.debug(`${prefix} | End`)
   } catch (e) {
     logger.error(`${prefix} | Error ${e}`)
     processing.delete(userId)
