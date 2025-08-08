@@ -4843,7 +4843,7 @@ function createComboBotHelper<
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
-        return this.handleWarn(`Bot settings does not contain ${symbol}`)
+        return this.handleDebug(`Bot settings does not contain ${symbol}`)
       }
       const ed = await this.getExchangeInfo(symbol)
       const skipRange = skip && !dynamic

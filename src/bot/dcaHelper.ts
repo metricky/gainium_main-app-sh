@@ -10500,7 +10500,7 @@ function createDCABotHelper<
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
-        return this.handleWarn(`Bot settings does not contain ${symbol}`)
+        return this.handleDebug(`Bot settings does not contain ${symbol}`)
       }
       if (
         this.pairs.has(symbol) &&
@@ -10510,7 +10510,7 @@ function createDCABotHelper<
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
-        return this.handleWarn(
+        return this.handleDebug(
           `Bot settings does not contain ${symbol}. Wont open new deal`,
         )
       }

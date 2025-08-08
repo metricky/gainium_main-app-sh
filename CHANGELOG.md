@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.1] – 2025-08-08
+### Changed
+- Changed log level for some logs
+
 ## [1.1.0] – 2025-08-07
 ### Changed
 - Updated log level logic
