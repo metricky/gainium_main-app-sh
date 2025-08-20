@@ -3,6 +3,7 @@
 ## [1.1.2] – 2025-08-20
 ### Changed
 - Reset stats when corresponding global variable changed
+- Optmization of get hedge bot deals stats
 
 ## [1.1.1] – 2025-08-08
 ### Changed

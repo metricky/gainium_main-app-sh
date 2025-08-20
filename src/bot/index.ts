@@ -10282,6 +10282,7 @@ class Bot<T extends UserSchema = UserSchema> {
       const stats = await this.comboDealsDb.aggregate([
         {
           $match: {
+            userId,
             $expr: { $in: ['$botId', bot.data.bots.map((b) => `${b._id}`)] },
             status: DCADealStatusEnum.closed,
           },
@@ -10419,6 +10420,7 @@ class Bot<T extends UserSchema = UserSchema> {
       const stats = await this.dcaDealsDb.aggregate([
         {
           $match: {
+            userId,
             $expr: { $in: ['$botId', bot.data.bots.map((b) => `${b._id}`)] },
             status: DCADealStatusEnum.closed,
           },
