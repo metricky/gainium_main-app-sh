@@ -4,6 +4,7 @@
 ### Changed
 - Reset stats when corresponding global variable changed
 - Optmization of get hedge bot deals stats
+- Minimum dynamic price deviation
 
 ## [1.1.1] – 2025-08-08
 ### Changed

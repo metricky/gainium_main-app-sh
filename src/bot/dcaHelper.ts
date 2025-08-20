@@ -2283,11 +2283,11 @@ function createDCABotHelper<
         return true
       }
 
-      const overValue =
+      let overValue =
         parseFloat(settings.dynamicPriceFilterOverValue || '') ||
         parseFloat(settings.dynamicPriceFilterDeviation || '') ||
         0
-      const underValue =
+      let underValue =
         parseFloat(settings.dynamicPriceFilterUnderValue || '') ||
         parseFloat(settings.dynamicPriceFilterDeviation || '') ||
         0
@@ -2300,6 +2300,8 @@ function createDCABotHelper<
       ) {
         return true
       }
+      overValue = Math.max(overValue, 0.5)
+      underValue = Math.max(underValue, 0.5)
       let lastData = (this.data?.lastPricesPerSymbol ?? []).find(
         (d) => d.symbol === symbol,
       )
