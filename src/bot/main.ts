@@ -28,6 +28,7 @@ import type {
   BaseReturn,
   PriceMessage,
   BybitHost,
+  BotSchema,
 } from '../../types'
 import {
   PositionSide,
@@ -874,6 +875,24 @@ class MainBot<T extends IMainBot> {
         this.handleLog(
           `Variable ${data._id} is not from indicators or dca custom or multi tp/sl, skip reload`,
         )
+        if (this.botType === BotType.combo || this.botType === BotType.dca) {
+          const resetStats =
+            findPath?.path.includes('orderSize') ||
+            findPath?.path.includes('baseOrderSize') ||
+            findPath?.path.includes('ordersCount') ||
+            findPath?.path.includes('volumeScale') ||
+            findPath?.path.includes('maxNumberOfOpenDeals')
+          if (resetStats || (this.data as BotSchema | null)?.stats) {
+            this.handleLog(
+              `Reset bot ${this.botId} stats after variable ${data._id} changed`,
+            )
+            this.updateData({
+              stats: null,
+              symbolStats: null,
+              resetStatsAfter: +new Date(),
+            })
+          }
+        }
       }
     } catch (e) {
       this.handleErrors(
