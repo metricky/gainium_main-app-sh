@@ -3,6 +3,8 @@
 ## [1.1.3] – 2025-08-25
 ### Changed
 - Increase parallel listeners in bot
+### Fixed
+- Bot not able to be closed if catch error deal not found
 
 ## [1.1.2] – 2025-08-20
 ### Changed

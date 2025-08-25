@@ -4505,6 +4505,9 @@ function createDCABotHelper<
       this.handleLog(`Сlose deal ${dealId}`)
       let findDeal = this.getDeal(dealId)
       if (!findDeal) {
+        if (this.closeAfterTpFilled && this.getOpenDeals().length === 0) {
+          this.stop()
+        }
         this.endMethod(_id)
         return this.handleWarn(`Deal ${dealId} not found when close`)
       }
