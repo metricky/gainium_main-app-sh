@@ -7074,7 +7074,7 @@ class Bot<T extends UserSchema = UserSchema> {
         async (payload) => {
           return (await this.processInternalApiCall(payload)) ?? StatusEnum.ok
         },
-        2,
+        100,
       )
     }
   }

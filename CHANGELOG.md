@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.3] – 2025-08-25
+### Changed
+- Increase parallel listeners in bot
+
 ## [1.1.2] – 2025-08-20
 ### Changed
 - Reset stats when corresponding global variable changed
