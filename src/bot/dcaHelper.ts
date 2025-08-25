@@ -1505,7 +1505,10 @@ function createDCABotHelper<
       const findDeal = this.getDeal(dealId)
       if (
         findDeal &&
-        findDeal.deal.status === DCADealStatusEnum.open &&
+        (findDeal.deal.status === DCADealStatusEnum.open ||
+          (findDeal.deal.status === DCADealStatusEnum.canceled &&
+            !findDeal.deal.profit.total &&
+            tpOrder)) &&
         this.data &&
         this.orders &&
         dealId

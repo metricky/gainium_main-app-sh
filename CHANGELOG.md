@@ -3,6 +3,7 @@
 ## [1.1.3] – 2025-08-25
 ### Changed
 - Increase parallel listeners in bot
+- Calcualte deal profit if deal canceled, but TP order is filled
 ### Fixed
 - Bot not able to be closed if catch error deal not found
 
