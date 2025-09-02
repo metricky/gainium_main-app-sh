@@ -35,6 +35,8 @@ import {
   HedgeBotSchema,
   GlobalVariablesSchema,
   BrokerCodesSchema,
+  HedgeComboBacktestingResult,
+  HedgeDCABacktestingResult,
 } from '../../types'
 import { SYNC_USER } from '../config'
 
@@ -150,6 +152,14 @@ const models = {
   brokerCodes: model<BrokerCodesSchema>(
     `${collections.brokerCodes}`,
     schema.brokerCodes,
+  ),
+  hedgeComboBacktest: model<HedgeComboBacktestingResult>(
+    `${collections.hedgeComboBacktest}`,
+    schema.hedgeComboBacktest,
+  ),
+  hedgeDcaBacktest: model<HedgeDCABacktestingResult>(
+    `${collections.hedgeDcaBacktest}`,
+    schema.hedgeDcaBacktest,
   ),
 }
 

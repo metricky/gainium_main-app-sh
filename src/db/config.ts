@@ -37,4 +37,6 @@ export const collections = {
   globalVariables: 'globalVariables',
   hedgeDCABot: 'hedgeDcaBots',
   brokerCodes: 'brokerCodes',
+  hedgeComboBacktest: 'hedgeComboBacktest',
+  hedgeDcaBacktest: 'hedgeDcaBacktest',
 }

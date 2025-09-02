@@ -52,6 +52,8 @@ import {
   MainBot,
   InputRequest,
   UserSchema,
+  HedgeComboBacktestingResult,
+  HedgeDCABacktestingResult,
 } from '../../types'
 import BotInstance from '../bot'
 import utils, { isFutures } from '../utils'
@@ -90,6 +92,8 @@ import {
   globalVarsDb,
   hedgeDCABotDb,
   userDb as _userDb,
+  hedgeComboBacktestDb,
+  hedgeDcaBacktestDb,
 } from '../db/dbInit'
 import { errorAccess } from './errorResponse'
 import {
@@ -3411,6 +3415,60 @@ const resolvers = <
         total: result.status === StatusEnum.ok ? result.data.count : 0,
       }
     },
+    getHedgeComboBacktests: async (
+      _parent: any,
+      { input }: { input?: DataGridFilterInput },
+      { token, req }: InputRequest,
+    ) => {
+      if (!req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const { filter, ...rest } = mapDataGridOptionsToMongoOptions(input)
+      const result = await hedgeComboBacktestDb.readData(
+        { userId: user.data._id.toString(), ...filter },
+        undefined,
+        { ...rest },
+        true,
+        true,
+      )
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? result.data.result : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+        total: result.status === StatusEnum.ok ? result.data.count : 0,
+      }
+    },
+    getHedgeDCABacktests: async (
+      _parent: any,
+      { input }: { input?: DataGridFilterInput },
+      { token, req }: InputRequest,
+    ) => {
+      if (!req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const { filter, ...rest } = mapDataGridOptionsToMongoOptions(input)
+      const result = await hedgeDcaBacktestDb.readData(
+        { userId: user.data._id.toString(), ...filter },
+        undefined,
+        { ...rest },
+        true,
+        true,
+      )
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? result.data.result : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+        total: result.status === StatusEnum.ok ? result.data.count : 0,
+      }
+    },
     getLeverageBracketsByUUID: async (
       _parent: any,
       { input: { uuid } }: { input: { uuid: string } },
@@ -3461,6 +3519,32 @@ const resolvers = <
       { input }: { input: { shareId: string } },
     ) => {
       const result = await comboBacktestDb.readData({ shareId: input.shareId })
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? result.data.result : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    getHedgeComboBacktestByShareId: async (
+      _parent: any,
+      { input }: { input: { shareId: string } },
+    ) => {
+      const result = await hedgeComboBacktestDb.readData({
+        shareId: input.shareId,
+      })
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? result.data.result : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    getHedgeDCABacktestByShareId: async (
+      _parent: any,
+      { input }: { input: { shareId: string } },
+    ) => {
+      const result = await hedgeDcaBacktestDb.readData({
+        shareId: input.shareId,
+      })
       return {
         status: result.status,
         data: result.status === StatusEnum.ok ? result.data.result : null,
@@ -6787,6 +6871,60 @@ const resolvers = <
         reason: result.status === StatusEnum.ok ? null : result.reason,
       }
     },
+    saveHedgeComboBacktest: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: HedgeComboBacktestingResult
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (!req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const result = await hedgeComboBacktestDb.createData({
+        ...input,
+        savePermanent: !!input.savePermanent,
+      })
+      return {
+        status: result.status,
+        data:
+          result.status === StatusEnum.ok ? result.data._id.toString() : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    saveHedgeDCABacktest: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: HedgeDCABacktestingResult
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (!req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const result = await hedgeDcaBacktestDb.createData({
+        ...input,
+        savePermanent: !!input.savePermanent,
+      })
+      return {
+        status: result.status,
+        data:
+          result.status === StatusEnum.ok ? result.data._id.toString() : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
     saveGridBacktest: async (
       _parent: any,
       {
@@ -6858,6 +6996,60 @@ const resolvers = <
         return user
       }
       const result = await comboBacktestDb.deleteManyData({
+        _id: { $in: input.ids },
+        userId: user.data._id.toString(),
+      })
+      return {
+        status: result.status,
+        data:
+          result.status === StatusEnum.ok ? 'Backtest result deleted' : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    deleteHedgeComboBacktests: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { ids: string[] }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const result = await hedgeComboBacktestDb.deleteManyData({
+        _id: { $in: input.ids },
+        userId: user.data._id.toString(),
+      })
+      return {
+        status: result.status,
+        data:
+          result.status === StatusEnum.ok ? 'Backtest result deleted' : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    deleteHedgeDCABacktests: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { ids: string[] }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const result = await hedgeDCABotDb.deleteManyData({
         _id: { $in: input.ids },
         userId: user.data._id.toString(),
       })
@@ -6992,7 +7184,11 @@ const resolvers = <
           ? backtestDb
           : type === BotType.combo
             ? comboBacktestDb
-            : gridBacktestDb
+            : type === BotType.hedgeCombo
+              ? hedgeComboBacktestDb
+              : type === BotType.hedgeDca
+                ? hedgeDcaBacktestDb
+                : gridBacktestDb
       const $set: { [x: string]: string | undefined } = {}
       if (typeof name !== 'undefined') {
         $set['settings.name'] = name
