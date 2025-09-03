@@ -7155,6 +7155,74 @@ const resolvers = <
         reason: result.status === StatusEnum.ok ? null : result.reason,
       }
     },
+    setHedgeComboBacktestPermanentStatus: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { id: string; savePermanent: boolean }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const { id, savePermanent } = input
+      const result = await hedgeComboBacktestDb.updateData(
+        {
+          _id: id,
+        },
+        { $set: { savePermanent: !!savePermanent } },
+      )
+      return {
+        status: result.status,
+        data:
+          result.status === StatusEnum.ok
+            ? savePermanent
+              ? 'Backtest saved permanently'
+              : `Backtest will be scheduled for deletion`
+            : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    setHedgeDCABacktestPermanentStatus: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { id: string; savePermanent: boolean }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const { id, savePermanent } = input
+      const result = await hedgeDcaBacktestDb.updateData(
+        {
+          _id: id,
+        },
+        { $set: { savePermanent: !!savePermanent } },
+      )
+      return {
+        status: result.status,
+        data:
+          result.status === StatusEnum.ok
+            ? savePermanent
+              ? 'Backtest saved permanently'
+              : `Backtest will be scheduled for deletion`
+            : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
     setBacktestTextFields: async (
       _parent: any,
       {
@@ -7191,7 +7259,11 @@ const resolvers = <
                 : gridBacktestDb
       const $set: { [x: string]: string | undefined } = {}
       if (typeof name !== 'undefined') {
-        $set['settings.name'] = name
+        if (type === BotType.hedgeDca || type === BotType.hedgeCombo) {
+          $set['long.settings.name'] = name
+        } else {
+          $set['settings.name'] = name
+        }
       }
       if (typeof note !== 'undefined') {
         $set.note = note
@@ -7539,6 +7611,82 @@ const resolvers = <
       }
       const shareId = v4()
       const result = await comboBacktestDb.updateData(filter, {
+        $set: { shareId },
+      })
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? shareId : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    shareHedgeComboBacktest: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { _id: string }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const filter = { _id: input._id, userId: user.data._id.toString() }
+      const get = await hedgeComboBacktestDb.readData(filter)
+      if (get.status === StatusEnum.notok) {
+        return get
+      }
+      if (get.data.result.shareId) {
+        return {
+          status: StatusEnum.ok,
+          data: get.data.result.shareId,
+          reason: null,
+        }
+      }
+      const shareId = v4()
+      const result = await hedgeComboBacktestDb.updateData(filter, {
+        $set: { shareId },
+      })
+      return {
+        status: result.status,
+        data: result.status === StatusEnum.ok ? shareId : null,
+        reason: result.status === StatusEnum.ok ? null : result.reason,
+      }
+    },
+    shareHedgeDCABacktest: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { _id: string }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const filter = { _id: input._id, userId: user.data._id.toString() }
+      const get = await hedgeDcaBacktestDb.readData(filter)
+      if (get.status === StatusEnum.notok) {
+        return get
+      }
+      if (get.data.result.shareId) {
+        return {
+          status: StatusEnum.ok,
+          data: get.data.result.shareId,
+          reason: null,
+        }
+      }
+      const shareId = v4()
+      const result = await hedgeDcaBacktestDb.updateData(filter, {
         $set: { shareId },
       })
       return {

@@ -2056,6 +2056,7 @@ const backtestFinancial = {
   stDevWinningTrade: Number,
   stDevLosingTrade: Number,
   stDownDevLosingTrade: Number,
+  unrealizedUsage: Number,
 }
 
 const backtestDuration = {
@@ -2080,6 +2081,7 @@ const backtestUsage = {
   maxTheoreticalUsage: Number,
   maxRealUsage: Number,
   avgRealUsage: Number,
+  maxTheoreticalUsageWithRate: Number,
 }
 
 const backtestNumerical = {

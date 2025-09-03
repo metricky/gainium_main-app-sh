@@ -754,6 +754,12 @@ export const BotSchema = /* GraphQL */ `
     setComboBacktestPermanentStatus(
       input: setBacktestPermanentStatusInput!
     ): saveBacktestsResponse
+    setHedgeComboBacktestPermanentStatus(
+      input: setBacktestPermanentStatusInput!
+    ): saveBacktestsResponse
+    setHedgeDCABacktestPermanentStatus(
+      input: setBacktestPermanentStatusInput!
+    ): saveBacktestsResponse
     setBacktestTextFields(
       input: setBacktestTextFieldsInput!
     ): saveBacktestsResponse
@@ -770,6 +776,8 @@ export const BotSchema = /* GraphQL */ `
     deleteGridBacktests(input: deleteBacktestsInput!): saveBacktestsResponse
     shareBacktest(input: shareBacktestInput): shareBacktestResponse
     shareComboBacktest(input: shareBacktestInput): shareBacktestResponse
+    shareHedgeComboBacktest(input: shareBacktestInput): shareBacktestResponse
+    shareHedgeDCABacktest(input: shareBacktestInput): shareBacktestResponse
     shareGridBacktest(input: String): shareBacktestResponse
     setArchive(input: setArchiveInput!): setArchiveResponse
     closeOrderOnExchange(
@@ -1378,6 +1386,7 @@ export const BotSchema = /* GraphQL */ `
     unrealizedPnL: Float
     unrealizedPnLUsd: Float
     unrealizedPnLPerc: Float
+    unrealizedUsage: Float
     maxDealProfit: Float
     maxDealLoss: Float
     maxDealProfitUsd: Float
@@ -1511,6 +1520,7 @@ export const BotSchema = /* GraphQL */ `
     stDevWinningTrade: Float
     stDevLosingTrade: Float
     stDownDevLosingTrade: Float
+    unrealizedUsage: Float
   }
   type durationBacktest {
     avgDealDuration: Float
@@ -1583,11 +1593,13 @@ export const BotSchema = /* GraphQL */ `
     maxTheoreticalUsage: Float
     maxRealUsage: Float
     avgRealUsage: Float
+    maxTheoreticalUsageWithRate: Float
   }
   input inputUsageBacktest {
     maxTheoreticalUsage: Float
     maxRealUsage: Float
     avgRealUsage: Float
+    maxTheoreticalUsageWithRate: Float
   }
   type numericalBacktest {
     all: Float
