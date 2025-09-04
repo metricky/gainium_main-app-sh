@@ -643,6 +643,12 @@ export const BotSchema = /* GraphQL */ `
     restartBot(input: restartBotInput!): restartResponse
     getBacktests(input: DataGridFilterInput): getBacktestsResponse
     getComboBacktests(input: DataGridFilterInput): getComboBacktestsResponse
+    getHedgeComboBacktests(
+      input: DataGridFilterInput
+    ): getHedgeComboBacktestsResponse
+    getHedgeDCABacktests(
+      input: DataGridFilterInput
+    ): getHedgeDCABacktestsResponse
     getGridBacktests(input: DataGridFilterInput): getGridBacktestsResponse
     getLeverageBracketsByUUID(
       input: getLeverageInput
@@ -653,6 +659,12 @@ export const BotSchema = /* GraphQL */ `
     getComboBacktestByShareId(
       input: getBacktestsInput!
     ): getComboBacktestByShareIdResponse
+    getHedgeComboBacktestByShareId(
+      input: getBacktestsInput!
+    ): getHedgeComboBacktestByShareIdResponse
+    getHedgeDCABacktestByShareId(
+      input: getBacktestsInput!
+    ): getHedgeDCABacktestByShareIdResponse
     getGridBacktestByShareId(
       input: getBacktestsInput!
     ): getGridBacktestByShareIdResponse
@@ -731,11 +743,21 @@ export const BotSchema = /* GraphQL */ `
     mergeComboDeals(input: mergeDealsInput!): mergeDealsResponse
     saveBacktest(input: backtestInput!): saveBacktestsResponse
     saveComboBacktest(input: comboBacktestInput!): saveBacktestsResponse
+    saveHedgeComboBacktest(
+      input: hedgeComboBacktestInput!
+    ): saveBacktestsResponse
+    saveHedgeDCABacktest(input: hedgeDCABacktestInput!): saveBacktestsResponse
     saveGridBacktest(input: gridBacktestInput!): saveBacktestsResponse
     setBacktestPermanentStatus(
       input: setBacktestPermanentStatusInput!
     ): saveBacktestsResponse
     setComboBacktestPermanentStatus(
+      input: setBacktestPermanentStatusInput!
+    ): saveBacktestsResponse
+    setHedgeComboBacktestPermanentStatus(
+      input: setBacktestPermanentStatusInput!
+    ): saveBacktestsResponse
+    setHedgeDCABacktestPermanentStatus(
       input: setBacktestPermanentStatusInput!
     ): saveBacktestsResponse
     setBacktestTextFields(
@@ -747,9 +769,15 @@ export const BotSchema = /* GraphQL */ `
     ): saveBacktestsResponse
     deleteBacktests(input: deleteBacktestsInput!): saveBacktestsResponse
     deleteComboBacktests(input: deleteBacktestsInput!): saveBacktestsResponse
+    deleteHedgeComboBacktests(
+      input: deleteBacktestsInput!
+    ): saveBacktestsResponse
+    deleteHedgeDCABacktests(input: deleteBacktestsInput!): saveBacktestsResponse
     deleteGridBacktests(input: deleteBacktestsInput!): saveBacktestsResponse
     shareBacktest(input: shareBacktestInput): shareBacktestResponse
     shareComboBacktest(input: shareBacktestInput): shareBacktestResponse
+    shareHedgeComboBacktest(input: shareBacktestInput): shareBacktestResponse
+    shareHedgeDCABacktest(input: shareBacktestInput): shareBacktestResponse
     shareGridBacktest(input: String): shareBacktestResponse
     setArchive(input: setArchiveInput!): setArchiveResponse
     closeOrderOnExchange(
@@ -1275,6 +1303,8 @@ export const BotSchema = /* GraphQL */ `
     long: comboSettings
     short: comboSettings
     sharedSettings: sharedSettings
+    created: Date
+    updated: Date
   }
   type getHedgeComboBotSettingsResponse implements BasicResponse {
     status: Status
@@ -1358,6 +1388,7 @@ export const BotSchema = /* GraphQL */ `
     unrealizedPnL: Float
     unrealizedPnLUsd: Float
     unrealizedPnLPerc: Float
+    unrealizedUsage: Float
     maxDealProfit: Float
     maxDealLoss: Float
     maxDealProfitUsd: Float
@@ -1491,6 +1522,7 @@ export const BotSchema = /* GraphQL */ `
     stDevWinningTrade: Float
     stDevLosingTrade: Float
     stDownDevLosingTrade: Float
+    unrealizedUsage: Float
   }
   type durationBacktest {
     avgDealDuration: Float
@@ -1563,11 +1595,13 @@ export const BotSchema = /* GraphQL */ `
     maxTheoreticalUsage: Float
     maxRealUsage: Float
     avgRealUsage: Float
+    maxTheoreticalUsageWithRate: Float
   }
   input inputUsageBacktest {
     maxTheoreticalUsage: Float
     maxRealUsage: Float
     avgRealUsage: Float
+    maxTheoreticalUsageWithRate: Float
   }
   type numericalBacktest {
     all: Float
@@ -1770,6 +1804,84 @@ export const BotSchema = /* GraphQL */ `
     periodicStats: [PeriodicStats]
     messages: [String]
   }
+  type hedgeComboBacktestHedgeResult {
+    financial: financialBacktest
+    duration: durationBacktest
+    usage: usageBacktest
+    numerical: numericalBacktest
+    ratios: ratiosBacktest
+  }
+  type hedgeComboBacktestSideResult {
+    noData: Boolean
+    maxLeverage: Float
+    financial: financialBacktest
+    duration: durationBacktest
+    usage: usageBacktest
+    numerical: numericalBacktest
+    ratios: ratiosBacktest
+    interval: String
+    quoteRate: Float
+    precision: Float
+    multi: Boolean
+    multiPairs: Float
+    symbolStats: [SymbolStats]
+    periodicStats: [PeriodicStats]
+    messages: [String]
+  }
+  type hedgeComboBacktestSideConfig {
+    symbol: String
+    baseAsset: String
+    quoteAsset: String
+    exchange: String
+    exchangeUUID: String
+    settings: ComboBotSettings
+    duration: durationBacktest
+  }
+  type hedgeDCABacktestSideConfig {
+    symbol: String
+    baseAsset: String
+    quoteAsset: String
+    exchange: String
+    exchangeUUID: String
+    settings: DCABotSettings
+    duration: durationBacktest
+  }
+  type hedgeComboBacktest {
+    _id: String
+    serverSide: Boolean
+    hedgeResult: hedgeComboBacktestHedgeResult
+    longResult: hedgeComboBacktestSideResult
+    shortResult: hedgeComboBacktestSideResult
+    long: hedgeComboBacktestSideConfig
+    short: hedgeComboBacktestSideConfig
+    userId: String
+    time: Float
+    savePermanent: Boolean
+    config: backtestConfig
+    archive: Boolean
+    author: String
+    sent: Boolean
+    note: String
+    shareId: String
+  }
+  type hedgeDCABacktest {
+    _id: String
+    serverSide: Boolean
+    hedgeResult: hedgeComboBacktestHedgeResult
+    longResult: hedgeComboBacktestSideResult
+    shortResult: hedgeComboBacktestSideResult
+    long: hedgeDCABacktestSideConfig
+    short: hedgeDCABacktestSideConfig
+    userId: String
+    time: Float
+    savePermanent: Boolean
+    config: backtestConfig
+    archive: Boolean
+    author: String
+    sent: Boolean
+    note: String
+    shareId: String
+  }
   type gridBacktest {
     serverSide: Boolean
     noData: Boolean
@@ -1830,6 +1942,18 @@ export const BotSchema = /* GraphQL */ `
     data: [comboBacktest]
     total: Float
   }
+  type getHedgeComboBacktestsResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [hedgeComboBacktest]
+    total: Float
+  }
+  type getHedgeDCABacktestsResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [hedgeDCABacktest]
+    total: Float
+  }
   type getBacktestByShareIdResponse implements BasicResponse {
     status: Status
     reason: String
@@ -1839,6 +1963,16 @@ export const BotSchema = /* GraphQL */ `
     status: Status
     reason: String
     data: comboBacktest
+  }
+  type getHedgeComboBacktestByShareIdResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: hedgeComboBacktest
+  }
+  type getHedgeDCABacktestByShareIdResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: hedgeDCABacktest
   }
   type getGridBacktestByShareIdResponse implements BasicResponse {
     status: Status
@@ -1977,6 +2111,80 @@ export const BotSchema = /* GraphQL */ `
     symbolStats: [SymbolStatsInput]
     periodicStats: [PeriodicStatsInput]
     messages: [String]
+  }
+  input hedgeComboBacktestInputHedgeResult {
+    financial: inputFinancialBacktest
+    duration: inputDurationBacktest
+    usage: inputUsageBacktest
+    numerical: inputNumericalBacktest
+    ratios: inputRatiosBacktest
+  }
+  input hedgeComboBacktestInputSideResult {
+    noData: Boolean
+    maxLeverage: Float
+    financial: inputFinancialBacktest
+    duration: inputDurationBacktest
+    usage: inputUsageBacktest
+    numerical: inputNumericalBacktest
+    ratios: inputRatiosBacktest
+    interval: String
+    quoteRate: Float
+    precision: Float
+    multi: Boolean
+    multiPairs: Float
+    symbolStats: [SymbolStatsInput]
+    periodicStats: [PeriodicStatsInput]
+    messages: [String]
+  }
+  input hedgeComboBacktestInputSideConfig {
+    symbol: String
+    baseAsset: String
+    quoteAsset: String
+    exchange: String
+    exchangeUUID: String
+    settings: createComboBotInput
+    duration: inputDurationBacktest
+  }
+  input hedgeDCABacktestInputSideConfig {
+    symbol: String
+    baseAsset: String
+    quoteAsset: String
+    exchange: String
+    exchangeUUID: String
+    settings: createDCABotInput
+    duration: inputDurationBacktest
+  }
+  input hedgeComboBacktestInput {
+    hedgeResult: hedgeComboBacktestInputHedgeResult
+    longResult: hedgeComboBacktestInputSideResult
+    shortResult: hedgeComboBacktestInputSideResult
+    long: hedgeComboBacktestInputSideConfig
+    short: hedgeComboBacktestInputSideConfig
+    userId: String
+    time: Float
+    savePermanent: Boolean
+    config: inputBacktestConfig
+    archive: Boolean
+    author: String
+    sent: Boolean
+    note: String
+    shareId: String
+  }
+  input hedgeDCABacktestInput {
+    hedgeResult: hedgeComboBacktestInputHedgeResult
+    longResult: hedgeComboBacktestInputSideResult
+    shortResult: hedgeComboBacktestInputSideResult
+    long: hedgeDCABacktestInputSideConfig
+    short: hedgeDCABacktestInputSideConfig
+    userId: String
+    time: Float
+    savePermanent: Boolean
+    config: inputBacktestConfig
+    archive: Boolean
+    author: String
+    sent: Boolean
+    note: String
+    shareId: String
   }
   input deleteBacktestsInput {
     ids: [String]

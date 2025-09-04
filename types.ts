@@ -3609,6 +3609,7 @@ export interface ComboBacktestingResult extends SchemaI {
     unrealizedPnL: number
     unrealizedPnLUsd: number
     unrealizedPnLPerc: number
+    unrealizedUsage: number
     maxDealProfit: number
     maxDealLoss: number
     maxDealProfitUsd: number
@@ -3656,6 +3657,7 @@ export interface ComboBacktestingResult extends SchemaI {
     maxTheoreticalUsage: number
     maxRealUsage: number
     avgRealUsage: number
+    maxTheoreticalUsageWithRate: number
   }
   numerical: {
     all: number
@@ -3710,6 +3712,172 @@ export interface ComboBacktestingResult extends SchemaI {
   symbolStats?: SymbolStats[]
   periodicStats?: PeriodicStats[]
   messages?: string[]
+}
+
+export type DCABacktestingResultShort = {
+  noData?: boolean
+  maxLeverage?: number
+  financial: {
+    netProfitTotal: number
+    netProfitTotalUsd: number
+    netProfitTotalPerc: number
+    grossProfit: number
+    grossProfitUsd: number
+    grossProfitPerc: number
+    grossLoss: number
+    grossLossUsd: number
+    grossLossPerc: number
+    avgGrossProfit: number
+    avgGrossProfitUsd: number
+    avgGrossProfitPerc: number
+    avgGrossLoss: number
+    avgGrossLossUsd: number
+    avgGrossLossPerc: number
+    avgNetProfit: number
+    avgNetProfitUsd: number
+    avgNetProfitPerc: number
+    avgNetDaily: number
+    avgNetDailyUsd: number
+    avgNetDailyPerc: number
+    unrealizedPnL: number
+    unrealizedPnLUsd: number
+    unrealizedPnLPerc: number
+    unrealizedUsage: number
+    maxDealProfit: number
+    maxDealLoss: number
+    maxDealProfitUsd: number
+    maxDealProfitPerc: number
+    maxDealLossUsd: number
+    maxDealLossPerc: number
+    maxRunUp: number
+    maxRunUpUsd: number
+    maxRunUpPerc: number
+    maxDrawDown: number
+    maxDrawDownUsd: number
+    maxDrawDownPerc: number
+    maxDrawDownEquityUsd?: number
+    maxDrawDownEquityPerc?: number
+    initialBalanceUsd: number
+    stDevWinningTrade?: number
+    stDevLosingTrade?: number
+    stDownDevLosingTrade?: number
+    annualizedReturn?: number
+  }
+  duration: {
+    avgDealDuration: number
+    avgSplitDealDuration: SplitTime
+    firstDataTime: number
+    lastDataTime: number
+    loadingDataTime: number
+    processingDataTime: number
+    botWorkingTime: SplitTime
+    maxDealDuration: SplitTime
+    maxDealDurationTime: number
+    periodName?: string
+    botWorkingTimeNumber: number
+    avgWinningTrade?: number
+    maxWinningTrade?: number
+    avgLosingTrade?: number
+    maxLosingTrade?: number
+  }
+  usage: {
+    maxTheoreticalUsageWithRate: number
+    maxTheoreticalUsage: number
+    maxRealUsage: number
+    avgRealUsage: number
+  }
+  numerical: {
+    all: number
+    profit: number
+    loss: number
+    open: number
+    closed: number
+    maxConsecutiveWins: number
+    maxConsecutiveLosses: number
+    maxDCATriggered: number
+    avgDCATriggered: number
+    dealsPerDay: number
+    coveredPriceDeviation: number
+    actualPriceDeviation: number
+    liquidationEvents?: number
+    confidenceGrade?: string
+    dealsForConfidenceGrade?: number
+    priceDeviation?: number
+  }
+  ratios: {
+    profitFactor: number
+    profitByPeriod: number[]
+    buyAndHold: {
+      value: number
+      valueUsd: number
+      perc: number
+    }
+    periodRatio: number
+    sharpe: number
+    sortino: number
+    cwr: number
+  }
+  interval: ExchangeIntervals
+  quoteRate: number
+  precision?: number
+  _id?: string
+  shared?: boolean
+  multi?: boolean
+  multiPairs?: number
+  symbolStats?: SymbolStats[]
+  periodicStats?: PeriodicStats[]
+  messages?: string[]
+}
+
+export interface _HedgeBacktestingResult {
+  longResult: DCABacktestingResultShort
+  shortResult: DCABacktestingResultShort
+  hedgeResult: Pick<
+    DCABacktestingResult,
+    'financial' | 'duration' | 'usage' | 'numerical' | 'ratios'
+  >
+}
+
+export type HedgeDCABacktestSideConfig = {
+  symbol: string
+  baseAsset: string
+  quoteAsset: string
+  exchange: ExchangeEnum
+  exchangeUUID: string
+  settings: DCABotSettings
+  duration: _HedgeBacktestingResult['longResult']['duration'] & {
+    periodName?: string
+  }
+}
+
+export type HedgeComboBacktestSideConfig = Omit<
+  HedgeDCABacktestSideConfig,
+  'settings'
+> & {
+  settings: ComboBotSettings
+}
+
+export type HedgeComboBacktestingResult = Omit<
+  HedgeDCABacktestingResult,
+  'long' | 'short'
+> & { long: HedgeComboBacktestSideConfig; short: HedgeComboBacktestSideConfig }
+
+export type HedgeDCABacktestingResult = {
+  serverSide?: boolean
+  hedgeResult: _HedgeBacktestingResult['hedgeResult']
+  longResult: _HedgeBacktestingResult['longResult']
+  shortResult: _HedgeBacktestingResult['shortResult']
+  long: HedgeDCABacktestSideConfig
+  short: HedgeDCABacktestSideConfig
+  userId: string
+  time: number
+  savePermanent: boolean
+  config: BacktestingSettings
+  archive?: boolean
+  author?: string
+  sent?: boolean
+  note?: string
+  shareId?: string
 }
 
 export interface GRIDBacktestingResult extends SchemaI {

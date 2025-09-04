@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.0] – 2025-09-04
+### Changed
+- Hedge backtest
+
 ## [1.1.3] – 2025-08-25
 ### Changed
 - Increase parallel listeners in bot
