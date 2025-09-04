@@ -2573,6 +2573,8 @@ class Bot<T extends UserSchema = UserSchema> {
         vars: userId !== bot.data.result.userId ? null : shortBot.vars,
       },
       sharedSettings: bot.data.result.sharedSettings,
+      created: bot.data.result.created,
+      updated: bot.data.result.updated,
     }
     return {
       status: StatusEnum.ok,

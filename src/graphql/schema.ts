@@ -1303,6 +1303,8 @@ export const BotSchema = /* GraphQL */ `
     long: comboSettings
     short: comboSettings
     sharedSettings: sharedSettings
+    created: Date
+    updated: Date
   }
   type getHedgeComboBotSettingsResponse implements BasicResponse {
     status: Status

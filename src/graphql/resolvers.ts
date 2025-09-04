@@ -7049,7 +7049,7 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const result = await hedgeDCABotDb.deleteManyData({
+      const result = await hedgeDcaBacktestDb.deleteManyData({
         _id: { $in: input.ids },
         userId: user.data._id.toString(),
       })
