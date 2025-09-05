@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.1] – 2025-09-05
+### Changed
+- Indicators (QFL fix)
+
 ## [1.2.0] – 2025-09-04
 ### Changed
 - Hedge backtest
