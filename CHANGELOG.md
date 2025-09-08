@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.2] – 2025-09-08
+### Changed
+- Indicators logs
+
 ## [1.2.1] – 2025-09-05
 ### Changed
 - Indicators (QFL fix)

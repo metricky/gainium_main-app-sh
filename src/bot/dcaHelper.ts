@@ -8791,6 +8791,14 @@ function createDCABotHelper<
       return `${i.indicatorAction}-${i.section}`
     }
 
+    private showIndicatorLogs() {
+      return (
+        (this.data?.settings.indicators ?? []).length *
+          (this.data?.settings.pair ?? []).length <
+        200
+      )
+    }
+
     private async sendIndicatorSubscribeEvent(
       data: BotParentIndicatorEventDto,
     ): Promise<{
@@ -8872,7 +8880,12 @@ function createDCABotHelper<
         >(rabbitIndicatorsKey, payload, timeout)
         if (result) {
           if (result.response) {
-            this.handleDebug(`Unsubscribed from indicator ${id}`)
+            const text = `Unsubscribed from indicator ${id}`
+            if (this.showIndicatorLogs()) {
+              this.handleLog(text)
+            } else {
+              this.handleDebug(text)
+            }
             if (this.redisSubIndicators && cb) {
               this.redisSubIndicators.unsubscribe(room, cb)
             }
@@ -9664,9 +9677,12 @@ function createDCABotHelper<
                     groupId: i.groupId,
                     is1d: rrOrAr || hasLower,
                   })
-                  this.handleDebug(
-                    `Bot connected to ${type} indicator. Id: ${id}, room: ${room}`,
-                  )
+                  const text = `Bot connected to ${type} indicator. Id: ${id}, room: ${room}`
+                  if (this.showIndicatorLogs()) {
+                    this.handleLog(text)
+                  } else {
+                    this.handleDebug(text)
+                  }
                   if (maChild) {
                     const indicatorChildData: BotParentIndicatorEventDto = {
                       data: {
@@ -9733,9 +9749,12 @@ function createDCABotHelper<
                       groupId: '',
                       is1d: false,
                     })
-                    this.handleDebug(
-                      `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
-                    )
+                    const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
+                    if (this.showIndicatorLogs()) {
+                      this.handleLog(text)
+                    } else {
+                      this.handleDebug(text)
+                    }
                   }
                   if (xoChild) {
                     const indicatorChildData: BotParentIndicatorEventDto = {
@@ -9807,9 +9826,12 @@ function createDCABotHelper<
                       groupId: '',
                       is1d: false,
                     })
-                    this.handleDebug(
-                      `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`,
-                    )
+                    const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
+                    if (this.showIndicatorLogs()) {
+                      this.handleLog(text)
+                    } else {
+                      this.handleDebug(text)
+                    }
                   }
                 } else {
                   this.handleDebug(
