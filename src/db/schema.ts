@@ -320,6 +320,7 @@ const Symbols = {
 }
 
 const botCommon = {
+  locked: Boolean,
   share: Boolean,
   shareId: String,
   pendingClose: Boolean,

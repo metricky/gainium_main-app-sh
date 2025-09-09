@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.3] – 2025-09-09
+### Changed
+- Lock the bot while loading
+
 ## [1.2.2] – 2025-09-08
 ### Changed
 - Indicators logs

@@ -1629,6 +1629,7 @@ export enum BotProgressCodeEnum {
 }
 
 export interface MainBot<T = BaseSettings> extends SchemaI {
+  locked?: boolean
   unrealizedProfit?: number
   pendingClose?: boolean
   pendingCloseTime?: number

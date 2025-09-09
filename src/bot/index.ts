@@ -5903,6 +5903,13 @@ class Bot<T extends UserSchema = UserSchema> {
         if (!getBot) {
           return this.entityNotFound('Bot')
         }
+        if (getBot.data.locked) {
+          return {
+            status: StatusEnum.notok,
+            reason: 'Cannot delete bot when it is locked',
+            data: null,
+          }
+        }
         if ((getBot.data?.dealsInBot.active ?? 0) > 0) {
           return {
             status: StatusEnum.notok,
@@ -5989,6 +5996,13 @@ class Bot<T extends UserSchema = UserSchema> {
         }
         if (!getBot) {
           return this.entityNotFound('Bot')
+        }
+        if (getBot.data.locked) {
+          return {
+            status: StatusEnum.notok,
+            reason: 'Cannot delete bot when it is locked',
+            data: null,
+          }
         }
         if ((getBot.data?.dealsInBot.active ?? 0) > 0) {
           return {
@@ -6085,6 +6099,13 @@ class Bot<T extends UserSchema = UserSchema> {
         }
         if (!getBot) {
           return this.entityNotFound('Bot')
+        }
+        if (getBot.data.bots.some((b) => b.locked)) {
+          return {
+            status: StatusEnum.notok,
+            reason: 'Cannot delete bot when it is locked',
+            data: null,
+          }
         }
         if (getBot.data?.bots?.some((b) => b.dealsInBot.active > 0)) {
           return {
@@ -6188,6 +6209,13 @@ class Bot<T extends UserSchema = UserSchema> {
         }
         if (!getBot) {
           return this.entityNotFound('Bot')
+        }
+        if (getBot.data.bots.some((b) => b.locked)) {
+          return {
+            status: StatusEnum.notok,
+            reason: 'Cannot delete bot when it is locked',
+            data: null,
+          }
         }
         if (getBot.data?.bots?.some((b) => b.dealsInBot.active > 0)) {
           return {

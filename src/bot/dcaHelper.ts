@@ -14162,6 +14162,9 @@ function createDCABotHelper<
       _skipAvailable?: boolean,
     ): Promise<void> {
       const _id = this.startMethod('start')
+      if (this.botId && this.db) {
+        await this.db.updateData({ _id: this.botId }, { locked: true })
+      }
       this.finishLoad = false
       this.startTime = +new Date()
       this.clearClassProperties(undefined, true)
@@ -14172,10 +14175,16 @@ function createDCABotHelper<
       )
       const wasServiceRestart = !!this.serviceRestart
       this.ignoreRestartStats = false
+      const unlock = async () => {
+        if (this.botId && this.db) {
+          await this.db.updateData({ _id: this.botId }, { locked: false })
+        }
+      }
       if (data) {
         this.serviceRestart = false
         this.loadingComplete = true
         this.finishLoad = true
+        await unlock()
         this.endMethod(_id)
         return await this.stop()
       }
@@ -14199,6 +14208,7 @@ function createDCABotHelper<
         this.loadingComplete = true
         this.serviceRestart = false
         this.finishLoad = true
+        await unlock()
         this.endMethod(_id)
         return await this.stop()
       }
@@ -14341,6 +14351,7 @@ function createDCABotHelper<
       this.finishLoad = true
       this.secondRestart = true
       this.reload = false
+      await unlock()
       this.endMethod(_id)
     }
 
