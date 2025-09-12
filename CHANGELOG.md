@@ -3,6 +3,7 @@
 ## [1.2.3] – 2025-09-12
 ### Fixed
 - Bot stop stuck
+- Bitget Linear base order calculation
 
 ## [1.2.3] – 2025-09-09
 ### Changed

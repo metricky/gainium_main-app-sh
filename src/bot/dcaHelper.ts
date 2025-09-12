@@ -6349,7 +6349,8 @@ function createDCABotHelper<
               settings.minTp &&
               (settings.dealCloseCondition === CloseConditionEnum.techInd ||
                 settings.dealCloseCondition === CloseConditionEnum.webhook))) &&
-          !this.futures
+          (!this.futures ||
+            (this.futures && this.data.exchange === ExchangeEnum.bitgetUsdm))
         ) {
           const perc =
             settings.dealCloseCondition === CloseConditionEnum.tp
