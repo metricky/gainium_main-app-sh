@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.3] – 2025-09-12
+### Fixed
+- Bot stop stuck
+
 ## [1.2.3] – 2025-09-09
 ### Changed
 - Lock the bot while loading

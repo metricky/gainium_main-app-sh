@@ -14392,7 +14392,7 @@ function createDCABotHelper<
           clearInterval(timer)
           this.openNewDealTimer.delete(id)
         }
-        const openDeals = this.getOpenDeals()
+        let openDeals = this.getOpenDeals()
         for (const d of openDeals) {
           await this.clearDealTimer(d.deal._id)
         }
@@ -14459,6 +14459,7 @@ function createDCABotHelper<
         if (closeType === CloseDCATypeEnum.cancel) {
           await this.afterBotStop()
         }
+        openDeals = this.getOpenDeals()
         if (
           this.data?.status === BotStatusEnum.closed &&
           openDeals.length === 0
