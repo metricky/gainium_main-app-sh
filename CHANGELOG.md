@@ -1,6 +1,10 @@
 # Changelog
 
-## [1.2.3] – 2025-09-12
+## [1.2.5] – 2025-09-15
+### Changed
+- TP order size calculation for long profit in base
+
+## [1.2.4] – 2025-09-12
 ### Fixed
 - Bot stop stuck
 - Bitget Linear base order calculation

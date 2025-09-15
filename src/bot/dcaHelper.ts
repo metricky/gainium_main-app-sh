@@ -1417,6 +1417,7 @@ function createDCABotHelper<
           orderSizeType,
           parentBotId: this.data.parentBotId,
           action: this.data.settings.futures ? undefined : this.data.action,
+          tags: ['TPrev150925'],
         } as any)
         if (record.status === StatusEnum.notok) {
           this.handleErrors(
@@ -11229,10 +11230,12 @@ function createDCABotHelper<
               boPrice
             : baseOrderSize)
         boQty = this.math.round(boQty, precision, !this.futures)
-        let qty =
-          (filledOrders.reduce((acc, v) => acc + +v.executedQty, 0) + boQty) *
-            (this.futures ? 1 : 1 - fee.taker) -
-          (deal?.tpHistory ?? ([] as unknown as NonNullable<Deal['tpHistory']>))
+        const _qty =
+          filledOrders.reduce((acc, v) => acc + +v.executedQty, 0) + boQty
+        const add =
+          -(
+            deal?.tpHistory ?? ([] as unknown as NonNullable<Deal['tpHistory']>)
+          )
             .filter(
               (dh) =>
                 !filledCloseOrders
@@ -11243,6 +11246,7 @@ function createDCABotHelper<
           filledCloseOrders.reduce((acc, v) => acc + +v.executedQty, 0) -
           pendingReduceFunds.base -
           reduceFundsBase
+        let qty = _qty * (this.futures ? 1 : 1 - fee.taker) + add
         let origQty = qty
         const sellDisplacement = fee.maker * 2
         const priceDisplacement = this.futures
@@ -11395,8 +11399,12 @@ function createDCABotHelper<
         }
         let qtyBase = tpOrder.qty
         if ((await this.profitBase(deal)) && this.botType !== BotType.combo) {
+          const hasNewRevTp = deal?.tags?.includes('TPrev150925')
           let qtyNew = this.math.round(
-            ((origQty * avgPrice) / tpOrder.price) * (1 - fee.maker),
+            (((long && !this.futures && hasNewRevTp ? _qty + add : origQty) *
+              avgPrice) /
+              tpOrder.price) *
+              (long && !this.futures && hasNewRevTp ? 1 : 1 - fee.maker),
             precision,
             !this.futures,
           )
