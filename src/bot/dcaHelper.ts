@@ -14456,6 +14456,9 @@ function createDCABotHelper<
           for (const i of this.indicators.values()) {
             await this.sendIndicatorUnsubscribeEvent(i.id, i.room, i.cb, false)
           }
+          if (this.data) {
+            this.data.status = BotStatusEnum.closed
+          }
         }
         if (this.timer) {
           clearTimeout(this.timer)

@@ -1058,10 +1058,10 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
     )
     if (activeDCABots.length) {
       logger.debug(
-        `${prefix} | Found ${activeDCABots.length} active bots, closing`,
+        `${prefix} | Found ${activeDCABots.length} active dca bots, closing`,
       )
       for (const b of activeDCABots) {
-        Bot.changeStatus(
+        await Bot.changeStatus(
           userId,
           {
             status: BotStatusEnum.closed,
@@ -1085,7 +1085,7 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
     )
     if (activeComboBots.length) {
       logger.debug(
-        `${prefix} | Found ${activeComboBots.length} active bots, closing`,
+        `${prefix} | Found ${activeComboBots.length} active combo bots, closing`,
       )
       for (const b of activeComboBots) {
         await Bot.changeStatus(

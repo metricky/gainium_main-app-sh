@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.7] – 2025-09-18
+### Fixed
+- Bot not stopped when reset account
+
 ## [1.2.6] – 2025-09-18
 ### Fixed
 - TP called multiple times with OR condition and multiple timeframes
