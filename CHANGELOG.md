@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.6] – 2025-09-18
+### Fixed
+- TP called multiple times with OR condition and multiple timeframes
+
 ## [1.2.5] – 2025-09-15
 ### Changed
 - TP order size calculation for long profit in base

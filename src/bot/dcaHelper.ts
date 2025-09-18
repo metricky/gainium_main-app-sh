@@ -2687,12 +2687,15 @@ function createDCABotHelper<
       _botId: string,
       symbol: string,
       lastData: IndicatorHistory,
+      interval?: ExchangeIntervals,
       section?: IndicatorSection,
       action?: IndicatorAction,
     ) {
       if (!this.data) {
         return
       }
+      const lastTime =
+        lastData.time + timeIntervalMap[interval ?? ExchangeIntervals.oneM]
       const settings = await this.getAggregatedSettings()
       const ps = settings.indicators
         ?.map((i) => this.indicators.get(`${i.uuid}@${symbol}`))
@@ -2813,10 +2816,8 @@ function createDCABotHelper<
             })
           }
         }
-        if (
-          (this.indicatorActions.closeDealSl.get(symbol) ?? 0) < lastData.time
-        ) {
-          this.indicatorActions.closeDealSl.set(symbol, lastData.time)
+        if ((this.indicatorActions.closeDealSl.get(symbol) ?? 0) < lastTime) {
+          this.indicatorActions.closeDealSl.set(symbol, lastTime)
           this.closeAllDeals(
             settings.closeDealType ?? CloseDCATypeEnum.closeByMarket,
             symbol,
@@ -2864,10 +2865,8 @@ function createDCABotHelper<
             })
           }
         }
-        if (
-          (this.indicatorActions.closeDealTp.get(symbol) ?? 0) < lastData.time
-        ) {
-          this.indicatorActions.closeDealTp.set(symbol, lastData.time)
+        if ((this.indicatorActions.closeDealTp.get(symbol) ?? 0) < lastTime) {
+          this.indicatorActions.closeDealTp.set(symbol, lastTime)
           this.closeAllDeals(
             settings.closeDealType ?? CloseDCATypeEnum.closeByMarket,
             symbol,
@@ -2912,8 +2911,8 @@ function createDCABotHelper<
             })
           }
         }
-        if ((this.indicatorActions.stopBot.get(symbol) ?? 0) < lastData.time) {
-          this.indicatorActions.stopBot.set(symbol, lastData.time)
+        if ((this.indicatorActions.stopBot.get(symbol) ?? 0) < lastTime) {
+          this.indicatorActions.stopBot.set(symbol, lastTime)
           await this.setStatus(
             this.botId,
             BotStatusEnum.closed,
@@ -2973,8 +2972,8 @@ function createDCABotHelper<
             })
           }
         }
-        if ((this.indicatorActions.startBot.get(symbol) ?? 0) < lastData.time) {
-          this.indicatorActions.startBot.set(symbol, lastData.time)
+        if ((this.indicatorActions.startBot.get(symbol) ?? 0) < lastTime) {
+          this.indicatorActions.startBot.set(symbol, lastTime)
           this.setStatus(
             this.botId,
             BotStatusEnum.open,
@@ -3052,9 +3051,7 @@ function createDCABotHelper<
             })
           }
         }
-        if (
-          (this.indicatorActions.startDeal.get(symbol) ?? 0) < lastData.time
-        ) {
+        if ((this.indicatorActions.startDeal.get(symbol) ?? 0) < lastTime) {
           const cbIfNotOpened = () => {
             for (const ai of allForSymbolOpen) {
               const i = this.indicators.get(ai.key)
@@ -3081,7 +3078,7 @@ function createDCABotHelper<
               }
             }
           }
-          this.indicatorActions.startDeal.set(symbol, lastData.time)
+          this.indicatorActions.startDeal.set(symbol, lastTime)
           if ((await this.filterCoinsByVolume(this.botId, [symbol])).length) {
             this.openNewDeal(
               this.botId,
@@ -3096,8 +3093,8 @@ function createDCABotHelper<
       }
       if (allOpenDCA.length) {
         const key = `${symbol}`
-        if ((this.indicatorActions.dcaOrder.get(key) ?? 0) < lastData.time) {
-          this.indicatorActions.dcaOrder.set(key, lastData.time)
+        if ((this.indicatorActions.dcaOrder.get(key) ?? 0) < lastTime) {
+          this.indicatorActions.dcaOrder.set(key, lastTime)
           for (const i of allOpenDCA) {
             const ind = this.indicators.get(i.key)
             if (ind) {
@@ -4077,6 +4074,7 @@ function createDCABotHelper<
           this.botId,
           symbol,
           lastData,
+          i?.interval,
           i?.section,
           i?.action,
         )
