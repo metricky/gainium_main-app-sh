@@ -60,6 +60,7 @@ import utils, { isPaper } from '../utils'
 import { decrypt } from '../utils/crypto'
 import logger from '../utils/logger'
 import { IdMute, IdMutex } from '../utils/mutex'
+import * as crypto from 'crypto'
 import {
   apiError,
   convertComboBotToObject,
@@ -152,6 +153,7 @@ const unknownOrderMessages = [
   'Order does not exist',
   'Order filled.',
   'Order cancelled.',
+  'unknownOid',
 ]
 
 const mutex = new IdMutex()
@@ -2743,7 +2745,8 @@ class MainBot<T extends IMainBot> {
     if (this.exchange && this.data) {
       if (
         this.data.exchange === ExchangeEnum.coinbase ||
-        this.kucoinFullFutures
+        this.kucoinFullFutures ||
+        this.hyperliquid
       ) {
         const local = this.getOrderFromMap(id)
         if (local) {
@@ -2806,7 +2809,9 @@ class MainBot<T extends IMainBot> {
       const getCount = this.canceledMap.get(id) ?? 0
       this.canceledMap.set(id, getCount + 1)
       const byId =
-        this.data?.exchange === ExchangeEnum.coinbase || this.kucoinFullFutures
+        this.data?.exchange === ExchangeEnum.coinbase ||
+        this.kucoinFullFutures ||
+        this.hyperliquid
       if ((this.canceledMap.get(id) ?? 0) > 10) {
         this.canceledMap.delete(id)
         const get = this.getOrderFromMap(id)
@@ -3185,6 +3190,9 @@ class MainBot<T extends IMainBot> {
   }
 
   getOrderId(prefix: string) {
+    if (this.hyperliquid) {
+      return '0x' + crypto.randomBytes(16).toString('hex')
+    }
     const maxLength = this.okx || this.mexc ? 32 : 36
     const exchangePrefix =
       this.okx ||
@@ -3666,6 +3674,7 @@ class MainBot<T extends IMainBot> {
       if (!this.ordersKeys.has(clientOrderId) && !msg.liquidation) {
         return
       }
+      // TODO: prepare order updates to hyperliquid
       if (clientOrderId.indexOf('GA-BR') !== -1) {
         return
       }
@@ -4222,8 +4231,15 @@ class MainBot<T extends IMainBot> {
       if (count === 0) {
         await this.saveOrderToDb(order)
       }
+      let symbol = order.symbol
+      if (this.hyperliquid) {
+        const ei = await this.getExchangeInfo(order.symbol)
+        if (ei?.code) {
+          symbol = ei.code
+        }
+      }
       const requestData = {
-        symbol: order.symbol,
+        symbol,
         side: order.side as
           | typeof OrderSideEnum.buy
           | typeof OrderSideEnum.sell,
@@ -4750,7 +4766,8 @@ class MainBot<T extends IMainBot> {
         symbol: order.symbol,
         newClientOrderId:
           this.data?.exchange === ExchangeEnum.coinbase ||
-          this.kucoinFullFutures
+          this.kucoinFullFutures ||
+          this.hyperliquid
             ? `${order.orderId}`
             : order.clientOrderId,
       })
@@ -5012,6 +5029,13 @@ class MainBot<T extends IMainBot> {
       this.data?.exchange === ExchangeEnum.okx ||
       this.data?.exchange === ExchangeEnum.okxInverse ||
       this.data?.exchange === ExchangeEnum.okxLinear
+    )
+  }
+
+  get hyperliquid() {
+    return (
+      this.data?.exchange === ExchangeEnum.hyperliquid ||
+      this.data?.exchange === ExchangeEnum.hyperliquidInverse
     )
   }
 

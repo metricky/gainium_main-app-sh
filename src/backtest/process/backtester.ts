@@ -217,6 +217,7 @@ class Backtester<T extends UserSchema> {
       return {
         ...prices,
         data: [
+          //@ts-expect-error exchange enum to be updated
           ...prices.data.map((p) => ({
             symbol: p.pair,
             price: p.price,
@@ -225,6 +226,7 @@ class Backtester<T extends UserSchema> {
           {
             symbol: 'USDTZUSD',
             price: usdRequest.data.result.usdRate,
+            //@ts-expect-error exchange enum to be updated
             exchange: 'all',
           },
         ],
@@ -379,8 +381,10 @@ class Backtester<T extends UserSchema> {
             : 'closed',
       },
       userFee: fee.data.result.maker,
+      //@ts-expect-error exchange enum to be updated
       symbols: pair.data.result,
       prices: prices.data,
+      //@ts-expect-error exchange enum to be updated
       exchange,
       interval: this.range?.interval ?? ExchangeIntervals.oneM,
       from: this.range?.from ?? now - 30 * 24 * 60 * 60 * 1000,
@@ -472,8 +476,10 @@ class Backtester<T extends UserSchema> {
             : 'closed',
       },
       userFee: fee.data.result.maker,
+      //@ts-expect-error exchange enum to be updated
       symbols: pair.data.result,
       prices: prices.data,
+      //@ts-expect-error exchange enum to be updated
       exchange,
       interval: this.range?.interval ?? ExchangeIntervals.oneM,
       from: this.range?.from ?? now - 30 * 24 * 60 * 60 * 1000,
@@ -566,8 +572,10 @@ class Backtester<T extends UserSchema> {
         sellDisplacement: settings.sellDisplacement * 100,
       },
       userFee: fee.data.result.maker,
+      //@ts-expect-error exchange enum to be updated
       symbols: pair.data.result,
       prices: prices.data,
+      //@ts-expect-error exchange enum to be updated
       exchange,
       interval: this.range?.interval ?? ExchangeIntervals.oneM,
       from: this.range?.from ?? now - 30 * 24 * 60 * 60 * 1000,

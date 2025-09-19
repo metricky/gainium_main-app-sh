@@ -123,6 +123,10 @@ export enum ExchangeEnum {
   paperBitgetCoinm = 'paperBitgetCoinm',
   mexc = 'mexc',
   paperMexc = 'paperMexc',
+  hyperliquid = 'hyperliquid',
+  hyperliquidInverse = 'hyperliquidInverse',
+  paperHyperliquid = 'paperHyperliquid',
+  paperHyperliquidInverse = 'paperHyperliquidInverse',
 }
 
 export enum BinanceFutures {
@@ -222,6 +226,7 @@ export enum OrderSideEnum {
 }
 
 export type ExchangeInfo = {
+  code?: string
   baseAsset: {
     minAmount: number
     maxAmount: number
@@ -2072,6 +2077,7 @@ export interface RateSchema extends SchemaI {
 export type ClearRateSchema = ExcludeDoc<RateSchema>
 
 export interface PairsSchema extends SchemaI {
+  code?: string
   pair: string
   exchange: ExchangeEnum
   baseAsset: {
@@ -4475,6 +4481,7 @@ export type IndicatorCreationConfig = {
   indicatorConfig: IndicatorConfig
   interval: ExchangeIntervals
   symbol: string
+  symbolCode?: string
   exchange: ExchangeEnum
   test?: boolean
   limitMultiplier?: number

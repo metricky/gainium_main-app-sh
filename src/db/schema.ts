@@ -722,6 +722,7 @@ const rateSchema: Schema<RateSchema> = new Schema({
 })
 
 const pairsSchema: Schema<PairsSchema> = new Schema({
+  code: String,
   pair: RequiredString,
   exchange: { ...RequiredString, enum: ExchangeEnum },
   baseAsset: {

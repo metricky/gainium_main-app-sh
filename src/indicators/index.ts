@@ -162,6 +162,13 @@ const filterIndicatorIntervalsByExchange = (
   if ([ExchangeEnum.mexc].includes(exchange)) {
     return intervals.filter((i) => mexcSupported.includes(i))
   }
+  if (
+    [ExchangeEnum.hyperliquid, ExchangeEnum.hyperliquidInverse].includes(
+      exchange,
+    )
+  ) {
+    return intervals.filter((i) => binanceSupported.includes(i))
+  }
   return intervals
 }
 
@@ -228,7 +235,11 @@ class InternalIndicatorsFactory {
   private splitPhrase = `@gainium@`
   protected workers: WorkerType[] = []
 
-  private pairs = new ExpirableMap(10 * 60 * 1000, true, true)
+  private pairs = new ExpirableMap<string, { code: string }>(
+    10 * 60 * 1000,
+    true,
+    true,
+  )
   private pairsSize = 0
   constructor() {
     this.handleWorkerTerminate = this.handleWorkerTerminate.bind(this)
@@ -510,7 +521,9 @@ class InternalIndicatorsFactory {
           `${this.loggerPrefix} Loaded ${this.pairsSize} pairs from db`,
         )
         for (const p of pairs.data?.result ?? []) {
-          this.pairs.set(`${p.pair}-${p.exchange}`, true)
+          this.pairs.set(`${p.pair}-${p.exchange}`, {
+            code: p.code || '',
+          })
         }
       }
     }
@@ -545,6 +558,7 @@ class InternalIndicatorsFactory {
     limitMultiplier?: number,
     load1d = false,
   ) {
+    let symbolCode: string | undefined
     try {
       if ([ExchangeEnum.mexc, ExchangeEnum.paperMexc].includes(exchange)) {
         return {
@@ -566,6 +580,20 @@ class InternalIndicatorsFactory {
             room: '',
             message: `Pair ${symbol} not found in exchange ${ex}`,
           }
+        }
+      }
+
+      if (
+        [
+          ExchangeEnum.hyperliquid,
+          ExchangeEnum.paperHyperliquid,
+          ExchangeEnum.hyperliquidInverse,
+          ExchangeEnum.paperHyperliquidInverse,
+        ].includes(exchange)
+      ) {
+        const find = this.pairs.get(`${symbol}-${exchange}`)
+        if (find?.code) {
+          symbolCode = find.code
         }
       }
 
@@ -608,6 +636,7 @@ class InternalIndicatorsFactory {
           test,
           limitMultiplier,
           load1d,
+          symbolCode,
         })
         const subscriberId = await this.subscribeIndicator(
           id,
