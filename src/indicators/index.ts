@@ -571,15 +571,14 @@ class InternalIndicatorsFactory {
       const ex = paperExchanges.includes(exchange)
         ? mapPaperToReal(exchange as PaperExchangeType)
         : exchange
-      if (!test) {
-        const pairExists = await this.checkPair(symbol, ex)
-        if (!pairExists) {
-          return {
-            id: '',
-            indicator: null,
-            room: '',
-            message: `Pair ${symbol} not found in exchange ${ex}`,
-          }
+
+      const pairExists = await this.checkPair(symbol, ex)
+      if (!pairExists) {
+        return {
+          id: '',
+          indicator: null,
+          room: '',
+          message: `Pair ${symbol} not found in exchange ${ex}`,
         }
       }
 

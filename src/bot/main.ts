@@ -1793,7 +1793,15 @@ class MainBot<T extends IMainBot> {
     }
   }
 
-  redisSubKeys(pairs: string[]) {
+  async redisSubKeys(pairs: string[]) {
+    if (this.hyperliquid) {
+      pairs = await Promise.all(
+        pairs.map(async (p) => {
+          const find = await this.getExchangeInfo(p)
+          return find?.code ?? p
+        }),
+      )
+    }
     return pairs.map(
       (p) =>
         `trade@${p}@${removePaperFormExchangeName(
@@ -1984,7 +1992,7 @@ class MainBot<T extends IMainBot> {
             this.pairs.add(first)
           }
           if (this.redisSubGlobal) {
-            for (const pair of this.redisSubKeys([...this.pairs])) {
+            for (const pair of await this.redisSubKeys([...this.pairs])) {
               this.redisSubGlobal.subscribe(pair, this.redisSubCb)
             }
           }

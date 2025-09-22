@@ -2671,7 +2671,7 @@ function createBotHelper<
 
         const usdRate = (await this.getUsdRate(pair)) || 1
         if (this.redisSubGlobal) {
-          for (const pair of this.redisSubKeys([...this.pairs])) {
+          for (const pair of await this.redisSubKeys([...this.pairs])) {
             this.redisSubGlobal.unsubscribe(pair, this.redisSubCb)
           }
         }
