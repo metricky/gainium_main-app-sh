@@ -2753,8 +2753,7 @@ class MainBot<T extends IMainBot> {
     if (this.exchange && this.data) {
       if (
         this.data.exchange === ExchangeEnum.coinbase ||
-        this.kucoinFullFutures ||
-        this.hyperliquid
+        this.kucoinFullFutures
       ) {
         const local = this.getOrderFromMap(id)
         if (local) {
@@ -3131,7 +3130,9 @@ class MainBot<T extends IMainBot> {
     }
     order.orderId = msg.orderId
     order.executedQty = this.coinm
-      ? order.exchange === ExchangeEnum.bybitCoinm || this.isBitget
+      ? order.exchange === ExchangeEnum.bybitCoinm ||
+        this.isBitget ||
+        this.hyperliquid
         ? msg.totalTradeQuantity
         : `${
             (+msg.totalTradeQuantity * (ed?.quoteAsset.minAmount ?? 1)) / price
@@ -3250,11 +3251,11 @@ class MainBot<T extends IMainBot> {
       (current.side === PositionSide.SHORT && side === 'SELL')
     ) {
       const totalQty =
-        this.coinm && !this.isBitget
+        this.coinm && !this.isBitget && !this.hyperliquid
           ? positionCoinm + orderCoinm
           : qty + current.qty
       current.price =
-        this.coinm && !this.isBitget
+        this.coinm && !this.isBitget && !this.hyperliquid
           ? this.math.round(
               (positionCoinm * current.price + orderCoinm * price) / totalQty,
               ed?.priceAssetPrecision,
@@ -3264,17 +3265,21 @@ class MainBot<T extends IMainBot> {
               ed?.priceAssetPrecision,
             )
       current.qty =
-        this.coinm && !this.isBitget
+        this.coinm && !this.isBitget && !this.hyperliquid
           ? (totalQty * (ed?.quoteAsset.minAmount ?? 1)) / current.price
           : totalQty
     } else {
       const totalQty =
-        this.coinm && !this.isBitget
+        this.coinm && !this.isBitget && !this.hyperliquid
           ? positionCoinm - orderCoinm
           : current.qty - qty
       if (
         Math.abs(totalQty) <= Number.EPSILON ||
-        (this.coinm && !this.isBitget && totalQty < 1 && current.qty !== 0)
+        (this.coinm &&
+          !this.isBitget &&
+          !this.hyperliquid &&
+          totalQty < 1 &&
+          current.qty !== 0)
       ) {
         current.qty = 0
         current.price = 0
@@ -3282,13 +3287,13 @@ class MainBot<T extends IMainBot> {
         current.side =
           order.side === 'BUY' ? PositionSide.LONG : PositionSide.SHORT
         current.qty =
-          this.coinm && !this.isBitget
+          this.coinm && !this.isBitget && !this.hyperliquid
             ? Math.abs((totalQty * (ed?.quoteAsset.minAmount ?? 1)) / price)
             : Math.abs(totalQty)
         current.price = price
       } else {
         current.qty =
-          this.coinm && !this.isBitget
+          this.coinm && !this.isBitget && !this.hyperliquid
             ? Math.abs(
                 (totalQty * (ed?.quoteAsset.minAmount ?? 1)) / current.price,
               )
@@ -4119,7 +4124,7 @@ class MainBot<T extends IMainBot> {
     let executedQty = order.executedQty
     if (ed) {
       executedQty =
-        this.coinm && !this.isBitget
+        this.coinm && !this.isBitget && !this.hyperliquid
           ? `${
               (+order.executedQty * (ed.quoteAsset.minAmount ?? 1)) /
               (+order.price || +(order.avgPrice ?? '0') || +order.origQty)
@@ -4252,7 +4257,7 @@ class MainBot<T extends IMainBot> {
           | typeof OrderSideEnum.buy
           | typeof OrderSideEnum.sell,
         quantity:
-          this.coinm && count === 0 && !this.isBitget
+          this.coinm && count === 0 && !this.isBitget && !this.hyperliquid
             ? Math.max(
                 1,
                 this.math.round(
@@ -4624,7 +4629,11 @@ class MainBot<T extends IMainBot> {
         let forceUpdate = false
         if (
           !skipBr &&
-          !(this.kucoinFutures || this.okx || (this.coinm && !this.isBitget)) &&
+          !(
+            this.kucoinFutures ||
+            this.okx ||
+            (this.coinm && !this.isBitget && !this.hyperliquid)
+          ) &&
           [ExchangeEnum.bybit].includes(this.data.exchange) &&
           requestData.type === 'MARKET' &&
           ['CANCELED'].includes(processedOrder.status) &&
@@ -5454,7 +5463,7 @@ class MainBot<T extends IMainBot> {
             }
           }
         }
-        if (this.coinm && !this.isBitget) {
+        if (this.coinm && !this.isBitget && !this.hyperliquid) {
           baseAmount = budget / +levels
         }
         const basicInitialGrid = initialGrids.find((g) =>
@@ -5576,7 +5585,7 @@ class MainBot<T extends IMainBot> {
                 )
               }
             }
-            if (this.coinm && !this.isBitget) {
+            if (this.coinm && !this.isBitget && !this.hyperliquid) {
               qty = this.math.round(baseAmount, quotedAssetPrecision)
             }
             if (qty < symbol.baseAsset.minAmount) {
@@ -5624,7 +5633,7 @@ class MainBot<T extends IMainBot> {
             if (grid.qty < symbol.baseAsset.minAmount) {
               grid.qty = symbol.baseAsset.minAmount
             }
-            if (this.coinm && !this.isBitget) {
+            if (this.coinm && !this.isBitget && !this.hyperliquid) {
               const cont = (grid.price * grid.qty) / symbol.quoteAsset.minAmount
               if (cont < 1) {
                 grid.qty = this.math.round(

@@ -3511,7 +3511,7 @@ function createComboBotHelper<
                 true,
               )
             }
-            if (settings.coinm && !this.isBitget) {
+            if (settings.coinm && !this.isBitget && !this.hyperliquid) {
               const cont = (price * qty) / symbol.quoteAsset.minAmount
               if (cont < 1) {
                 qty = this.math.round(
@@ -4119,7 +4119,7 @@ function createComboBotHelper<
             true,
           )
         }
-        if (this.coinm && !this.isBitget) {
+        if (this.coinm && !this.isBitget && !this.hyperliquid) {
           const cont = (price * qty) / ed.quoteAsset.minAmount
           if (cont < 1) {
             qty = this.math.round(
@@ -4256,7 +4256,7 @@ function createComboBotHelper<
             : findDeal?.deal?.settings.updatedComboAdjustments
               ? this.isLong && settings.profitCurrency === 'base'
               : this.isLong && settings.profitCurrency === 'quote'
-        if (this.coinm && !this.isBitget) {
+        if (this.coinm && !this.isBitget && !this.hyperliquid) {
           const ed = await this.getExchangeInfo(symbol)
           const qtyByGrids = this.math.round(
             (grids.reduce(
