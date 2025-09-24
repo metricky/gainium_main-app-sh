@@ -194,8 +194,8 @@ const getIntervalByExchange = (
     }
     case ExchangeEnum.hyperliquid:
     case ExchangeEnum.paperHyperliquid:
-    case ExchangeEnum.hyperliquidInverse:
-    case ExchangeEnum.paperHyperliquidInverse: {
+    case ExchangeEnum.hyperliquidLinear:
+    case ExchangeEnum.paperHyperliquidLinear: {
       return interval
     }
     default:

@@ -45,8 +45,8 @@ const providers = [
   ExchangeEnum.paperBitgetCoinm,
   ExchangeEnum.hyperliquid,
   ExchangeEnum.paperHyperliquid,
-  ExchangeEnum.hyperliquidInverse,
-  ExchangeEnum.paperHyperliquidInverse,
+  ExchangeEnum.hyperliquidLinear,
+  ExchangeEnum.paperHyperliquidLinear,
 ]
 
 export const updateExchangeInfo = async (ec = ExchangeChooser) => {

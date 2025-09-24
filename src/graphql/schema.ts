@@ -2272,8 +2272,8 @@ export const BotSchema = /* GraphQL */ `
     paperMexc
     hyperliquid
     paperHyperliquid
-    hyperliquidInverse
-    paperHyperliquidInverse
+    hyperliquidLinear
+    paperHyperliquidLinear
   }
   enum CurrencyEnum {
     quote

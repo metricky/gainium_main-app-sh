@@ -483,7 +483,7 @@ const connectUserBalance = async (
         }
         if (
           e.provider === ExchangeEnum.hyperliquid ||
-          e.provider === ExchangeEnum.hyperliquidInverse
+          e.provider === ExchangeEnum.hyperliquidLinear
         ) {
           setHyperliquidTimer(u, e.uuid, ec)
           continue
@@ -732,9 +732,9 @@ const exchanges = [
   ExchangeEnum.mexc,
   ExchangeEnum.paperMexc,
   ExchangeEnum.hyperliquid,
-  ExchangeEnum.hyperliquidInverse,
+  ExchangeEnum.hyperliquidLinear,
   ExchangeEnum.paperHyperliquid,
-  ExchangeEnum.paperHyperliquidInverse,
+  ExchangeEnum.paperHyperliquidLinear,
 ]
 
 const userSnapshots = async (

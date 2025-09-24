@@ -88,7 +88,6 @@ class BacktestWrapper {
   private async loadPrices(): Promise<Prices> {
     const prices = await this.exchange.getAllPrices()
     const exchange = this.data.data.exchange
-    //@ts-expect-error exchange enum to be updated
     return (prices.data ?? []).map((p) => ({
       price: p.price,
       symbol: p.pair,
@@ -108,7 +107,6 @@ class BacktestWrapper {
       {},
       true,
     )
-    //@ts-expect-error exchange enum to be updated
     return symbols.data?.result ?? []
   }
 
@@ -476,7 +474,6 @@ class BacktestWrapper {
       const instance =
         this.data.type === BotType.dca || this.data.type === BotType.combo
           ? new DCABackteser(
-              //@ts-expect-error exchange enum to be updated
               {
                 ...this.data.data,
                 prices,
@@ -486,8 +483,7 @@ class BacktestWrapper {
               this.handleBacktestLog,
             )
           : this.data.type === BotType.grid
-            ? //@ts-expect-error exchange enum to be updated
-              new GridBacktester({ ...this.data.data, prices, symbols: s })
+            ? new GridBacktester({ ...this.data.data, prices, symbols: s })
             : null
       if (instance) {
         this.handleLog('Instance created', 'debug')

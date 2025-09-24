@@ -124,9 +124,9 @@ export enum ExchangeEnum {
   mexc = 'mexc',
   paperMexc = 'paperMexc',
   hyperliquid = 'hyperliquid',
-  hyperliquidInverse = 'hyperliquidInverse',
+  hyperliquidLinear = 'hyperliquidLinear',
   paperHyperliquid = 'paperHyperliquid',
-  paperHyperliquidInverse = 'paperHyperliquidInverse',
+  paperHyperliquidLinear = 'paperHyperliquidLinear',
 }
 
 export enum BinanceFutures {

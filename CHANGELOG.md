@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.0] – 2025-09-24
+### Added
+- Hyperliquid integration
+
 ## [1.2.7] – 2025-09-18
 ### Fixed
 - Bot not stopped when reset account

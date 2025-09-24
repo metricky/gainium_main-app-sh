@@ -5145,10 +5145,10 @@ const resolvers = <
                                 ]
                               : tt === TradeTypeEnum.futures &&
                                   provider === ExchangeEnum.paperHyperliquid
-                                ? [ExchangeEnum.paperHyperliquidInverse]
+                                ? [ExchangeEnum.paperHyperliquidLinear]
                                 : tt === TradeTypeEnum.futures &&
                                     provider === ExchangeEnum.hyperliquid
-                                  ? [ExchangeEnum.hyperliquidInverse]
+                                  ? [ExchangeEnum.hyperliquidLinear]
                                   : [provider]) {
             const paper = paperExchanges.includes(provider)
             if (paper) {
@@ -5167,8 +5167,7 @@ const resolvers = <
                         e === ExchangeEnum.paperBybitCoinm ||
                         e === ExchangeEnum.paperOkxInverse ||
                         e === ExchangeEnum.paperKucoinInverse ||
-                        e === ExchangeEnum.paperBitgetCoinm ||
-                        e === ExchangeEnum.paperHyperliquidInverse)
+                        e === ExchangeEnum.paperBitgetCoinm)
                         ? 0.5
                         : stablecoinBalance || 50,
                     asset:
@@ -5177,8 +5176,7 @@ const resolvers = <
                         e === ExchangeEnum.paperBybitCoinm ||
                         e === ExchangeEnum.paperOkxInverse ||
                         e === ExchangeEnum.paperKucoinInverse ||
-                        e === ExchangeEnum.paperBitgetCoinm ||
-                        e === ExchangeEnum.paperHyperliquidInverse)
+                        e === ExchangeEnum.paperBitgetCoinm)
                         ? 'BTC'
                         : coinToTopUp || 'USDT',
                   },
@@ -5325,11 +5323,11 @@ const resolvers = <
                                         ].includes(e)
                                           ? 'SPOT'
                                           : [
-                                                ExchangeEnum.hyperliquidInverse,
-                                                ExchangeEnum.paperHyperliquidInverse,
+                                                ExchangeEnum.hyperliquidLinear,
+                                                ExchangeEnum.paperHyperliquidLinear,
                                               ].includes(e)
-                                            ? 'Inverse'
-                                            : 'Linear'
+                                            ? 'Linear'
+                                            : 'Inverse'
                                       })`
                                     : name,
                       key: encrypt(key),

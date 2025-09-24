@@ -4319,7 +4319,6 @@ function createDCABotHelper<
             this.combo &&
             this.coinm &&
             !this.isBitget &&
-            !this.hyperliquid &&
             Math.max(
               1,
               this.math.round(
@@ -11431,7 +11430,7 @@ function createDCABotHelper<
             +(bo?.price || 0) ||
             +(bo?.origPrice || 0) ||
             +(deal?.initialPrice || 0)
-          if (this.coinm && !this.isBitget && !this.hyperliquid && startPrice) {
+          if (this.coinm && !this.isBitget && startPrice) {
             const contracts = Math.max(
               1,
               this.math.round(
@@ -12283,7 +12282,7 @@ function createDCABotHelper<
                 true,
               )
             }
-            if (settings.coinm && !this.isBitget && !this.hyperliquid) {
+            if (settings.coinm && !this.isBitget) {
               const cont = (price * qty) / symbol.quoteAsset.minAmount
               if (cont < 1) {
                 qty = this.math.round(

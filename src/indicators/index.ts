@@ -163,7 +163,7 @@ const filterIndicatorIntervalsByExchange = (
     return intervals.filter((i) => mexcSupported.includes(i))
   }
   if (
-    [ExchangeEnum.hyperliquid, ExchangeEnum.hyperliquidInverse].includes(
+    [ExchangeEnum.hyperliquid, ExchangeEnum.hyperliquidLinear].includes(
       exchange,
     )
   ) {
@@ -586,8 +586,8 @@ class InternalIndicatorsFactory {
         [
           ExchangeEnum.hyperliquid,
           ExchangeEnum.paperHyperliquid,
-          ExchangeEnum.hyperliquidInverse,
-          ExchangeEnum.paperHyperliquidInverse,
+          ExchangeEnum.hyperliquidLinear,
+          ExchangeEnum.paperHyperliquidLinear,
         ].includes(exchange)
       ) {
         const find = this.pairs.get(`${symbol}-${exchange}`)
