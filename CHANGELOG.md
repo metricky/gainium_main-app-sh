@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.8] – 2025-09-26
+### Added
+- ENCRYPT_KEY
+
 ## [1.2.7] – 2025-09-18
 ### Fixed
 - Bot not stopped when reset account
