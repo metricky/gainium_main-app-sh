@@ -2210,6 +2210,34 @@ class MainBot<T extends IMainBot> {
                 this.data.settings.marginType === BotMarginTypeEnum.cross
                   ? MarginType.CROSSED
                   : MarginType.ISOLATED
+
+              if (
+                !zeroPosition ||
+                +zeroPosition.leverage !== this.currentLeverage
+              ) {
+                const leverageResult = await this.exchange.changeLeverage({
+                  symbol,
+                  leverage,
+                  side: !hedge?.data
+                    ? PositionSide.BOTH
+                    : requiredSide === 'LONG'
+                      ? PositionSide.LONG
+                      : PositionSide.SHORT,
+                })
+                if (leverageResult.status === StatusEnum.notok) {
+                  this.handleErrors(
+                    `Cannot set leverage for ${symbol}: ${leverageResult.reason}`,
+                    'load data',
+                  )
+                } else {
+                  this.handleLog(`Set leverage ${leverage} for ${symbol}`)
+                }
+              } else {
+                this.handleLog(
+                  `No need to change leverage ${leverage} for ${symbol}`,
+                )
+              }
+
               if (
                 !zeroPosition ||
                 (zeroPosition.isolated && margin === MarginType.CROSSED) ||
@@ -2236,33 +2264,6 @@ class MainBot<T extends IMainBot> {
               } else {
                 this.handleLog(
                   `No need to change margin ${margin} for ${symbol}`,
-                )
-              }
-
-              if (
-                !zeroPosition ||
-                +zeroPosition.leverage !== this.currentLeverage
-              ) {
-                const leverageResult = await this.exchange.changeLeverage({
-                  symbol,
-                  leverage,
-                  side: !hedge?.data
-                    ? PositionSide.BOTH
-                    : requiredSide === 'LONG'
-                      ? PositionSide.LONG
-                      : PositionSide.SHORT,
-                })
-                if (leverageResult.status === StatusEnum.notok) {
-                  this.handleErrors(
-                    `Cannot set leverage for ${symbol}: ${leverageResult.reason}`,
-                    'load data',
-                  )
-                } else {
-                  this.handleLog(`Set leverage ${leverage} for ${symbol}`)
-                }
-              } else {
-                this.handleLog(
-                  `No need to change leverage ${leverage} for ${symbol}`,
                 )
               }
             }
