@@ -599,6 +599,7 @@ export const errorDict = {
   Unauthorized: apiError,
   'cannot be less than': orderPrice,
   'Your api key has expired.': apiError,
+  'user or api wallet': apiError,
 }
 
 export const getErrorSubType = (string: string): string => {

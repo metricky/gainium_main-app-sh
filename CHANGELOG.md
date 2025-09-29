@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.2] – 2025-09-29
+### Change
+- Bot errors map updated
+
 ## [1.3.1] – 2025-09-26
 ### Change
 - Rearranged set leverage and set margin methods to fit hyperliquid logic
