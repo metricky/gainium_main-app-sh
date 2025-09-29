@@ -573,6 +573,7 @@ export const errorDict = {
   'highest price limit for buy': orderPrice,
   'Cannot start the bot because of hard limits': 'User limit',
   'Reduce order is rejected': futuresPosition,
+  'reduce only order would increase position': futuresPosition,
   'ReduceOnly Order': futuresPosition,
   'current position is zero, cannot fix reduce-only order qty': futuresPosition,
   'Reduce-only rule not satisfied': futuresPosition,

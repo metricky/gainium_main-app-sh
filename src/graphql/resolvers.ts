@@ -5143,7 +5143,13 @@ const resolvers = <
                                   ExchangeEnum.paperBitgetCoinm,
                                   ExchangeEnum.paperBitgetUsdm,
                                 ]
-                              : [provider]) {
+                              : tt === TradeTypeEnum.futures &&
+                                  provider === ExchangeEnum.paperHyperliquid
+                                ? [ExchangeEnum.paperHyperliquidLinear]
+                                : tt === TradeTypeEnum.futures &&
+                                    provider === ExchangeEnum.hyperliquid
+                                  ? [ExchangeEnum.hyperliquidLinear]
+                                  : [provider]) {
             const paper = paperExchanges.includes(provider)
             if (paper) {
               key = v4()
@@ -5305,7 +5311,25 @@ const resolvers = <
                                           ? 'Inverse'
                                           : 'Linear'
                                     })`
-                                  : name,
+                                  : tradeType === TradeTypeEnum.all &&
+                                      [
+                                        ExchangeEnum.hyperliquid,
+                                        ExchangeEnum.paperHyperliquid,
+                                      ].includes(provider)
+                                    ? `${name} (${
+                                        [
+                                          ExchangeEnum.hyperliquid,
+                                          ExchangeEnum.paperHyperliquid,
+                                        ].includes(e)
+                                          ? 'SPOT'
+                                          : [
+                                                ExchangeEnum.hyperliquidLinear,
+                                                ExchangeEnum.paperHyperliquidLinear,
+                                              ].includes(e)
+                                            ? 'Linear'
+                                            : 'Inverse'
+                                      })`
+                                    : name,
                       key: encrypt(key),
                       secret: encrypt(secret),
                       uuid,

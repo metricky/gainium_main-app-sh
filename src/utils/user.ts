@@ -71,6 +71,10 @@ const coinsbaseTimer: Map<string, NodeJS.Timeout> = new Map()
 
 const coinbaseTimeout = 10 * 60 * 1000
 
+const hyperliquidTimer: Map<string, NodeJS.Timeout> = new Map()
+
+const hyperliquidTimeout = 10 * 60 * 1000
+
 const balanceMsg: (UserDataStreamEvent & {
   userId: string
   e: ExchangeInUser
@@ -429,6 +433,29 @@ const setCoinbaseTimer = async (
   )
 }
 
+const setHyperliquidTimer = async (
+  user: ClearUserSchema,
+  uuid: string,
+  ec = ExchangeChooser,
+) => {
+  const key = `${uuid}`
+  const get = hyperliquidTimer.get(key)
+  if (get) {
+    clearInterval(get)
+  }
+  logger.debug(`Hyperliquid timer set for ${uuid}`)
+  hyperliquidTimer.set(
+    key,
+    setInterval(
+      () => (
+        logger.debug(`Hyperliquid timer trigger for ${uuid}`),
+        updateUserBalance(user, uuid, undefined, ec)
+      ),
+      hyperliquidTimeout,
+    ),
+  )
+}
+
 const connectUserBalance = async (
   id?: string,
   uuid?: string,
@@ -452,6 +479,13 @@ const connectUserBalance = async (
       for (const e of u.exchanges.filter((ue) => !ue.linkedTo)) {
         if (e.provider === ExchangeEnum.coinbase) {
           setCoinbaseTimer(u, e.uuid, ec)
+          continue
+        }
+        if (
+          e.provider === ExchangeEnum.hyperliquid ||
+          e.provider === ExchangeEnum.hyperliquidLinear
+        ) {
+          setHyperliquidTimer(u, e.uuid, ec)
           continue
         }
         const find = streams.find((s) => s.uuid === e.uuid)
@@ -508,6 +542,12 @@ const disconnectUserBalance = async (uuid: string) => {
   if (getTimer) {
     clearInterval(getTimer)
     coinsbaseTimer.delete(uuid)
+  }
+
+  const getTimerHyperliquid = hyperliquidTimer.get(uuid)
+  if (getTimerHyperliquid) {
+    clearInterval(getTimerHyperliquid)
+    hyperliquidTimer.delete(uuid)
   }
 
   if (streamsSet.has(uuid)) {
@@ -691,6 +731,10 @@ const exchanges = [
   ExchangeEnum.paperBitgetCoinm,
   ExchangeEnum.mexc,
   ExchangeEnum.paperMexc,
+  ExchangeEnum.hyperliquid,
+  ExchangeEnum.hyperliquidLinear,
+  ExchangeEnum.paperHyperliquid,
+  ExchangeEnum.paperHyperliquidLinear,
 ]
 
 const userSnapshots = async (

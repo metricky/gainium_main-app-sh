@@ -60,6 +60,7 @@ import utils, { isPaper } from '../utils'
 import { decrypt } from '../utils/crypto'
 import logger from '../utils/logger'
 import { IdMute, IdMutex } from '../utils/mutex'
+import * as crypto from 'crypto'
 import {
   apiError,
   convertComboBotToObject,
@@ -152,6 +153,8 @@ const unknownOrderMessages = [
   'Order does not exist',
   'Order filled.',
   'Order cancelled.',
+  'unknownOid',
+  'order was never placed, already canceled, or filled',
 ]
 
 const mutex = new IdMutex()
@@ -1791,7 +1794,15 @@ class MainBot<T extends IMainBot> {
     }
   }
 
-  redisSubKeys(pairs: string[]) {
+  async redisSubKeys(pairs: string[]) {
+    if (this.hyperliquid) {
+      pairs = await Promise.all(
+        pairs.map(async (p) => {
+          const find = await this.getExchangeInfo(p)
+          return find?.code ?? p
+        }),
+      )
+    }
     return pairs.map(
       (p) =>
         `trade@${p}@${removePaperFormExchangeName(
@@ -1982,7 +1993,7 @@ class MainBot<T extends IMainBot> {
             this.pairs.add(first)
           }
           if (this.redisSubGlobal) {
-            for (const pair of this.redisSubKeys([...this.pairs])) {
+            for (const pair of await this.redisSubKeys([...this.pairs])) {
               this.redisSubGlobal.subscribe(pair, this.redisSubCb)
             }
           }
@@ -2199,6 +2210,34 @@ class MainBot<T extends IMainBot> {
                 this.data.settings.marginType === BotMarginTypeEnum.cross
                   ? MarginType.CROSSED
                   : MarginType.ISOLATED
+
+              if (
+                !zeroPosition ||
+                +zeroPosition.leverage !== this.currentLeverage
+              ) {
+                const leverageResult = await this.exchange.changeLeverage({
+                  symbol,
+                  leverage,
+                  side: !hedge?.data
+                    ? PositionSide.BOTH
+                    : requiredSide === 'LONG'
+                      ? PositionSide.LONG
+                      : PositionSide.SHORT,
+                })
+                if (leverageResult.status === StatusEnum.notok) {
+                  this.handleErrors(
+                    `Cannot set leverage for ${symbol}: ${leverageResult.reason}`,
+                    'load data',
+                  )
+                } else {
+                  this.handleLog(`Set leverage ${leverage} for ${symbol}`)
+                }
+              } else {
+                this.handleLog(
+                  `No need to change leverage ${leverage} for ${symbol}`,
+                )
+              }
+
               if (
                 !zeroPosition ||
                 (zeroPosition.isolated && margin === MarginType.CROSSED) ||
@@ -2225,33 +2264,6 @@ class MainBot<T extends IMainBot> {
               } else {
                 this.handleLog(
                   `No need to change margin ${margin} for ${symbol}`,
-                )
-              }
-
-              if (
-                !zeroPosition ||
-                +zeroPosition.leverage !== this.currentLeverage
-              ) {
-                const leverageResult = await this.exchange.changeLeverage({
-                  symbol,
-                  leverage,
-                  side: !hedge?.data
-                    ? PositionSide.BOTH
-                    : requiredSide === 'LONG'
-                      ? PositionSide.LONG
-                      : PositionSide.SHORT,
-                })
-                if (leverageResult.status === StatusEnum.notok) {
-                  this.handleErrors(
-                    `Cannot set leverage for ${symbol}: ${leverageResult.reason}`,
-                    'load data',
-                  )
-                } else {
-                  this.handleLog(`Set leverage ${leverage} for ${symbol}`)
-                }
-              } else {
-                this.handleLog(
-                  `No need to change leverage ${leverage} for ${symbol}`,
                 )
               }
             }
@@ -3135,7 +3147,9 @@ class MainBot<T extends IMainBot> {
       : msg.eventType === 'executionReport'
         ? msg.totalQuoteTradeQuantity
         : `${(+msg.averagePrice || +msg.price) * +order.executedQty}`
-
+    if (this.hyperliquid) {
+      order.type = find.type
+    }
     if (`${price}` !== order.price && price !== 0) {
       order.type === OrderTypeEnum.market
     }
@@ -3185,6 +3199,9 @@ class MainBot<T extends IMainBot> {
   }
 
   getOrderId(prefix: string) {
+    if (this.hyperliquid) {
+      return '0x' + crypto.randomBytes(16).toString('hex')
+    }
     const maxLength = this.okx || this.mexc ? 32 : 36
     const exchangePrefix =
       this.okx ||
@@ -3666,10 +3683,16 @@ class MainBot<T extends IMainBot> {
       if (!this.ordersKeys.has(clientOrderId) && !msg.liquidation) {
         return
       }
-      if (clientOrderId.indexOf('GA-BR') !== -1) {
+      const isHyperliquidOrder =
+        clientOrderId.startsWith('0x') &&
+        clientOrderId.length === 34 &&
+        this.hyperliquid
+
+      if (clientOrderId.indexOf('GA-BR') !== -1 && !isHyperliquidOrder) {
         return
       }
       if (
+        !isHyperliquidOrder &&
         !msg.liquidation &&
         ((this.botType === BotType.grid &&
           !clientOrderId.includes('GRID-TP') &&
@@ -3808,14 +3831,18 @@ class MainBot<T extends IMainBot> {
         ) {
           price = usdRequest.data.result.usdRate
         }
-        const rate = findUSDRate(quote, [
-          ...prices.data.map((p) => ({ ...p, exchange: 'all' })),
-          {
-            pair: 'USDTZUSD',
-            price,
-            exchange: 'all',
-          },
-        ])
+        const rate = findUSDRate(
+          quote,
+          [
+            ...prices.data.map((p) => ({ ...p, exchange: 'all' })),
+            {
+              pair: 'USDTZUSD',
+              price,
+              exchange: 'all',
+            },
+          ],
+          this.data?.exchange,
+        )
         if (rate) {
           this.setLastUsdData(key, { price: rate, time: +new Date() })
         }
@@ -5012,6 +5039,13 @@ class MainBot<T extends IMainBot> {
       this.data?.exchange === ExchangeEnum.okx ||
       this.data?.exchange === ExchangeEnum.okxInverse ||
       this.data?.exchange === ExchangeEnum.okxLinear
+    )
+  }
+
+  get hyperliquid() {
+    return (
+      this.data?.exchange === ExchangeEnum.hyperliquid ||
+      this.data?.exchange === ExchangeEnum.hyperliquidLinear
     )
   }
 

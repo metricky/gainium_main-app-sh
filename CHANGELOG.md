@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1] – 2025-09-26
+### Change
+- Rearranged set leverage and set margin methods to fit hyperliquid logic
+
+## [1.3.0] – 2025-09-26
+### Added
+- Hyperliquid integration
+  
 ## [1.2.8] – 2025-09-26
 ### Added
 - ENCRYPT_KEY

@@ -85,8 +85,14 @@ const findUSDRate = (asset: string, _prices: Prices, exchange?: string) => {
   if (asset === 'USD') {
     return 1
   }
-  let usdRate = Number(asset === 'USDT')
-  let usdtRate = Number(asset === 'USDT')
+  let usdRate = Number(
+    asset === 'USDT' ||
+      (exchange?.toLowerCase().includes('hyperliquid') && asset === 'USDC'),
+  )
+  let usdtRate = Number(
+    asset === 'USDT' ||
+      (exchange?.toLowerCase().includes('hyperliquid') && asset === 'USDC'),
+  )
   if (asset !== 'USDT') {
     const findUsdtRate = findRate(asset, 'USDT', prices)
     if (findUsdtRate) {
@@ -155,6 +161,7 @@ export const getRealFutures = () => [
   ExchangeEnum.kucoinLinear,
   ExchangeEnum.bitgetCoinm,
   ExchangeEnum.bitgetUsdm,
+  ExchangeEnum.hyperliquidLinear,
 ]
 
 export const getRealCoinm = () => [
@@ -173,6 +180,7 @@ export const getRealSpot = () => [
   ExchangeEnum.coinbase,
   ExchangeEnum.bitget,
   ExchangeEnum.mexc,
+  ExchangeEnum.hyperliquid,
 ]
 
 export const isFutures = (exchange: ExchangeEnum) => {
@@ -197,6 +205,8 @@ export const isFutures = (exchange: ExchangeEnum) => {
     ExchangeEnum.paperBitgetCoinm,
     ExchangeEnum.bitgetUsdm,
     ExchangeEnum.paperBitgetUsdm,
+    ExchangeEnum.hyperliquidLinear,
+    ExchangeEnum.paperHyperliquidLinear,
   ].includes(exchange)
 }
 
@@ -235,6 +245,8 @@ export const isPaper = (exchange: ExchangeEnum) => {
     ExchangeEnum.paperBitgetUsdm,
     ExchangeEnum.paperBitgetCoinm,
     ExchangeEnum.paperMexc,
+    ExchangeEnum.paperHyperliquid,
+    ExchangeEnum.paperHyperliquidLinear,
   ].includes(exchange)
 }
 

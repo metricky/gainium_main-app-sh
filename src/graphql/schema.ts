@@ -42,6 +42,7 @@ export const BasicSchema = /* GraphQL */ `
     name: String
   }
   type pairInfo {
+    code: String
     pair: String
     exchange: Exchange
     baseAsset: baseAssetPair
@@ -72,6 +73,7 @@ export const BasicSchema = /* GraphQL */ `
     name: String
   }
   type pairDetailedInfo {
+    code: String
     pair: String
     exchange: Exchange
     baseAsset: baseAssetInPair
@@ -2268,6 +2270,10 @@ export const BotSchema = /* GraphQL */ `
     paperBitgetCoinm
     mexc
     paperMexc
+    hyperliquid
+    paperHyperliquid
+    hyperliquidLinear
+    paperHyperliquidLinear
   }
   enum CurrencyEnum {
     quote

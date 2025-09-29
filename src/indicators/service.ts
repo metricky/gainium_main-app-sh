@@ -192,6 +192,12 @@ const getIntervalByExchange = (
     case ExchangeEnum.paperMexc: {
       return mexcKlineIntervals[interval]
     }
+    case ExchangeEnum.hyperliquid:
+    case ExchangeEnum.paperHyperliquid:
+    case ExchangeEnum.hyperliquidLinear:
+    case ExchangeEnum.paperHyperliquidLinear: {
+      return interval
+    }
     default:
       return interval
   }
@@ -260,6 +266,7 @@ class InternalIndicator {
   private length: number
   private indicatorName: string
   private symbol: string
+  private symbolCode?: string
   private interval: ExchangeIntervals
   private exchange: ExchangeEnum
   private lastCandleTimestamp = 0
@@ -297,6 +304,7 @@ class InternalIndicator {
     interval: _interval,
     symbol: _symbol,
     exchange: _exchange,
+    symbolCode,
   }: IndicatorCreationConfig) {
     this.length = 0
     this.indicatorName =
@@ -757,6 +765,7 @@ class InternalIndicator {
     this.period = intervalMap[_interval]
     this.start = 0
     this.symbol = _symbol
+    this.symbolCode = symbolCode
     this.interval = _interval
     this.exchange = _exchange
     this.test = !!test
@@ -1434,7 +1443,7 @@ class InternalIndicator {
   private getRedisChannelName() {
     const exchange = removePaperFormExchangeName(this.exchange)
     const interval = getIntervalByExchange(this.exchange, this.interval)
-    return `${this.symbol}@${exchange}@${interval}Candle`
+    return `${this.symbolCode || this.symbol}@${exchange}@${interval}Candle`
   }
 
   private redisCb(msg: string) {
@@ -1461,7 +1470,7 @@ class InternalIndicator {
       this.redisClient.subscribe(serviceLogRedis, this.processServiceLog)
     }
     this.rabbitClient.send('candlesRequests', {
-      symbol: this.symbol,
+      symbol: this.symbolCode || this.symbol,
       exchange,
       interval,
     })

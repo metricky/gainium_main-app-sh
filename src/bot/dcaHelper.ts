@@ -1124,7 +1124,7 @@ function createDCABotHelper<
           }
           if (newSymbols.length) {
             if (this.redisSubGlobal) {
-              for (const pair of this.redisSubKeys(newSymbols)) {
+              for (const pair of await this.redisSubKeys(newSymbols)) {
                 this.redisSubGlobal.subscribe(pair, this.redisSubCb)
               }
             }
@@ -2069,7 +2069,7 @@ function createDCABotHelper<
           this.unsubscribeFromExchangeInfo(symbol)
           this.unsubscribeFromUserFee(symbol)
           if (this.redisSubGlobal) {
-            for (const pair of this.redisSubKeys([symbol])) {
+            for (const pair of await this.redisSubKeys([symbol])) {
               this.redisSubGlobal.unsubscribe(pair, this.redisSubCb)
             }
           }
@@ -14447,7 +14447,7 @@ function createDCABotHelper<
         }
         if (!closeType || openDeals.length === 0) {
           if (this.redisSubGlobal) {
-            for (const pair of this.redisSubKeys([...this.pairs])) {
+            for (const pair of await this.redisSubKeys([...this.pairs])) {
               this.redisSubGlobal.unsubscribe(pair, this.redisSubCb)
             }
           }
