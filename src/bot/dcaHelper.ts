@@ -3118,6 +3118,17 @@ function createDCABotHelper<
       this.saveIndicatorsData(this.botId)
     }
 
+    private convertNullToNan(obj: Record<string, unknown>) {
+      for (const key in obj) {
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          this.convertNullToNan(obj[key] as Record<string, unknown>)
+        } else if (obj[key] === null) {
+          obj[key] = NaN
+        }
+      }
+      return obj
+    }
+
     /**
      * Check indicator condition
      */
@@ -3771,8 +3782,12 @@ function createDCABotHelper<
                 }
                 if (type === IndicatorEnum.pp) {
                   const [ld, pd] = sortedByTime
-                  const lastData = ld.value as PriorPivotResult
-                  const prevData = pd.value as PriorPivotResult
+                  const lastData = this.convertNullToNan(
+                    ld.value as PriorPivotResult,
+                  ) as PriorPivotResult
+                  const prevData = this.convertNullToNan(
+                    pd.value as PriorPivotResult,
+                  ) as PriorPivotResult
                   if (!ppType || ppType === ppValueTypeEnum.price) {
                     last = lastData.price
                     prev = prevData.price

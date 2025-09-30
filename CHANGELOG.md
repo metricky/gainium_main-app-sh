@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.3] – 2025-09-30
+### Fixed
+- Market structure price actions
+
 ## [1.3.2] – 2025-09-29
 ### Change
 - Bot errors map updated
