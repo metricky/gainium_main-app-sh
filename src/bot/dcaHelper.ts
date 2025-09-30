@@ -138,6 +138,7 @@ export type FullDeal<Deal extends CleanDCADealsSchema> = {
   previousOrders: Grid[]
   closeBySl: boolean
   notCheckSl: boolean
+  closeByTp: boolean
 }
 
 const mutex = new IdMutex()
@@ -341,6 +342,7 @@ function createDCABotHelper<
     dealsForIndicatorUnpnl: Map<string, DealIndicatorUnpnlVal> = new Map()
     dealsForStopLossCombo: Map<string, DealStopLossCombo> = new Map()
     dealsDCALevelCheck: Map<string, number> = new Map()
+    dealsForTPLevelCheck: Map<string, number> = new Map()
     startSent = false
     stopSent = false
     private defaultUnpnl = 2
@@ -1023,6 +1025,7 @@ function createDCABotHelper<
               previousOrders: [],
               closeBySl: false,
               notCheckSl: false,
+              closeByTp: false,
             },
             false,
           ),
@@ -1073,6 +1076,7 @@ function createDCABotHelper<
             enterMarketTimer: null,
             closeBySl: false,
             notCheckSl: false,
+            closeByTp: false,
           }
           this.setDeal(fullDeal, false)
         }
@@ -1437,6 +1441,7 @@ function createDCABotHelper<
           previousOrders: [],
           closeBySl: false,
           notCheckSl: false,
+          closeByTp: false,
         })
         this.resetPending(this.botId, symbol)
         this.emit('bot deal update', record.data)
@@ -8020,10 +8025,11 @@ function createDCABotHelper<
               o.typeOrder === TypeOrderEnum.dealTP,
           )
           const deal = this.getDeal(dealId)
-          if (deal?.closeBySl) {
+          if (deal?.closeBySl || deal?.closeByTp) {
             continue main
           }
-          if (activeTPSLOrders.length) {
+          const forTPCheck = deal && (await this.isDealForTPLevelCheck(deal))
+          if (activeTPSLOrders.length && deal && !forTPCheck) {
             for (const activeTPSLOrder of activeTPSLOrders) {
               const tpslOrderData = await this.getOrder(
                 activeTPSLOrder.clientOrderId,
@@ -8097,44 +8103,46 @@ function createDCABotHelper<
             }
           }
 
-          const tpOrdersInCurrent = (
-            deal ?? { currentOrders: [] }
-          ).currentOrders.filter(
-            (g) =>
-              g.type === TypeOrderEnum.dealTP &&
-              !((deal?.deal.tpSlTargetFilled ?? []) as string[]).includes(
-                g.tpSlTarget ?? '',
-              ),
-          )
-          if (activeTPSLOrders.length !== tpOrdersInCurrent.length) {
-            for (const tpOrderInCurrent of tpOrdersInCurrent) {
-              if (
-                activeTPSLOrders.find(
-                  (o) =>
-                    o.side === tpOrderInCurrent.side &&
-                    +o.price === tpOrderInCurrent.price &&
-                    +o.origQty === tpOrderInCurrent.qty,
+          if (!forTPCheck) {
+            const tpOrdersInCurrent = (
+              deal ?? { currentOrders: [] }
+            ).currentOrders.filter(
+              (g) =>
+                g.type === TypeOrderEnum.dealTP &&
+                !((deal?.deal.tpSlTargetFilled ?? []) as string[]).includes(
+                  g.tpSlTarget ?? '',
+                ),
+            )
+            if (activeTPSLOrders.length !== tpOrdersInCurrent.length) {
+              for (const tpOrderInCurrent of tpOrdersInCurrent) {
+                if (
+                  activeTPSLOrders.find(
+                    (o) =>
+                      o.side === tpOrderInCurrent.side &&
+                      +o.price === tpOrderInCurrent.price &&
+                      +o.origQty === tpOrderInCurrent.qty,
+                  )
+                ) {
+                  continue
+                }
+                this.handleDebug(
+                  `TP order wasn't found in orders, but must be in grid ${
+                    tpOrderInCurrent.side
+                  }, base: ${tpOrderInCurrent.qty}, quote: ${
+                    tpOrderInCurrent.price * tpOrderInCurrent.qty
+                  }, price: ${tpOrderInCurrent.price}`,
                 )
-              ) {
-                continue
-              }
-              this.handleDebug(
-                `TP order wasn't found in orders, but must be in grid ${
-                  tpOrderInCurrent.side
-                }, base: ${tpOrderInCurrent.qty}, quote: ${
-                  tpOrderInCurrent.price * tpOrderInCurrent.qty
-                }, price: ${tpOrderInCurrent.price}`,
-              )
-              if (deal) {
-                await this.placeOrders(
-                  this.botId,
-                  deal.deal.symbol.symbol,
-                  dealId,
-                  {
-                    new: [tpOrderInCurrent],
-                    cancel: [],
-                  },
-                )
+                if (deal) {
+                  await this.placeOrders(
+                    this.botId,
+                    deal.deal.symbol.symbol,
+                    dealId,
+                    {
+                      new: [tpOrderInCurrent],
+                      cancel: [],
+                    },
+                  )
+                }
               }
             }
           }
@@ -10963,6 +10971,10 @@ function createDCABotHelper<
         this.endMethod(_id)
         return this.handleLog(`Deal ${dealId} closing by SL. Skip place orders`)
       }
+      if (deal?.closeBySl || deal?.closeByTp) {
+        this.endMethod(_id)
+        return this.handleLog(`Deal ${dealId} closing by TP. Skip place orders`)
+      }
       const settings = await this.getAggregatedSettings(deal?.deal)
       if (this.data?.status === BotStatusEnum.error) {
         this.restoreFromRangeOrError()
@@ -11017,6 +11029,16 @@ function createDCABotHelper<
                 ? -1
                 : 0,
           )) {
+          if (
+            deal &&
+            (await this.isDealForTPLevelCheck(deal)) &&
+            order.type === TypeOrderEnum.dealTP
+          ) {
+            this.handleDebug(
+              `Deal ${deal.deal._id} close order is MARKET. Skip TP order placement`,
+            )
+            continue
+          }
           if (this.stopList.has(order.newClientOrderId)) {
             this.handleLog(
               `Order in stop list ${order.newClientOrderId}, side - ${order.side}, price - ${order.price}, qty - ${order.qty}`,
@@ -12045,7 +12067,6 @@ function createDCABotHelper<
             settings.dealCloseCondition === CloseConditionEnum.tp &&
             settings.tpPerc &&
             !settings.useMultiTp &&
-            !settings.trailingTp &&
             ![OrderSizeTypeEnum.percFree, OrderSizeTypeEnum.percTotal].includes(
               settings.orderSizeType ?? OrderSizeTypeEnum.percFree,
             )
@@ -13640,6 +13661,9 @@ function createDCABotHelper<
       this.dealsForTrailing.delete(dealId)
       this.dealsForStopLoss.delete(dealId)
       this.dealsForStopLossCombo.delete(dealId)
+      this.dealsDCALevelCheck.delete(dealId)
+      this.dealsForIndicatorUnpnl.delete(dealId)
+      this.dealsForTPLevelCheck.delete(dealId)
     }
 
     async checkDealsForStopLossMethods() {
@@ -13648,8 +13672,26 @@ function createDCABotHelper<
       await this.checkDealsForStopLoss()
       await this.checkDealsForIndicatorUnpnl()
       this.checkDealsForDCALevelCheck()
+      await this.checkDealsForTPLevelCheck()
     }
-    isDealForDCALevelCheck(d: FullDeal<ExcludeDoc<ExcludeDoc<Deal>>>) {
+    async isDealForTPLevelCheck(d: FullDeal<ExcludeDoc<Deal>>) {
+      const settings = await this.getAggregatedSettings(d.deal)
+      return settings.closeOrderType === OrderTypeEnum.market
+    }
+    async checkDealsForTPLevelCheck() {
+      const activeDeals: [string, number][] = []
+      for (const d of this.allDealsData) {
+        if (await this.isDealForTPLevelCheck(d)) {
+          activeDeals.push([`${d.deal._id}`, this.getDealTPLevelToCheck(d)] as [
+            string,
+            number,
+          ])
+        }
+      }
+
+      this.dealsForTPLevelCheck = new Map(activeDeals)
+    }
+    isDealForDCALevelCheck(d: FullDeal<ExcludeDoc<Deal>>) {
       return (
         d.deal.action === ActionsEnum.useOppositeBalance &&
         d.deal.levels.complete < d.deal.levels.all &&
@@ -13677,6 +13719,35 @@ function createDCABotHelper<
         )
         this.allowedMethods.add('checkDCALevel')
       }
+    }
+    async setDealForTPLevelCheck(deal: FullDeal<ExcludeDoc<Deal>>) {
+      if (await this.isDealForTPLevelCheck(deal)) {
+        this.dealsDCALevelCheck.set(
+          deal.deal._id,
+          this.getDealTPLevelToCheck(deal),
+        )
+        this.allowedMethods.add('checkTPLevel')
+        const get = this.getDeal(deal.deal._id)
+        if (get) {
+          get.closeByTp = false
+          this.saveDeal(get)
+        }
+      }
+    }
+    private getDealTPLevelToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
+      const def = this.isLong ? Infinity : 0
+      const filledIds = (d.deal.tpFilledHistory ?? []).map((o) => o.id)
+      return (
+        +[...d.currentOrders]
+          .filter(
+            (o) =>
+              o.type === TypeOrderEnum.dealTP &&
+              !filledIds.includes(o.tpSlTarget ?? ''),
+          )
+          .sort((a, b) =>
+            this.isLong ? +a.price - +b.price : +b.price - +a.price,
+          )[0]?.price || def
+      )
     }
     private getDealDCALevelToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
       const def = this.isLong ? 0 : Infinity
@@ -13858,6 +13929,20 @@ function createDCABotHelper<
           )
           return acc
         }, new Map<string, number>())
+        const tpLevelMin = [...this.dealsForTPLevelCheck.entries()].reduce(
+          (acc, [k, v]) => {
+            const deal = this.getDeal(k)
+            const symbol = deal?.deal.symbol.symbol ?? ''
+            acc.set(
+              symbol,
+              this.isLong
+                ? Math.min(acc.get(symbol) ?? Infinity, v)
+                : Math.max(acc.get(symbol) ?? 0, v),
+            )
+            return acc
+          },
+          new Map<string, number>(),
+        )
         if (this.isLong) {
           const slKeys = [...stopLossMin.keys(), ...indicatorUnpnlMin.keys()]
           for (const key of slKeys) {
@@ -13880,6 +13965,7 @@ function createDCABotHelper<
             ...dealsForMoveSlMin.keys(),
             ...trailingTpMin.keys(),
             ...indicatorUnpnlMax.keys(),
+            ...tpLevelMin.keys(),
           ]
           for (const key of otherKeys) {
             this.lowestHigh.set(
@@ -13889,6 +13975,7 @@ function createDCABotHelper<
                 dealsForMoveSlMin.get(key) ?? Infinity,
                 trailingTpMin.get(key) ?? Infinity,
                 indicatorUnpnlMax.get(key) ?? Infinity,
+                tpLevelMin.get(key) ?? Infinity,
               ),
             )
           }
@@ -13920,6 +14007,7 @@ function createDCABotHelper<
             ...dealsForMoveSlMin.keys(),
             ...trailingTpMin.keys(),
             ...indicatorUnpnlMax.keys(),
+            ...tpLevelMin.keys(),
           ]
           for (const key of otherKeys) {
             this.highestLow.set(
@@ -13929,6 +14017,7 @@ function createDCABotHelper<
                 dealsForMoveSlMin.get(key) ?? 0,
                 trailingTpMin.get(key) ?? 0,
                 indicatorUnpnlMax.get(key) ?? 0,
+                tpLevelMin.get(key) ?? 0,
               ),
             )
           }
@@ -13948,6 +14037,7 @@ function createDCABotHelper<
       await this.setDealForStopLoss(deal)
       await this.setDealForIndicatorUnpnl(deal)
       this.setDealForDCALevelCheck(deal)
+      await this.setDealForTPLevelCheck(deal)
     }
 
     async checkDealsAllowedMethods() {
@@ -13960,12 +14050,16 @@ function createDCABotHelper<
       const activeDeals = this.getOpenDeals()
       let sl = 0
       let countDCALevelCheck = 0
+      let tp = 0
       for (const d of activeDeals) {
         if (await this.isDealForStopLoss(d)) {
           sl++
         }
         if (this.isDealForDCALevelCheck(d)) {
           countDCALevelCheck++
+        }
+        if (await this.isDealForTPLevelCheck(d)) {
+          tp++
         }
       }
       if (activeDeals.length && sl) {
@@ -14000,6 +14094,11 @@ function createDCABotHelper<
       } else {
         this.allowedMethods.delete('checkDCALevel')
       }
+      if (activeDeals.length && tp) {
+        this.allowedMethods.add('checkTPLevel')
+      } else {
+        this.allowedMethods.delete('checkTPLevel')
+      }
       this.handleDebug(
         `Check deals allowed methods: ${[...this.allowedMethods].join(', ')}`,
       )
@@ -14012,7 +14111,8 @@ function createDCABotHelper<
         this.allowedMethods.has('checkDealsMoveSL') ||
         this.allowedMethods.has('checkTrailing') ||
         this.allowedMethods.has('checkDealsStopLoss') ||
-        this.allowedMethods.has('checkIndicatorUnpnl')
+        this.allowedMethods.has('checkIndicatorUnpnl') ||
+        this.allowedMethods.has('checkTPLevel')
       )
     }
 
@@ -15017,6 +15117,65 @@ function createDCABotHelper<
         }
       }
     }
+
+    public async checkTPLevel(_botId: string, price: number) {
+      for (const [d, v] of this.dealsForTPLevelCheck) {
+        if (!(this.isLong ? price >= v : price <= v)) {
+          continue
+        }
+        const deal = this.getDeal(d)
+        if (!deal) {
+          continue
+        }
+        if (deal.closeByTp) {
+          continue
+        }
+        const value = this.dealsForTPLevelCheck.get(deal.deal._id)
+        if (value) {
+          const trigger = this.isLong ? price >= value : price <= value
+          if (trigger) {
+            this.handleDebug(
+              `Deal: ${deal.deal._id} adding TP order by TP level check`,
+            )
+            deal.closeByTp = true
+            this.saveDeal(deal)
+            const order = deal.currentOrders.find(
+              (o) => +o.price === value && o.type === TypeOrderEnum.dealTP,
+            )
+            if (!order) {
+              return this.handleErrors(
+                `Cannot find order for TP level check`,
+                'checkTPLevel',
+                '',
+                false,
+                false,
+                false,
+              )
+            }
+            const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
+            if (ed) {
+              const result = await this.sendGridToExchange(
+                order,
+                {
+                  dealId: deal.deal._id,
+                  type: 'MARKET',
+                  reduceOnly: !!this.futures,
+                  positionSide: this.hedge
+                    ? this.isLong
+                      ? PositionSide.LONG
+                      : PositionSide.SHORT
+                    : PositionSide.BOTH,
+                },
+                ed,
+              )
+              if (result && result.status === 'FILLED') {
+                this.processFilledOrder(result)
+              }
+            }
+          }
+        }
+      }
+    }
     /**
      * Price update callback<br />
      *
@@ -15128,6 +15287,7 @@ function createDCABotHelper<
             await this.checkDealsStopLoss(this.botId, msg.symbol)
             await this.checkDealsIndicatorUnpnl(this.botId, msg.symbol)
             await this.checkDCALevel(this.botId, msg.price)
+            await this.checkTPLevel(this.botId, msg.price)
           }
         }
       }
@@ -15598,6 +15758,7 @@ function createDCABotHelper<
               profitCurrency: this.combo
                 ? findDeal.deal.settings.profitCurrency
                 : dealSettings.profitCurrency,
+              closeOrderType: dealSettings.closeOrderType,
             },
             true,
           )
@@ -16329,6 +16490,7 @@ function createDCABotHelper<
             deal: dealData,
             closeBySl: false,
             notCheckSl: false,
+            closeByTp: false,
           }
           await this.checkDealSlMethods(full)
           this.setDeal(full)
@@ -18403,6 +18565,12 @@ function createDCABotHelper<
     IdMute(mutex, (botId: string) => `${botId}checkDCALevel`),
     DCABotHelper.prototype,
     'checkDCALevel',
+  )
+
+  applyMethodDecorator(
+    IdMute(mutex, (botId: string) => `${botId}checkTPLevel`),
+    DCABotHelper.prototype,
+    'checkTPLevel',
   )
 
   applyMethodDecorator(

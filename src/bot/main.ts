@@ -182,6 +182,7 @@ type AllowedMethods =
   | 'sendEightyAlert'
   | 'sendHundredAlert'
   | 'checkDCALevel'
+  | 'checkTPLevel'
 
 export type RedisKeys =
   | 'usedOrderId'

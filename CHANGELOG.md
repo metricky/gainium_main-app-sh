@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.4] – 2025-09-30
+### Added
+- Market TP order
+
 ## [1.3.3] – 2025-09-30
 ### Fixed
 - Market structure price actions

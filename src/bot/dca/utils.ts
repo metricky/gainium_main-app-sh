@@ -157,6 +157,7 @@ class DCAUtils {
       return {
         ...prepareSettings,
         gridLevel: set.gridLevel,
+        closeOrderType: set.closeOrderType,
       } as CleanComboDealsSchema['settings']
     }
     return prepareSettings

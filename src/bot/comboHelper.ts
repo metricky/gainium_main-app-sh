@@ -2294,6 +2294,7 @@ function createComboBotHelper<
                   previousOrders: [],
                   closeBySl: false,
                   notCheckSl: false,
+                  closeByTp: false,
                 },
                 false,
               )
@@ -4496,6 +4497,7 @@ function createComboBotHelper<
           previousOrders: [],
           closeBySl: false,
           notCheckSl: false,
+          closeByTp: false,
         })
         this.resetPending(this.botId, symbol)
         this.emit('bot deal update', record.data)

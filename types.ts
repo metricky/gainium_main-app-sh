@@ -751,6 +751,7 @@ export interface DCABotSettings extends BaseSettings {
   useMinTP?: boolean
   minTp?: string
   closeDealType?: CloseDCATypeEnum
+  closeOrderType?: OrderTypeEnum
   terminalDealType?: TerminalDealTypeEnum
   useMultiTp?: boolean
   multiTp?: MultiTP[]
@@ -1098,6 +1099,7 @@ export type DCADealsSettings = Pick<
   | 'dcaVolumeBaseOn'
   | 'dcaVolumeMaxValue'
   | 'dcaVolumeRequiredChange'
+  | 'closeOrderType'
 > & {
   avgPrice: number
   changed: boolean

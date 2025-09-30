@@ -2892,6 +2892,7 @@ export const BotSchema = /* GraphQL */ `
     useMinTP: Boolean
     minTp: String
     closeDealType: CloseDCATypeEnum
+    closeOrderType: OrderTypeEnum
     terminalDealType: TerminalDealTypeEnum
     useMultiTp: Boolean
     multiTp: [multiTP]
@@ -3518,6 +3519,7 @@ export const BotSchema = /* GraphQL */ `
     useMinTP: Boolean
     minTp: String
     closeDealType: String
+    closeOrderType: OrderTypeEnum
     orderSizeType: String
     useMultiSl: Boolean
     pairPrioritization: String
@@ -3657,6 +3659,7 @@ export const BotSchema = /* GraphQL */ `
     useMinTP: Boolean
     minTp: String
     closeDealType: String
+    closeOrderType: OrderTypeEnum
     orderSizeType: String
     useMultiSl: Boolean
     pairPrioritization: String
@@ -3728,6 +3731,7 @@ export const BotSchema = /* GraphQL */ `
     useMinTP: Boolean
     minTp: String
     closeDealType: String
+    closeOrderType: OrderTypeEnum
     orderSizeType: String
     useMultiSl: Boolean
     pairPrioritization: String
@@ -4477,6 +4481,7 @@ export const BotSchema = /* GraphQL */ `
     useMinTP: Boolean
     minTp: String
     closeDealType: CloseDCATypeEnum
+    closeOrderType: OrderTypeEnum
     terminalDealType: TerminalDealTypeEnum
     useMultiTp: Boolean
     multiTp: [inputMultiTP]
@@ -4860,6 +4865,7 @@ export const BotSchema = /* GraphQL */ `
     useMinTP: Boolean
     minTp: String
     closeDealType: CloseDCATypeEnum
+    closeOrderType: OrderTypeEnum
     orderSizeType: OrderSizeTypeEnum
     useMultiTp: Boolean
     multiTp: [inputMultiTP]
