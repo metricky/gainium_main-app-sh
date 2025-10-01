@@ -4410,6 +4410,29 @@ class MainBot<T extends IMainBot> {
               )
               this.updateNotEnoughBalanceErrors(order, -1)
             }
+          } else if (
+            this.data.notEnoughBalance.orders &&
+            this.data.notEnoughBalance.orders[notEnoughBalanceId] &&
+            this.data.notEnoughBalance.orders[notEnoughBalanceId] <
+              this.notEnoughBalanceThreshold &&
+            this.data.notEnoughBalance.thresholdPassed
+          ) {
+            this.handleDebug(
+              `${this.notEnoughBalanceLogPrefix} Not enough balance reset threshold`,
+            )
+            this.data.notEnoughBalance = {
+              ...this.data.notEnoughBalance,
+              thresholdPassed: false,
+              thresholdPassedTime: 0,
+            }
+            this.updateData({
+              notEnoughBalance: this.data.notEnoughBalance,
+            })
+            this.emit('bot settings update', {
+              notEnoughBalance: {
+                thresholdPassed: this.data.notEnoughBalance.thresholdPassed,
+              },
+            })
           }
         }
         request = request ?? (await this.exchange.openOrder(requestData))

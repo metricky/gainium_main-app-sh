@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.5] – 2025-10-01
+### Fixed
+- Reset not enough balance status
+
 ## [1.3.4] – 2025-09-30
 ### Added
 - Market TP order
