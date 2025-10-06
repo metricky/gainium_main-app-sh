@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.6] – 2025-10-06
+### Fixed
+- Hyperliquid spot order price precision
+
 ## [1.3.5] – 2025-10-01
 ### Fixed
 - Reset not enough balance status

@@ -88,6 +88,7 @@ import {
   comboBotDb,
   dcaBotDb,
   orderDb,
+  pairDb,
   rateDb,
   userProfitByHourDb,
 } from '../db/dbInit'
@@ -3022,6 +3023,15 @@ class MainBot<T extends IMainBot> {
     process?: boolean,
   ): Promise<Order | null> {
     const msg = this.convertCoinbaseOrder(_msg)
+    if (this.hyperliquid && !this.futures) {
+      const pair = await pairDb.readData({
+        exchange: this.data?.exchange,
+        code: msg.symbol,
+      })
+      if (pair.status === StatusEnum.ok && pair.data?.result) {
+        msg.symbol = pair.data.result.pair
+      }
+    }
     const ed = await this.getExchangeInfo(msg.symbol)
     const orderId = this.getOrderStatus(msg)
     const base = parseFloat(msg.totalTradeQuantity)
