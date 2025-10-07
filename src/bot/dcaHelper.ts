@@ -14255,6 +14255,33 @@ function createDCABotHelper<
         `Allowed methods: ${Array.from(this.allowedMethods).join(', ')}`,
       )
     }
+    protected async checkSettingsPairs() {
+      if (!this.data || !this.shouldContinueLoad() || !this.shouldProceed()) {
+        return
+      }
+      const notFound: string[] = []
+      let first = false
+      let i = 0
+      for (const pair of this.data.settings.pair) {
+        if (!(await this.getExchangeInfo(pair))) {
+          first = i === 0
+          this.handleLog(`Pair ${pair} not found in exchange info`)
+          notFound.push(pair)
+        }
+        i++
+      }
+      if (notFound.length) {
+        this.handleLog(`Removing pairs not found: ${notFound.join(', ')}`)
+        this.data.settings.pair = this.data.settings.pair.filter(
+          (p) => !notFound.includes(p),
+        )
+        this.updateData({ settings: this.data.settings })
+        notFound.forEach((p) => this.pairsNotFound.add(p))
+        if (first) {
+          this.calculateUsage()
+        }
+      }
+    }
     /**
      * Start bot<br />
      *
@@ -14378,6 +14405,7 @@ function createDCABotHelper<
         await this.getUserFees()
         await this.loadOrders()
         await this.checkAllowedMethods()
+        await this.checkSettingsPairs()
         if (this.pairsNotFound.size) {
           if (
             this.data?.settings.useMulti &&

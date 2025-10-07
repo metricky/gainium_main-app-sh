@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.8] – 2025-10-07
+### Changed
+- Remove delisted pairs from the bot
+
 ## [1.3.7] – 2025-10-07
 ### Changed
 - Added mutex to check candle in indicator service
