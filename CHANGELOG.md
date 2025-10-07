@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.3.7] – 2025-10-07
+### Changed
+- Added mutex to check candle in indicator service
+
 ## [1.3.6] – 2025-10-06
 ### Fixed
 - Hyperliquid spot order price precision

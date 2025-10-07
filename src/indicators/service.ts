@@ -886,7 +886,8 @@ class InternalIndicator {
     return this.subscribers.length
   }
 
-  private async checkCandle(_start: number) {
+  @IdMute(mutex, (id: string) => id)
+  private async checkCandle(_id: string, _start: number) {
     const start = +_start
     if (this.closed) {
       return
@@ -950,7 +951,7 @@ class InternalIndicator {
       const timeout =
         +start + +this.period * 2 + +this.waitCandlePeriod - +new Date()
       this.checkCandleTimer = setTimeout(
-        () => this.checkCandle(+start + +this.period),
+        () => this.checkCandle(this.id, +start + +this.period),
         timeout,
       )
     } catch (e) {
@@ -1418,7 +1419,7 @@ class InternalIndicator {
       const timeout =
         +this.start + +this.period + +this.waitCandlePeriod - +new Date()
       this.checkCandleTimer = setTimeout(
-        () => this.checkCandle(+checkPrice),
+        () => this.checkCandle(this.id, +checkPrice),
         timeout,
       )
     } catch (e) {
