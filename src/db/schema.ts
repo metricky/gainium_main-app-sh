@@ -101,6 +101,8 @@ import {
   ActionsEnum,
   DCACloseTriggerEnum,
   BybitHost,
+  OBFVGValueEnum,
+  OBFVGRefEnum,
 } from '../../types'
 import { collections } from './config'
 
@@ -966,6 +968,8 @@ const indicatorsSettings = new Schema({
   unpnlValue: Number,
   unpnlCondition: { type: String, enum: IndicatorStartConditionEnum },
   dcValue: { type: String, enum: DCValueEnum },
+  obfvgValue: { type: String, enum: OBFVGValueEnum },
+  obfvgRef: { type: String, enum: OBFVGRefEnum },
 })
 
 const multiTP = new Schema({

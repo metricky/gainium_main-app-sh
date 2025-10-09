@@ -78,11 +78,13 @@ import {
   DCACustom,
   MultiTP,
   DCADealsSchema,
+  OBFVGRefEnum,
+  OBFVGValueEnum,
 } from '../../types'
 import { MathHelper } from '../utils/math'
 import MainBot, { notEnoughErrors } from './main'
 import utils from '../utils'
-import { gt, lt, lte, gte, eq } from '@gainium/indicators'
+import { gt, lt, lte, gte, eq, OBFVGResult } from '@gainium/indicators'
 import { IdMute, IdMutex } from '../utils/mutex'
 import {
   DCABotSchema,
@@ -3292,6 +3294,8 @@ function createDCABotHelper<
               ppType,
               section,
               dcValue,
+              obfvgRef,
+              obfvgValue,
             } = find
             if (indicatorAction === IndicatorAction.riskReward) {
               risk = true
@@ -3329,7 +3333,112 @@ function createDCABotHelper<
               valueInsteadof = valueInsteadof ?? 1
               let value = indicatorValue !== undefined ? +indicatorValue : 0
               let prevValue = value
-              if (type === IndicatorEnum.pc) {
+              if (type === IndicatorEnum.obfvg) {
+                const [l, p] = [...data].sort((a, b) => b.time - a.time)
+                const last = this.convertNullToNan(
+                  l.value as OBFVGResult,
+                ) as OBFVGResult
+                const prev = this.convertNullToNan(
+                  p.value as OBFVGResult,
+                ) as OBFVGResult
+                const lastBull =
+                  obfvgRef === OBFVGRefEnum.high
+                    ? last.bullishFVGHigh
+                    : obfvgRef === OBFVGRefEnum.low
+                      ? last.bullishFVGLow
+                      : last.bullishFVGMiddle
+                const lastBear =
+                  obfvgRef === OBFVGRefEnum.high
+                    ? last.bearishFVGHigh
+                    : obfvgRef === OBFVGRefEnum.low
+                      ? last.bearishFVGLow
+                      : last.bearishFVGMiddle
+                const prevBull =
+                  obfvgRef === OBFVGRefEnum.high
+                    ? prev.bullishFVGHigh
+                    : obfvgRef === OBFVGRefEnum.low
+                      ? prev.bullishFVGLow
+                      : prev.bullishFVGMiddle
+                const prevBear =
+                  obfvgRef === OBFVGRefEnum.high
+                    ? prev.bearishFVGHigh
+                    : obfvgRef === OBFVGRefEnum.low
+                      ? prev.bearishFVGLow
+                      : prev.bearishFVGMiddle
+                const lastPrice = last.price
+                const prevPrice = prev.price
+                const bullCd =
+                  !isNaN(lastBull) &&
+                  !isNaN(prevBull) &&
+                  !isNaN(lastPrice) &&
+                  !isNaN(prevPrice) &&
+                  ((gt(prevPrice, prevBull) && lt(lastPrice, lastBull)) ||
+                    (gt(prevPrice, prevBull) && lte(lastPrice, lastBull)))
+                const bearCd =
+                  !isNaN(lastBear) &&
+                  !isNaN(prevBear) &&
+                  !isNaN(lastPrice) &&
+                  !isNaN(prevPrice) &&
+                  ((gt(prevPrice, prevBear) && lt(lastPrice, lastBear)) ||
+                    (gt(prevPrice, prevBear) && lte(lastPrice, lastBear)))
+                const bullCu =
+                  !isNaN(lastBull) &&
+                  !isNaN(prevBull) &&
+                  !isNaN(lastPrice) &&
+                  !isNaN(prevPrice) &&
+                  ((lt(prevPrice, prevBull) && gt(lastPrice, lastBull)) ||
+                    (lt(prevPrice, prevBull) && gte(lastPrice, lastBull)))
+                const bearCu =
+                  !isNaN(lastBear) &&
+                  !isNaN(prevBear) &&
+                  !isNaN(lastPrice) &&
+                  !isNaN(prevPrice) &&
+                  ((lt(prevPrice, prevBear) && gt(lastPrice, lastBear)) ||
+                    (lt(prevPrice, prevBear) && gte(lastPrice, lastBear)))
+                const bullGt =
+                  !isNaN(lastBull) &&
+                  !isNaN(prevPrice) &&
+                  gt(lastPrice, lastBull)
+                const bearGt =
+                  !isNaN(lastBear) &&
+                  !isNaN(lastPrice) &&
+                  gt(lastPrice, lastBear)
+                const bullLt =
+                  !isNaN(lastBull) &&
+                  !isNaN(lastPrice) &&
+                  lt(lastPrice, lastBull)
+                const bearLt =
+                  !isNaN(lastBear) &&
+                  !isNaN(lastPrice) &&
+                  lt(lastPrice, lastBear)
+
+                action =
+                  indicatorCondition === IndicatorStartConditionEnum.cd
+                    ? obfvgValue === OBFVGValueEnum.bearish
+                      ? bearCd
+                      : obfvgValue === OBFVGValueEnum.any
+                        ? bullCd || bearCd
+                        : bullCd
+                    : indicatorCondition === IndicatorStartConditionEnum.cu
+                      ? obfvgValue === OBFVGValueEnum.bearish
+                        ? bearCu
+                        : obfvgValue === OBFVGValueEnum.any
+                          ? bullCu || bearCu
+                          : bullCu
+                      : indicatorCondition === IndicatorStartConditionEnum.gt
+                        ? obfvgValue === OBFVGValueEnum.bearish
+                          ? bearGt
+                          : obfvgValue === OBFVGValueEnum.any
+                            ? bullGt || bearGt
+                            : bullGt
+                        : indicatorCondition === IndicatorStartConditionEnum.lt
+                          ? obfvgValue === OBFVGValueEnum.bearish
+                            ? bearLt
+                            : obfvgValue === OBFVGValueEnum.any
+                              ? bullLt || bearLt
+                              : bullLt
+                          : false
+              } else if (type === IndicatorEnum.pc) {
                 const pcCondition =
                   +(pcValue ?? '5') > 0
                     ? PCConditionEnum.up
@@ -9247,198 +9356,192 @@ function createDCABotHelper<
                   const indicatorData: BotParentIndicatorEventDto = {
                     data: {
                       indicatorConfig:
-                        type === IndicatorEnum.dc
-                          ? { type, length: indicatorLength }
-                          : type === IndicatorEnum.macd
-                            ? {
-                                type,
-                                shortInterval: macdFast ?? 12,
-                                longInterval: macdSlow ?? 26,
-                                signalInterval: indicatorLength,
-                                percentile,
-                                percentileLookback,
-                                percentilePercentage,
-                                maSignal: macdMaSignal ?? MAEnum.ema,
-                                maSource: macdMaSource ?? MAEnum.ema,
-                              }
-                            : type === IndicatorEnum.st
+                        type === IndicatorEnum.obfvg
+                          ? { type }
+                          : type === IndicatorEnum.dc
+                            ? { type, length: indicatorLength }
+                            : type === IndicatorEnum.macd
                               ? {
                                   type,
-                                  factor: factor ?? 3,
-                                  atrLength: atrLength ?? 10,
+                                  shortInterval: macdFast ?? 12,
+                                  longInterval: macdSlow ?? 26,
+                                  signalInterval: indicatorLength,
+                                  percentile,
+                                  percentileLookback,
+                                  percentilePercentage,
+                                  maSignal: macdMaSignal ?? MAEnum.ema,
+                                  maSource: macdMaSource ?? MAEnum.ema,
                                 }
-                              : type === IndicatorEnum.pp
+                              : type === IndicatorEnum.st
                                 ? {
                                     type,
-                                    ppHighLeft: +(ppHighLeft ?? 5),
-                                    ppHighRight: +(ppHighRight ?? 5),
-                                    ppLowLeft: +(ppLowLeft ?? 5),
-                                    ppLowRight: +(ppLowRight ?? 5),
-                                    ppMult: +(ppMult ?? 1),
+                                    factor: factor ?? 3,
+                                    atrLength: atrLength ?? 10,
                                   }
-                                : type === IndicatorEnum.tv
+                                : type === IndicatorEnum.pp
                                   ? {
                                       type,
-                                      checkLevel,
-                                      useAsEntryExitPoints:
-                                        condition ===
-                                        TradingviewAnalysisConditionEnum.entry,
+                                      ppHighLeft: +(ppHighLeft ?? 5),
+                                      ppHighRight: +(ppHighRight ?? 5),
+                                      ppLowLeft: +(ppLowLeft ?? 5),
+                                      ppLowRight: +(ppLowRight ?? 5),
+                                      ppMult: +(ppMult ?? 1),
                                     }
-                                  : type === IndicatorEnum.pc
+                                  : type === IndicatorEnum.tv
                                     ? {
                                         type,
-                                        pcUp: Math.abs(+(pcValue ?? '5')),
-                                        pcDown: Math.abs(+(pcValue ?? '5')),
+                                        checkLevel,
+                                        useAsEntryExitPoints:
+                                          condition ===
+                                          TradingviewAnalysisConditionEnum.entry,
                                       }
-                                    : type === IndicatorEnum.div
+                                    : type === IndicatorEnum.pc
                                       ? {
                                           type,
-                                          oscillators: divOscillators ?? [],
+                                          pcUp: Math.abs(+(pcValue ?? '5')),
+                                          pcDown: Math.abs(+(pcValue ?? '5')),
                                         }
-                                      : type === IndicatorEnum.ma
+                                      : type === IndicatorEnum.div
                                         ? {
                                             type,
-                                            interval: indicatorLength,
-                                            maType: maType || MAEnum.ema,
+                                            oscillators: divOscillators ?? [],
                                           }
-                                        : type === IndicatorEnum.ath
+                                        : type === IndicatorEnum.ma
                                           ? {
                                               type,
-                                              lookback: athLookback ?? 100,
+                                              interval: indicatorLength,
+                                              maType: maType || MAEnum.ema,
                                             }
-                                          : type === IndicatorEnum.xo
-                                            ? xOscillator1 === IndicatorEnum.vo
-                                              ? {
-                                                  type: xOscillator1,
-                                                  voLong: voLong ?? 10,
-                                                  voShort: voShort ?? 5,
-                                                }
-                                              : {
-                                                  type:
-                                                    xOscillator1 ||
-                                                    IndicatorEnum.rsi,
-                                                  interval: indicatorLength,
-                                                }
-                                            : type === IndicatorEnum.atr
-                                              ? {
-                                                  type,
-                                                  interval: indicatorLength,
-                                                }
-                                              : type === IndicatorEnum.adr
+                                          : type === IndicatorEnum.ath
+                                            ? {
+                                                type,
+                                                lookback: athLookback ?? 100,
+                                              }
+                                            : type === IndicatorEnum.xo
+                                              ? xOscillator1 ===
+                                                IndicatorEnum.vo
+                                                ? {
+                                                    type: xOscillator1,
+                                                    voLong: voLong ?? 10,
+                                                    voShort: voShort ?? 5,
+                                                  }
+                                                : {
+                                                    type:
+                                                      xOscillator1 ||
+                                                      IndicatorEnum.rsi,
+                                                    interval: indicatorLength,
+                                                  }
+                                              : type === IndicatorEnum.atr
                                                 ? {
                                                     type,
                                                     interval: indicatorLength,
                                                   }
-                                                : type === IndicatorEnum.stoch
+                                                : type === IndicatorEnum.adr
                                                   ? {
                                                       type,
-                                                      k: indicatorLength,
-                                                      dsmooth:
-                                                        stochSmoothD ?? 1,
-                                                      ksmooth:
-                                                        stochSmoothK ?? 3,
+                                                      interval: indicatorLength,
                                                     }
-                                                  : type ===
-                                                      IndicatorEnum.stochRSI
+                                                  : type === IndicatorEnum.stoch
                                                     ? {
                                                         type,
                                                         k: indicatorLength,
                                                         dsmooth:
-                                                          stochSmoothD ?? 3,
+                                                          stochSmoothD ?? 1,
                                                         ksmooth:
                                                           stochSmoothK ?? 3,
-                                                        interval:
-                                                          stochRSI ?? 14,
                                                       }
-                                                    : type === IndicatorEnum.sr
+                                                    : type ===
+                                                        IndicatorEnum.stochRSI
                                                       ? {
                                                           type,
-                                                          leftBars:
-                                                            leftBars ?? 15,
-                                                          rightBars:
-                                                            rightBars ?? 15,
+                                                          k: indicatorLength,
+                                                          dsmooth:
+                                                            stochSmoothD ?? 3,
+                                                          ksmooth:
+                                                            stochSmoothK ?? 3,
+                                                          interval:
+                                                            stochRSI ?? 14,
                                                         }
                                                       : type ===
-                                                          IndicatorEnum.mar
+                                                          IndicatorEnum.sr
                                                         ? {
                                                             type,
-                                                            mar1type:
-                                                              mar1type ||
-                                                              MAEnum.ema,
-                                                            mar1length:
-                                                              mar1length || 20,
-                                                            mar2type:
-                                                              mar2type ||
-                                                              MAEnum.price,
-                                                            mar2length:
-                                                              mar2length || 20,
-                                                            percentile,
-                                                            percentileLookback,
-                                                            percentilePercentage,
-                                                            trendFilter,
-                                                            trendFilterLookback,
-                                                            trendFilterType,
-                                                            trendFilterValue,
+                                                            leftBars:
+                                                              leftBars ?? 15,
+                                                            rightBars:
+                                                              rightBars ?? 15,
                                                           }
                                                         : type ===
-                                                            IndicatorEnum.mfi
+                                                            IndicatorEnum.mar
                                                           ? {
                                                               type,
-                                                              interval:
-                                                                indicatorLength ??
-                                                                14,
+                                                              mar1type:
+                                                                mar1type ||
+                                                                MAEnum.ema,
+                                                              mar1length:
+                                                                mar1length ||
+                                                                20,
+                                                              mar2type:
+                                                                mar2type ||
+                                                                MAEnum.price,
+                                                              mar2length:
+                                                                mar2length ||
+                                                                20,
                                                               percentile,
                                                               percentileLookback,
                                                               percentilePercentage,
+                                                              trendFilter,
+                                                              trendFilterLookback,
+                                                              trendFilterType,
+                                                              trendFilterValue,
                                                             }
                                                           : type ===
-                                                              IndicatorEnum.qfl
+                                                              IndicatorEnum.mfi
                                                             ? {
                                                                 type,
-                                                                basePeriods:
-                                                                  basePeriods ??
-                                                                  36,
-                                                                pumpPeriods:
-                                                                  pumpPeriods ??
-                                                                  8,
-                                                                pump:
-                                                                  (pump ?? 3) /
-                                                                  100,
-                                                                baseCrack:
-                                                                  (baseCrack ??
-                                                                    3) / 100,
+                                                                interval:
+                                                                  indicatorLength ??
+                                                                  14,
+                                                                percentile,
+                                                                percentileLookback,
+                                                                percentilePercentage,
                                                               }
                                                             : type ===
-                                                                IndicatorEnum.uo
+                                                                IndicatorEnum.qfl
                                                               ? {
                                                                   type,
-                                                                  fast:
-                                                                    uoFast ?? 7,
-                                                                  middle:
-                                                                    uoMiddle ??
-                                                                    14,
-                                                                  slow:
-                                                                    uoSlow ??
-                                                                    28,
-                                                                  percentile,
-                                                                  percentileLookback,
-                                                                  percentilePercentage,
+                                                                  basePeriods:
+                                                                    basePeriods ??
+                                                                    36,
+                                                                  pumpPeriods:
+                                                                    pumpPeriods ??
+                                                                    8,
+                                                                  pump:
+                                                                    (pump ??
+                                                                      3) / 100,
+                                                                  baseCrack:
+                                                                    (baseCrack ??
+                                                                      3) / 100,
                                                                 }
                                                               : type ===
-                                                                  IndicatorEnum.mom
+                                                                  IndicatorEnum.uo
                                                                 ? {
                                                                     type,
-                                                                    interval:
-                                                                      indicatorLength,
-                                                                    source:
-                                                                      momSource ??
-                                                                      'close',
+                                                                    fast:
+                                                                      uoFast ??
+                                                                      7,
+                                                                    middle:
+                                                                      uoMiddle ??
+                                                                      14,
+                                                                    slow:
+                                                                      uoSlow ??
+                                                                      28,
                                                                     percentile,
                                                                     percentileLookback,
                                                                     percentilePercentage,
                                                                   }
                                                                 : type ===
-                                                                    IndicatorEnum.bbwp
+                                                                    IndicatorEnum.mom
                                                                   ? {
                                                                       type,
                                                                       interval:
@@ -9446,59 +9549,53 @@ function createDCABotHelper<
                                                                       source:
                                                                         momSource ??
                                                                         'close',
-                                                                      lookback:
-                                                                        bbwpLookback ??
-                                                                        252,
+                                                                      percentile,
+                                                                      percentileLookback,
+                                                                      percentilePercentage,
                                                                     }
                                                                   : type ===
-                                                                      IndicatorEnum.psar
+                                                                      IndicatorEnum.bbwp
                                                                     ? {
                                                                         type,
-                                                                        start:
-                                                                          psarStart ??
-                                                                          0.02,
-                                                                        inc:
-                                                                          psarInc ??
-                                                                          0.02,
-                                                                        max:
-                                                                          psarMax ??
-                                                                          0.2,
+                                                                        interval:
+                                                                          indicatorLength,
+                                                                        source:
+                                                                          momSource ??
+                                                                          'close',
+                                                                        lookback:
+                                                                          bbwpLookback ??
+                                                                          252,
                                                                       }
                                                                     : type ===
-                                                                        IndicatorEnum.vo
+                                                                        IndicatorEnum.psar
                                                                       ? {
                                                                           type,
-                                                                          voLong:
-                                                                            voLong ??
-                                                                            10,
-                                                                          voShort:
-                                                                            voShort ??
-                                                                            5,
-                                                                          percentile,
-                                                                          percentileLookback,
-                                                                          percentilePercentage,
+                                                                          start:
+                                                                            psarStart ??
+                                                                            0.02,
+                                                                          inc:
+                                                                            psarInc ??
+                                                                            0.02,
+                                                                          max:
+                                                                            psarMax ??
+                                                                            0.2,
                                                                         }
                                                                       : type ===
-                                                                          IndicatorEnum.kc
+                                                                          IndicatorEnum.vo
                                                                         ? {
                                                                             type,
-                                                                            interval:
-                                                                              indicatorLength,
-                                                                            ma:
-                                                                              kcMa ||
-                                                                              MAEnum.ema,
-                                                                            multiplier:
-                                                                              bbwMult ||
-                                                                              2,
-                                                                            range:
-                                                                              kcRange ||
-                                                                              RangeType.atr,
-                                                                            rangeLength:
-                                                                              kcRangeLength ||
-                                                                              20,
+                                                                            voLong:
+                                                                              voLong ??
+                                                                              10,
+                                                                            voShort:
+                                                                              voShort ??
+                                                                              5,
+                                                                            percentile,
+                                                                            percentileLookback,
+                                                                            percentilePercentage,
                                                                           }
                                                                         : type ===
-                                                                            IndicatorEnum.kcpb
+                                                                            IndicatorEnum.kc
                                                                           ? {
                                                                               type,
                                                                               interval:
@@ -9515,28 +9612,31 @@ function createDCABotHelper<
                                                                               rangeLength:
                                                                                 kcRangeLength ||
                                                                                 20,
-                                                                              percentile,
-                                                                              percentileLookback,
-                                                                              percentilePercentage,
                                                                             }
                                                                           : type ===
-                                                                              IndicatorEnum.bb
+                                                                              IndicatorEnum.kcpb
                                                                             ? {
                                                                                 type,
                                                                                 interval:
                                                                                   indicatorLength,
-                                                                                bbwMa:
-                                                                                  bbwMa ||
-                                                                                  MAEnum.sma,
-                                                                                bbwMaLength:
-                                                                                  bbwMaLength ||
-                                                                                  20,
-                                                                                bbwMult:
+                                                                                ma:
+                                                                                  kcMa ||
+                                                                                  MAEnum.ema,
+                                                                                multiplier:
                                                                                   bbwMult ||
                                                                                   2,
+                                                                                range:
+                                                                                  kcRange ||
+                                                                                  RangeType.atr,
+                                                                                rangeLength:
+                                                                                  kcRangeLength ||
+                                                                                  20,
+                                                                                percentile,
+                                                                                percentileLookback,
+                                                                                percentilePercentage,
                                                                               }
                                                                             : type ===
-                                                                                IndicatorEnum.bbw
+                                                                                IndicatorEnum.bb
                                                                               ? {
                                                                                   type,
                                                                                   interval:
@@ -9550,12 +9650,9 @@ function createDCABotHelper<
                                                                                   bbwMult:
                                                                                     bbwMult ||
                                                                                     2,
-                                                                                  percentile,
-                                                                                  percentileLookback,
-                                                                                  percentilePercentage,
                                                                                 }
                                                                               : type ===
-                                                                                  IndicatorEnum.bbpb
+                                                                                  IndicatorEnum.bbw
                                                                                 ? {
                                                                                     type,
                                                                                     interval:
@@ -9574,18 +9671,37 @@ function createDCABotHelper<
                                                                                     percentilePercentage,
                                                                                   }
                                                                                 : type ===
-                                                                                    IndicatorEnum.ecd
+                                                                                    IndicatorEnum.bbpb
                                                                                   ? {
-                                                                                      type,
-                                                                                    }
-                                                                                  : ({
                                                                                       type,
                                                                                       interval:
                                                                                         indicatorLength,
+                                                                                      bbwMa:
+                                                                                        bbwMa ||
+                                                                                        MAEnum.sma,
+                                                                                      bbwMaLength:
+                                                                                        bbwMaLength ||
+                                                                                        20,
+                                                                                      bbwMult:
+                                                                                        bbwMult ||
+                                                                                        2,
                                                                                       percentile,
                                                                                       percentileLookback,
                                                                                       percentilePercentage,
-                                                                                    } as IndicatorConfig),
+                                                                                    }
+                                                                                  : type ===
+                                                                                      IndicatorEnum.ecd
+                                                                                    ? {
+                                                                                        type,
+                                                                                      }
+                                                                                    : ({
+                                                                                        type,
+                                                                                        interval:
+                                                                                          indicatorLength,
+                                                                                        percentile,
+                                                                                        percentileLookback,
+                                                                                        percentilePercentage,
+                                                                                      } as IndicatorConfig),
                       interval:
                         type === IndicatorEnum.adr
                           ? ExchangeIntervals.oneD

@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.0] – 2025-10-09
+### Added
+- Order Blocks & Fair Value Gaps (FVG only)
+
 ## [1.3.8] – 2025-10-07
 ### Changed
 - Remove delisted pairs from the bot

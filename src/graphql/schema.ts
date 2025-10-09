@@ -2723,6 +2723,8 @@ export const BotSchema = /* GraphQL */ `
     kcMa: String
     kcRange: String
     kcRangeLength: Float
+    obfvgValue: String
+    obfvgRef: String
     unpnlValue: Float
     unpnlCondition: String
     dcValue: String
@@ -4199,6 +4201,7 @@ export const BotSchema = /* GraphQL */ `
     KCPB
     UNPNL
     DC
+    OBFVG
   }
   enum BBCrossingEnum {
     middle
@@ -4312,6 +4315,8 @@ export const BotSchema = /* GraphQL */ `
     kcMa: String
     kcRange: String
     kcRangeLength: Float
+    obfvgValue: String
+    obfvgRef: String
     unpnlValue: Float
     unpnlCondition: String
     dcValue: String

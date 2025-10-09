@@ -12,6 +12,7 @@ import {
   QFLResult,
   DCResult,
   PercentileResult,
+  OBFVGResult,
 } from '@gainium/indicators'
 import {
   DCABacktestingInput,
@@ -510,8 +511,22 @@ export type SettingsIndicators = {
   unpnlValue?: number
   unpnlCondition?: IndicatorStartConditionEnum
   dcValue?: DCValueEnum
+  obfvgValue?: OBFVGValueEnum
+  obfvgRef?: OBFVGRefEnum
 } & Percentile &
   TrendFilter
+
+export enum OBFVGValueEnum {
+  bullish = 'bullish',
+  bearish = 'bearish',
+  any = 'any',
+}
+
+export enum OBFVGRefEnum {
+  high = 'high',
+  low = 'low',
+  middle = 'middle',
+}
 
 export enum DCValueEnum {
   basis = 'basis',
@@ -3102,6 +3117,7 @@ export enum IndicatorEnum {
   kcpb = 'KCPB',
   unpnl = 'UNPNL',
   dc = 'DC',
+  obfvg = 'OBFVG',
 }
 
 export enum MAEnum {
@@ -3129,6 +3145,7 @@ export type MAResult = {
 }
 
 export type IndicatorHistory = { time: number } & (
+  | { type: IndicatorEnum.obfvg; value: OBFVGResult }
   | { type: IndicatorEnum.dc; value: DCResult }
   | { type: IndicatorEnum.pp; value: PriorPivotResult }
   | { type: IndicatorEnum.st; value: SuperTrendResult }
@@ -3224,6 +3241,7 @@ type DivergenceOscillators =
   | IndicatorEnum.stoch
 
 export type IndicatorConfig =
+  | { type: IndicatorEnum.obfvg }
   | { type: IndicatorEnum.dc; length: number }
   | {
       type: IndicatorEnum.pc
