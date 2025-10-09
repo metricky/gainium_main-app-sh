@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.1] – 2025-10-09
+### Fixed
+- GQL input schema
+
 ## [1.4.0] – 2025-10-09
 ### Added
 - Order Blocks & Fair Value Gaps (FVG only)
