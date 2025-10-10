@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.2] – 2025-10-10
+### Fixed
+- Multi SL issue
+
 ## [1.4.1] – 2025-10-09
 ### Fixed
 - GQL input schema

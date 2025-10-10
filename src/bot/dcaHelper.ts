@@ -5874,6 +5874,7 @@ function createDCABotHelper<
           )
           this.updateUserProfitStep()
           let reopen = false
+          let isSl = false
           if (!isReduce) {
             if (
               order.tpSlTarget &&
@@ -5903,6 +5904,7 @@ function createDCABotHelper<
                 .map((tp) => tp.uuid)
                 .includes(order.tpSlTarget)
             ) {
+              isSl = true
               findDeal.previousOrders = findDeal.currentOrders
               findDeal.currentOrders = await this.createCurrentDealOrders(
                 findDeal.deal.symbol.symbol,
@@ -5954,6 +5956,9 @@ function createDCABotHelper<
               this.updateUsage(dealId)
               this.updateAssets(dealId)
               this.sendDealClosedAlert(findDeal.deal, order, true)
+            }
+            if (isSl) {
+              this.checkDealSlMethods(findDeal)
             }
           })
 
@@ -13754,7 +13759,6 @@ function createDCABotHelper<
           ])
         }
       }
-
       this.dealsForStopLoss = new Map(activeDeals)
     }
     async checkDealsForIndicatorUnpnl() {
