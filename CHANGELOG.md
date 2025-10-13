@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.3] – 2025-10-13
+### Changed
+- Reduced unknown order retry count
+
 ## [1.4.2] – 2025-10-10
 ### Fixed
 - Multi SL issue

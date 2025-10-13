@@ -2821,13 +2821,13 @@ class MainBot<T extends IMainBot> {
       this.canceledMap.set(id, getCount + 1)
       const byId =
         this.data?.exchange === ExchangeEnum.coinbase || this.kucoinFullFutures
-      if ((this.canceledMap.get(id) ?? 0) > 10) {
+      if ((this.canceledMap.get(id) ?? 0) > 5) {
         this.canceledMap.delete(id)
         const get = this.getOrderFromMap(id)
         let find = get && get.status === 'NEW' ? get : undefined
         if (find && this.orders) {
           this.handleLog(
-            `Order not found after 10 attempts 2000 ms, order ${id} status set to CANCELED`,
+            `Order not found after 5 attempts 2000 ms, order ${id} status set to CANCELED`,
           )
           find.status = 'CANCELED'
           this.deleteOrder(find.clientOrderId)
