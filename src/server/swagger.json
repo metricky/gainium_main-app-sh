@@ -7365,16 +7365,29 @@
     "/api/cloneComboBot": {
       "put": {
         "summary": "Clone Combo bot settings.",
-        "tags": [
-          "Bots"
-        ],
+        "tags": ["Bots"],
         "description": "Requires write permission of API keys.",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "$ref": "#/components/schemas/UpdateComboBotInput"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/UpdateComboBotInput"
+                  }
+                ],
+                "properties": {
+                  "pair": {
+                    "type": "array",
+                    "description": "Array of trading pairs for the bot",
+                    "items": {
+                      "type": "string",
+                      "example": "BTC_USDT"
+                    },
+                    "example": ["BTC_USDT"]
+                  }
+                }
               }
             }
           }
@@ -7409,10 +7422,7 @@
                   "properties": {
                     "status": {
                       "type": "string",
-                      "enum": [
-                        "OK",
-                        "NOTOK"
-                      ],
+                      "enum": ["OK", "NOTOK"],
                       "description": "OK - execution of query is successful, NOTOK - execution of query failed",
                       "example": "OK"
                     },
@@ -7442,9 +7452,7 @@
                   "properties": {
                     "status": {
                       "type": "string",
-                      "enum": [
-                        "NOTOK"
-                      ],
+                      "enum": ["NOTOK"],
                       "description": "status or request",
                       "example": "NOTOK"
                     },

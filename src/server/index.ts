@@ -24,6 +24,8 @@ import { CORS_ORIGIN, GRAPH_QL_PORT, JWT_SECRET, SERVER_HOST } from '../config'
 import { addHealthEndpoint } from '../utils/healthServer'
 import swaggerDoc from './swagger.json'
 
+swaggerDoc.servers = [{ url: `${SERVER_HOST}` }]
+
 const cors_origin = CORS_ORIGIN?.split(' ')
 
 const Bot = BotInstance.getInstance()

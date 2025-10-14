@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.4] – 2025-10-14
+### Fixed
+- Clone combo bot input body
+- Server url in swagger
+
 ## [1.4.3] – 2025-10-13
 ### Changed
 - Reduced unknown order retry count
