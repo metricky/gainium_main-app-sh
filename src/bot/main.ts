@@ -1591,12 +1591,16 @@ class MainBot<T extends IMainBot> {
 
   private getNotEnoughOrdersIdByOrder(order: Order) {
     return this.botType === BotType.grid
-      ? order.side
-      : `${order.dealId}@${order.side}`
+      ? `${order.price}@${order.side}`
+      : `${order.dealId}@${order.side}@${order.price}`
   }
 
   @IdMute(mutex, (order: Order) => `notEnoughBalance${order.botId}`)
-  private async updateNotEnoughBalanceErrors(order: Order, inc = 1) {
+  private async updateNotEnoughBalanceErrors(
+    order: Order,
+    inc = 1,
+    reset = false,
+  ) {
     if (!this.data) {
       return
     }
@@ -1615,7 +1619,7 @@ class MainBot<T extends IMainBot> {
       this.data.notEnoughBalance.orders[id] = 0
     }
     this.data.notEnoughBalance.orders[id] += inc
-    if (this.data.notEnoughBalance.orders[id] === 0) {
+    if (this.data.notEnoughBalance.orders[id] <= 0 || reset) {
       delete this.data.notEnoughBalance.orders[id]
     }
     this.updateData({
@@ -4394,8 +4398,8 @@ class MainBot<T extends IMainBot> {
       }
       if (!processedOrder) {
         let request: BaseReturn<CommonOrder> | undefined
+        const notEnoughBalanceId = this.getNotEnoughOrdersIdByOrder(order)
         if (this.data.notEnoughBalance?.thresholdPassed) {
-          const notEnoughBalanceId = this.getNotEnoughOrdersIdByOrder(order)
           if (
             (this.data.notEnoughBalance.orders?.[notEnoughBalanceId] ?? 0) >
             this.notEnoughBalanceThreshold
@@ -4420,29 +4424,6 @@ class MainBot<T extends IMainBot> {
               )
               this.updateNotEnoughBalanceErrors(order, -1)
             }
-          } else if (
-            this.data.notEnoughBalance.orders &&
-            this.data.notEnoughBalance.orders[notEnoughBalanceId] &&
-            this.data.notEnoughBalance.orders[notEnoughBalanceId] <
-              this.notEnoughBalanceThreshold &&
-            this.data.notEnoughBalance.thresholdPassed
-          ) {
-            this.handleDebug(
-              `${this.notEnoughBalanceLogPrefix} Not enough balance reset threshold`,
-            )
-            this.data.notEnoughBalance = {
-              ...this.data.notEnoughBalance,
-              thresholdPassed: false,
-              thresholdPassedTime: 0,
-            }
-            this.updateData({
-              notEnoughBalance: this.data.notEnoughBalance,
-            })
-            this.emit('bot settings update', {
-              notEnoughBalance: {
-                thresholdPassed: this.data.notEnoughBalance.thresholdPassed,
-              },
-            })
           }
         }
         request = request ?? (await this.exchange.openOrder(requestData))
@@ -4581,6 +4562,12 @@ class MainBot<T extends IMainBot> {
         }
         if (request.status === StatusEnum.ok) {
           processedOrder = request.data
+          if (
+            this.data.notEnoughBalance?.thresholdPassed &&
+            (this.data.notEnoughBalance.orders?.[notEnoughBalanceId] ?? 0) > 0
+          ) {
+            this.updateNotEnoughBalanceErrors(order, 0, true)
+          }
         }
       }
       if (processedOrder) {

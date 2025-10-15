@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.6] – 2025-10-15
+### Changed
+- NOB logic for bot
+
 ## [1.4.5] – 2025-10-15
 ### Changed
 - Debug log for indicators
