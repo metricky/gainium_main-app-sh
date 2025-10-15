@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.5] – 2025-10-15
+### Changed
+- Debug log for indicators
+
 ## [1.4.4] – 2025-10-14
 ### Fixed
 - Clone combo bot input body

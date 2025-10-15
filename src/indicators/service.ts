@@ -1208,8 +1208,16 @@ class InternalIndicator {
         if (callCB) {
           this.cb?.(this.data, price, is1d)
         }
+      } else {
+        this.handleDebug(
+          `No result for ${this.id} at ${new Date(time)} with value ${JSON.stringify(value)}`,
+        )
       }
-    } catch {}
+    } catch (e) {
+      this.handleError(
+        `Cannot update value: ${(e as Error)?.message || e} for ${this.id} at ${new Date(time)} with value ${JSON.stringify(value)}`,
+      )
+    }
   }
   private async getCandles(
     from: number,
