@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.7] – 2025-10-16
+### Changed
+- Backtester update
+
 ## [1.4.6] – 2025-10-15
 ### Changed
 - NOB logic for bot
