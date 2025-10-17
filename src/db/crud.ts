@@ -518,27 +518,55 @@ class MongoCrud<T = any> {
   /**
    * Delete one data
    * @param {object | undefined} [search] search object. Default = {}
-   * @returns {Promise<ErrorResponse | MessageResponse>} message or error
+   * @param {boolean | undefined} [returnDoc] set to true to return deleted doc, false - to return message. Default = false
+   * @returns {Promise<ErrorResponse | MessageResponse | DataResponse>} deleted data, message or error
    */
-
+  async deleteData(
+    search: FilterQuery<ExcludeDoc<T>>,
+    returnDoc?: false,
+  ): Promise<ErrorResponse | MessageResponse>
+  async deleteData(
+    search: FilterQuery<ExcludeDoc<T>>,
+    returnDoc?: true,
+  ): Promise<DataResponse<ExcludeDoc<T>> | ErrorResponse>
   async deleteData(
     search: FilterQuery<ExcludeDoc<T>> = {},
+    returnDoc = false,
     count = 0,
-  ): Promise<ErrorResponse | MessageResponse> {
+  ) {
     try {
       const result = await this.getClient()
         .then(async () => {
-          const deleteRecord = await this.model.deleteOne(search)
-          if (deleteRecord.deletedCount === 1) {
-            return this.returnMessage('Record deleted')
+          if (!returnDoc) {
+            const deleteRecord = await this.model.deleteOne(search)
+            if (deleteRecord.deletedCount === 1) {
+              return this.returnMessage('Record deleted')
+            }
+            return this.returnError('Server error')
           }
-          return this.returnError('Server error')
+
+          const deletedDoc = await this.model.findOneAndDelete(search, {
+            lean: true,
+          })
+          if (deletedDoc) {
+            const res = {
+              ...deletedDoc,
+              _id: `${(deletedDoc as any)._id}`,
+            } as T
+            return this.returnData(res)
+          }
+          return this.returnError('No document found to delete')
         })
-        .catch(this.handleError(this.deleteData, search, count))
+        .catch(this.handleError(this.deleteData, search, returnDoc, count))
       return result
     } catch (e) {
       logger.error(`MongoCrud delete data | ${(e as Error)?.message ?? e}`)
-      return this.handleError(this.deleteData, search, count)(e as Error)
+      return this.handleError(
+        this.deleteData,
+        search,
+        returnDoc,
+        count,
+      )(e as Error)
     }
   }
   /**

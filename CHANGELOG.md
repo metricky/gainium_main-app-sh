@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.8] – 2025-10-17
+### Changed
+- Mongo delete method
+
 ## [1.4.7] – 2025-10-16
 ### Changed
 - Backtester update
