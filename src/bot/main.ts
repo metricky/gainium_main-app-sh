@@ -1590,9 +1590,10 @@ class MainBot<T extends IMainBot> {
   }
 
   private getNotEnoughOrdersIdByOrder(order: Order) {
+    const price = `${order.price}`.replace('.', '')
     return this.botType === BotType.grid
-      ? `${order.price}@${order.side}`
-      : `${order.dealId}@${order.side}@${order.price}`
+      ? `${price}@${order.side}`
+      : `${order.dealId}@${order.side}@${price}`
   }
 
   @IdMute(mutex, (order: Order) => `notEnoughBalance${order.botId}`)
