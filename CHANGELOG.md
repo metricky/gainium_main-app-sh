@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.10] – 2025-10-20
+### Fixed
+- Move deal to terminal of multicoin bot. 
+
 ## [1.4.9] – 2025-10-17
 ### Fixed
 - NOB order id

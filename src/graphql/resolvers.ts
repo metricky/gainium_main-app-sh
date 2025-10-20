@@ -3872,7 +3872,7 @@ const resolvers = <
       ) as Currency
 
       const newBotData = {
-        pair: dcaBot.settings.pair,
+        pair: [dcaDeal.symbol.symbol],
         name: '',
         strategy: dcaBot.settings.strategy,
         profitCurrency: dcaDeal.settings.profitCurrency,
