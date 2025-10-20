@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.12] – 2025-10-20
+### Fixed
+- Reset trailing mode
+
 ## [1.4.11] – 2025-10-20
 ### Added
 - Step parameter to update bot/deal API

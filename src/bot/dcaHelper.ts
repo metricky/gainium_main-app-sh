@@ -15970,11 +15970,19 @@ function createDCABotHelper<
             findDeal.deal.status === DCADealStatusEnum.error)
         ) {
           const currentSlPerc = findDeal.deal.settings.slPerc
-          const changeTrailing =
-            settings.trailingTpPerc &&
-            `${settings.trailingTpPerc}` !==
-              `${findDeal.deal.settings.trailingTpPerc}`
-          if (changeTrailing) {
+          const changeTrailingTp =
+            (settings.trailingTpPerc &&
+              `${settings.trailingTpPerc}` !==
+                `${findDeal.deal.settings.trailingTpPerc}`) ||
+            (!settings.trailingTp && findDeal.deal.settings.trailingTp)
+          const changeTrailingSl =
+            !settings.trailingSl && findDeal.deal.settings.trailingSl
+          if (
+            (changeTrailingTp &&
+              findDeal.deal.trailingMode === TrailingModeEnum.ttp) ||
+            (changeTrailingSl &&
+              findDeal.deal.trailingMode === TrailingModeEnum.tsl)
+          ) {
             findDeal.deal.trailingLevel = 0
             findDeal.deal.trailingMode = undefined
           }
