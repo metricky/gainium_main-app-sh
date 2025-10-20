@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.11] – 2025-10-20
+### Added
+- Step parameter to update bot/deal API
+
 ## [1.4.10] – 2025-10-20
 ### Fixed
 - Move deal to terminal of multicoin bot. 

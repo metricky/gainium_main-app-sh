@@ -39,6 +39,10 @@
             "type": "string",
             "description": "Bot name"
           },
+          "step": {
+            "type": "string",
+            "description": "Step percentage between DCA orders"
+          },
           "ordersCount": {
             "type": "integer",
             "description": "DCA orders count"
@@ -394,6 +398,10 @@
           "name": {
             "type": "string",
             "description": "Bot name"
+          },
+          "step": {
+            "type": "string",
+            "description": "Step percentage between DCA orders" 
           },
           "ordersCount": {
             "type": "integer",
@@ -5545,6 +5553,10 @@
                     "type": "integer",
                     "description": "DCA orders count"
                   },
+                  "step": {
+                    "type": "string",
+                    "description": "Step percentage between DCA orders"
+                  },
                   "tpPerc": {
                     "type": "string",
                     "description": "Take profit percent"
@@ -5555,10 +5567,7 @@
                   },
                   "profitCurrency": {
                     "type": "string",
-                    "enum": [
-                      "base",
-                      "quote"
-                    ],
+                    "enum": ["base", "quote"],
                     "description": "Profit currency"
                   },
                   "avgPrice": {
@@ -5600,9 +5609,7 @@
                   "dealCloseConditionSL": {
                     "type": "string",
                     "description": "Deal close options. For deal only possible option - tp",
-                    "enum": [
-                      "tp"
-                    ]
+                    "enum": ["tp"]
                   },
                   "useMultiSl": {
                     "type": "boolean",
@@ -5635,10 +5642,7 @@
                   "baseSlOn": {
                     "type": "string",
                     "description": "Base SL on. Default - avg",
-                    "enum": [
-                      "start",
-                      "avg"
-                    ]
+                    "enum": ["start", "avg"]
                   },
                   "trailingSl": {
                     "type": "boolean",
@@ -5661,9 +5665,7 @@
                   "dealCloseCondition": {
                     "type": "string",
                     "description": "Deal close options. For deal only possible option - tp",
-                    "enum": [
-                      "tp"
-                    ]
+                    "enum": ["tp"]
                   },
                   "closeByTimer": {
                     "type": "boolean",
@@ -5676,12 +5678,7 @@
                   "closeByTimerUnits": {
                     "type": "string",
                     "description": "Close deal by timer units",
-                    "enum": [
-                      "seconds",
-                      "minutes",
-                      "hours",
-                      "days"
-                    ]
+                    "enum": ["seconds", "minutes", "hours", "days"]
                   },
                   "useMultiTp": {
                     "type": "boolean",
@@ -5723,10 +5720,7 @@
                   "dcaCondition": {
                     "type": "string",
                     "description": "DCA Type. For deal available options - percentage, custom. Custom required dcaCustom array",
-                    "enum": [
-                      "percentage",
-                      "custom"
-                    ]
+                    "enum": ["percentage", "custom"]
                   },
                   "dcaCustom": {
                     "type": "array",
@@ -5868,6 +5862,10 @@
                   "ordersCount": {
                     "type": "integer",
                     "description": "DCA orders count"
+                  },
+                  "step":{
+                    "type": "string",
+                    "description": "Step percentage between DCA orders"
                   },
                   "tpPerc": {
                     "type": "string",

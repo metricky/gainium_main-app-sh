@@ -788,6 +788,7 @@ const allowedSettingsKeys = [
   'dcaCondition',
   'dcaCustom',
   'pair',
+  'step',
 ]
 const onlyDcaSettingsKeys = [
   'orderSize',
@@ -844,6 +845,7 @@ export const checkDCADealSettings = (
   }
 
   const checkTypes =
+    checkStringAsNumber(settings.step, true) &&
     checkNumber(settings.ordersCount, true) &&
     checkStringAsNumber(settings.tpPerc, true) &&
     checkStringAsEnum(settings.profitCurrency, ['quote', 'base']) &&
@@ -1133,6 +1135,7 @@ export const checkDCABotSettings = (
   }
 
   const checkTypes =
+    checkStringAsNumber(settings.step, true) &&
     checkString(settings.name) &&
     checkStringAsNumber(settings.baseOrderSize, true) &&
     checkStringAsNumber(settings.baseStep, true) &&
