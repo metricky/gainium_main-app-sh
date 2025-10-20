@@ -82,6 +82,7 @@ const findUSDRate = (asset: string, _prices: Prices, exchange?: string) => {
     .replace('SBTC', 'BTC')
     .replace('SUSD', 'USD')
     .replace('SUSDT', 'USDT')
+    .replace('UBTC', 'BTC')
   if (asset === 'USD') {
     return 1
   }
@@ -94,7 +95,10 @@ const findUSDRate = (asset: string, _prices: Prices, exchange?: string) => {
       (exchange?.toLowerCase().includes('hyperliquid') && asset === 'USDC'),
   )
   if (asset !== 'USDT') {
-    const findUsdtRate = findRate(asset, 'USDT', prices)
+    const findUsdtRate =
+      findRate(asset, 'USDT', prices) ||
+      (exchange?.toLowerCase().includes('hyperliquid') &&
+        findRate(asset, 'USDC', prices))
     if (findUsdtRate) {
       usdtRate = findUsdtRate
       usdRate = usdtRate

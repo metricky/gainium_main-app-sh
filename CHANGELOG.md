@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.13] – 2025-10-20
+### Changed
+- Hyperliquid USD rates
+
 ## [1.4.12] – 2025-10-20
 ### Fixed
 - Reset trailing mode
