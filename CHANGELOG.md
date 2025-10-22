@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.14] – 2025-10-22
+### Fixed
+- Market TP wrong trigger when having SL and multicoin. 
+
+### Added
+- New bot schema fields. 
+
 ## [1.4.13] – 2025-10-20
 ### Changed
 - Hyperliquid USD rates

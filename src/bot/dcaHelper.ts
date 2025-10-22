@@ -13718,6 +13718,7 @@ function createDCABotHelper<
       closeBySl: boolean,
       notCheckSl: boolean,
       closeByMulti: boolean,
+      closeTrigger: DCACloseTriggerEnum,
     ) {
       const d = this.getDeal(dealId)
       if (!d) {
@@ -13745,7 +13746,7 @@ function createDCABotHelper<
         undefined,
         undefined,
         true,
-        DCACloseTriggerEnum.trailing,
+        closeTrigger,
       )
     }
 
@@ -14853,6 +14854,7 @@ function createDCABotHelper<
         const close =
           (this.isLong && last <= priceToClose) ||
           (!this.isLong && last >= priceToClose)
+        let trailing = false
         if (
           close &&
           ((trailingSl &&
@@ -14871,6 +14873,7 @@ function createDCABotHelper<
               d.deal.trailingLevel
             }, price: ${last}, deal: ${dealId}`,
           )
+          trailing = true
         } else if (
           close &&
           useSl &&
@@ -14914,7 +14917,13 @@ function createDCABotHelper<
           )
         }
         if (close) {
-          this.triggerStopLoss(dealId, closeBySl, notCheckSl, closeByMulti)
+          this.triggerStopLoss(
+            dealId,
+            closeBySl,
+            notCheckSl,
+            closeByMulti,
+            trailing ? DCACloseTriggerEnum.trailing : DCACloseTriggerEnum.sl,
+          )
         }
       }
       this.lockSLCheck = false
@@ -15216,13 +15225,13 @@ function createDCABotHelper<
       }
     }
 
-    public async checkDCALevel(_botId: string, price: number) {
+    public async checkDCALevel(_botId: string, price: number, symbol: string) {
       for (const [d, v] of this.dealsDCALevelCheck) {
         if (!(this.isLong ? price <= v : price >= v)) {
           continue
         }
         const deal = this.getDeal(d)
-        if (!deal) {
+        if (!deal || deal.deal.symbol.symbol !== symbol) {
           continue
         }
         const value = this.dealsDCALevelCheck.get(deal.deal._id)
@@ -15266,13 +15275,13 @@ function createDCABotHelper<
       }
     }
 
-    public async checkTPLevel(_botId: string, price: number) {
+    public async checkTPLevel(_botId: string, price: number, symbol: string) {
       for (const [d, v] of this.dealsForTPLevelCheck) {
         if (!(this.isLong ? price >= v : price <= v)) {
           continue
         }
         const deal = this.getDeal(d)
-        if (!deal) {
+        if (!deal || deal.deal.symbol.symbol !== symbol) {
           continue
         }
         if (deal.closeByTp) {
@@ -15282,7 +15291,7 @@ function createDCABotHelper<
         if (value) {
           const trigger = this.isLong ? price >= value : price <= value
           if (trigger) {
-            this.handleDebug(
+            this.handleLog(
               `Deal: ${deal.deal._id} adding TP order by TP level check`,
             )
             deal.closeByTp = true
@@ -15434,8 +15443,8 @@ function createDCABotHelper<
             await this.checkTrailing(this.botId, msg.symbol)
             await this.checkDealsStopLoss(this.botId, msg.symbol)
             await this.checkDealsIndicatorUnpnl(this.botId, msg.symbol)
-            await this.checkDCALevel(this.botId, msg.price)
-            await this.checkTPLevel(this.botId, msg.price)
+            await this.checkDCALevel(this.botId, msg.price, msg.symbol)
+            await this.checkTPLevel(this.botId, msg.price, msg.symbol)
           }
         }
       }

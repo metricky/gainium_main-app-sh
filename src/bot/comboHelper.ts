@@ -5597,7 +5597,7 @@ function createComboBotHelper<
         msg.price <= (this.highestLow.get(msg.symbol) ?? 0)
       ) {
         this.unrealizedProfit()
-        this.checkDCALevel(this.botId, msg.price)
+        this.checkDCALevel(this.botId, msg.price, msg.symbol)
       }
       if (
         this.data &&

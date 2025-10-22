@@ -2611,6 +2611,7 @@ export const BotSchema = /* GraphQL */ `
     stats: profitLossStats
     lastPositionChange: Float
     notEnoughBalance: botNotEnoughBalance
+    cost: Float
   }
   type botNotEnoughBalance {
     thresholdPassed: Boolean
@@ -3313,6 +3314,7 @@ export const BotSchema = /* GraphQL */ `
     symbolStats: [botSymbolsStats]
     dealsReduceForBot: [dealsReduceForBot]
     notEnoughBalance: botNotEnoughBalance
+    cost: Float
   }
   type minigridSettings {
     topPrice: Float
@@ -3393,6 +3395,7 @@ export const BotSchema = /* GraphQL */ `
     assets: hedgeAssets
     uuid: String
     sharedSettings: sharedSettings
+    cost: Float
   }
   type fullComboBot {
     _id: String
@@ -3438,6 +3441,7 @@ export const BotSchema = /* GraphQL */ `
     symbolStats: [botSymbolsStats]
     useAssets: Boolean
     notEnoughBalance: botNotEnoughBalance
+    cost: Float
   }
   type dealsReduceForBot {
     profit: Float

@@ -387,6 +387,7 @@ const botCommon = {
     thresholdPassed: Boolean,
     thresholdPassedTime: Number,
   },
+  cost: Number,
   ...CreatedUpdated,
 }
 
@@ -2559,6 +2560,7 @@ const hedgeComboBotSchema = new Schema<HedgeBotSchema>({
     dealCloseConditionSL: { type: String, enum: CloseConditionEnum },
     dealCloseCondition: { type: String, enum: CloseConditionEnum },
   },
+  cost: Number,
   ...CreatedUpdated,
 })
 
@@ -2607,6 +2609,7 @@ const hedgeDcaBotSchema = new Schema<HedgeBotSchema>({
     comboTpBase: { type: String, enum: ComboTpBase },
     dealCloseConditionSL: { type: String, enum: CloseConditionEnum },
   },
+  cost: Number,
   ...CreatedUpdated,
 })
 

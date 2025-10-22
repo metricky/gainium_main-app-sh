@@ -1700,6 +1700,7 @@ export interface MainBot<T = BaseSettings> extends SchemaI {
   }
   share?: boolean
   shareId?: string
+  cost?: number
 }
 
 export type BotVars = {
@@ -4673,6 +4674,7 @@ export interface HedgeBotSchema
       | 'deleteTime'
       | 'share'
       | 'shareId'
+      | 'cost'
     >,
     Pick<
       DCABotSchema,
