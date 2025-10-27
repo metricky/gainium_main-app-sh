@@ -765,7 +765,7 @@ function createBotHelper<
               clientOrderId: swapId,
               status: 'NEW',
               executedQty: '0',
-              price: `${price}`,
+              price: `${this.math.round(price, ed.priceAssetPrecision)}`,
               origPrice: `${price}`,
               cummulativeQuoteQty: `${price * exactQtyToSwap}`,
               orderId: '-1',

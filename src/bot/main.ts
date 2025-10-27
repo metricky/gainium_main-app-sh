@@ -1247,7 +1247,7 @@ class MainBot<T extends IMainBot> {
         clientOrderId: this.getOrderId('GA-F'),
         status: 'NEW' as 'NEW',
         executedQty: '0',
-        price: `${price}`,
+        price: `${this.math.round(price, ed.priceAssetPrecision)}`,
         origPrice: `${price}`,
         cummulativeQuoteQty: `${price * qty}`,
         orderId: '-1',
