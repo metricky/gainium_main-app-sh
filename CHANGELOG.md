@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.15] – 2025-10-27
+### Fixed
+- Share Grid backtest input.  
+
 ## [1.4.14] – 2025-10-22
 ### Fixed
 - Market TP wrong trigger when having SL and multicoin. 

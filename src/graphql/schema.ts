@@ -780,7 +780,7 @@ export const BotSchema = /* GraphQL */ `
     shareComboBacktest(input: shareBacktestInput): shareBacktestResponse
     shareHedgeComboBacktest(input: shareBacktestInput): shareBacktestResponse
     shareHedgeDCABacktest(input: shareBacktestInput): shareBacktestResponse
-    shareGridBacktest(input: String): shareBacktestResponse
+    shareGridBacktest(input: shareBacktestInput): shareBacktestResponse
     setArchive(input: setArchiveInput!): setArchiveResponse
     closeOrderOnExchange(
       input: closeOrderOnExchangeInput!
