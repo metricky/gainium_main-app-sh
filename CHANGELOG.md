@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.19] – 2025-10-29
+### Fixed
+- Deals filter in reset user method. 
+
 ## [1.4.18] – 2025-10-29
 ### Added
 - Close old start deals. 

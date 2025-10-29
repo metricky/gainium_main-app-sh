@@ -8,6 +8,7 @@ import {
   ClearUserSchema,
   FreeAsset,
   ResetAccountTypeEnum,
+  DCADealStatusEnum,
 } from '../../types'
 import {
   BotStatusEnum,
@@ -1018,6 +1019,9 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           await dcaDealsDb.readData(
             {
               botId: { $in: dcaBotsWithDeals.map((b) => `${b._id}`) },
+              status: {
+                $in: [DCADealStatusEnum.open, DCADealStatusEnum.start],
+              },
               ...paperFilter,
             },
             {},
@@ -1047,6 +1051,9 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           await comboDealsDb.readData(
             {
               botId: { $in: comboBotsWithDeals.map((b) => `${b._id}`) },
+              status: {
+                $in: [DCADealStatusEnum.open, DCADealStatusEnum.start],
+              },
               ...paperFilter,
             },
             {},
