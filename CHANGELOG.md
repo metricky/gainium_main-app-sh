@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.18] – 2025-10-29
+### Added
+- Close old start deals. 
+
 ## [1.4.17] – 2025-10-29
 ### Fixed
 - Prevent duplicate transaction error. 

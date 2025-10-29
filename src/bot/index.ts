@@ -12696,6 +12696,83 @@ class Bot<T extends UserSchema = UserSchema> {
     /** TODO: stop logic here */
     this.handleDebug(`${prefix} end`)
   }
+
+  @IdMute(mutex, () => 'closeOldStartDeals')
+  async closeOldStartDeals() {
+    const prefix = `Closing old start deals | `
+    this.handleLog(`${prefix} start`)
+    const startDcaDeals = await this.dcaDealsDb.readData(
+      {
+        status: DCADealStatusEnum.start,
+        $not: { type: 'terminal', 'settings.useLimitPrice': true },
+        createTime: {
+          $lt: +new Date() - 24 * 60 * 60 * 1000,
+        },
+      },
+      {},
+      {},
+      true,
+    )
+    if (startDcaDeals.status === StatusEnum.notok) {
+      this.handleError(
+        `${prefix} error in reading deals: ${startDcaDeals.reason}`,
+      )
+    } else {
+      this.handleLog(
+        `${prefix} found ${startDcaDeals.data?.result.length} DCA deals to close`,
+      )
+      for (let i = 0; i < startDcaDeals.data?.result.length; i++) {
+        const deal = startDcaDeals.data?.result[i]
+        this.handleLog(
+          `${prefix} closing DCA deal ${deal._id} ${i + 1}/${startDcaDeals.data?.result.length}`,
+        )
+        await this.closeDCADeal(
+          deal.userId,
+          deal.botId,
+          `${deal._id}`,
+          CloseDCATypeEnum.cancel,
+          undefined,
+          deal.paperContext,
+          DCACloseTriggerEnum.auto,
+        )
+      }
+    }
+    const startComboDeals = await this.comboDealsDb.readData(
+      {
+        status: DCADealStatusEnum.start,
+        createTime: {
+          $lt: +new Date() - 24 * 60 * 60 * 1000,
+        },
+      },
+      {},
+      {},
+      true,
+    )
+    if (startComboDeals.status === StatusEnum.notok) {
+      this.handleError(
+        `${prefix} error in reading combo deals: ${startComboDeals.reason}`,
+      )
+    } else {
+      this.handleLog(
+        `${prefix} found ${startComboDeals.data?.result.length} Combo deals to close`,
+      )
+      for (let i = 0; i < startComboDeals.data?.result.length; i++) {
+        const deal = startComboDeals.data?.result[i]
+        this.handleLog(
+          `${prefix} closing Combo deal ${deal._id} ${i + 1}/${startDcaDeals.data?.result.length}`,
+        )
+        await this.closeComboDeal(
+          deal.userId,
+          deal.botId,
+          `${deal._id}`,
+          CloseDCATypeEnum.cancel,
+          undefined,
+          deal.paperContext,
+          DCACloseTriggerEnum.auto,
+        )
+      }
+    }
+  }
 }
 
 export default Bot

@@ -26,6 +26,10 @@ cron.schedule('20 */1 * * *', async () => {
   exchangeFullUpdate()
 })
 
+cron.schedule('15 */1 * * *', async () => {
+  Bot.getInstance().closeOldStartDeals()
+})
+
 cron.schedule('0 0 * * *', async () => {
   Bot.getInstance().premanenetlyDeleteBots()
   checkBacktests()
