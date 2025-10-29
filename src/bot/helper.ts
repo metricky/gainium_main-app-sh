@@ -101,6 +101,7 @@ function createBotHelper<
    * Class for operate bot functions
    */
   class BotHelper extends ActualBaseClass {
+    private ordersInProgress: Set<string> = new Set()
     /** DB instance to work with transactions collection */
     protected transactionDb: DB<TransactionSchema>
     /** Object to store swap asset order */
@@ -1487,7 +1488,8 @@ function createBotHelper<
             currentSide === PositionSide.SHORT) ||
           (order.side === OrderSideEnum.sell &&
             currentSide === PositionSide.LONG)
-        return await this.sendGridToExchange(
+        this.ordersInProgress.add(order.newClientOrderId)
+        const r = await this.sendGridToExchange(
           order,
           {
             type: 'LIMIT',
@@ -1496,6 +1498,8 @@ function createBotHelper<
           },
           ed,
         )
+        this.ordersInProgress.delete(order.newClientOrderId)
+        return r
       } else {
         this.handleDebug(
           `Grid already exist qty: ${order.qty}, price: ${order.price}, side: ${order.side}`,
@@ -1809,6 +1813,11 @@ function createBotHelper<
           this.notProceedMessage(`processFilledOrder ${order.clientOrderId}`),
         )
         return
+      }
+      if (this.ordersInProgress.has(order.clientOrderId)) {
+        return this.handleDebug(
+          `Order ${order.clientOrderId} is in progress, skip filled processing`,
+        )
       }
       const _id = this.startMethod('processFilledOrder')
       if (!this.loadingComplete) {

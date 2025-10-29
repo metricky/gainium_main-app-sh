@@ -615,7 +615,6 @@ class MongoCrud<T = any> {
             search,
             { ...data },
             {
-              new: true,
               upsert: false,
             },
           )

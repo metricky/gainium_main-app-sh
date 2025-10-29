@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.17] – 2025-10-29
+### Fixed
+- Prevent duplicate transaction error. 
+
 ## [1.4.16] – 2025-10-27
 ### Fixed
 - Hyperliquid price precision.   
