@@ -996,7 +996,6 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
     )
     const dcaBotsWithDeals = dcaBots.filter(
       (b) =>
-        !b.parentBotId &&
         (b.status === BotStatusEnum.closed ||
           (b.status === BotStatusEnum.error &&
             b.previousStatus === BotStatusEnum.closed)) &&
@@ -1004,7 +1003,6 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
     )
     const comboBotsWithDeals = comboBots.filter(
       (b) =>
-        !b.parentBotId &&
         (b.status === BotStatusEnum.closed ||
           (b.status === BotStatusEnum.error &&
             b.previousStatus === BotStatusEnum.closed)) &&
@@ -1102,10 +1100,9 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
 
     const activeDCABots = dcaBots.filter(
       (b) =>
-        !b.parentBotId &&
-        (b.status === BotStatusEnum.open ||
-          b.status === BotStatusEnum.range ||
-          b.status === BotStatusEnum.error),
+        b.status === BotStatusEnum.open ||
+        b.status === BotStatusEnum.range ||
+        b.status === BotStatusEnum.error,
     )
     if (activeDCABots.length) {
       logger.debug(
@@ -1116,9 +1113,9 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           userId,
           {
             status: BotStatusEnum.closed,
-            id: b._id.toString(),
+            id: b.parentBotId || b._id.toString(),
             cancelPartiallyFilled: true,
-            type: BotType.dca,
+            type: b.parentBotId ? BotType.hedgeDca : BotType.dca,
             closeType: CloseDCATypeEnum.cancel,
           },
           !!b.paperContext,
@@ -1129,10 +1126,9 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
 
     const activeComboBots = comboBots.filter(
       (b) =>
-        !b.parentBotId &&
-        (b.status === BotStatusEnum.open ||
-          b.status === BotStatusEnum.range ||
-          b.status === BotStatusEnum.error),
+        b.status === BotStatusEnum.open ||
+        b.status === BotStatusEnum.range ||
+        b.status === BotStatusEnum.error,
     )
     if (activeComboBots.length) {
       logger.debug(
@@ -1143,9 +1139,9 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
           userId,
           {
             status: BotStatusEnum.closed,
-            id: b._id.toString(),
+            id: b.parentBotId || b._id.toString(),
             cancelPartiallyFilled: true,
-            type: BotType.combo,
+            type: b.parentBotId ? BotType.hedgeCombo : BotType.combo,
             closeType: CloseDCATypeEnum.cancel,
           },
           !!b.paperContext,

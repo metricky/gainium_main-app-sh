@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.20] – 2025-11-03
+### Fixed
+- Reset account with hedge bots. 
+
 ## [1.4.19] – 2025-10-29
 ### Fixed
 - Deals filter in reset user method. 
