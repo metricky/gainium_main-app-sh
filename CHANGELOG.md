@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.21] – 2025-11-03
+### Fixed
+- Handle worker terminate. 
+
 ## [1.4.20] – 2025-11-03
 ### Fixed
 - Reset account with hedge bots. 

@@ -686,7 +686,7 @@ class Bot<T extends UserSchema = UserSchema> {
                   },
                 ],
               },
-              { isDeleted: { $ne: true }, parentBotId: { $exists: false } },
+              { isDeleted: { $ne: true } },
             ],
           },
           {},
@@ -728,39 +728,10 @@ class Bot<T extends UserSchema = UserSchema> {
         }
       }
       if (hedgeComboBots.length) {
-        const findChildBots = await this.comboBotDb.readData(
-          {
-            _id: { $in: comboBots.map((b) => new Types.ObjectId(b.id)) },
-            $and: [
-              {
-                $or: [
-                  { 'deals.active': { $gt: 0 } },
-                  {
-                    status: {
-                      $in: [
-                        BotStatusEnum.open,
-                        BotStatusEnum.range,
-                        BotStatusEnum.error,
-                        BotStatusEnum.monitoring,
-                      ],
-                    },
-                  },
-                ],
-              },
-              { isDeleted: { $ne: true }, parentBotId: { $exists: true } },
-            ],
-          },
-          {},
-          {},
-          true,
-          true,
-        )
         const findBots = await hedgeComboBotDb.readData(
           {
             _id: {
-              $in: findChildBots?.data?.result.map(
-                (b) => new Types.ObjectId(b._id),
-              ),
+              $in: hedgeComboBots.map((b) => new Types.ObjectId(b.id)),
             },
             $and: [{ isDeleted: { $ne: true } }],
           },
@@ -797,7 +768,7 @@ class Bot<T extends UserSchema = UserSchema> {
               b.uuid,
               b.bots[0].exchange,
               !!b.paperContext,
-              b.bots.map((_b) => ({ id: `${b}`, type: BotType.combo })),
+              b.bots.map((_b) => ({ id: `${_b._id}`, type: BotType.combo })),
               undefined,
               b.status,
               true,
@@ -806,39 +777,10 @@ class Bot<T extends UserSchema = UserSchema> {
         }
       }
       if (hedgeDcaBots.length) {
-        const findChildBots = await this.dcaBotDb.readData(
-          {
-            _id: { $in: dcaBots.map((b) => new Types.ObjectId(b.id)) },
-            $and: [
-              {
-                $or: [
-                  { 'deals.active': { $gt: 0 } },
-                  {
-                    status: {
-                      $in: [
-                        BotStatusEnum.open,
-                        BotStatusEnum.range,
-                        BotStatusEnum.error,
-                        BotStatusEnum.monitoring,
-                      ],
-                    },
-                  },
-                ],
-              },
-              { isDeleted: { $ne: true }, parentBotId: { $exists: true } },
-            ],
-          },
-          {},
-          {},
-          true,
-          true,
-        )
         const findBots = await hedgeDCABotDb.readData(
           {
             _id: {
-              $in: findChildBots?.data?.result.map(
-                (b) => new Types.ObjectId(b._id),
-              ),
+              $in: hedgeDcaBots.map((b) => new Types.ObjectId(b.id)),
             },
             $and: [{ isDeleted: { $ne: true } }],
           },
@@ -875,7 +817,7 @@ class Bot<T extends UserSchema = UserSchema> {
               b.uuid,
               b.bots[0].exchange,
               !!b.paperContext,
-              b.bots.map((_b) => ({ id: `${b}`, type: BotType.combo })),
+              b.bots.map((_b) => ({ id: `${_b._id}`, type: BotType.dca })),
               undefined,
               b.status,
               true,
