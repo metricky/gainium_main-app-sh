@@ -1024,7 +1024,7 @@ class MainBot<T extends IMainBot> {
     }
   }
 
-  private userStreamInfoCb(msg: string) {
+  protected userStreamInfoCb(msg: string) {
     this.handleLog(`${msg}`)
     if ((msg ?? '').includes('Subscribed to user')) {
       if (

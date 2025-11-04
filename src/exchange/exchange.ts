@@ -34,9 +34,9 @@ import ExpirableMap from '../utils/expirableMap'
 const { sleep } = utils
 
 class Exchange extends AbstractExchange {
-  private readonly exchange: ExchangeEnum
-  private isOkx: boolean
-  private brokerCodes = new ExpirableMap<ExchangeEnum, string>(60 * 60 * 1000) // 1 hour cache
+  protected readonly exchange: ExchangeEnum
+  protected isOkx: boolean
+  protected brokerCodes = new ExpirableMap<ExchangeEnum, string>(60 * 60 * 1000) // 1 hour cache
   protected timeProfiler = TimeProfiler.getInstance()
   constructor(
     exchange: ExchangeEnum,
@@ -67,13 +67,13 @@ class Exchange extends AbstractExchange {
     return this.timeProfiler.getEmptyTimeProfile(requestName, this.exchange)
   }
 
-  private startProfilerTime(
+  protected startProfilerTime(
     profiler: ExchangeRequestTimeProfile,
   ): ExchangeRequestTimeProfile {
     return this.timeProfiler.startProfilerTime(profiler)
   }
 
-  private endProfilerTime(
+  protected endProfilerTime(
     profiler: ExchangeRequestTimeProfile,
   ): ExchangeRequestTimeProfile {
     return this.timeProfiler.endProfilerTime(profiler)

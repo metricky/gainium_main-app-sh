@@ -133,6 +133,22 @@ const UserResponse = /* GraphQL */ `
   }
 `
 
+export const AddExchangeInput = /* GraphQL */ `
+  input addExchangeInput {
+    key: String!
+    secret: String!
+    provider: Exchange!
+    name: String
+    passphrase: String
+    stablecoinBalance: Float
+    coinToTopUp: String
+    tradeType: TradeTypeEnum
+    keysType: String
+    okxSource: String
+    bybitHost: BybitHost
+  }
+`
+
 export const UserSchema = /* GraphQL */ `
   type Query {
     getUserFiles: getUserFilesResponse
@@ -434,19 +450,7 @@ export const UserSchema = /* GraphQL */ `
     kz
     ge
   }
-  input addExchangeInput {
-    key: String!
-    secret: String!
-    provider: Exchange!
-    name: String
-    passphrase: String
-    stablecoinBalance: Float
-    coinToTopUp: String
-    tradeType: TradeTypeEnum
-    keysType: String
-    okxSource: String
-    bybitHost: BybitHost
-  }
+
   input updateExchangeInput {
     uuid: String!
     key: String
@@ -5365,4 +5369,5 @@ export default [
   UserResponse,
   BotSchema,
   GlobalVariablesSchema,
+  AddExchangeInput,
 ]
