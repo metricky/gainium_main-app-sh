@@ -1109,7 +1109,7 @@ export const checkDCABotSettings = (
     'comboUseSmartGrids',
     'comboSmartGridsCount',
   ]
-  const onlyDcaKeys = [...onlyDcaSettingsKeys]
+  const onlyDcaKeys = [...onlyDcaSettingsKeys].filter((v) => v !== 'orderSize')
 
   const onlyComboKeys = [
     ...onlyComboSettingsKeys,

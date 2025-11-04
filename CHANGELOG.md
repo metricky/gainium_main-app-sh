@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.22] – 2025-11-04
+### Fixed
+- Clone combo bot unsupported fields.  
+
 ## [1.4.21] – 2025-11-03
 ### Fixed
 - Handle worker terminate. 
