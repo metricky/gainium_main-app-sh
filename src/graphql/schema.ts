@@ -2799,6 +2799,8 @@ export const BotSchema = /* GraphQL */ `
     useNoOverlapDeals: Boolean
     dynamicPriceFilterDirection: String
     useRiskReward: Boolean
+    rrSlType: String
+    rrSlFixedValue: String
     riskSlType: String
     riskSlAmountPerc: String
     riskSlAmountValue: String
@@ -2960,6 +2962,8 @@ export const BotSchema = /* GraphQL */ `
     useNoOverlapDeals: Boolean
     dynamicPriceFilterDirection: String
     useRiskReward: Boolean
+    rrSlType: String
+    rrSlFixedValue: String
     riskSlType: String
     riskSlAmountPerc: String
     riskSlAmountValue: String
@@ -4392,6 +4396,8 @@ export const BotSchema = /* GraphQL */ `
     useNoOverlapDeals: Boolean
     dynamicPriceFilterDirection: String
     useRiskReward: Boolean
+    rrSlType: String
+    rrSlFixedValue: String
     riskSlType: String
     riskSlAmountPerc: String
     riskSlAmountValue: String
@@ -4595,6 +4601,8 @@ export const BotSchema = /* GraphQL */ `
     useNoOverlapDeals: Boolean
     dynamicPriceFilterDirection: String
     useRiskReward: Boolean
+    rrSlType: String
+    rrSlFixedValue: String
     riskSlType: String
     riskSlAmountPerc: String
     riskSlAmountValue: String
@@ -4782,6 +4790,8 @@ export const BotSchema = /* GraphQL */ `
     useNoOverlapDeals: Boolean
     dynamicPriceFilterDirection: String
     useRiskReward: Boolean
+    rrSlType: String
+    rrSlFixedValue: String
     riskSlType: String
     riskSlAmountPerc: String
     riskSlAmountValue: String
@@ -4944,6 +4954,8 @@ export const BotSchema = /* GraphQL */ `
     useNoOverlapDeals: Boolean
     dynamicPriceFilterDirection: String
     useRiskReward: Boolean
+    rrSlType: String
+    rrSlFixedValue: String
     riskSlType: String
     riskSlAmountPerc: String
     riskSlAmountValue: String

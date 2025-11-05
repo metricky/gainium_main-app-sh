@@ -80,6 +80,7 @@ import {
   DCADealsSchema,
   OBFVGRefEnum,
   OBFVGValueEnum,
+  RRSlTypeEnum,
 } from '../../types'
 import { MathHelper } from '../utils/math'
 import MainBot, { notEnoughErrors } from './main'
@@ -10299,11 +10300,18 @@ function createDCABotHelper<
         indicators,
         riskMaxSl,
         riskMinSl,
+        rrSlFixedValue,
+        rrSlType,
       } = await this.getAggregatedSettings()
-      const indicator = [...this.indicators.values()].find(
-        (i) => i.symbol === pair && i.action === IndicatorAction.riskReward,
-      )
-      if (!indicator) {
+      const isRRSLTypeIndicator =
+        rrSlType === RRSlTypeEnum.indicator || !rrSlType
+      const isRRSLTypeFixed = rrSlType === RRSlTypeEnum.fixed
+      const indicator = isRRSLTypeIndicator
+        ? [...this.indicators.values()].find(
+            (i) => i.symbol === pair && i.action === IndicatorAction.riskReward,
+          )
+        : undefined
+      if (!indicator && isRRSLTypeIndicator) {
         this.handleErrors(
           `Risk reward indicator not found for ${pair}`,
           'checkRiskRewardCondition',
@@ -10315,15 +10323,20 @@ function createDCABotHelper<
         return null
       }
 
-      const [last] = [...indicator.history].sort((a, b) => b.time - a.time)
-      if (!last) {
+      const [last] =
+        isRRSLTypeIndicator && indicator
+          ? [...indicator.history].sort((a, b) => b.time - a.time)
+          : []
+      if (!last && isRRSLTypeIndicator) {
         return null
       }
 
-      const indicatorSettings = (indicators ?? []).find(
-        (i) => i.indicatorAction === IndicatorAction.riskReward,
-      )
-      if (!indicatorSettings) {
+      const indicatorSettings = isRRSLTypeIndicator
+        ? (indicators ?? []).find(
+            (i) => i.indicatorAction === IndicatorAction.riskReward,
+          )
+        : undefined
+      if (!indicatorSettings && isRRSLTypeIndicator) {
         if (!indicator) {
           this.handleErrors(
             `Risk reward indicator not found for ${pair}`,
@@ -10335,92 +10348,99 @@ function createDCABotHelper<
         }
         return null
       }
-      const { type, ppValue, srCrossingValue, bbCrossingValue, stCondition } =
-        indicatorSettings
+
       let value = NaN
-      if (type === IndicatorEnum.pp) {
-        const data = last.value as PriorPivotResult
-        if (ppValue === ppValueEnum.anyH) {
-          value = isNaN(data.hh) || data.hh === null ? data.lh : data.hh
+      if (indicatorSettings) {
+        const { type, ppValue, srCrossingValue, bbCrossingValue, stCondition } =
+          indicatorSettings
+        if (type === IndicatorEnum.pp) {
+          const data = last.value as PriorPivotResult
+          if (ppValue === ppValueEnum.anyH) {
+            value = isNaN(data.hh) || data.hh === null ? data.lh : data.hh
+          }
+          if (ppValue === ppValueEnum.hh) {
+            value = data.all.hh
+          }
+          if (ppValue === ppValueEnum.lh) {
+            value = data.all.lh
+          }
+          if (ppValue === ppValueEnum.anyL) {
+            value = isNaN(data.ll) || data.ll === null ? data.hl : data.ll
+          }
+          if (ppValue === ppValueEnum.hl) {
+            value = data.all.hl
+          }
+          if (ppValue === ppValueEnum.ll) {
+            value = data.all.ll
+          }
+          if (ppValue === ppValueEnum.anySWH) {
+            value = isNaN(data.wh) || data.wh === null ? data.sh : data.wh
+          }
+          if (ppValue === ppValueEnum.wh) {
+            value = data.all.wh
+          }
+          if (ppValue === ppValueEnum.sh) {
+            value = data.all.sh
+          }
+          if (ppValue === ppValueEnum.anySWL) {
+            value = isNaN(data.wl) || data.wl === null ? data.sl : data.wl
+          }
+          if (ppValue === ppValueEnum.wl) {
+            value = data.all.wl
+          }
+          if (ppValue === ppValueEnum.sl) {
+            value = data.all.sl
+          }
         }
-        if (ppValue === ppValueEnum.hh) {
-          value = data.all.hh
+        if (type === IndicatorEnum.qfl) {
+          const data = last.value as QFLResult
+          value = data.base
         }
-        if (ppValue === ppValueEnum.lh) {
-          value = data.all.lh
+        if (type === IndicatorEnum.sr) {
+          const data = last.value as PivotResult
+          value =
+            srCrossingValue === SRCrossingEnum.resistance ? data.high : data.low
         }
-        if (ppValue === ppValueEnum.anyL) {
-          value = isNaN(data.ll) || data.ll === null ? data.hl : data.ll
+        if (type === IndicatorEnum.bb || type === IndicatorEnum.kc) {
+          const data = last.value as {
+            result: BandsResult
+            price: number
+          }
+          value =
+            bbCrossingValue === BBCrossingEnum.lower
+              ? data.result.lower
+              : bbCrossingValue === BBCrossingEnum.middle
+                ? data.result.middle
+                : data.result.upper
         }
-        if (ppValue === ppValueEnum.hl) {
-          value = data.all.hl
+        if (type === IndicatorEnum.ma) {
+          const data = last.value as MAResult
+          value = data.ma
         }
-        if (ppValue === ppValueEnum.ll) {
-          value = data.all.ll
+        if (type === IndicatorEnum.st) {
+          const data = last.value as SuperTrendResult
+          value =
+            stCondition === STConditionEnum.down ? data.all.down : data.all.up
         }
-        if (ppValue === ppValueEnum.anySWH) {
-          value = isNaN(data.wh) || data.wh === null ? data.sh : data.wh
+        if (type === IndicatorEnum.psar) {
+          const data = last.value as { psar: number; price: number }
+          value = data.psar
         }
-        if (ppValue === ppValueEnum.wh) {
-          value = data.all.wh
-        }
-        if (ppValue === ppValueEnum.sh) {
-          value = data.all.sh
-        }
-        if (ppValue === ppValueEnum.anySWL) {
-          value = isNaN(data.wl) || data.wl === null ? data.sl : data.wl
-        }
-        if (ppValue === ppValueEnum.wl) {
-          value = data.all.wl
-        }
-        if (ppValue === ppValueEnum.sl) {
-          value = data.all.sl
+        if (type === IndicatorEnum.atr) {
+          const atrMultiplier = +(indicatorSettings?.riskAtrMult ?? '1')
+          const data = last.value as number
+          value = this.isLong
+            ? price - data * atrMultiplier
+            : price + data * atrMultiplier
         }
       }
-      if (type === IndicatorEnum.qfl) {
-        const data = last.value as QFLResult
-        value = data.base
-      }
-      if (type === IndicatorEnum.sr) {
-        const data = last.value as PivotResult
-        value =
-          srCrossingValue === SRCrossingEnum.resistance ? data.high : data.low
-      }
-      if (type === IndicatorEnum.bb || type === IndicatorEnum.kc) {
-        const data = last.value as {
-          result: BandsResult
-          price: number
-        }
-        value =
-          bbCrossingValue === BBCrossingEnum.lower
-            ? data.result.lower
-            : bbCrossingValue === BBCrossingEnum.middle
-              ? data.result.middle
-              : data.result.upper
-      }
-      if (type === IndicatorEnum.ma) {
-        const data = last.value as MAResult
-        value = data.ma
-      }
-      if (type === IndicatorEnum.st) {
-        const data = last.value as SuperTrendResult
-        value =
-          stCondition === STConditionEnum.down ? data.all.down : data.all.up
-      }
-      if (type === IndicatorEnum.psar) {
-        const data = last.value as { psar: number; price: number }
-        value = data.psar
-      }
-      if (type === IndicatorEnum.atr) {
-        const atrMultiplier = +(indicatorSettings?.riskAtrMult ?? '1')
-        const data = last.value as number
-        value = this.isLong
-          ? price - data * atrMultiplier
-          : price + data * atrMultiplier
+      if (isRRSLTypeFixed) {
+        const sl = +(rrSlFixedValue ?? '-1') / 100
+        value = this.isLong ? price * (1 + sl) : price * (1 - sl)
       }
       if (isNaN(value) || value === null) {
         this.handleErrors(
-          `Risk reward indicator value not found for ${pair}`,
+          `Risk reward value not found for ${pair}`,
           'checkRiskRewardCondition',
           '',
           false,

@@ -103,6 +103,7 @@ import {
   BybitHost,
   OBFVGValueEnum,
   OBFVGRefEnum,
+  RRSlTypeEnum,
 } from '../../types'
 import { collections } from './config'
 
@@ -1116,6 +1117,8 @@ const dcaBotSettings = new Schema({
   useNoOverlapDeals: Boolean,
   dynamicPriceFilterDirection: String,
   useRiskReward: Boolean,
+  rrSlType: { type: String, enum: RRSlTypeEnum },
+  rrSlFixedValue: String,
   riskSlType: String,
   riskSlAmountPerc: String,
   riskSlAmountValue: String,
@@ -1173,6 +1176,8 @@ const comboBotSettings = new Schema<ComboBotSettings>({
   useNoOverlapDeals: Boolean,
   dynamicPriceFilterDirection: String,
   useRiskReward: Boolean,
+  rrSlType: { type: String, enum: RRSlTypeEnum },
+  rrSlFixedValue: String,
   riskSlType: String,
   riskSlAmountPerc: String,
   riskSlAmountValue: String,

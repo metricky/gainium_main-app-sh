@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.0] - 2025-11-05
+### Added 
+- Fixed Stop Loss in Risk Reward
+
 ## [1.4.23] – 2025-11-05
 ### Fixed
 - Max deal levels. 
