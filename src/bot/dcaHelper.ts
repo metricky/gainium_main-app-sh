@@ -5780,6 +5780,20 @@ function createDCABotHelper<
               (findDeal.deal.pendingAddFunds ?? []).length +
               (findDeal.deal.funds ?? []).length,
           )
+          if (
+            findDeal.currentOrders.filter(
+              (o) => o.type === TypeOrderEnum.dealRegular,
+            ).length === 0
+          ) {
+            findDeal.deal.levels.all = Math.max(
+              findDeal.deal.levels.complete,
+              1 +
+                findDeal.initialOrders.filter(
+                  (o) => o.type === TypeOrderEnum.dealRegular,
+                ).length,
+              1 + (findDeal.deal.funds ?? []).length,
+            )
+          }
           findDeal.currentOrders = await this.createCurrentDealOrders(
             findDeal.deal.symbol.symbol,
             findDeal.deal.lastPrice,
@@ -6058,6 +6072,20 @@ function createDCABotHelper<
                   : o.status === 'FILLED'),
             ).length ?? 1,
           )
+          if (
+            findDeal.currentOrders.filter(
+              (o) => o.type === TypeOrderEnum.dealRegular,
+            ).length === 0
+          ) {
+            findDeal.deal.levels.all = Math.max(
+              findDeal.deal.levels.complete,
+              1 +
+                findDeal.initialOrders.filter(
+                  (o) => o.type === TypeOrderEnum.dealRegular,
+                ).length,
+              1 + (findDeal.deal.funds ?? []).length,
+            )
+          }
           if (findDeal.deal.levels.complete > findDeal.deal.levels.all) {
             findDeal.deal.levels.all = findDeal.deal.levels.complete
           }
@@ -15861,6 +15889,20 @@ function createDCABotHelper<
               (findDeal.deal.pendingAddFunds ?? []).length +
               (findDeal.deal.funds ?? []).length,
           )
+          if (
+            findDeal.currentOrders.filter(
+              (o) => o.type === TypeOrderEnum.dealRegular,
+            ).length === 0
+          ) {
+            findDeal.deal.levels.all = Math.max(
+              findDeal.deal.levels.complete,
+              1 +
+                findDeal.initialOrders.filter(
+                  (o) => o.type === TypeOrderEnum.dealRegular,
+                ).length,
+              1 + (findDeal.deal.funds ?? []).length,
+            )
+          }
         }
         this.saveDeal(findDeal, {
           initialBalances: findDeal.deal.initialBalances,
@@ -16119,6 +16161,20 @@ function createDCABotHelper<
                   (findDeal.deal.pendingAddFunds ?? []).length +
                   (findDeal.deal.funds ?? []).length,
               ),
+            }
+            if (
+              findDeal.currentOrders.filter(
+                (o) => o.type === TypeOrderEnum.dealRegular,
+              ).length === 0
+            ) {
+              findDeal.deal.levels.all = Math.max(
+                findDeal.deal.levels.complete,
+                1 +
+                  findDeal.initialOrders.filter(
+                    (o) => o.type === TypeOrderEnum.dealRegular,
+                  ).length,
+                1 + (findDeal.deal.funds ?? []).length,
+              )
             }
             findDeal.deal.fullFee = await this.getCommDeal(findDeal.deal)
           }

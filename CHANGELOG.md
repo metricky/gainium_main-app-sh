@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.4.23] – 2025-11-05
+### Fixed
+- Max deal levels. 
+
 ## [1.4.22] – 2025-11-04
 ### Fixed
 - Clone combo bot unsupported fields.  
