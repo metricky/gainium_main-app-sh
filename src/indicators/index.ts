@@ -560,6 +560,21 @@ class InternalIndicatorsFactory {
   ) {
     let symbolCode: string | undefined
     try {
+      if (
+        [
+          ExchangeEnum.hyperliquid,
+          ExchangeEnum.hyperliquidLinear,
+          ExchangeEnum.paperHyperliquid,
+          ExchangeEnum.paperHyperliquidLinear,
+        ].includes(exchange)
+      ) {
+        return {
+          id: '',
+          indicator: null,
+          room: '',
+          message: `Hyperliquid is disabled`,
+        }
+      }
       if ([ExchangeEnum.mexc, ExchangeEnum.paperMexc].includes(exchange)) {
         return {
           id: '',

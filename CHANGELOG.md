@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.1] - 2025-11-06
+### Changed 
+- Hyperliquid max candles. Hide hyperliquid in indicators. 
+
 ## [1.5.0] - 2025-11-05
 ### Added 
 - Fixed Stop Loss in Risk Reward

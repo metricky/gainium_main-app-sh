@@ -1265,7 +1265,12 @@ class InternalIndicator {
                 this.exchange === ExchangeEnum.paperOkxInverse ||
                 this.exchange === ExchangeEnum.paperOkxLinear
               ? 100
-              : 200
+              : this.exchange === ExchangeEnum.hyperliquid ||
+                  this.exchange === ExchangeEnum.hyperliquidLinear ||
+                  this.exchange === ExchangeEnum.paperHyperliquid ||
+                  this.exchange === ExchangeEnum.paperHyperliquidLinear
+                ? 4999
+                : 200
     const to = this.to || new Date().getTime()
     const step = intervalMap[this.interval]
     const length = Math.max(Math.ceil(this.length * 2), 500)
@@ -1419,7 +1424,7 @@ class InternalIndicator {
       } else {
         this.start = this.to ? +this.to + 1 : new Date().getTime()
         this.handleError(
-          `${this.indicatorName}@${this.symbol}@${this.exchange}@${this.interval} | ${candles.reason}`,
+          `${this.indicatorName}@${this.symbol}@${this.exchange}@${this.interval} | ${candles.status === StatusEnum.notok ? candles.reason : 'No data'}`,
         )
       }
     } catch (e) {
