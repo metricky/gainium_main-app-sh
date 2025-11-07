@@ -169,10 +169,10 @@ function createHedgeBotHelper<
         this.data?.sharedSettings?.useTp && this.data.sharedSettings.tpPerc
           ? total >= +this.data.sharedSettings.tpPerc
           : false
-      this.handleDebug(
-        `Total deal ${deals.length}, unrealized ${totalUnrealized}, usage ${totalUsage}, total ${total} (${prevTotal}), slTrigger ${slTrigger}, tpTrigger ${tpTrigger}`,
-      )
+      const msg = `Total deal ${deals.length}, unrealized ${totalUnrealized}, usage ${totalUsage}, total ${total} (${prevTotal}), slTrigger ${slTrigger}, tpTrigger ${tpTrigger}`
+      this.handleDebug(msg)
       if (slTrigger || tpTrigger) {
+        this.handleLog(msg)
         deals.forEach((deal) => {
           this.sendMessageToBotService(
             this.options.botType === BotType.hedgeCombo
