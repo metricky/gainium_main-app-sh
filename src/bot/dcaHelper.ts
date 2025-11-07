@@ -16636,6 +16636,7 @@ function createDCABotHelper<
               timeCountStart: Date.now(),
               unrealizedProfit: 0,
               usage: 0,
+              maxUsage: 0,
             },
             type: this.data.settings.type,
             tpHistory: deals.map((d) => d.tpHistory ?? []).flat(),

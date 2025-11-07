@@ -21,6 +21,7 @@ import {
   ActionsEnum,
   DCADealStatusEnum,
   DCACloseTriggerEnum,
+  ComboTpBase,
 } from '../../types'
 import { applyMethodDecorator } from './dcaHelper'
 
@@ -95,10 +96,14 @@ function createHedgeBotHelper<
       }
     }
 
-    private async getDeals(
-      strategy?: StrategyEnum,
-    ): Promise<
-      { id: string; unrealizedProfit: number; usage: number; botId: string }[]
+    private async getDeals(strategy?: StrategyEnum): Promise<
+      {
+        id: string
+        unrealizedProfit: number
+        usage: number
+        botId: string
+        maxUsage: number
+      }[]
     > {
       if (!strategy) {
         return [
@@ -121,6 +126,7 @@ function createHedgeBotHelper<
               unrealizedProfit: number
               usage: number
               botId: string
+              maxUsage: number
             }[]
           }>([
             {
@@ -138,6 +144,7 @@ function createHedgeBotHelper<
                     unrealizedProfit: '$stats.unrealizedProfit',
                     usage: '$stats.usage',
                     botId: '$botId',
+                    maxUsage: '$stats.maxUsage',
                   },
                 },
               },
@@ -149,13 +156,30 @@ function createHedgeBotHelper<
 
     private async checkTpSl(_botId: string) {
       this.handleDebug(`Check TP/SL`)
+      const useTp =
+        this.data?.sharedSettings?.useTp && this.data.sharedSettings.tpPerc
+      const useSl =
+        this.data?.sharedSettings?.useSl && this.data.sharedSettings.slPerc
+      if (!useTp && !useSl) {
+        this.handleDebug(`TP/SL not used, skip check`)
+        return
+      }
       const deals = await this.getDeals()
       const totalUnrealized = deals.reduce(
         (acc, v) => acc + v.unrealizedProfit,
         0,
       )
 
-      const totalUsage = deals.reduce((acc, v) => acc + v.usage, 0)
+      const usage = deals.reduce((acc, v) => acc + v.usage, 0)
+      const maxUsage = deals.reduce((acc, v) => acc + v.maxUsage, 0)
+      const totalUsage =
+        this.options.botType === BotType.hedgeCombo
+          ? !this.data?.sharedSettings?.comboTpBase ||
+            this.data?.sharedSettings?.comboTpBase === ComboTpBase.full
+            ? maxUsage
+            : usage
+          : usage
+
       let total = (totalUnrealized / totalUsage) * 100
       const prevTotal = total
       if (isNaN(total) || !isFinite(total)) {

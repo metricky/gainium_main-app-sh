@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.2] - 2025-11-07
+### Fixed
+- Hedge Combo bot TP/SL base on value ignored.  
+
 ## [1.5.1] - 2025-11-06
 ### Changed 
 - Hyperliquid max candles. Hide hyperliquid in indicators. 

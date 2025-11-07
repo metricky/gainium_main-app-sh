@@ -3301,6 +3301,7 @@ class Bot<T extends UserSchema = UserSchema> {
         timeCountStart: Date.now(),
         unrealizedProfit: 0,
         usage: 0,
+        maxUsage: 0,
       },
       vars,
     })

@@ -1148,6 +1148,7 @@ export type ProfitLossStats = {
   currentCount?: 'loss' | 'profit'
   unrealizedProfit: number
   usage: number
+  maxUsage: number
 }
 
 export type BlockOrder = { price: number; qty: number; side: OrderSideEnum }

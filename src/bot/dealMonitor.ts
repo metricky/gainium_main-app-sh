@@ -21,6 +21,7 @@ type DealStatsMap = {
   wasChanged: boolean
   unrealizedProfit: number
   usage: number
+  maxUsage: number
   botId: string
 }
 
@@ -61,7 +62,7 @@ export class DealMonitor {
     const { price, time } = data
     const dealId = deal._id.toString()
     const stats = this.stats.get(dealId)
-    if (stats && (data.time - stats.start <= 60 * 1000 || !stats.wasChanged)) {
+    if (stats && (data.time - stats.start <= 30 * 1000 || !stats.wasChanged)) {
       this.updateDealStats(combo, deal, stats, price, usdRate, time, fee)
     } else {
       if (stats) {
@@ -121,6 +122,16 @@ export class DealMonitor {
             : deal.usage.current.quote
           : (combo ? deal.usage.max.base : deal.usage.current.base) * price
       : undefined
+    let maxUsage = price
+      ? deal.settings.futures
+        ? deal.settings.coinm
+          ? deal.usage.max.base * price
+          : deal.usage.max.quote
+        : long
+          ? deal.usage.max.quote
+          : deal.usage.max.base * price
+      : undefined
+    maxUsage = (maxUsage ?? 0) * usdRate * (profitBase ? price : 1)
     usage = (usage ?? 0) * usdRate * (profitBase ? price : 1)
     if (!combo && (deal.reduceFunds?.length || deal.tpFilledHistory?.length)) {
       const reduceFundsBase = (deal.reduceFunds ?? []).reduce(
@@ -203,6 +214,10 @@ export class DealMonitor {
         comboBasedOn === ComboTpBase.full
           ? deal.usage.max.quote
           : deal.usage.current.quote
+      const maxUsageBase = deal.usage.max.base
+
+      const maxUsageQuote = deal.usage.max.quote
+
       let total =
         deal.profit.total +
         (profitBase ? qty - base : quoteTp - quote) * (long ? 1 : -1) -
@@ -245,6 +260,14 @@ export class DealMonitor {
       newPercent = total / denominator
       unrealizedProfit = total * usdRate * (profitBase ? price : 1)
       usage = denominator * usdRate * (profitBase ? price : 1)
+      maxUsage = deal.settings.futures
+        ? deal.settings.coinm
+          ? maxUsageBase
+          : maxUsageQuote
+        : long
+          ? maxUsageQuote * (profitBase ? 1 / price : 1)
+          : maxUsageBase * (profitBase ? 1 : price)
+      maxUsage = maxUsage * usdRate * (profitBase ? price : 1)
     }
     if (newPercent > 0 && newPercent > stats.runUpPercent) {
       stats.runUpPercent = newPercent
@@ -276,6 +299,7 @@ export class DealMonitor {
     if (stats.wasChanged && unrealizedProfit) {
       stats.unrealizedProfit = unrealizedProfit
       stats.usage = usage ?? 0
+      stats.maxUsage = maxUsage ?? 0
     }
     this.stats.set(deal._id.toString(), stats)
   }
@@ -300,6 +324,7 @@ export class DealMonitor {
       unrealizedProfit: deal.stats?.unrealizedProfit ?? 0,
       botId: deal.botId,
       usage: deal.stats?.usage ?? 0,
+      maxUsage: deal.stats?.maxUsage ?? 0,
     })
   }
 
@@ -337,6 +362,7 @@ export class DealMonitor {
           'stats.currentCount': stats.currentCount,
           'stats.unrealizedProfit': stats.unrealizedProfit,
           'stats.usage': stats.usage,
+          'stats.maxUsage': stats.maxUsage,
         },
       },
     )
