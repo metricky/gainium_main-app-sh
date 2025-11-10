@@ -4711,6 +4711,7 @@ export enum ResetAccountTypeEnum {
   whole = 'whole',
   paper = 'paper',
   live = 'live',
+  softLive = 'softLive',
 }
 
 export interface BrokerCodesSchema extends SchemaI {

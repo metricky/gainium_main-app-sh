@@ -971,12 +971,13 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
     const isPaper = type === ResetAccountTypeEnum.paper
     const isLive = type === ResetAccountTypeEnum.live
     const isAll = type === ResetAccountTypeEnum.whole
+    const isSoftLive = type === ResetAccountTypeEnum.softLive
     const Bot = BotService.getInstance()
     const paperFilter: Record<string, unknown> = {}
     if (isPaper) {
       paperFilter.paperContext = { $eq: true }
     }
-    if (isLive) {
+    if (isLive || isSoftLive) {
       paperFilter.paperContext = { $ne: true }
     }
     const userWithPaperFilter = { userId, ...paperFilter }
@@ -1151,215 +1152,223 @@ export const resetUser = async (userId: string, type: ResetAccountTypeEnum) => {
       logger.debug(`${prefix} | Bots closed`)
     }
 
-    logger.debug(`${prefix} | Bots deleted`)
     const requests: {
       fn: Promise<ErrorResponse | MessageResponse>
       name: string
     }[] = []
     /** General */
-    if (isAll) {
-      requests.push({ fn: feeDb.deleteManyData({ userId }), name: 'feeDb' })
-    }
-    if (isPaper) {
-      requests.push({
-        fn: feeDb.deleteManyData({ userId, exchange: { $in: paperExchanges } }),
-        name: 'feeDb',
-      })
-    }
-    if (isLive) {
-      requests.push({
-        fn: feeDb.deleteManyData({
-          userId,
-          exchange: { $nin: paperExchanges },
-        }),
-        name: 'feeDb',
-      })
-    }
-    requests.push({
-      fn: balanceDb.deleteManyData(userWithPaperFilter),
-      name: 'balanceDb',
-    })
-    requests.push({
-      fn: snapshotDb.deleteManyData(userWithPaperFilter),
-      name: 'snapshotDb',
-    })
-    requests.push({
-      fn: botEventDb.deleteManyData({ botId: { $in: botIds } }),
-      name: 'botEventDb',
-    })
-    requests.push({
-      fn: botMessageDb.deleteManyData(userWithPaperFilter),
-      name: 'botMessageDb',
-    })
-    if (isAll) {
-      requests.push({
-        fn: botProfitChartDb.deleteManyData({ userId }),
-        name: 'botProfitChartDb',
-      })
-    }
-    if (isPaper || isLive) {
-      requests.push({
-        fn: botProfitChartDb.deleteManyData({ userId, botId: { $in: botIds } }),
-        name: 'botProfitChartDb',
-      })
-    }
-    requests.push({
-      fn: userProfitByHourDb.deleteManyData(userWithPaperFilter),
-      name: 'userProfitByHourDb',
-    })
-    requests.push({
-      fn: orderDb.deleteManyData(userWithPaperFilter),
-      name: 'orderDb',
-    })
-    /** Bots */
-    requests.push({
-      fn: hedgeComboBotDb.deleteManyData(userWithPaperFilter),
-      name: 'hedgeComboBotDb',
-    })
-    requests.push({
-      fn: hedgeDCABotDb.deleteManyData(userWithPaperFilter),
-      name: 'hedgeDCABotDb',
-    })
-    requests.push({
-      fn: botDb.deleteManyData(userWithPaperFilter),
-      name: 'botDb',
-    })
-    requests.push({
-      fn: transactionDb.deleteManyData(userWithPaperFilter),
-      name: 'transactionDb',
-    })
-    requests.push({
-      fn: dcaBotDb.deleteManyData(userWithPaperFilter),
-      name: 'dcaBotDb',
-    })
-    requests.push({
-      fn: dcaDealsDb.deleteManyData(userWithPaperFilter),
-      name: 'dcaDealsDb',
-    })
-    requests.push({
-      fn: comboBotDb.deleteManyData(userWithPaperFilter),
-      name: 'comboBotDb',
-    })
-    requests.push({
-      fn: comboDealsDb.deleteManyData(userWithPaperFilter),
-      name: 'comboDealsDb',
-    })
-    requests.push({
-      fn: minigridDb.deleteManyData({
-        botId: { $in: botIds },
-        ...userWithPaperFilter,
-      }),
-      name: 'minigridDb',
-    })
-    requests.push({
-      fn: comboProfitDb.deleteManyData(userWithPaperFilter),
-      name: 'comboProfitDb',
-    })
-    requests.push({
-      fn: comboTransactionsDb.deleteManyData(userWithPaperFilter),
-      name: 'comboTransactionsDb',
-    })
-    /** Paper */
-    if (isAll || isPaper) {
-      const userPaperExchanges = user.exchanges
-        .filter((e) => paperExchanges.includes(e.provider))
-        .map((e) => decrypt(e.key))
-      const paperUsers =
-        (
-          await paperUserDb.readData(
-            {
-              key: { $in: userPaperExchanges },
-            },
-            {},
-            {},
-            true,
-          )
-        )?.data?.result ?? []
-      if (paperUsers.length) {
-        logger.debug(`${prefix} | Found ${paperUsers.length} paper users`)
-        const paperIds = paperUsers.map((p) => p._id)
+    if (!isSoftLive) {
+      if (isAll) {
+        requests.push({ fn: feeDb.deleteManyData({ userId }), name: 'feeDb' })
+      }
+      if (isPaper) {
         requests.push({
-          fn: paperPositionDb.deleteManyData({
-            user: { $in: paperIds },
+          fn: feeDb.deleteManyData({
+            userId,
+            exchange: { $in: paperExchanges },
           }),
-          name: 'paperPositionDb',
-        })
-        requests.push({
-          fn: paperHedgeDb.deleteManyData({
-            user: { $in: paperIds },
-          }),
-          name: 'paperHedgeDb',
-        })
-        requests.push({
-          fn: paperLeverageDb.deleteManyData({
-            user: { $in: paperIds },
-          }),
-          name: 'paperLeverageDb',
-        })
-
-        requests.push({
-          fn: paperOrderDb.deleteManyData({
-            user: { $in: paperIds },
-          }),
-          name: 'paperOrderDb',
-        })
-        requests.push({
-          fn: paperWalletsDb.deleteManyData({
-            user: { $in: paperIds },
-          }),
-          name: 'paperWalletsDb',
-        })
-        requests.push({
-          fn: paperUserDb.deleteManyData({
-            _id: { $in: paperIds },
-          }),
-          name: 'paperUserDb',
+          name: 'feeDb',
         })
       }
-    }
-
-    await Promise.all(
-      requests.map((r) =>
-        r.fn.then((res) => {
-          if (res.status === StatusEnum.ok) {
-            logger.debug(`${prefix} | ${r.name} ${res.reason}`)
-          } else {
-            logger.error(`${prefix} | ${r.name} delete error ${res.reason}`)
-          }
-        }),
-      ),
-    )
-
-    await userDb
-      .updateData(
-        { _id: userId },
-        {
-          $set: {
-            exchanges: isAll
-              ? []
-              : user.exchanges.filter((e) =>
-                  isPaper
-                    ? !paperExchanges.includes(e.provider)
-                    : paperExchanges.includes(e.provider),
-                ),
-          },
-        },
-      )
-      .then((res) => {
-        if (res.status === StatusEnum.ok) {
-          logger.debug(`${prefix} | User updated`)
-        } else {
-          logger.error(`${prefix} | User update error ${res.reason}`)
-        }
+      if (isLive) {
+        requests.push({
+          fn: feeDb.deleteManyData({
+            userId,
+            exchange: { $nin: paperExchanges },
+          }),
+          name: 'feeDb',
+        })
+      }
+      requests.push({
+        fn: balanceDb.deleteManyData(userWithPaperFilter),
+        name: 'balanceDb',
       })
-    logger.debug(`${prefix} | User updated. Checking global vars`)
-    const vars = await globalVarsDb.readData({ userId }, {}, {}, true)
-    logger.debug(
-      `${prefix} | Found ${vars.data?.result?.length ?? 0} global vars`,
-    )
-    await updateRelatedBotsInVar(
-      (vars.data?.result ?? []).map((v) => `${v._id}`),
-    )
+      requests.push({
+        fn: snapshotDb.deleteManyData(userWithPaperFilter),
+        name: 'snapshotDb',
+      })
+      requests.push({
+        fn: botEventDb.deleteManyData({ botId: { $in: botIds } }),
+        name: 'botEventDb',
+      })
+      requests.push({
+        fn: botMessageDb.deleteManyData(userWithPaperFilter),
+        name: 'botMessageDb',
+      })
+      if (isAll) {
+        requests.push({
+          fn: botProfitChartDb.deleteManyData({ userId }),
+          name: 'botProfitChartDb',
+        })
+      }
+      if (isPaper || isLive) {
+        requests.push({
+          fn: botProfitChartDb.deleteManyData({
+            userId,
+            botId: { $in: botIds },
+          }),
+          name: 'botProfitChartDb',
+        })
+      }
+      requests.push({
+        fn: userProfitByHourDb.deleteManyData(userWithPaperFilter),
+        name: 'userProfitByHourDb',
+      })
+      requests.push({
+        fn: orderDb.deleteManyData(userWithPaperFilter),
+        name: 'orderDb',
+      })
+      /** Bots */
+      requests.push({
+        fn: hedgeComboBotDb.deleteManyData(userWithPaperFilter),
+        name: 'hedgeComboBotDb',
+      })
+      requests.push({
+        fn: hedgeDCABotDb.deleteManyData(userWithPaperFilter),
+        name: 'hedgeDCABotDb',
+      })
+      requests.push({
+        fn: botDb.deleteManyData(userWithPaperFilter),
+        name: 'botDb',
+      })
+      requests.push({
+        fn: transactionDb.deleteManyData(userWithPaperFilter),
+        name: 'transactionDb',
+      })
+      requests.push({
+        fn: dcaBotDb.deleteManyData(userWithPaperFilter),
+        name: 'dcaBotDb',
+      })
+      requests.push({
+        fn: dcaDealsDb.deleteManyData(userWithPaperFilter),
+        name: 'dcaDealsDb',
+      })
+      requests.push({
+        fn: comboBotDb.deleteManyData(userWithPaperFilter),
+        name: 'comboBotDb',
+      })
+      requests.push({
+        fn: comboDealsDb.deleteManyData(userWithPaperFilter),
+        name: 'comboDealsDb',
+      })
+      requests.push({
+        fn: minigridDb.deleteManyData({
+          botId: { $in: botIds },
+          ...userWithPaperFilter,
+        }),
+        name: 'minigridDb',
+      })
+      requests.push({
+        fn: comboProfitDb.deleteManyData(userWithPaperFilter),
+        name: 'comboProfitDb',
+      })
+      requests.push({
+        fn: comboTransactionsDb.deleteManyData(userWithPaperFilter),
+        name: 'comboTransactionsDb',
+      })
+      /** Paper */
+      if (isAll || isPaper) {
+        const userPaperExchanges = user.exchanges
+          .filter((e) => paperExchanges.includes(e.provider))
+          .map((e) => decrypt(e.key))
+        const paperUsers =
+          (
+            await paperUserDb.readData(
+              {
+                key: { $in: userPaperExchanges },
+              },
+              {},
+              {},
+              true,
+            )
+          )?.data?.result ?? []
+        if (paperUsers.length) {
+          logger.debug(`${prefix} | Found ${paperUsers.length} paper users`)
+          const paperIds = paperUsers.map((p) => p._id)
+          requests.push({
+            fn: paperPositionDb.deleteManyData({
+              user: { $in: paperIds },
+            }),
+            name: 'paperPositionDb',
+          })
+          requests.push({
+            fn: paperHedgeDb.deleteManyData({
+              user: { $in: paperIds },
+            }),
+            name: 'paperHedgeDb',
+          })
+          requests.push({
+            fn: paperLeverageDb.deleteManyData({
+              user: { $in: paperIds },
+            }),
+            name: 'paperLeverageDb',
+          })
+
+          requests.push({
+            fn: paperOrderDb.deleteManyData({
+              user: { $in: paperIds },
+            }),
+            name: 'paperOrderDb',
+          })
+          requests.push({
+            fn: paperWalletsDb.deleteManyData({
+              user: { $in: paperIds },
+            }),
+            name: 'paperWalletsDb',
+          })
+          requests.push({
+            fn: paperUserDb.deleteManyData({
+              _id: { $in: paperIds },
+            }),
+            name: 'paperUserDb',
+          })
+        }
+      }
+
+      await Promise.all(
+        requests.map((r) =>
+          r.fn.then((res) => {
+            if (res.status === StatusEnum.ok) {
+              logger.debug(`${prefix} | ${r.name} ${res.reason}`)
+            } else {
+              logger.error(`${prefix} | ${r.name} delete error ${res.reason}`)
+            }
+          }),
+        ),
+      )
+
+      await userDb
+        .updateData(
+          { _id: userId },
+          {
+            $set: {
+              exchanges: isAll
+                ? []
+                : user.exchanges.filter((e) =>
+                    isPaper
+                      ? !paperExchanges.includes(e.provider)
+                      : paperExchanges.includes(e.provider),
+                  ),
+            },
+          },
+        )
+        .then((res) => {
+          if (res.status === StatusEnum.ok) {
+            logger.debug(`${prefix} | User updated`)
+          } else {
+            logger.error(`${prefix} | User update error ${res.reason}`)
+          }
+        })
+
+      logger.debug(`${prefix} | User updated. Checking global vars`)
+      const vars = await globalVarsDb.readData({ userId }, {}, {}, true)
+      logger.debug(
+        `${prefix} | Found ${vars.data?.result?.length ?? 0} global vars`,
+      )
+      await updateRelatedBotsInVar(
+        (vars.data?.result ?? []).map((v) => `${v._id}`),
+      )
+    }
     processing.delete(userId)
     logger.debug(`${prefix} | End`)
   } catch (e) {

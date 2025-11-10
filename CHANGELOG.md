@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.5] - 2025-11-10
+### Changed
+- Soft reset live account. 
+
 ## [1.5.4] - 2025-11-10
 ### Added
 - Hyperliquid sub-account support. 
