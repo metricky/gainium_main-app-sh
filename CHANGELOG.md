@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.0] - 2025-11-10
+### Added
+- Skip balance check option for Grid bots. 
+
 ## [1.5.5] - 2025-11-10
 ### Changed
 - Soft reset live account. 

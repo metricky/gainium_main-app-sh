@@ -327,6 +327,7 @@ export interface BotSettings extends BaseSettings {
   tpSlLimit?: boolean
   feeOrder?: boolean
   lastPriceRangeAlert?: number
+  skipBalanceCheck?: boolean
 }
 
 export enum FuturesStrategyEnum {

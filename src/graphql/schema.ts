@@ -2352,6 +2352,7 @@ export const BotSchema = /* GraphQL */ `
     slLimit: Boolean
     tpSlLimit: Boolean
     feeOrder: Boolean
+    skipBalanceCheck: Boolean
   }
   type botListResponse implements BasicResponse {
     status: Status
@@ -4159,6 +4160,7 @@ export const BotSchema = /* GraphQL */ `
     slLimit: Boolean
     tpSlLimit: Boolean
     feeOrder: Boolean
+    skipBalanceCheck: Boolean
   }
   enum FuturesStrategyEnum {
     LONG
@@ -5136,6 +5138,7 @@ export const BotSchema = /* GraphQL */ `
     slLimit: Boolean
     tpSlLimit: Boolean
     feeOrder: Boolean
+    skipBalanceCheck: Boolean
   }
   enum CloseGRIDTypeEnum {
     cancel

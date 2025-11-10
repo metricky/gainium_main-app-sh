@@ -472,6 +472,7 @@ const botSettings = new Schema({
   slLimit: Boolean,
   tpSlLimit: Boolean,
   feeOrder: Boolean,
+  skipBalanceCheck: Boolean,
 })
 
 const botSchema: Schema<BotSchema> = new Schema({

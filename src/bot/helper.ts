@@ -746,7 +746,10 @@ function createBotHelper<
                 ? quote
                 : base
 
-            if (required / this.currentLeverage > (balance?.free ?? Infinity)) {
+            if (
+              required / this.currentLeverage > (balance?.free ?? Infinity) &&
+              !this.data.settings.skipBalanceCheck
+            ) {
               this.sendEndProcess()
               this.endMethod(_id)
               return this.handleErrors(
