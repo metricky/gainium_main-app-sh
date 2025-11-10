@@ -6622,11 +6622,12 @@ function createDCABotHelper<
           origQty: `${qty}`,
           side: this.isLong ? OrderSideEnum.buy : OrderSideEnum.sell,
           symbol,
-          type: settings.useRiskReward
-            ? OrderTypeEnum.market
-            : forceMarket
+          type:
+            settings.useRiskReward && !useLimit
               ? OrderTypeEnum.market
-              : baseOrderType,
+              : forceMarket
+                ? OrderTypeEnum.market
+                : baseOrderType,
           updateTime: new Date().getTime(),
           transactTime: new Date().getTime(),
           exchange: this.data.exchange,

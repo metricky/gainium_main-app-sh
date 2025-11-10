@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.3] - 2025-11-10
+### Fixed
+- Use fixed base price in RR with fixed SL.   
+
 ## [1.5.2] - 2025-11-07
 ### Fixed
 - Hedge Combo bot TP/SL base on value ignored.  
