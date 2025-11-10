@@ -47,8 +47,18 @@ class Exchange extends AbstractExchange {
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
     bybitHost?: BybitHost,
+    subaccount?: boolean,
   ) {
-    super(key, secret, passphrase, undefined, keysType, okxSource, bybitHost)
+    super(
+      key,
+      secret,
+      passphrase,
+      undefined,
+      keysType,
+      okxSource,
+      bybitHost,
+      subaccount,
+    )
     this.exchange = exchange
     this.isOkx = [
       ExchangeEnum.okx,
@@ -802,6 +812,7 @@ class Exchange extends AbstractExchange {
       authHeaders.code = code
       authHeaders.exchange = this.exchange
     }
+    authHeaders.subaccount = this.subaccount ? 'true' : 'false'
     timeProfile = this.startProfilerTime(timeProfile)
     return axios<BaseReturn<R>>({
       url: `${EXCHANGE_SERVICE_API_URL}/${endpoint}`,

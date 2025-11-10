@@ -243,6 +243,7 @@ const userSchema: Schema<UserSchema> = new Schema({
       uuid: RequiredString,
       hedge: Boolean,
       zeroFee: Boolean,
+      subaccount: Boolean,
       notAllowedToDelete: Boolean,
       linkedTo: String,
       status: Boolean,

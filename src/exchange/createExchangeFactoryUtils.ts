@@ -17,6 +17,7 @@ export type ExchangeArgs = [
   CoinbaseKeysType | undefined,
   OKXSource | undefined,
   BybitHost | undefined,
+  boolean | undefined,
 ]
 
 export type ExchangeType<
@@ -32,6 +33,7 @@ export type ExchangeFactory<T extends AbsctractExchange> = (
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
   bybitHost?: BybitHost,
+  subacount?: boolean,
 ) => T
 
 export function createExchangeFactory<

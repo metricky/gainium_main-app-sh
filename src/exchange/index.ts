@@ -105,6 +105,7 @@ abstract class AbsctractExchange implements Exchange {
   public key?: string
   public secret?: string
   public passphrase?: string
+  public subaccount?: boolean
   /** Constructor method
    * @param {string} key api key
    * @param {string} secret api secret
@@ -121,6 +122,7 @@ abstract class AbsctractExchange implements Exchange {
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
     bybitHost?: BybitHost,
+    subaccount?: boolean,
   ) {
     this.key = key ? decrypt(key) : key
     this.secret = secret ? decrypt(secret) : secret
@@ -128,6 +130,7 @@ abstract class AbsctractExchange implements Exchange {
     this.keysType = keysType
     this.okxSource = okxSource
     this.bybitHost = bybitHost
+    this.subaccount = subaccount
   }
   /** Function to handle and format success result */
   returnGood<T>() {

@@ -942,7 +942,8 @@ class MainBot<T extends IMainBot> {
       )
       return
     }
-    const { uuid, keysType, provider, okxSource, bybitHost } = exchange
+    const { uuid, keysType, provider, okxSource, bybitHost, subaccount } =
+      exchange
     let { key, secret, passphrase } = exchange
     key = decrypt(key)
     secret = decrypt(secret)
@@ -956,6 +957,7 @@ class MainBot<T extends IMainBot> {
       okxSource,
       bybitHost,
       provider,
+      subaccount,
     }
   }
 
@@ -1010,6 +1012,7 @@ class MainBot<T extends IMainBot> {
         exchange.keysType,
         exchange.okxSource,
         exchange.bybitHost,
+        exchange.subaccount,
         true,
       )
     } catch (e) {
@@ -1054,6 +1057,7 @@ class MainBot<T extends IMainBot> {
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
     bybitHost?: BybitHost,
+    subaccount?: boolean,
     update?: boolean,
   ) {
     if (!this.data) {
@@ -1075,6 +1079,7 @@ class MainBot<T extends IMainBot> {
         keysType,
         okxSource,
         bybitHost,
+        subaccount,
       )
       this.handleLog('Load exchange provider')
       if (update) {
@@ -1972,6 +1977,7 @@ class MainBot<T extends IMainBot> {
           keys.keysType,
           keys.okxSource,
           keys.bybitHost,
+          keys.subaccount,
         )
         if (!this.shouldContinueLoad()) {
           this.handleLog('Should not continue load')

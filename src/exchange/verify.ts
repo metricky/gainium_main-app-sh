@@ -39,6 +39,7 @@ const verifyNormal = async (
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
   bybitHost?: BybitHost,
+  subaccount?: boolean,
 ): Promise<VerifyResponse> => {
   const authHeaders: Record<string, string> = {
     'Content-type': 'application/json',
@@ -57,6 +58,7 @@ const verifyNormal = async (
   if (bybitHost) {
     authHeaders.bybitHost = bybitHost
   }
+  authHeaders.subaccount = subaccount ? 'true' : 'false'
   authHeaders.exchange = provider
   authHeaders.sendtoall = 'true'
   return axios<VerifyResponse>(
@@ -122,6 +124,7 @@ const verifyExchange = async (
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
   bybitHost?: BybitHost,
+  subaccount?: boolean,
 ): Promise<VerifyResponse> => {
   if (paperExchanges.includes(provider)) {
     return verifyPaper(key, secret)
@@ -135,6 +138,7 @@ const verifyExchange = async (
     keysType,
     okxSource,
     bybitHost,
+    subaccount,
   )
 }
 

@@ -1513,6 +1513,7 @@ export type ExchangeInUser = {
   keysType?: CoinbaseKeysType
   okxSource?: OKXSource
   zeroFee?: boolean
+  subaccount?: boolean
   bybitHost?: BybitHost
 }
 

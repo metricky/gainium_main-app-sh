@@ -5044,6 +5044,7 @@ const resolvers = <
           keysType,
           okxSource,
           bybitHost,
+          subaccount,
         } = input
         const tradeType = _tradeType ?? TradeTypeEnum.spot
         const { passphrase } = input
@@ -5070,6 +5071,7 @@ const resolvers = <
               keysType,
               okxSource,
               bybitHost,
+              subaccount,
             )
             if (!verifyResult.status) {
               logger.error(
@@ -5345,6 +5347,7 @@ const resolvers = <
                             return !!(await exchangeInstance.getHedge()).data
                           })()
                         : false,
+                      subaccount,
                     },
                   ],
                 },
@@ -5506,7 +5509,7 @@ const resolvers = <
       }
       const { stablecoinBalance, coinToTopUp } = input
       let { key, secret, passphrase } = input
-      const { uuid, name, keysType, okxSource, bybitHost } = input
+      const { uuid, name, keysType, okxSource, bybitHost, subaccount } = input
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
@@ -5519,6 +5522,7 @@ const resolvers = <
         const oldKeysType = find.keysType
         const oldOkxSource = find.okxSource
         const oldBybitHost = find.bybitHost
+        const oldSubaccount = find.subaccount
         if (!paperExchanges.includes(find.provider)) {
           if (
             oldKey !== key ||
@@ -5529,7 +5533,8 @@ const resolvers = <
               : true) ||
             keysType !== oldKeysType ||
             oldOkxSource !== okxSource ||
-            oldBybitHost !== bybitHost
+            oldBybitHost !== bybitHost ||
+            oldSubaccount !== subaccount
           ) {
             const keyToUse = key || oldKey
             const secretToUse = secret || oldSecret
@@ -5543,6 +5548,7 @@ const resolvers = <
               keysType,
               okxSource,
               bybitHost,
+              subaccount,
             )
             if (!status) {
               return {
@@ -5561,6 +5567,7 @@ const resolvers = <
               keysType,
               okxSource,
               bybitHost,
+              subaccount,
             )
             const hedge = isFutures(find.provider)
               ? !!(await exchangeInstance.getHedge()).data
@@ -5620,7 +5627,8 @@ const resolvers = <
               oldPassphrase !== decrypt(passphrase ?? '') ||
               keysType !== oldKeysType ||
               okxSource !== oldOkxSource ||
-              bybitHost !== oldBybitHost)
+              bybitHost !== oldBybitHost ||
+              oldSubaccount !== subaccount)
           ) {
             rabbitClient?.send(rabbitUsersStreamKey, {
               event: 'close stream',
@@ -5636,6 +5644,7 @@ const resolvers = <
                 keysType,
                 okxSource,
                 bybitHost,
+                subaccount,
               },
               uuid,
             })

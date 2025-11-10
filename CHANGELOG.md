@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.4] - 2025-11-10
+### Added
+- Hyperliquid sub-account support. 
+
 ## [1.5.3] - 2025-11-10
 ### Fixed
 - Use fixed base price in RR with fixed SL.   

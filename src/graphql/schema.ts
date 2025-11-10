@@ -146,6 +146,7 @@ export const AddExchangeInput = /* GraphQL */ `
     keysType: String
     okxSource: String
     bybitHost: BybitHost
+    subaccount: Boolean
   }
 `
 
@@ -462,6 +463,7 @@ export const UserSchema = /* GraphQL */ `
     keysType: String
     okxSource: String
     bybitHost: BybitHost
+    subaccount: Boolean
   }
   type exchangeResponse implements BasicResponse {
     status: Status
@@ -485,6 +487,7 @@ export const UserSchema = /* GraphQL */ `
     status: Boolean
     hedge: Boolean
     zeroFee: Boolean
+    subaccount: Boolean
     linkedTo: String
     balance: Float
     keysType: String
