@@ -1210,7 +1210,7 @@ class InternalIndicator {
         }
       } else {
         this.handleDebug(
-          `No result for ${this.id} at ${new Date(time)} with value ${JSON.stringify(value)}`,
+          `No result for ${this.id} at ${new Date(time).toISOString()} with value ${JSON.stringify(value)}`,
         )
       }
     } catch (e) {

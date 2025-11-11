@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.1] - 2025-11-11
+### Changed
+- Request candles for indicators through main thread. 
+
 ## [1.6.0] - 2025-11-10
 ### Added
 - Skip balance check option for Grid bots. 

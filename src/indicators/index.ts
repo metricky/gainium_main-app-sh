@@ -26,6 +26,7 @@ import { v4 } from 'uuid'
 import { pairDb } from '../db/dbInit'
 import ExpirableMap from '../utils/expirableMap'
 import { INIDCATORS_PER_WORKER } from '../config'
+import { CandlesProvider } from './candleProvider'
 
 const mutex = new IdMutex()
 
@@ -214,9 +215,11 @@ type WorkerType = {
 class InternalIndicatorsFactory {
   static instance: InternalIndicatorsFactory
 
-  static getInstance() {
+  static getInstance(candlesProvider = CandlesProvider) {
     if (!InternalIndicatorsFactory.instance) {
-      InternalIndicatorsFactory.instance = new InternalIndicatorsFactory()
+      InternalIndicatorsFactory.instance = new InternalIndicatorsFactory(
+        candlesProvider,
+      )
     }
     return InternalIndicatorsFactory.instance
   }
@@ -241,8 +244,12 @@ class InternalIndicatorsFactory {
     true,
   )
   private pairsSize = 0
-  constructor() {
+  constructor(candlesProvider = CandlesProvider) {
     this.handleWorkerTerminate = this.handleWorkerTerminate.bind(this)
+    if (isMainThread) {
+      logger.debug(`${this.loggerPrefix} InternalIndicatorsFactory initialized`)
+      candlesProvider.getInstance()
+    }
   }
 
   private getWorkerById(workerId: number) {

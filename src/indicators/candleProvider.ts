@@ -9,6 +9,7 @@ import type { CandleResponse, BaseReturn } from '../../types'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { isOkx } from '../utils/exchange'
 import RedisClient from '../db/redis'
+import Rabbit from '../db/rabbit'
 
 const { sleep } = utils
 
@@ -16,6 +17,17 @@ const mutex = new IdMutex()
 const mutexConcurrentlyCandles = new IdMutex(500)
 
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
+const candlesChannel = 'indicatorsCandles'
+
+type CandlesRequestMessage = {
+  exchange: ExchangeEnum
+  symbol: string
+  interval: ExchangeIntervals
+  from: number
+  to: number
+  count?: number
+  saveResult: boolean
+}
 
 export class CandlesProvider {
   static instance: CandlesProvider
@@ -28,6 +40,31 @@ export class CandlesProvider {
   }
 
   protected ec = ExchangeChooser
+
+  private rabbitClient = new Rabbit()
+
+  constructor() {
+    this.getCandles = this.getCandles.bind(this)
+    if (isMainThread) {
+      this.rabbitClient.listenWithCallback<
+        CandlesRequestMessage,
+        Promise<BaseReturn<CandleResponse[]>>
+      >(candlesChannel, async (d) => {
+        logger.debug(
+          `${loggerPrefix} Received candles request ${d.exchange} ${d.symbol} ${d.interval} ${d.from} ${d.to}`,
+        )
+        return await this.getCandles(
+          d.exchange,
+          d.symbol,
+          d.interval,
+          d.from,
+          d.to,
+          d.count,
+          d.saveResult,
+        )
+      })
+    }
+  }
 
   private handleError(...msg: unknown[]) {
     logger.error(`${loggerPrefix}`, ...msg)
@@ -61,6 +98,31 @@ export class CandlesProvider {
     saveResult = true,
     retryCount = 1,
   ): Promise<BaseReturn<CandleResponse[]>> {
+    if (!isMainThread) {
+      logger.debug(
+        `${loggerPrefix} Requesting candles ${exchange} ${symbol} ${interval} ${from} ${to}`,
+      )
+      const result = await this.rabbitClient.sendWithCallback<
+        CandlesRequestMessage,
+        BaseReturn<CandleResponse[]>
+      >(candlesChannel, {
+        exchange,
+        symbol,
+        interval,
+        from,
+        to,
+        count,
+        saveResult,
+      })
+      if (!result?.response) {
+        return {
+          status: StatusEnum.notok,
+          data: null,
+          reason: 'No response from main thread',
+        }
+      }
+      return result.response
+    }
     if (isOkx(exchange)) {
       from = from - 1
       to = to + 1
