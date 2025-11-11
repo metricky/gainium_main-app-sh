@@ -13,8 +13,10 @@ import Rabbit from '../db/rabbit'
 
 const { sleep } = utils
 
+const maxSimultaneousCandleRequests = 100
+
 const mutex = new IdMutex()
-const mutexConcurrentlyCandles = new IdMutex(500)
+const mutexConcurrentlyCandles = new IdMutex(maxSimultaneousCandleRequests)
 
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 const candlesChannel = 'indicatorsCandles'
@@ -49,20 +51,24 @@ export class CandlesProvider {
       this.rabbitClient.listenWithCallback<
         CandlesRequestMessage,
         Promise<BaseReturn<CandleResponse[]>>
-      >(candlesChannel, async (d) => {
-        logger.debug(
-          `${loggerPrefix} Received candles request ${d.exchange} ${d.symbol} ${d.interval} ${d.from} ${d.to}`,
-        )
-        return await this.getCandles(
-          d.exchange,
-          d.symbol,
-          d.interval,
-          d.from,
-          d.to,
-          d.count,
-          d.saveResult,
-        )
-      })
+      >(
+        candlesChannel,
+        async (d) => {
+          logger.debug(
+            `${loggerPrefix} Received candles request ${d.exchange} ${d.symbol} ${d.interval} ${d.from} ${d.to}`,
+          )
+          return await this.getCandles(
+            d.exchange,
+            d.symbol,
+            d.interval,
+            d.from,
+            d.to,
+            d.count,
+            d.saveResult,
+          )
+        },
+        maxSimultaneousCandleRequests,
+      )
     }
   }
 
