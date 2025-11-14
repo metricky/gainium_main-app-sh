@@ -13892,7 +13892,7 @@ function createDCABotHelper<
     }
     async setDealForTPLevelCheck(deal: FullDeal<ExcludeDoc<Deal>>) {
       if (await this.isDealForTPLevelCheck(deal)) {
-        this.dealsDCALevelCheck.set(
+        this.dealsForTPLevelCheck.set(
           deal.deal._id,
           this.getDealTPLevelToCheck(deal),
         )

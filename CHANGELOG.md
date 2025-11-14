@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.2] - 2025-11-14
+### Fixed
+- Market TP order triggered at wrong price when having multiple deals. 
+
 ## [1.6.1] - 2025-11-11
 ### Changed
 - Request candles for indicators through main thread. 
