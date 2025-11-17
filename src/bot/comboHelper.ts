@@ -58,7 +58,7 @@ import utils from '../utils'
 const { sleep } = utils
 import { RunWithDelay } from '../utils/delay'
 import { DealStats } from './worker/statsService'
-import createDCABotHelper, { applyMethodDecorator } from './dcaHelper'
+import createDCABotHelper from './dcaHelper'
 
 const mutex = new IdMutex()
 const mutexConcurrently = new IdMutex(300)
@@ -144,7 +144,10 @@ function createComboBotHelper<
         get.delete(id)
       }
     }
-
+    @RunWithDelay(
+      (botId: string) => `${botId}saveMinigridToRedis`,
+      (_botId: string, restart: boolean) => setToRedisDelay * (restart ? 5 : 2),
+    )
     saveMinigridToRedis(_botId: string, _restart: boolean) {
       this.setToRedis('minigrids', this.allMinigrids)
     }
@@ -208,6 +211,11 @@ function createComboBotHelper<
       )
     }
 
+    @IdMute(
+      mutex,
+      (fullDeal: FullMinigrid) =>
+        `${fullDeal.schema._id}@${fullDeal.schema.botId}saveMinigrid`,
+    )
     private async saveMinigrid(
       fullMinigrid: FullMinigrid,
       minigrid: Partial<any>,
@@ -733,6 +741,8 @@ function createComboBotHelper<
         : undefined
     }
 
+    @IdMute(mutexConcurrently, () => 'createTransaction')
+    @IdMute(mutex, (o: Order) => `${o.botId}transaction`)
     private async createTransaction(
       o: Order,
       minigrid: FullMinigrid,
@@ -1373,7 +1383,10 @@ function createComboBotHelper<
       display = Math.max(0, display)
       return { real, display }
     }
-
+    @RunWithDelay(
+      (botId: string, dealId: string) => `${dealId}@${botId}autoRebalancing`,
+      10 * 1000,
+    )
     public async autoRebalancing(_botId: string, dealId: string) {
       if (!this.data?.settings.autoRebalancing || this.futures) {
         return
@@ -1407,6 +1420,7 @@ function createComboBotHelper<
       }
     }
 
+    @IdMute(mutex, (dealId: string) => `${dealId}compareBalances`)
     public async compareBalances(dealId: string) {
       this.handleDebug(`Compare balances for ${dealId}`)
       const response: CompareBalancesResponse = {
@@ -1620,6 +1634,11 @@ function createComboBotHelper<
       }
     }
 
+    @IdMute(
+      mutex,
+      (order: Order) =>
+        `processRebalanceOrder${order.dealId}-${order.clientOrderId}`,
+    )
     private async processRebalanceOrder(order: Order) {
       this.handleDebug(`Process rebalance order ${order.clientOrderId}`)
       const { dealId } = order
@@ -1647,6 +1666,7 @@ function createComboBotHelper<
       })
     }
 
+    @IdMute(mutex, (dealId: string) => `processRebalanceDeal${dealId}`)
     public async manageBalanceDiff(
       dealId: string,
       qty: number,
@@ -1805,6 +1825,10 @@ function createComboBotHelper<
       return this.findDiff(newGrids, oldGrids, ignoreQty)
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, order: Order) => `${botId}update${order.dealId}`,
+    )
     override async updateDeal(_botId: string, order: Order) {
       const _id = this.startMethod('updateDeal')
       this.ordersInBetweenUpdates.delete(order.clientOrderId)
@@ -2004,6 +2028,7 @@ function createComboBotHelper<
       }
     }
 
+    @IdMute(mutex, (dealId) => `updateUsage${dealId}`)
     override async updateUsage(
       dealId: string,
       reset = false,
@@ -2250,6 +2275,7 @@ function createComboBotHelper<
       }
     }
 
+    @IdMute(mutex, (order: Order) => `${order.botId}update${order.dealId}`)
     private async updateMinigrid(order: Order) {
       const _id = this.startMethod('updateMinigrid')
       const minigrid = this.getMinigrid(order.minigridId)
@@ -2801,6 +2827,11 @@ function createComboBotHelper<
       }
     }
 
+    @IdMute(
+      mutex,
+      (order: Order) =>
+        `${order.botId}process${order.symbol}${order.dealId ?? ''}`,
+    )
     override async processFilledOrder(order: Order): Promise<void> {
       if (!this.shouldProceed()) {
         this.handleLog(
@@ -2985,6 +3016,7 @@ function createComboBotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}processFeeOrder`)
     private async processFeeOrder(_botId: string, order: Order) {
       const { dealId, clientOrderId, typeOrder, symbol, executedQty, price } =
         order
@@ -3101,6 +3133,7 @@ function createComboBotHelper<
       return result
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}placeFeeOrderCombo`)
     private async placeFeeOrder(
       _botId: string,
       dealId: string,
@@ -3192,6 +3225,7 @@ function createComboBotHelper<
       }
     }
 
+    @IdMute(mutex, (order: Order) => `${order.botId}${order.clientOrderId}`)
     override async startDeal(orderBo: Order) {
       const _id = this.startMethod('startDeal')
       const { dealId } = orderBo
@@ -4513,6 +4547,10 @@ function createComboBotHelper<
       return
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, symbol: string) => `${botId}placeBaseOrder${symbol}`,
+    )
     override async placeBaseOrder(
       _botId: string,
       symbol: string,
@@ -4803,6 +4841,7 @@ function createComboBotHelper<
       this.endMethod(_id)
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}newDeal`)
     override async openNewDeal(
       _botId: string,
       symbol: string,
@@ -5343,6 +5382,7 @@ function createComboBotHelper<
       this.checkDealsForDCALevelCheck()
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}unrealizedProfit`, 200)
     private async unrealizedProfit() {
       if (!this.allowedMethods.has('checkDealsStopLoss')) {
         return
@@ -5486,6 +5526,11 @@ function createComboBotHelper<
       )
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
+      200,
+    )
     override async priceUpdateCallback(
       _botId: string,
       msg: PriceMessage,
@@ -5911,158 +5956,6 @@ function createComboBotHelper<
       this.endMethod(_id)
     }
   }
-
-  applyMethodDecorator(
-    RunWithDelay(
-      (botId: string) => `${botId}saveMinigridToRedis`,
-      (_botId: string, restart: boolean) => setToRedisDelay * (restart ? 5 : 2),
-    ),
-    ComboBot.prototype,
-    'saveMinigridToRedis',
-  )
-
-  applyMethodDecorator(
-    RunWithDelay(
-      (botId: string, dealId: string) => `${dealId}@${botId}autoRebalancing`,
-      10 * 1000,
-    ),
-    ComboBot.prototype,
-    'autoRebalancing',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (fullDeal: FullMinigrid) =>
-        `${fullDeal.schema._id}@${fullDeal.schema.botId}saveMinigrid`,
-    ),
-    ComboBot.prototype,
-    'saveMinigrid',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutexConcurrently, () => 'createTransaction'),
-    ComboBot.prototype,
-    'createTransaction',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (o: Order) => `${o.botId}transaction`),
-    ComboBot.prototype,
-    'createTransaction',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (dealId: string) => `${dealId}compareBalances`),
-    ComboBot.prototype,
-    'compareBalances',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (order: Order) =>
-        `processRebalanceOrder${order.dealId}-${order.clientOrderId}`,
-    ),
-    ComboBot.prototype,
-    'processRebalanceOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (order: Order) =>
-        `processRebalanceOrder${order.dealId}-${order.clientOrderId}`,
-    ),
-    ComboBot.prototype,
-    'processRebalanceOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (dealId: string) => `processRebalanceDeal${dealId}`),
-    ComboBot.prototype,
-    'manageBalanceDiff',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, order: Order) => `${botId}update${order.dealId}`,
-    ),
-    ComboBot.prototype,
-    'updateDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (dealId) => `updateUsage${dealId}`),
-    ComboBot.prototype,
-    'updateUsage',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (order: Order) => `${order.botId}update${order.dealId}`),
-    ComboBot.prototype,
-    'updateMinigrid',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (order: Order) =>
-        `${order.botId}process${order.symbol}${order.dealId ?? ''}`,
-    ),
-    ComboBot.prototype,
-    'processFilledOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}processFeeOrder`),
-    ComboBot.prototype,
-    'processFeeOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}placeFeeOrderCombo`),
-    ComboBot.prototype,
-    'placeFeeOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (order: Order) => `${order.botId}${order.clientOrderId}`),
-    ComboBot.prototype,
-    'startDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, symbol: string) => `${botId}placeBaseOrder${symbol}`,
-    ),
-    ComboBot.prototype,
-    'placeBaseOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}newDeal`),
-    ComboBot.prototype,
-    'openNewDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}unrealizedProfit`, 200),
-    ComboBot.prototype,
-    'unrealizedProfit',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
-      200,
-    ),
-    ComboBot.prototype,
-    'priceUpdateCallback',
-  )
 
   return ComboBot as new (
     id: string,

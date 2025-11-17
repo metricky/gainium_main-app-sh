@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.3] - 2025-11-17
+### Changed
+- Decorators apply logic in bot helpers. 
+
 ## [1.6.2] - 2025-11-14
 ### Fixed
 - Market TP order triggered at wrong price when having multiple deals. 

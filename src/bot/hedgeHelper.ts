@@ -23,7 +23,6 @@ import {
   DCACloseTriggerEnum,
   ComboTpBase,
 } from '../../types'
-import { applyMethodDecorator } from './dcaHelper'
 
 const mutex = new IdMutex()
 
@@ -153,7 +152,7 @@ function createHedgeBotHelper<
         )?.data?.result?.[0]?.deals ?? []
       )
     }
-
+    @IdMute(mutex, (botId: string) => `checkTpSl${botId}`)
     private async checkTpSl(_botId: string) {
       this.handleDebug(`Check TP/SL`)
       const useTp =
@@ -221,6 +220,7 @@ function createHedgeBotHelper<
       this.setTpSlTimer()
     }
 
+    @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
     override async setStatus(
       _botId: string,
       status: BotStatusEnum,
@@ -270,29 +270,12 @@ function createHedgeBotHelper<
       super.setStatus(_botId, status, closeType, serverRestart)
     }
 
+    @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
     public async reload(_botId: string) {
       this.resetTimers()
       super.reload(_botId)
     }
   }
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `checkTpSl${botId}`),
-    HedgeBot.prototype,
-    'checkTpSl',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `setStatusBot${botId}`),
-    HedgeBot.prototype,
-    'setStatus',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `setStatusBot${botId}`),
-    HedgeBot.prototype,
-    'reload',
-  )
 
   return HedgeBot as new (
     options: MetaBotOptions,

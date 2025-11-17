@@ -150,6 +150,8 @@ const mutexIndicators = new IdMutex(100)
 
 const mutexConcurrently = new IdMutex(30)
 
+const mutexDCAOrdersByIndicator = new IdMutex(100)
+
 const mutexPriceConcurrently = new IdMutex(30)
 
 const mutexOpenDealBySignal = new IdMutex(15)
@@ -159,7 +161,7 @@ const notionalReasons = ['The order funds should be more than', 'NOTIONAL']
 const maxTimeout = 2 ** 31 - 1
 
 // Helper function to apply decorators to methods
-export function applyMethodDecorator(
+/* export function applyMethodDecorator(
   decorator: MethodDecorator,
   target: any,
   propertyKey: string,
@@ -168,7 +170,7 @@ export function applyMethodDecorator(
   if (descriptor) {
     decorator(target, propertyKey, descriptor)
   }
-}
+} */
 
 type LocalIndicators = {
   uuid: string
@@ -459,6 +461,10 @@ function createDCABotHelper<
       )
     }
 
+    @RunWithDelay(
+      (botId: string) => `${botId}setDealToRedis`,
+      (_botId: string, restart: boolean) => setToRedisDelay * (restart ? 5 : 2),
+    )
     setDealToRedis(_botId: string, _restart: boolean) {
       this.setToRedis('deals', [...this.deals.values()])
     }
@@ -581,6 +587,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}indicatorDataCb`)
     private async indicatorDataCb(
       _botId: string,
       msg: {
@@ -742,6 +749,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}updateDealLastPrices`)
     async updateDealLastPrices(
       _botId: string,
       override?: LastPricesPerSymbols,
@@ -851,6 +859,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}checkCooldownStart`)
     async checkCooldownStart(_botId: string, symbol: string) {
       const settings = await this.getAggregatedSettings()
       const cooldownAfterDealStartOption =
@@ -864,6 +873,8 @@ function createDCABotHelper<
               ?.time
       return this.utils.checkCooldownStart(settings, lastTime ?? 0)
     }
+
+    @IdMute(mutex, (botId: string) => `${botId}checkCooldownStop`)
     async checkCooldownStop(_botId: string, symbol: string) {
       const settings = await this.getAggregatedSettings()
       const cooldownAfterDealStartOption =
@@ -1198,6 +1209,11 @@ function createDCABotHelper<
      * @param {FullDeal} FullDeal
      * @param {Partial<ExcludeDoc<Deal>} changed
      */
+    @IdMute(
+      mutex,
+      (fullDeal: FullDeal<ExcludeDoc<Deal>>) =>
+        `${fullDeal.deal._id}@${fullDeal.deal.botId}saveDeal`,
+    )
     async saveDeal(
       fullDeal: FullDeal<ExcludeDoc<Deal>>,
       deal?: Partial<any>,
@@ -1503,6 +1519,10 @@ function createDCABotHelper<
      * @param {Order} tpOrder Order which close the deal
      *
      */
+    @IdMute(
+      mutex,
+      (botId: string, order: Order) => `${botId}${order.clientOrderId}`,
+    )
     async closeDeal(
       _botId: string,
       dealId: string,
@@ -2016,6 +2036,7 @@ function createDCABotHelper<
      * @param {boolean} [cancel] Cancel deal orders. Default = true
      * @param {Order} [tpOrder] Take profit order to close deal
      */
+    @IdMute(mutex, (botId: string) => `${botId}processDealClose`)
     async processDealClose(
       _botId: string,
       dealId: string,
@@ -2510,6 +2531,7 @@ function createDCABotHelper<
         .join(', ')
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}saveIndicatorsData`)
     private async saveIndicatorsData(_botId: string, run = false) {
       if (!run) {
         if (this.saveIndicatorTimer) {
@@ -2691,6 +2713,21 @@ function createDCABotHelper<
       }
       return botSettings
     }
+    @RunWithDelay(
+      (
+        botId: string,
+        symbol: string,
+        _lastData: IndicatorHistory,
+        section?: IndicatorSection,
+        action?: IndicatorAction,
+      ) => `${botId}${symbol}${section}${action}checkIndicatorStatus`,
+      500,
+    )
+    @IdMute(
+      mutex,
+      (botId: string, symbol: string) =>
+        `${botId}${symbol}checkIndicatorStatus`,
+    )
     async checkIndicatorStatus(
       _botId: string,
       symbol: string,
@@ -3140,6 +3177,19 @@ function createDCABotHelper<
     /**
      * Check indicator condition
      */
+    @IdMute(
+      mutex,
+      (
+        botId: string,
+        _uuid: string,
+        _data: IndicatorHistory[],
+        symbol: string,
+      ) => `${botId}${symbol}checkIndicatorConditions`,
+    )
+    @IdMute(
+      mutexIndicators,
+      (botId: string) => `${botId}checkIndicatorConditions`,
+    )
     async checkIndicatorConditions(
       _botId: string,
       uuid: string,
@@ -4211,6 +4261,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutexDCAOrdersByIndicator, () => 'addDCAOrderByIndicator')
     private async addDCAOrderByIndicator(
       _botId: string,
       index: number,
@@ -4365,6 +4416,7 @@ function createDCABotHelper<
     /**
      * Check max amount of active deals
      */
+    @IdMute(mutex, (botId: string) => `checkMaxDeals${botId}`)
     async checkMaxDeals(_botId: string, symbol: string) {
       if (!this.allowedMethods.has('checkMaxDeals')) {
         return true
@@ -4598,6 +4650,10 @@ function createDCABotHelper<
      * @param {string} dealId Id of the deal
      * @param {CloseDCATypeEnum} [closeType] Close type. Default = leave
      */
+    @IdMute(
+      mutex,
+      (botId: string, dealId: string) => `${botId}${dealId ?? 'closeById'}`,
+    )
     async closeDealById(
       _botId: string,
       dealId: string,
@@ -5209,6 +5265,7 @@ function createDCABotHelper<
      *
      * @param {Order} orderBo Base order
      */
+    @IdMute(mutex, (order: Order) => `${order.botId}${order.clientOrderId}`)
     async startDeal(orderBo: Order) {
       const _id = this.startMethod('startDeal')
       const { dealId } = orderBo
@@ -5333,6 +5390,7 @@ function createDCABotHelper<
       this.endMethod(_id)
     }
     /** Sell remainder for deal */
+    @IdMute(mutex, (dealId: string) => `${dealId}sellRemainder`)
     async sellRemainder(
       dealId: string,
       _qty: number,
@@ -5704,6 +5762,10 @@ function createDCABotHelper<
       return { avg, display }
     }
 
+    @RunWithDelay(
+      (deal: ExcludeDoc<Deal>) => `${deal._id}sendDealClosedAlert`,
+      5 * 1000,
+    )
     async sendDealClosedAlert(
       _deal: ExcludeDoc<Deal>,
       _order?: Order,
@@ -5716,6 +5778,10 @@ function createDCABotHelper<
      *
      * @param {Order} order Base order
      */
+    @IdMute(
+      mutex,
+      (botId: string, order: Order) => `${botId}${order?.dealId}update`,
+    )
     async updateDeal(_botId: string, order: Order) {
       const _id = this.startMethod('updateDeal')
       this.ordersInBetweenUpdates.delete(order.clientOrderId)
@@ -6149,6 +6215,11 @@ function createDCABotHelper<
      * Check TP order status after timeout
      * @param {string} id Base order id to check
      */
+    @IdMute(
+      mutex,
+      (botId: string, _id: string, dealId: string) =>
+        `${botId}${dealId ?? 'closeById'}`,
+    )
     async checkTPOrder(
       _botId: string,
       id: string,
@@ -6200,6 +6271,10 @@ function createDCABotHelper<
      * @param {string} id Base order id to check
      * @param {string} dealId Deal id base order to check
      */
+    @IdMute(
+      mutex,
+      (botId: string, _symbol: string) => `${botId}placeBaseOrder${_symbol}`,
+    )
     async checkBaseOrder(
       _botId: string,
       symbol: string,
@@ -6652,6 +6727,10 @@ function createDCABotHelper<
      * Place base order<br />
      * @param {string} [oldDealId] Deal id to create a new base order
      */
+    @IdMute(
+      mutex,
+      (botId: string, symbol: string) => `${botId}placeBaseOrder${symbol}`,
+    )
     async placeBaseOrder(
       _botId: string,
       symbol: string,
@@ -7285,6 +7364,7 @@ function createDCABotHelper<
      * Update bot deals
      * @param {boolean} increase
      */
+    @IdMute(mutex, (botId) => `updateBotDeals${botId}`)
     async updateBotDeals(_botId: string, increase: boolean) {
       if (this.data) {
         this.data.deals = {
@@ -7365,6 +7445,7 @@ function createDCABotHelper<
      * @param {boolean} [noBotUsage] Not calculate bot usage. Default = false
      */
 
+    @IdMute(mutex, (dealId) => `updateUsage${dealId}`)
     async updateUsage(
       dealId: string,
       reset = false,
@@ -7671,6 +7752,7 @@ function createDCABotHelper<
      * Calculate bot usage
      */
 
+    @IdMute(mutex, (botId) => `calculateBotUsage${botId}`)
     async calculateBotUsage(_botId: string) {
       if (this.data) {
         const updateOpenDeals = this.getOpenDeals()
@@ -8131,6 +8213,7 @@ function createDCABotHelper<
       )
     }
     /** Check orders after service restart */
+    @IdMute(mutex, (botId: string) => `${botId}checkOrders`)
     async checkOrders(_botId: string, partiallyFilled?: boolean) {
       if (!this.shouldProceed()) {
         this.handleLog(this.notProceedMessage('orders check'))
@@ -8479,6 +8562,7 @@ function createDCABotHelper<
       this.endMethod(_id)
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}filterCoinsByVolume`)
     protected async filterCoinsByVolume(
       _botId: string,
       pairs: string[],
@@ -9077,6 +9161,7 @@ function createDCABotHelper<
       return true
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}filterCoinsByVolume`)
     async runAfterIndicatorsConnected(_botId: string) {
       this.handleDebug('Run after indicators connected')
       const c = [...this.afterIndicatorsConnected]
@@ -9095,6 +9180,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}openIndicators`)
     async openIndicators(_botId: string, _serviceRestart?: boolean) {
       this.indicatorConfigIdMap = new Map()
       this.indicatorRoomConfigMap = new Map()
@@ -10265,6 +10351,7 @@ function createDCABotHelper<
       return result
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}resetPending`)
     resetPending(_botId: string, symbol: string) {
       this.pendingDeals -= 1
       if (this.pendingDeals < 0) {
@@ -10682,7 +10769,10 @@ function createDCABotHelper<
     /**
      * Open new deal
      */
-
+    @IdMute(
+      mutex,
+      (botId: string, symbol: string) => `${botId}newDeal@${symbol}`,
+    )
     async openNewDeal(
       _botId: string,
       symbol: string,
@@ -10966,7 +11056,10 @@ function createDCABotHelper<
     /**
      * Open deal by signal if settings are specified
      */
-
+    @IdMute(
+      mutexOpenDealBySignal,
+      (botId: string) => `${botId}openDealBySignal`,
+    )
     public async openDealBySignal(
       _botId: string,
       _symbol?: string,
@@ -11118,6 +11211,10 @@ function createDCABotHelper<
      * @param {{new: Grid[], cancel: Grid[]}} orders Orders to cancel and place
      */
 
+    @IdMute(
+      mutex,
+      (botId: string, _symbol: string, dealId: string) => `${botId}${dealId}`,
+    )
     async placeOrders(
       _botId: string,
       symbol: string,
@@ -12827,6 +12924,7 @@ function createDCABotHelper<
      * @param {CloseDCATypeEnum} [closeType] Close type
      */
 
+    @IdMute(mutex, (botId: string) => `setStatusBot${botId}`)
     async setStatus(
       _botId: string,
       status: BotStatusEnum,
@@ -12953,6 +13051,11 @@ function createDCABotHelper<
      * @param {Order} order Order data
      */
 
+    @IdMute(
+      mutex,
+      (order: Order) =>
+        `${order.botId}process${order.symbol}${order.dealId ?? ''}`,
+    )
     async processFilledOrder(order: Order): Promise<void> {
       if (!this.shouldProceed()) {
         this.handleLog(
@@ -13039,6 +13142,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (order: Order) => `${order.botId}${order.dealId}update`)
     private async updatePartiallyFilledTP(order: Order) {
       const price = parseFloat(order.price)
       const qty = parseFloat(order.executedQty)
@@ -14857,6 +14961,7 @@ function createDCABotHelper<
      * Check deals SL
      */
 
+    @IdMute(mutex, (botId: string, symbol) => `${botId}sl${symbol}`)
     async checkDealsStopLoss(_botId: string, symbol: string) {
       if (!this.allowedMethods.has('checkDealsStopLoss')) {
         return
@@ -14978,6 +15083,7 @@ function createDCABotHelper<
       this.lockSLCheck = false
     }
 
+    @IdMute(mutex, (botId: string, symbol) => `${botId}indicatorUnpnl${symbol}`)
     async checkDealsIndicatorUnpnl(_botId: string, symbol: string) {
       if (!this.allowedMethods.has('checkIndicatorUnpnl')) {
         return
@@ -15034,6 +15140,7 @@ function createDCABotHelper<
       this.lockSLCheck = false
     }
 
+    @IdMute(mutex, (botId: string, symbol: string) => `${botId}moveSl${symbol}`)
     async checkDealsMoveSL(_botId: string, symbol: string) {
       if (!this.allowedMethods.has('checkDealsMoveSL')) {
         return
@@ -15088,6 +15195,13 @@ function createDCABotHelper<
     }
     /** Check if price not update */
 
+    @IdMute(
+      mutex,
+      (exchange?: ExchangeEnum) =>
+        `${removePaperFormExchangeName(
+          exchange ?? ExchangeEnum.binance,
+        )}priceTimerFn`,
+    )
     async priceTimerFn(_exchange?: ExchangeEnum) {
       const symbols: Set<string> = new Set()
       for (const d of this.getDealsByStatusAndSymbol({
@@ -15126,7 +15240,10 @@ function createDCABotHelper<
       }
     }
     /** Check trailing conditions */
-
+    @IdMute(
+      mutex,
+      (botId: string, symbol: string) => `${botId}trailing${symbol}`,
+    )
     async checkTrailing(_botId: string, _symbol: string) {
       if (!this.allowedMethods.has('checkTrailing')) {
         return
@@ -15215,6 +15332,10 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, symbol: string) => `${botId}checkDynamic${symbol}`,
+    )
     async checkDynamic(_botId: string, symbol: string, price: number) {
       if (this.data?.status === BotStatusEnum.closed) {
         return
@@ -15274,6 +15395,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}checkDCALevel`)
     public async checkDCALevel(_botId: string, price: number, symbol: string) {
       for (const [d, v] of this.dealsDCALevelCheck) {
         if (!(this.isLong ? price <= v : price >= v)) {
@@ -15324,6 +15446,7 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}checkTPLevel`)
     public async checkTPLevel(_botId: string, price: number, symbol: string) {
       for (const [d, v] of this.dealsForTPLevelCheck) {
         if (!(this.isLong ? price >= v : price <= v)) {
@@ -15386,7 +15509,15 @@ function createDCABotHelper<
      * Price update callback<br />
      *
      */
-
+    @IdMute(
+      mutex,
+      (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
+      50,
+    )
+    @IdMute(
+      mutexPriceConcurrently,
+      (botId: string) => `${botId}priceUpdateCallback`,
+    )
     override async priceUpdateCallback(
       _botId: string,
       msg: PriceMessage,
@@ -15715,6 +15846,7 @@ function createDCABotHelper<
      * Reload bot after settings changed
      */
 
+    @IdMute(mutex, (botId: string) => `reload${botId}`)
     override async reloadBot(_botId: string, replaceOrders = true) {
       try {
         if (this.reloadTimer) {
@@ -16833,6 +16965,10 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, dealId: string) => `addFunds${botId}${dealId}`,
+    )
     async addDealFunds(
       _botId: string,
       dealId: string,
@@ -17028,6 +17164,10 @@ function createDCABotHelper<
       this.endMethod(_id)
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, dealId: string) => `reduceFunds${botId}${dealId}`,
+    )
     async reduceDealFunds(
       _botId: string,
       dealId: string,
@@ -17269,6 +17409,11 @@ function createDCABotHelper<
       this.endMethod(_id)
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, dealId: string) =>
+        `cancelTerminalDealOrder${botId}${dealId}`,
+    )
     async cancelTerminalDealOrder(
       _botId: string,
       dealId: string,
@@ -17382,6 +17527,11 @@ function createDCABotHelper<
       )
     }
 
+    @IdMute(
+      mutex,
+      (botId: string, dealId: string) =>
+        `cancelPendingAddFundsDealOrder${botId}${dealId}`,
+    )
     async cancelPendingAddFundsDealOrder(
       _botId: string,
       dealId: string,
@@ -17604,6 +17754,8 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}updateBotStats`)
+    @IdMute(mutexConcurrently, () => 'updateEquityStats')
     async updateEquityStats(_botId: string) {
       const _id = this.startMethod('updateEquityStats')
       if (!this.data) {
@@ -17823,6 +17975,7 @@ function createDCABotHelper<
       this.endMethod(_id)
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}updateBotStats`)
     async botUpdateStats(_botId: string, d: FullDeal<ExcludeDoc<Deal>>) {
       if (!this.shouldProceed()) {
         this.handleLog(this.notProceedMessage('Bot update stats'))
@@ -18466,436 +18619,6 @@ function createDCABotHelper<
       this.endMethod(_id)
     }
   }
-
-  // Apply decorators programmatically
-  applyMethodDecorator(
-    RunWithDelay(
-      (botId: string) => `${botId}setDealToRedis`,
-      (_botId: string, restart: boolean) => setToRedisDelay * (restart ? 5 : 2),
-    ),
-    DCABotHelper.prototype,
-    'setDealToRedis',
-  )
-
-  applyMethodDecorator(
-    RunWithDelay(
-      (deal: ExcludeDoc<Deal>) => `${deal._id}sendDealClosedAlert`,
-      5 * 1000,
-    ),
-    DCABotHelper.prototype,
-    'sendDealClosedAlert',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}indicatorDataCb`),
-    DCABotHelper.prototype,
-    'indicatorDataCb',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}updateDealLastPrices`),
-    DCABotHelper.prototype,
-    'updateDealLastPrices',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}checkCooldownStart`),
-    DCABotHelper.prototype,
-    'updateDealLastTime',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}checkCooldownStart`),
-    DCABotHelper.prototype,
-    'checkCooldownStart',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}checkCooldownStop`),
-    DCABotHelper.prototype,
-    'checkCooldownStop',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (fullDeal: FullDeal<ExcludeDoc<Deal>>) =>
-        `${fullDeal.deal._id}@${fullDeal.deal.botId}saveDeal`,
-    ),
-    DCABotHelper.prototype,
-    'saveDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, order: Order) => `${botId}${order.clientOrderId}`,
-    ),
-    DCABotHelper.prototype,
-    'closeDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}processDealClose`),
-    DCABotHelper.prototype,
-    'processDealClose',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}saveIndicatorsData`),
-    DCABotHelper.prototype,
-    'saveIndicatorsData',
-  )
-
-  applyMethodDecorator(
-    RunWithDelay(
-      (
-        botId: string,
-        symbol: string,
-        _lastData: IndicatorHistory,
-        section?: IndicatorSection,
-        action?: IndicatorAction,
-      ) => `${botId}${symbol}${section}${action}checkIndicatorStatus`,
-      500,
-    ),
-    DCABotHelper.prototype,
-    'checkIndicatorStatus',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, symbol: string) =>
-        `${botId}${symbol}checkIndicatorStatus`,
-    ),
-    DCABotHelper.prototype,
-    'checkIndicatorStatus',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (
-        botId: string,
-        _uuid: string,
-        _data: IndicatorHistory[],
-        symbol: string,
-      ) => `${botId}${symbol}checkIndicatorConditions`,
-    ),
-    DCABotHelper.prototype,
-    'checkIndicatorConditions',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutexIndicators,
-      (botId: string) => `${botId}checkIndicatorConditions`,
-    ),
-    DCABotHelper.prototype,
-    'checkIndicatorConditions',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `checkMaxDeals${botId}`),
-    DCABotHelper.prototype,
-    'checkMaxDeals',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, dealId: string) => `${botId}${dealId ?? 'closeById'}`,
-    ),
-    DCABotHelper.prototype,
-    'closeDealById',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (order: Order) => `${order.botId}${order.clientOrderId}`),
-    DCABotHelper.prototype,
-    'startDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (dealId: string) => `${dealId}sellRemainder`),
-    DCABotHelper.prototype,
-    'sellRemainder',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, order: Order) => `${botId}${order?.dealId}update`,
-    ),
-    DCABotHelper.prototype,
-    'updateDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, _id: string, dealId: string) =>
-        `${botId}${dealId ?? 'closeById'}`,
-    ),
-    DCABotHelper.prototype,
-    'checkTPOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, _symbol: string) => `${botId}placeBaseOrder${_symbol}`,
-    ),
-    DCABotHelper.prototype,
-    'checkBaseOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, symbol: string) => `${botId}placeBaseOrder${symbol}`,
-    ),
-    DCABotHelper.prototype,
-    'placeBaseOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId) => `updateBotDeals${botId}`),
-    DCABotHelper.prototype,
-    'updateBotDeals',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (dealId) => `updateUsage${dealId}`),
-    DCABotHelper.prototype,
-    'updateUsage',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId) => `calculateBotUsage${botId}`),
-    DCABotHelper.prototype,
-    'calculateBotUsage',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}checkOrders`),
-    DCABotHelper.prototype,
-    'checkOrders',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}filterCoinsByVolume`),
-    DCABotHelper.prototype,
-    'filterCoinsByVolume',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}filterCoinsByVolume`),
-    DCABotHelper.prototype,
-    'runAfterIndicatorsConnected',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}openIndicators`),
-    DCABotHelper.prototype,
-    'openIndicators',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}resetPending`),
-    DCABotHelper.prototype,
-    'resetPending',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, symbol: string) => `${botId}newDeal@${symbol}`,
-    ),
-    DCABotHelper.prototype,
-    'openNewDeal',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutexOpenDealBySignal,
-      (botId: string) => `${botId}openDealBySignal`,
-    ),
-    DCABotHelper.prototype,
-    'openDealBySignal',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, _symbol: string, dealId: string) => `${botId}${dealId}`,
-    ),
-    DCABotHelper.prototype,
-    'placeOrders',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `setStatusBot${botId}`),
-    DCABotHelper.prototype,
-    'setStatus',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (order: Order) =>
-        `${order.botId}process${order.symbol}${order.dealId ?? ''}`,
-    ),
-    DCABotHelper.prototype,
-    'processFilledOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (order: Order) => `${order.botId}${order.dealId}update`),
-    DCABotHelper.prototype,
-    'updatePartiallyFilledTP',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string, symbol) => `${botId}sl${symbol}`),
-    DCABotHelper.prototype,
-    'checkDealsStopLoss',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string, symbol) => `${botId}indicatorUnpnl${symbol}`),
-    DCABotHelper.prototype,
-    'checkDealsIndicatorUnpnl',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string, symbol: string) => `${botId}moveSl${symbol}`),
-    DCABotHelper.prototype,
-    'checkDealsMoveSL',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (exchange?: ExchangeEnum) =>
-        `${removePaperFormExchangeName(
-          exchange ?? ExchangeEnum.binance,
-        )}priceTimerFn`,
-    ),
-    DCABotHelper.prototype,
-    'priceTimerFn',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, symbol: string) => `${botId}trailing${symbol}`,
-    ),
-    DCABotHelper.prototype,
-    'checkTrailing',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, symbol: string) => `${botId}checkDynamic${symbol}`,
-    ),
-    DCABotHelper.prototype,
-    'checkDynamic',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}checkDCALevel`),
-    DCABotHelper.prototype,
-    'checkDCALevel',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}checkTPLevel`),
-    DCABotHelper.prototype,
-    'checkTPLevel',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
-      50,
-    ),
-    DCABotHelper.prototype,
-    'priceUpdateCallback',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutexPriceConcurrently,
-      (botId: string) => `${botId}priceUpdateCallback`,
-    ),
-    DCABotHelper.prototype,
-    'priceUpdateCallback',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `reload${botId}`),
-    DCABotHelper.prototype,
-    'reloadBot',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, dealId: string) => `addFunds${botId}${dealId}`,
-    ),
-    DCABotHelper.prototype,
-    'addDealFunds',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, dealId: string) => `reduceFunds${botId}${dealId}`,
-    ),
-    DCABotHelper.prototype,
-    'reduceDealFunds',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, dealId: string) =>
-        `cancelTerminalDealOrder${botId}${dealId}`,
-    ),
-    DCABotHelper.prototype,
-    'cancelTerminalDealOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, dealId: string) =>
-        `cancelPendingAddFundsDealOrder${botId}${dealId}`,
-    ),
-    DCABotHelper.prototype,
-    'cancelPendingAddFundsDealOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}updateBotStats`),
-    DCABotHelper.prototype,
-    'updateEquityStats',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutexConcurrently, () => 'updateEquityStats'),
-    DCABotHelper.prototype,
-    'updateEquityStats',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}updateBotStats`),
-    DCABotHelper.prototype,
-    'botUpdateStats',
-  )
 
   return DCABotHelper as new (
     id: string,

@@ -36,7 +36,6 @@ import utils from '../utils'
 import { IdMutex, IdMute } from '../utils/mutex'
 import { botDb, transactionDb } from '../db/dbInit'
 import { DealStats } from './worker/statsService'
-import { applyMethodDecorator } from './dcaHelper'
 
 /**
  * Price in initial grids
@@ -1510,6 +1509,7 @@ function createBotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}processFeeOrder`)
     private async processFeeOrder(_botId: string, order: Order) {
       const { clientOrderId, typeOrder, symbol, executedQty, price } = order
       if (!this.data) {
@@ -1535,6 +1535,7 @@ function createBotHelper<
       this.emit('bot settings update', { feeBalance: this.data.feeBalance })
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}placeFeeOrderCombo`)
     private async placeFeeOrder(_botId: string, orderId: string) {
       if (!this.data) {
         return
@@ -1585,6 +1586,7 @@ function createBotHelper<
      *
      * @param {number} [latestPrice] Latest price to count
      */
+    @IdMute(mutex, (botId: string) => `${botId}`)
     async limitOrders(
       _botId: string,
       side: OrderSideEnum,
@@ -1806,6 +1808,7 @@ function createBotHelper<
      * @param {Order} order Order data
      * @param {number} updateTime Update time
      */
+    @IdMute(mutex, (order: Order) => `${order.botId}`)
     private async processFilledOrder(
       order: Order,
       updateTime: number,
@@ -2730,6 +2733,7 @@ function createBotHelper<
       }
       this.updateProgress()
     }
+    @IdMute(mutex, (order: Order) => `${order.botId}stab`)
     async checkBalances(order: Order) {
       if (this.futures) {
         return
@@ -2935,6 +2939,10 @@ function createBotHelper<
      *
      * @param {Order} o Filled order to sount transaction for
      */
+    @IdMute(
+      mutex,
+      (order: Order) => `${order.botId}transaction${order.clientOrderId}`,
+    )
     async createTransaction(o: Order): Promise<void> {
       if (!this.data) {
         return
@@ -3921,6 +3929,7 @@ function createBotHelper<
     }
     /** Check if price not update */
 
+    @IdMute(mutex, (botId: string) => `${botId}priceTimerFn`)
     async priceTimerFn(_botId: string) {
       if (!this.data) {
         return
@@ -3955,6 +3964,7 @@ function createBotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}closeBotByTp`)
     protected async closeBotByTp(
       _botId: string,
       msg: PriceMessage,
@@ -4282,6 +4292,11 @@ function createBotHelper<
      *
      * @param {PriceMessage} msg Update from {@link BotHelper#ioPrice}
      */
+    @IdMute(
+      mutex,
+      (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
+      100,
+    )
     override async priceUpdateCallback(
       _botId: string,
       msg: PriceMessage,
@@ -4613,67 +4628,6 @@ function createBotHelper<
       }
     }
   }
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}processFeeOrder`),
-    BotHelper.prototype,
-    'processFeeOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}placeFeeOrderCombo`),
-    BotHelper.prototype,
-    'placeFeeOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}`),
-    BotHelper.prototype,
-    'limitOrders',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (order: Order) => `${order.botId}`),
-    BotHelper.prototype,
-    'processFilledOrder',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (order: Order) => `${order.botId}stab`),
-    BotHelper.prototype,
-    'checkBalances',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (order: Order) => `${order.botId}transaction${order.clientOrderId}`,
-    ),
-    BotHelper.prototype,
-    'createTransaction',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}priceTimerFn`),
-    BotHelper.prototype,
-    'priceTimerFn',
-  )
-
-  applyMethodDecorator(
-    IdMute(mutex, (botId: string) => `${botId}closeBotByTp`),
-    BotHelper.prototype,
-    'closeBotByTp',
-  )
-
-  applyMethodDecorator(
-    IdMute(
-      mutex,
-      (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
-      100,
-    ),
-    BotHelper.prototype,
-    'priceUpdateCallback',
-  )
 
   return BotHelper as new (
     id: string,
