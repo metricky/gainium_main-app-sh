@@ -3025,7 +3025,7 @@ function createDCABotHelper<
             undefined,
             undefined,
             undefined,
-            undefined,
+            true,
             undefined,
             true,
           )
