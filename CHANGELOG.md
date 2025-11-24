@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.4] - 2025-11-24
+### Changed
+- Demo user. 
+
 ## [1.6.3] - 2025-11-17
 ### Changed
 - Decorators apply logic in bot helpers. 

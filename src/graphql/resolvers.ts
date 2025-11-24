@@ -942,7 +942,7 @@ const resolvers = <
       { input }: { input: { id: string; shareId?: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
 
@@ -1026,7 +1026,7 @@ const resolvers = <
       { input }: { input: { id: string; shareId?: string } },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -1195,7 +1195,7 @@ const resolvers = <
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
 
@@ -1229,7 +1229,7 @@ const resolvers = <
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
 
@@ -3078,7 +3078,7 @@ const resolvers = <
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3348,7 +3348,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3366,7 +3366,7 @@ const resolvers = <
       { input }: { input?: DataGridFilterInput },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3393,7 +3393,7 @@ const resolvers = <
       { input }: { input?: DataGridFilterInput },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3420,7 +3420,7 @@ const resolvers = <
       { input }: { input?: DataGridFilterInput },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3447,7 +3447,7 @@ const resolvers = <
       { input }: { input?: DataGridFilterInput },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3474,7 +3474,7 @@ const resolvers = <
       { input: { uuid } }: { input: { uuid: string } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3567,7 +3567,7 @@ const resolvers = <
       { input }: { input?: DataGridFilterInput },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3750,7 +3750,7 @@ const resolvers = <
       { input }: { input: { type: ResetAccountTypeEnum } },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3778,7 +3778,7 @@ const resolvers = <
       { token, req, paperContext }: InputRequest,
     ) => {
       const { botId, dealId, combo } = input
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -3977,7 +3977,7 @@ const resolvers = <
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4353,7 +4353,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4800,7 +4800,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -4833,7 +4833,7 @@ const resolvers = <
       {},
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -5889,7 +5889,7 @@ const resolvers = <
       },
       { token, req, paperContext }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6859,7 +6859,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6886,7 +6886,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6913,7 +6913,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6940,7 +6940,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
@@ -6967,7 +6967,7 @@ const resolvers = <
       },
       { token, req }: InputRequest,
     ) => {
-      if (!req.user?.authorized) {
+      if (token !== 'demo' && !req.user?.authorized) {
         return errorAccess()
       }
       const user = await findUser(token)
