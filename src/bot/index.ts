@@ -5572,7 +5572,11 @@ class Bot<T extends UserSchema = UserSchema> {
             args: [id, status, closeType],
           })
         } else {
-          return this.entityNotFound('Bot')
+          this.handleLog(`Hedge combo bot ${id} not found in changeStatus`)
+          await hedgeComboBotDb.updateData(
+            { _id: id, userId },
+            { $set: { status: BotStatusEnum.closed } },
+          )
         }
       } else if (type === BotType.hedgeDca) {
         const bot = this.hedgeDcaBots.find(
@@ -5587,7 +5591,11 @@ class Bot<T extends UserSchema = UserSchema> {
             args: [id, status, closeType],
           })
         } else {
-          return this.entityNotFound('Bot')
+          this.handleLog(`Hedge dca bot ${id} not found in changeStatus`)
+          await hedgeDCABotDb.updateData(
+            { _id: id, userId },
+            { $set: { status: BotStatusEnum.closed } },
+          )
         }
       } else {
         const bot = this.dcaBots.find(

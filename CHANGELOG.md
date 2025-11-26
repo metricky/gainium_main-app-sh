@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.5] - 2025-11-26
+### Fixed
+- Hedge bot not found when stopped. 
+
 ## [1.6.4] - 2025-11-24
 ### Changed
 - Demo user. 
