@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.6] - 2025-11-28
+### Fixed
+- API signature not valid with empty body. 
+
 ## [1.6.5] - 2025-11-26
 ### Fixed
 - Hedge bot not found when stopped. 

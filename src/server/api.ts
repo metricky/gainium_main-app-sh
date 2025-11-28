@@ -97,15 +97,21 @@ const checkKey = (
   time: string,
   signature: string,
 ) => {
-  let bodyResult = JSON.stringify(body)
+  const bodyResult = JSON.stringify(body)
+  const bodiesToCheck = [bodyResult]
   if (bodyResult.length === 2) {
-    bodyResult = ''
+    bodiesToCheck.push('')
   }
-  const signatureResult = crypto
-    .createHmac('sha256', secret)
-    .update(bodyResult + method + endpoint + time)
-    .digest('base64')
-  return signatureResult === signature
+  for (const bodyToCheck of bodiesToCheck) {
+    const signatureResult = crypto
+      .createHmac('sha256', secret)
+      .update(bodyToCheck + method + endpoint + time)
+      .digest('base64')
+    if (signatureResult === signature) {
+      return true
+    }
+  }
+  return false
 }
 
 const getUserByKey = async <R extends UserSchema = UserSchema>(
@@ -202,6 +208,7 @@ export const middleware =
         signature.toString(),
       )
     ) {
+      console.log(req.body, req.method, req.url, time, signature)
       error(`API request: ${req.method} ${req.url} signature not valid`)
       res.sendStatus(401)
       return
