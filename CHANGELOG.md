@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.7] - 2025-12-08
+### Fixed
+- Profit by user/bot start date. 
+
 ## [1.6.6] - 2025-11-28
 ### Fixed
 - API signature not valid with empty body. 

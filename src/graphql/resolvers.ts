@@ -2601,7 +2601,7 @@ const resolvers = <
               userId: `${user.data._id}`,
               // @ts-ignore
               paperContext: paperContext ? { $eq: true } : { $ne: true },
-              time: { $gt: startTime },
+              time: { $gte: startTime },
             },
           },
           {
