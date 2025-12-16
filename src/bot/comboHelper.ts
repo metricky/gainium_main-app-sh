@@ -1367,16 +1367,37 @@ function createComboBotHelper<
       const real = quote / base
       let display = real
       if (dealId) {
-        const realAvg = quote / base
-        if (!isNaN(realAvg)) {
+        if (!isNaN(real)) {
           if (d) {
-            const qty = this.isLong
+            /* const qty = this.isLong
               ? d.deal.currentBalances.base
               : d.deal.initialBalances.base - d.deal.currentBalances.base
             const quote = this.isLong
               ? d.deal.initialBalances.quote - d.deal.currentBalances.quote
               : d.deal.currentBalances.quote
-            display = +quote / qty
+            display = +quote / qty */
+            const profitBase = await this.profitBase(d.deal)
+            const longMult = this.isLong ? 1 : -1
+            const qty = this.isLong
+              ? d.deal.currentBalances.base
+              : d.deal.initialBalances.base - d.deal.currentBalances.base
+            const quote =
+              (this.isLong
+                ? d.deal.initialBalances.quote - d.deal.currentBalances.quote
+                : d.deal.currentBalances.quote) +
+              (profitBase ? 0 : d.deal.profit.total * longMult)
+            const fee =
+              (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0
+            display = profitBase
+              ? quote /
+                (qty -
+                  d.deal.profit.total * longMult -
+                  (-d.deal.profit.total + (d.deal.fullFee ?? 0) + qty * fee) /
+                    longMult)
+              : (+(d.deal.fullFee ?? 0) -
+                  d.deal.profit.total +
+                  quote * longMult) /
+                (qty * (longMult - fee))
           }
         }
       }

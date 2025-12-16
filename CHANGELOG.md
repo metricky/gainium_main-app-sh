@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.9] - 2025-12-16
+### Changed
+- Combo breakeven calculation. 
+
 ## [1.6.8] - 2025-12-16
 ### Changed
 - Improve random pair filtering. 
