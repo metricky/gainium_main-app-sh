@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.8] - 2025-12-16
+### Changed
+- Improve random pair filtering. 
+  
 ## [1.6.7] - 2025-12-08
 ### Fixed
 - Profit by user/bot start date. 

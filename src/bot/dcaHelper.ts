@@ -2259,15 +2259,17 @@ function createDCABotHelper<
               ) {
                 this.handleDebug(`Not open new ASAP deal ${dealId}`)
               } else {
+                const usedSymbols = openDeals.map((d) => d.deal.symbol.symbol)
                 const filtered = await this.filterCoinsByVolume(
                   this.botId,
                   settings.useMulti
-                    ? (await this.getSymbolsToOpenAsapDeals()).filter(
-                        (s) =>
-                          !openDeals
-                            .map((d) => d.deal.symbol.symbol)
-                            .includes(s),
-                      )
+                    ? (
+                        await this.getSymbolsToOpenAsapDeals(
+                          false,
+                          false,
+                          usedSymbols,
+                        )
+                      ).filter((s) => !usedSymbols.includes(s))
                     : [deal.deal.symbol.symbol],
                 )
                 if (filtered.length) {
@@ -8574,6 +8576,7 @@ function createDCABotHelper<
     async getSymbolsToOpenAsapDeals(
       skipVolume = false,
       all = false,
+      skippedPairs: string[] = [],
     ): Promise<string[]> {
       if (!this.data) {
         return []
@@ -8596,7 +8599,9 @@ function createDCABotHelper<
       if (maxDealsPerPair < 0) {
         maxDealsPerPair = 1
       }
-      const pairs = settings.pair ?? []
+      const pairs = (settings.pair ?? []).filter(
+        (p) => !skippedPairs.includes(p),
+      )
       if (pairs.length > 0 && !settings.useMulti) {
         return [pairs[0]]
       }
