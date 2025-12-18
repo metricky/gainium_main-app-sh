@@ -1,5 +1,6 @@
 import type { Prices } from '../../types'
 import { ExchangeEnum } from '../../types'
+import moment from 'moment-timezone'
 
 /**
  * Sleep function
@@ -11,15 +12,8 @@ const sleep = (milliseconds: number): Promise<void> => {
 }
 
 const getTimezoneOffset = (timeZone: string, date = new Date()) => {
-  const tz = date
-    .toLocaleString('en', { timeZone, timeStyle: 'long' })
-    .split(' ')
-    .slice(-1)[0]
-  const dateString = date.toString()
-  const offset =
-    Date.parse(`${dateString} UTC`) - Date.parse(`${dateString} ${tz}`)
-
-  return offset
+  // Returns offset in milliseconds using moment-timezone for reliability
+  return moment.tz(date, timeZone).utcOffset() * 60 * 1000
 }
 
 /**

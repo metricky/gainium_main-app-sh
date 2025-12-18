@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.10] - 2025-12-18
+### Fixed
+- Timezone offset. 
+
 ## [1.6.9] - 2025-12-16
 ### Changed
 - Combo breakeven calculation. 
