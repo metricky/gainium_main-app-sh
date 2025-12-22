@@ -3931,6 +3931,7 @@ const resolvers = <
         exchange,
         exchangeUUID,
         importFrom: dealId,
+        skipBalanceCheck: true,
       }
       const newBot = await Bot.createDCABot(
         user.data._id.toString(),

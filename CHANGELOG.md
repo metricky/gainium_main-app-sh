@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.11] - 2025-12-22
+### Fixed
+- Skip balance check in move deal to terminal. 
+
 ## [1.6.10] - 2025-12-18
 ### Fixed
 - Timezone offset. 
