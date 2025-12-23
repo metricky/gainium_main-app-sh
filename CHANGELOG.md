@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.12] - 2025-12-23
+### Fixed
+- AVP issue with group and section indicator logic
+
 ## [1.6.11] - 2025-12-22
 ### Fixed
 - Skip balance check in move deal to terminal. 

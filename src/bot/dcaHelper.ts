@@ -13625,7 +13625,40 @@ function createDCABotHelper<
                 i.section !== IndicatorSection.sl,
             )
           : undefined
-
+      const slGroups = this.data?.settings.indicatorGroups.filter(
+        (g) =>
+          g.action === IndicatorAction.closeDeal &&
+          g.section === IndicatorSection.sl,
+      )
+      const tpGroups = this.data?.settings.indicatorGroups.filter(
+        (g) =>
+          g.action === IndicatorAction.closeDeal &&
+          g.section !== IndicatorSection.sl,
+      )
+      const slGroup = foundInSl
+        ? slGroups?.find((g) => g.id === foundInSl?.groupId)
+        : undefined
+      const tpGroup = foundInTp
+        ? tpGroups?.find((g) => g.id === foundInTp?.groupId)
+        : undefined
+      const slIndicatorsInGroup = slGroup
+        ? this.data?.settings.indicators.filter(
+            (i) =>
+              i.indicatorAction === IndicatorAction.closeDeal &&
+              i.section === IndicatorSection.sl &&
+              i.groupId === slGroup.id,
+          )
+        : undefined
+      const tpIndicatorsInGroup = tpGroup
+        ? this.data?.settings.indicators.filter(
+            (i) =>
+              i.indicatorAction === IndicatorAction.closeDeal &&
+              i.section !== IndicatorSection.sl &&
+              i.groupId === tpGroup.id,
+          )
+        : undefined
+      const slGroupLogicOr = slGroup?.logic === IndicatorsLogicEnum.or
+      const tpGroupLogicOr = tpGroup?.logic === IndicatorsLogicEnum.or
       const slLogicOr =
         this.data?.settings.stopDealSlLogic === IndicatorsLogicEnum.or
       const tpLogicOr =
@@ -13661,6 +13694,12 @@ function createDCABotHelper<
         tpInidcators,
         slConditionGt,
         tpConditionGt,
+        slIndicatorsInGroup,
+        slGroupLogicOr,
+        tpIndicatorsInGroup,
+        tpGroupLogicOr,
+        slGroups,
+        tpGroups,
       }
     }
     get isBotForIndicatorUnpnl() {
@@ -13674,12 +13713,26 @@ function createDCABotHelper<
         tpLogicOr,
         slInidcators,
         tpInidcators,
+        slGroupLogicOr,
+        slIndicatorsInGroup,
+        tpGroupLogicOr,
+        tpIndicatorsInGroup,
+        slGroups,
+        tpGroups,
       } = this.getIndicatorUnpnlValues()
 
       if (foundInSl || foundInTp) {
         return (
-          (foundInSl && ((slInidcators?.length ?? 0) === 1 || slLogicOr)) ||
-          (foundInTp && ((tpInidcators?.length ?? 0) === 1 || tpLogicOr))
+          (foundInSl &&
+            ((slInidcators?.length ?? 0) === 1 ||
+              ((slIndicatorsInGroup?.length ?? 0) === 1 && slLogicOr) ||
+              ((slGroups?.length ?? 0) === 1 && slGroupLogicOr) ||
+              (slLogicOr && slGroupLogicOr))) ||
+          (foundInTp &&
+            ((tpInidcators?.length ?? 0) === 1 ||
+              ((tpIndicatorsInGroup?.length ?? 0) === 1 && tpLogicOr) ||
+              ((tpGroups?.length ?? 0) === 1 && tpGroupLogicOr) ||
+              (tpLogicOr && tpGroupLogicOr)))
         )
       }
       return false
