@@ -5336,7 +5336,7 @@ function createDCABotHelper<
             : DCADealStatusEnum.open
         findDeal.deal.updateTime = orderBo.updateTime
         findDeal.deal.levels.complete = findDeal.deal.levels.complete + 1
-
+        findDeal.closeByTp = false
         this.saveDeal(findDeal, {
           initialBalances: findDeal.deal.initialBalances,
           currentBalances: findDeal.deal.currentBalances,
@@ -5890,6 +5890,7 @@ function createDCABotHelper<
               findDeal.deal.currentBalances.quote +
               qty * price * (order.side === OrderSideEnum.buy ? 0 : 1),
           }
+          findDeal.closeByTp = false
           await this.checkDealSlMethods(findDeal)
           this.checkDealsPriceExtremum()
           this.saveDeal(findDeal, {
@@ -6021,7 +6022,7 @@ function createDCABotHelper<
             )
           }
           findDeal.deal.commission += commDeal
-
+          findDeal.closeByTp = false
           this.saveDeal(findDeal, {
             commission: findDeal.deal.commission,
             profit: findDeal.deal.profit,
@@ -6170,6 +6171,7 @@ function createDCABotHelper<
             findDeal.deal,
             false,
           )
+          findDeal.closeByTp = false
           if (findDeal.deal.bestPrice) {
             findDeal.deal.bestPrice = 0
           }
@@ -14059,10 +14061,6 @@ function createDCABotHelper<
           this.getDealTPLevelToCheck(deal),
         )
         this.allowedMethods.add('checkTPLevel')
-        if (deal.closeByTp) {
-          deal.closeByTp = false
-          this.saveDeal(deal)
-        }
       }
     }
     private getDealTPLevelToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
@@ -15525,8 +15523,11 @@ function createDCABotHelper<
             )
             deal.closeByTp = true
             this.saveDeal(deal)
+            const settings = await this.getAggregatedSettings(deal.deal)
             const order = deal.currentOrders.find(
-              (o) => +o.price === value && o.type === TypeOrderEnum.dealTP,
+              (o) =>
+                (settings.useMultiTp ? +o.price === value : true) &&
+                o.type === TypeOrderEnum.dealTP,
             )
             if (!order) {
               return this.handleErrors(
