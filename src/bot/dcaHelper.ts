@@ -920,7 +920,6 @@ function createDCABotHelper<
                 d.deal.status !== DCADealStatusEnum.canceled
               ) {
                 const initialOrders: Grid[] = []
-                const currentOrders: Grid[] = []
                 for (const o of d.initialOrders) {
                   initialOrders.push({
                     ...o,
@@ -936,7 +935,18 @@ function createDCABotHelper<
                         : this.getOrderId('D-TP'),
                   })
                 }
-                for (const o of d.currentOrders) {
+                const currentOrders = await this.createCurrentDealOrders(
+                  d.deal.symbol.symbol,
+                  d.deal.lastPrice,
+                  initialOrders,
+                  d.deal.settings.avgPrice || d.deal.avgPrice,
+                  d.deal.initialPrice,
+                  `${d.deal._id}`,
+                  false,
+                  d.deal,
+                  false,
+                )
+                /* for (const o of d.currentOrders) {
                   currentOrders.push({
                     ...o,
                     qty: this.math.round(
@@ -954,12 +964,13 @@ function createDCABotHelper<
                             : this.getOrderId('D-MTP')
                           : this.getOrderId('D-TP'),
                   })
-                }
+                } */
                 this.setDeal(
                   {
                     ...d,
                     closeBySl: false,
                     notCheckSl: false,
+                    closeByTp: false,
                     initialOrders,
                     currentOrders,
                   },
@@ -5336,7 +5347,7 @@ function createDCABotHelper<
             : DCADealStatusEnum.open
         findDeal.deal.updateTime = orderBo.updateTime
         findDeal.deal.levels.complete = findDeal.deal.levels.complete + 1
-
+        findDeal.closeByTp = false
         this.saveDeal(findDeal, {
           initialBalances: findDeal.deal.initialBalances,
           currentBalances: findDeal.deal.currentBalances,
@@ -5890,6 +5901,7 @@ function createDCABotHelper<
               findDeal.deal.currentBalances.quote +
               qty * price * (order.side === OrderSideEnum.buy ? 0 : 1),
           }
+          findDeal.closeByTp = false
           await this.checkDealSlMethods(findDeal)
           this.checkDealsPriceExtremum()
           this.saveDeal(findDeal, {
@@ -6021,7 +6033,7 @@ function createDCABotHelper<
             )
           }
           findDeal.deal.commission += commDeal
-
+          findDeal.closeByTp = false
           this.saveDeal(findDeal, {
             commission: findDeal.deal.commission,
             profit: findDeal.deal.profit,
@@ -6170,6 +6182,7 @@ function createDCABotHelper<
             findDeal.deal,
             false,
           )
+          findDeal.closeByTp = false
           if (findDeal.deal.bestPrice) {
             findDeal.deal.bestPrice = 0
           }
@@ -14018,6 +14031,8 @@ function createDCABotHelper<
             string,
             number,
           ])
+        } else {
+          this.handleDebug(`Deal ${d.deal._id} is not for TP Level Check`)
         }
       }
 
@@ -14059,27 +14074,24 @@ function createDCABotHelper<
           this.getDealTPLevelToCheck(deal),
         )
         this.allowedMethods.add('checkTPLevel')
-        const get = this.getDeal(deal.deal._id)
-        if (get) {
-          get.closeByTp = false
-          this.saveDeal(get)
-        }
       }
     }
     private getDealTPLevelToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
       const def = this.isLong ? Infinity : 0
       const filledIds = (d.deal.tpFilledHistory ?? []).map((o) => o.id)
-      return (
-        +[...d.currentOrders]
-          .filter(
-            (o) =>
-              o.type === TypeOrderEnum.dealTP &&
-              !filledIds.includes(o.tpSlTarget ?? ''),
-          )
-          .sort((a, b) =>
-            this.isLong ? +a.price - +b.price : +b.price - +a.price,
-          )[0]?.price || def
+      const tpPrice = +[...d.currentOrders]
+        .filter(
+          (o) =>
+            o.type === TypeOrderEnum.dealTP &&
+            !filledIds.includes(o.tpSlTarget ?? ''),
+        )
+        .sort((a, b) =>
+          this.isLong ? +a.price - +b.price : +b.price - +a.price,
+        )[0]?.price
+      this.handleDebug(
+        `Deal ${d.deal._id} TP Level Check Price: ${tpPrice}, Filled IDs: ${filledIds.join(', ')}`,
       )
+      return tpPrice || def
     }
     private getDealDCALevelToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
       const def = this.isLong ? 0 : Infinity
@@ -14317,6 +14329,16 @@ function createDCABotHelper<
               this.lowestHigh.delete(k)
             }
           })
+          this.handleLog(
+            `Lowest high: ${[...this.lowestHigh.entries()]
+              .map(([k, v]) => `${k}: ${v.toFixed(8)}`)
+              .join(', ')}`,
+          )
+          this.handleLog(
+            `Highest low: ${[...this.highestLow.entries()]
+              .map(([k, v]) => `${k}: ${v.toFixed(8)}`)
+              .join(', ')}`,
+          )
         } else {
           const slKeys = [...stopLossMin.keys(), ...indicatorUnpnlMin.keys()]
           for (const key of slKeys) {
@@ -14359,6 +14381,16 @@ function createDCABotHelper<
               this.highestLow.delete(k)
             }
           })
+          this.handleLog(
+            `Lowest high: ${[...this.lowestHigh.entries()]
+              .map(([k, v]) => `${k}: ${v.toFixed(8)}`)
+              .join(', ')}`,
+          )
+          this.handleLog(
+            `Highest low: ${[...this.highestLow.entries()]
+              .map(([k, v]) => `${k}: ${v.toFixed(8)}`)
+              .join(', ')}`,
+          )
         }
       }
     }
@@ -15508,26 +15540,35 @@ function createDCABotHelper<
     public async checkTPLevel(_botId: string, price: number, symbol: string) {
       for (const [d, v] of this.dealsForTPLevelCheck) {
         if (!(this.isLong ? price >= v : price <= v)) {
+          this.handleDebug(
+            `Price ${price} not reached TP level check value ${v}`,
+          )
           continue
         }
         const deal = this.getDeal(d)
         if (!deal || deal.deal.symbol.symbol !== symbol) {
+          this.handleDebug(`Deal not found or symbol mismatch for deal ${d}`)
           continue
         }
         if (deal.closeByTp) {
+          this.handleDebug(`Deal ${deal.deal._id} already closing by TP`)
           continue
         }
         const value = this.dealsForTPLevelCheck.get(deal.deal._id)
         if (value) {
           const trigger = this.isLong ? price >= value : price <= value
+          this.handleDebug(
+            `Checking TP level for deal ${deal.deal._id}: price ${price}, target ${value}, trigger ${trigger}`,
+          )
           if (trigger) {
             this.handleLog(
               `Deal: ${deal.deal._id} adding TP order by TP level check`,
             )
-            deal.closeByTp = true
-            this.saveDeal(deal)
+            const settings = await this.getAggregatedSettings(deal.deal)
             const order = deal.currentOrders.find(
-              (o) => +o.price === value && o.type === TypeOrderEnum.dealTP,
+              (o) =>
+                (settings.useMultiTp ? +o.price === value : true) &&
+                o.type === TypeOrderEnum.dealTP,
             )
             if (!order) {
               return this.handleErrors(
@@ -15539,6 +15580,8 @@ function createDCABotHelper<
                 false,
               )
             }
+            deal.closeByTp = true
+            this.saveDeal(deal)
             const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
             if (ed) {
               const result = await this.sendGridToExchange(
