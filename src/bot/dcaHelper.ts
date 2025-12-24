@@ -14059,10 +14059,9 @@ function createDCABotHelper<
           this.getDealTPLevelToCheck(deal),
         )
         this.allowedMethods.add('checkTPLevel')
-        const get = this.getDeal(deal.deal._id)
-        if (get) {
-          get.closeByTp = false
-          this.saveDeal(get)
+        if (deal.closeByTp) {
+          deal.closeByTp = false
+          this.saveDeal(deal)
         }
       }
     }

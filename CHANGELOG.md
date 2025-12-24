@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.13] - 2025-12-24
+### Fixed
+- Check TP level wrong price. 
+
 ## [1.6.12] - 2025-12-23
 ### Fixed
 - AVP issue with group and section indicator logic
