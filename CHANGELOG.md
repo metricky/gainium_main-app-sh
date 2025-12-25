@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.7.0] - 2025-12-25
+### Added
+- Password reset. 
+
 ## [1.6.14] - 2025-12-25
 ### Changed
 - Packages update. 

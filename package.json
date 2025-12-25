@@ -1,6 +1,6 @@
 {
   "name": "@gainium/main-app",
-  "version": "1.6.14",
+  "version": "1.7.0",
   "description": "Main app",
   "author": "Maksym Shamko",
   "private": true,
@@ -24,6 +24,7 @@
     "db:migration": "ts-node -r dotenv/config --files --project tsconfig.json ./src/db/migration/index.ts",
     "db:scripts": "ts-node -r dotenv/config --files --project tsconfig.json ./src/db/scripts/index.ts",
     "backtest": "LOG_LEVEL=debug NODE_ENV=production SERVICETYPE=backtest node --max-old-space-size=7168 -r dotenv/config ./dist/src/backtest/index.js",
+    "cli:reset-password": "node -r dotenv/config ./dist/src/cli/resetPassword.js",
     "prepare": "husky"
   },
   "devDependencies": {
