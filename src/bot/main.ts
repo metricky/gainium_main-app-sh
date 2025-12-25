@@ -76,7 +76,7 @@ import {
 import { paperExchanges } from '../exchange/paper/utils'
 import type { InitialGrid } from './helper'
 import { updateUserSteps } from '../utils/user'
-import { FilterQuery, Types } from 'mongoose'
+import { QueryFilter, Types } from 'mongoose'
 import { removePaperFormExchangeName } from '../exchange/helpers'
 import { getIntersection } from '../utils/set'
 import RedisClient, { RedisWrapper } from '../db/redis'
@@ -2299,7 +2299,7 @@ class MainBot<T extends IMainBot> {
    */
 
   async _loadOrders(
-    query?: FilterQuery<ClearOrderSchema>,
+    query?: QueryFilter<ClearOrderSchema>,
     skipRedis = false,
   ): Promise<ClearOrderSchema[]> {
     const id = this.startMethod('loadOrders main')

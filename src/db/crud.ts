@@ -9,9 +9,12 @@ import type {
   Model,
   PipelineStage,
   UpdateQuery,
-  FilterQuery,
+  QueryFilter,
   QueryOptions,
   ProjectionType,
+  DeepPartial,
+  Require_id,
+  ApplyBasicCreateCasting,
 } from 'mongoose'
 import type { ExcludeDoc } from '../../types'
 import { MONGO_DB_MAX_POOL_SIZE } from '../config'
@@ -239,7 +242,9 @@ class MongoCrud<T = any> {
       const result = await this.getClient()
         .then(async () => {
           const savedResult = await this.model.create(
-            [{ ...dataToAdd }] /*{
+            [{ ...dataToAdd }] as unknown as DeepPartial<
+              ApplyBasicCreateCasting<Require_id<T>>
+            >[] /*{
           session,
         }*/,
           )
@@ -273,28 +278,28 @@ class MongoCrud<T = any> {
    * @returns {Promise<ErrorResponse | DataResponse>} data or error
    */
   async readData<R = ExcludeDoc<T>>(
-    search?: FilterQuery<ExcludeDoc<T>>,
+    search?: QueryFilter<ExcludeDoc<T>>,
     fields?: ProjectionType<ExcludeDoc<T>>,
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: false,
     countNeed?: false,
   ): Promise<ErrorResponse | DataResponse<{ result: R }>>
   async readData<R = ExcludeDoc<T>>(
-    search?: FilterQuery<ExcludeDoc<T>>,
+    search?: QueryFilter<ExcludeDoc<T>>,
     fields?: ProjectionType<ExcludeDoc<T>>,
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: true,
     countNeed?: false,
   ): Promise<ErrorResponse | DataResponse<{ result: R[] }>>
   async readData<R = ExcludeDoc<T>>(
-    search?: FilterQuery<ExcludeDoc<T>>,
+    search?: QueryFilter<ExcludeDoc<T>>,
     fields?: ProjectionType<ExcludeDoc<T>>,
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: true,
     countNeed?: true,
   ): Promise<ErrorResponse | DataResponse<{ result: R[]; count: number }>>
   async readData<R = ExcludeDoc<T>>(
-    search?: FilterQuery<ExcludeDoc<T>>,
+    search?: QueryFilter<ExcludeDoc<T>>,
     fields?: ProjectionType<ExcludeDoc<T>>,
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: false,
@@ -302,7 +307,7 @@ class MongoCrud<T = any> {
   ): Promise<ErrorResponse | DataResponse<{ result: R; count: number }>>
 
   async readData<R = ExcludeDoc<T>>(
-    search: FilterQuery<ExcludeDoc<T>> = {},
+    search: QueryFilter<ExcludeDoc<T>> = {},
     fields: ProjectionType<ExcludeDoc<T>> | undefined = undefined,
     options: QueryOptions<ExcludeDoc<T>> = {},
     isArray = false,
@@ -373,7 +378,7 @@ class MongoCrud<T = any> {
   /** Count documents */
 
   async countData(
-    search: FilterQuery<ExcludeDoc<T>> = {},
+    search: QueryFilter<ExcludeDoc<T>> = {},
     count = 0,
   ): Promise<ErrorResponse | DataResponse<{ result: number }>> {
     try {
@@ -429,28 +434,28 @@ class MongoCrud<T = any> {
    * @returns {Promise<ErrorResponse | MessageResponse | DataResponse>} data or message or error
    */
   async updateData(
-    search: FilterQuery<ExcludeDoc<T>>,
+    search: QueryFilter<ExcludeDoc<T>>,
     data: UpdateQuery<Partial<T> & { updated?: Date }>,
     returnDoc?: false,
     updateTimestamp?: boolean,
     upsert?: boolean,
   ): Promise<ErrorResponse | MessageResponse>
   async updateData(
-    search: FilterQuery<ExcludeDoc<T>>,
+    search: QueryFilter<ExcludeDoc<T>>,
     data: UpdateQuery<Partial<T> & { updated?: Date }>,
     returnDoc?: true,
     updateTimestamp?: boolean,
     upsert?: boolean,
   ): Promise<DataResponse<T> | ErrorResponse>
   async updateData(
-    search: FilterQuery<ExcludeDoc<T>>,
+    search: QueryFilter<ExcludeDoc<T>>,
     data: UpdateQuery<Partial<T> & { updated?: Date }>,
     returnDoc?: false,
     updateTimestamp?: boolean,
     upsert?: boolean,
   ): Promise<ErrorResponse | MessageResponse>
   async updateData(
-    search: FilterQuery<ExcludeDoc<T>>,
+    search: QueryFilter<ExcludeDoc<T>>,
     data: UpdateQuery<Partial<T> & { updated?: Date }>,
     returnDoc?: true,
     updateTimestamp?: boolean,
@@ -458,7 +463,7 @@ class MongoCrud<T = any> {
   ): Promise<DataResponse<T> | ErrorResponse>
 
   async updateData(
-    search: FilterQuery<ExcludeDoc<T>> = {},
+    search: QueryFilter<ExcludeDoc<T>> = {},
     data: UpdateQuery<Partial<T> & { updated?: Date }>,
     returnDoc = false,
     updateTimestamp = false,
@@ -522,15 +527,15 @@ class MongoCrud<T = any> {
    * @returns {Promise<ErrorResponse | MessageResponse | DataResponse>} deleted data, message or error
    */
   async deleteData(
-    search: FilterQuery<ExcludeDoc<T>>,
+    search: QueryFilter<ExcludeDoc<T>>,
     returnDoc?: false,
   ): Promise<ErrorResponse | MessageResponse>
   async deleteData(
-    search: FilterQuery<ExcludeDoc<T>>,
+    search: QueryFilter<ExcludeDoc<T>>,
     returnDoc?: true,
   ): Promise<DataResponse<ExcludeDoc<T>> | ErrorResponse>
   async deleteData(
-    search: FilterQuery<ExcludeDoc<T>> = {},
+    search: QueryFilter<ExcludeDoc<T>> = {},
     returnDoc = false,
     count = 0,
   ) {
@@ -576,7 +581,7 @@ class MongoCrud<T = any> {
    */
 
   async deleteManyData(
-    search: FilterQuery<ExcludeDoc<T>> = {},
+    search: QueryFilter<ExcludeDoc<T>> = {},
     count = 0,
   ): Promise<ErrorResponse | MessageResponse> {
     try {
@@ -604,7 +609,7 @@ class MongoCrud<T = any> {
    */
 
   async updateManyData(
-    search: FilterQuery<ExcludeDoc<T>> = {},
+    search: QueryFilter<ExcludeDoc<T>> = {},
     data: UpdateQuery<Partial<T> & { updated?: Date }>,
     count = 0,
   ): Promise<ErrorResponse | MessageResponse> {

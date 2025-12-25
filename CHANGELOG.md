@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.14] - 2025-12-25
+### Changed
+- Packages update. 
+
 ## [1.6.13] - 2025-12-24
 ### Fixed
 - Check TP level wrong price. 

@@ -256,7 +256,10 @@ class UserStreamService {
     const { userId, userToken } = msg
     /** Check if token exist on user */
     const user = await this.db.readData({
-      $and: [{ tokens: { $elemMatch: { token: userToken } } }, { _id: userId }],
+      $and: [
+        { tokens: { $elemMatch: { token: userToken } } },
+        { _id: userId as any },
+      ],
     })
 
     if (user.status === StatusEnum.notok) {

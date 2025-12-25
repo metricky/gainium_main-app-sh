@@ -1920,8 +1920,9 @@ export type BotSymbolsStats = {
   symbol: string
 }
 
-export interface DCABotSchema<Settings = DCABotSettings>
-  extends MainBot<Settings> {
+export interface DCABotSchema<
+  Settings = DCABotSettings,
+> extends MainBot<Settings> {
   deals: {
     all: number
     active: number
@@ -4451,8 +4452,7 @@ export type ExchangeRequestTimeProfile = Partial<BalancerTimeProfile> & {
 }
 
 export interface ExchangeRequestTimeProfileSchema
-  extends SchemaI,
-    ExchangeRequestTimeProfile {
+  extends SchemaI, ExchangeRequestTimeProfile {
   exchangeTotal: number
   exchangeQueueTotal: number
   exchangeRequestTotal: number
@@ -4669,7 +4669,8 @@ export type HedgeBotSettings = Pick<
   | 'dealCloseCondition'
 >
 export interface HedgeBotSchema
-  extends SchemaI,
+  extends
+    SchemaI,
     Pick<
       MainBot,
       | 'paperContext'

@@ -2356,7 +2356,7 @@ class Bot<T extends UserSchema = UserSchema> {
             { shareId, share: { $eq: true } },
           ],
         },
-        { _id: botId, 'settings.type': { $ne: DCATypeEnum.terminal } },
+        { _id: botId as any, 'settings.type': { $ne: DCATypeEnum.terminal } },
         { isDeleted: { $ne: true } },
       ],
     })
@@ -2404,7 +2404,7 @@ class Bot<T extends UserSchema = UserSchema> {
             { shareId, share: { $eq: true } },
           ],
         },
-        { _id: botId },
+        { _id: botId as any },
         { isDeleted: { $ne: true } },
       ],
     })
@@ -2453,7 +2453,7 @@ class Bot<T extends UserSchema = UserSchema> {
               { shareId, share: { $eq: true } },
             ],
           },
-          { _id: botId },
+          { _id: botId as any },
           { isDeleted: { $ne: true } },
         ],
       },
@@ -2540,7 +2540,7 @@ class Bot<T extends UserSchema = UserSchema> {
               { shareId, share: { $eq: true } },
             ],
           },
-          { _id: botId },
+          { _id: botId as any },
           { isDeleted: { $ne: true } },
         ],
       },
@@ -2624,7 +2624,7 @@ class Bot<T extends UserSchema = UserSchema> {
             { shareId, share: { $eq: true } },
           ],
         },
-        { _id: botId },
+        { _id: botId as any },
         { isDeleted: { $ne: true } },
       ],
     })
@@ -6522,7 +6522,7 @@ class Bot<T extends UserSchema = UserSchema> {
                     _id: {
                       $in: findChild.map(
                         (c) => new Types.ObjectId(c.parentBotId),
-                      ),
+                      ) as any[],
                     },
                   },
                   {
@@ -6602,7 +6602,7 @@ class Bot<T extends UserSchema = UserSchema> {
                     _id: {
                       $in: findChild.map(
                         (c) => new Types.ObjectId(c.parentBotId),
-                      ),
+                      ) as any[],
                     },
                   },
                   {
@@ -7258,7 +7258,7 @@ class Bot<T extends UserSchema = UserSchema> {
             {
               status: archive ? BotStatusEnum.closed : BotStatusEnum.archive,
             },
-            { _id: { $in: botIds } },
+            { _id: { $in: botIds as any[] } },
             { userId },
           ],
         },
@@ -7302,7 +7302,7 @@ class Bot<T extends UserSchema = UserSchema> {
             {
               status: archive ? BotStatusEnum.closed : BotStatusEnum.archive,
             },
-            { _id: { $in: botIds } },
+            { _id: { $in: botIds as any[] } },
             { userId },
           ],
         },
@@ -7346,7 +7346,7 @@ class Bot<T extends UserSchema = UserSchema> {
             {
               status: archive ? BotStatusEnum.closed : BotStatusEnum.archive,
             },
-            { _id: { $in: botIds } },
+            { _id: { $in: botIds as any[] } },
             { userId },
           ],
         },
@@ -7389,7 +7389,7 @@ class Bot<T extends UserSchema = UserSchema> {
           {
             status: archive ? BotStatusEnum.closed : BotStatusEnum.archive,
           },
-          { _id: { $in: botIds } },
+          { _id: { $in: botIds as any[] } },
           { userId },
         ],
       },

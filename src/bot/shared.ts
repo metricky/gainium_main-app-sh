@@ -16,7 +16,7 @@ import {
   type CleanGlobalVariablesSchema,
 } from '../../types'
 import type DB from '../db'
-import type { FilterQuery, ProjectionFields } from 'mongoose'
+import type { ProjectionFields, QueryFilter } from 'mongoose'
 
 const mutex = new IdMutex()
 
@@ -110,7 +110,7 @@ export class SharedStore<T, D = T & SchemaI> {
     _name: string,
     key: string,
     subId: string,
-    filter: FilterQuery<ExcludeDoc<D>>,
+    filter: QueryFilter<ExcludeDoc<D>>,
     fields?: ProjectionFields<ExcludeDoc<D>>,
     force = false,
   ): Promise<T | undefined> {
@@ -138,7 +138,7 @@ export class SharedStore<T, D = T & SchemaI> {
   public async getData(
     key: string,
     subId: string,
-    filter: FilterQuery<ExcludeDoc<D>>,
+    filter: QueryFilter<ExcludeDoc<D>>,
     fields?: ProjectionFields<ExcludeDoc<D>>,
     force = false,
   ) {
@@ -149,7 +149,7 @@ export class SharedStore<T, D = T & SchemaI> {
   private async _updateData(
     _name: string,
     key: string,
-    filter: FilterQuery<ExcludeDoc<D>>,
+    filter: QueryFilter<ExcludeDoc<D>>,
   ) {
     const result = (await this.db.readData({ ...filter }))?.data?.result as
       | T
@@ -160,7 +160,7 @@ export class SharedStore<T, D = T & SchemaI> {
     }
   }
 
-  public async updateData(key: string, filter: FilterQuery<ExcludeDoc<D>>) {
+  public async updateData(key: string, filter: QueryFilter<ExcludeDoc<D>>) {
     return await this._updateData(this.name, key, filter)
   }
 
