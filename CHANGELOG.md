@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.7.1] - 2025-12-29
+### Fixed
+- Overwritten deal orders when updating deal. 
+
 ## [1.7.0] - 2025-12-25
 ### Added
 - Password reset. 

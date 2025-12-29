@@ -6201,9 +6201,9 @@ function createDCABotHelper<
           }).then(() => {
             this.updateUsage(dealId)
             this.updateDealLastPrices(this.botId)
+            this.updateAssets(dealId)
           })
 
-          this.updateAssets(dealId)
           await this.placeOrders(
             this.botId,
             order.symbol,
@@ -15538,7 +15538,7 @@ function createDCABotHelper<
 
     @IdMute(mutex, (botId: string) => `${botId}checkTPLevel`)
     public async checkTPLevel(_botId: string, price: number, symbol: string) {
-      for (const [d, v] of this.dealsForTPLevelCheck) {
+      for (const [d, v] of [...this.dealsForTPLevelCheck]) {
         if (!(this.isLong ? price >= v : price <= v)) {
           this.handleDebug(
             `Price ${price} not reached TP level check value ${v}`,
@@ -15554,11 +15554,10 @@ function createDCABotHelper<
           this.handleDebug(`Deal ${deal.deal._id} already closing by TP`)
           continue
         }
-        const value = this.dealsForTPLevelCheck.get(deal.deal._id)
-        if (value) {
-          const trigger = this.isLong ? price >= value : price <= value
+        if (v) {
+          const trigger = this.isLong ? price >= v : price <= v
           this.handleDebug(
-            `Checking TP level for deal ${deal.deal._id}: price ${price}, target ${value}, trigger ${trigger}`,
+            `Checking TP level for deal ${deal.deal._id}: price ${price}, target ${v}, trigger ${trigger}`,
           )
           if (trigger) {
             this.handleLog(
@@ -15567,7 +15566,7 @@ function createDCABotHelper<
             const settings = await this.getAggregatedSettings(deal.deal)
             const order = deal.currentOrders.find(
               (o) =>
-                (settings.useMultiTp ? +o.price === value : true) &&
+                (settings.useMultiTp ? +o.price === v : true) &&
                 o.type === TypeOrderEnum.dealTP,
             )
             if (!order) {
