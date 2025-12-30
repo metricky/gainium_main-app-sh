@@ -237,6 +237,7 @@ function createDCABotHelper<
     indicatorTimeout = 60 * 1000
     indicatorRoomConfigMap: Map<string, Set<string>> = new Map()
     indicatorConfigIdMap: Map<string, string> = new Map()
+    indicatorSubscribedRooms: Set<string> = new Set()
     indicatorGroupsToUse: SettingsIndicatorGroup[] = []
     botProfitDb = botProfitChartDb
     /** Bot deals */
@@ -2731,6 +2732,7 @@ function createDCABotHelper<
         botId: string,
         symbol: string,
         _lastData: IndicatorHistory,
+        _interval?: ExchangeIntervals,
         section?: IndicatorSection,
         action?: IndicatorAction,
       ) => `${botId}${symbol}${section}${action}checkIndicatorStatus`,
@@ -9098,8 +9100,11 @@ function createDCABotHelper<
             this.indicatorRoomConfigMap.set(room, get)
             this.indicatorConfigIdMap.set(result.response.id, config)
             const cb = this.indicatorDataCbRedis(room)
-            if (this.redisSubIndicators) {
-              this.redisSubIndicators.subscribe(room, cb)
+            if (!this.indicatorSubscribedRooms.has(room)) {
+              this.indicatorSubscribedRooms.add(room)
+              if (this.redisSubIndicators) {
+                this.redisSubIndicators.subscribe(room, cb)
+              }
             }
             return {
               id: result.response.id,
@@ -9166,6 +9171,7 @@ function createDCABotHelper<
                 getRoom.delete(get)
                 if (getRoom.size === 0) {
                   this.indicatorRoomConfigMap.delete(room)
+                  this.indicatorSubscribedRooms.delete(room)
                 } else {
                   this.indicatorRoomConfigMap.set(room, getRoom)
                 }
@@ -9202,6 +9208,7 @@ function createDCABotHelper<
     async openIndicators(_botId: string, _serviceRestart?: boolean) {
       this.indicatorConfigIdMap = new Map()
       this.indicatorRoomConfigMap = new Map()
+      this.indicatorSubscribedRooms = new Set()
       this.afterIndicatorsConnected = []
       this.handleLog('Open indicators')
       this.indicatorGroupsToUse = (
@@ -15826,6 +15833,7 @@ function createDCABotHelper<
       this.stopSent = false
       this.indicatorConfigIdMap = new Map()
       this.indicatorRoomConfigMap = new Map()
+      this.indicatorSubscribedRooms = new Set()
       for (const [id, timer] of this.closeDealTimer.entries()) {
         if (timer) {
           clearTimeout(timer)

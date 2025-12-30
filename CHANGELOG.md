@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.7.2] - 2025-12-30
+### Fixed
+- Missed indicator events if the same indicator is used in different sections. 
+
 ## [1.7.1] - 2025-12-29
 ### Fixed
 - Overwritten deal orders when updating deal. 
