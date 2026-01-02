@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.7.3] - 2026-01-02
+### Changed
+- Exchange error dictionary. 
+
 ## [1.7.2] - 2025-12-30
 ### Fixed
 - Missed indicator events if the same indicator is used in different sections. 

@@ -560,6 +560,10 @@ export const errorDict = {
   'cannot run in hedge mode': 'Hedge mode',
   'Cannot start when existing position not met bot settings':
     'Existing position',
+  'highest price limit for the buy leg': orderPrice,
+  'highest price limit for the sell leg': orderPrice,
+  'lowest price limit for the buy leg': orderPrice,
+  'lowest price limit for the sell leg': orderPrice,
   'order price exceeds the maximum price limit': orderPrice,
   'order price cannot be lower': orderPrice,
   'order price cannot be higher': orderPrice,
