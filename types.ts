@@ -1840,6 +1840,8 @@ export type BotStats = {
       seriesEquity: { value: number; min: number; max: number; perc: number }
     }
     general: {
+      bestDay?: number
+      worstDay?: number
       netProfitPerc: number
       avgDaily: UsdAssetNumber
       avgDailyPerc: number
@@ -1959,6 +1961,24 @@ export interface DCABotSchema<
     quote: number
   }[]
   action?: ActionsEnum
+  liveStats?: BotLiveStats
+}
+
+export type BotLiveStats = {
+  currentCost: number
+  maxCost: number
+  relativeCost: number
+  relativeCostString: string
+  totalProfit: number
+  relativeProfit: number
+  value: number
+  relativeValue: number
+  avgDaily: number
+  avgDailyRelative: number
+  annualizedReturn: number
+  tradingTimeString: string
+  tradingTimeNumber: number
+  dealsTotal: number
 }
 
 export enum BotFlags {

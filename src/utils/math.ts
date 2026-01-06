@@ -124,4 +124,18 @@ export class MathHelper {
     const tmp = parseFloat(`${s}`)
     return isNaN(tmp) ? 0 : tmp
   }
+
+  getPrecision(num: number, lowerThanZero = false) {
+    const add = num >= 1 ? 1 : 2
+    const precision = Math.floor(
+      Math.floor(Math.log(num)) / Math.floor(Math.LN10),
+    )
+    if (lowerThanZero) {
+      if (precision > 0) {
+        return precision + add
+      }
+      return Math.abs(precision + add > 0 ? 0 : precision + add)
+    }
+    return precision + 2 < 0 ? 0 : precision + 2
+  }
 }
