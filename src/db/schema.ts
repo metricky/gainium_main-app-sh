@@ -2626,12 +2626,18 @@ const brokerCodes = new Schema<BrokerCodesSchema>({
   exchange: {
     type: String,
     enum: ExchangeEnum,
-    unique: true,
+  },
+  zone: {
+    type: String,
+    default: null,
+    sparse: true,
   },
   code: String,
 })
 
 export const registerIndexes = () => {
+  brokerCodes.index({ exchange: 1, zone: 1 }, { unique: true })
+
   userProfitByHour.index({ userId: 1 })
 
   backtestRequest.index({ userid: 1 })

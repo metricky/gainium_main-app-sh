@@ -4718,6 +4718,7 @@ export enum ResetAccountTypeEnum {
 
 export interface BrokerCodesSchema extends SchemaI {
   exchange: ExchangeEnum
+  zone?: string
   code: string
 }
 

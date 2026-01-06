@@ -86,7 +86,7 @@ export class MongooseConnect {
         if (!MongooseConnect.synced || forceSync) {
           MongooseConnect.synced = true
           if (syncIndexesFn) {
-            syncIndexesFn()
+            await syncIndexesFn()
           }
         }
       } catch (e) {

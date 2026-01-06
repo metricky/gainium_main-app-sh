@@ -256,17 +256,23 @@ export const saveRate = async () => {
 
 const updateBrokerCodes = async () => {
   await axios
-    .get<{ exchange: ExchangeEnum; code: string }[]>(
-      'https://api.gainium.io/broker-codes',
+    .get<{ exchange: ExchangeEnum; zone?: string; code: string }[]>(
+      'https://api.gainium.io/broker-codes?v=2',
     )
     .then(async (res) => {
       if (res.data?.length) {
         for (const item of res.data) {
           await brokerCodesDb
-            .updateData({ ...item }, { ...item }, false, true, true)
+            .updateData(
+              { exchange: item.exchange, zone: item.zone },
+              { exchange: item.exchange, zone: item.zone, code: item.code },
+              false,
+              true,
+              true,
+            )
             .then((r) => {
               logger.debug(
-                `updateBrokerCodes | ${item.exchange} code updated: ${item.code}, result: ${r.status}`,
+                `updateBrokerCodes | ${item.exchange}${item.zone ? `@${item.zone}` : ''} code updated: ${item.code}, result: ${r.status}`,
               )
             })
         }

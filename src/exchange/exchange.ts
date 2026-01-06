@@ -36,7 +36,7 @@ const { sleep } = utils
 class Exchange extends AbstractExchange {
   protected readonly exchange: ExchangeEnum
   protected isOkx: boolean
-  protected brokerCodes = new ExpirableMap<ExchangeEnum, string>(60 * 60 * 1000) // 1 hour cache
+  protected brokerCodes = new ExpirableMap<string, string>(60 * 60 * 1000) // 1 hour cache
   protected timeProfiler = TimeProfiler.getInstance()
   constructor(
     exchange: ExchangeEnum,
@@ -780,14 +780,35 @@ class Exchange extends AbstractExchange {
     }
     let code = ''
     if (endpoint === 'order' && method === 'post') {
-      const get = this.brokerCodes.get(this.exchange)
+      const eName = this.exchange.startsWith('hyperliquid')
+        ? ExchangeEnum.hyperliquid
+        : this.exchange
+      const isBybitWithHost =
+        this.exchange.startsWith('bybit') && this.bybitHost !== null
+      const key = isBybitWithHost ? `${eName}@${this.bybitHost}` : eName
+      const get = this.brokerCodes.get(key)
       if (get) {
         code = get
       } else {
+        let codeWithZone = ''
+        if (isBybitWithHost) {
+          codeWithZone =
+            (
+              await brokerCodesDb.readData({
+                exchange: eName,
+                zone: this.bybitHost,
+              })
+            )?.data?.result?.code ?? ''
+        }
         code =
-          (await brokerCodesDb.readData({ exchange: this.exchange }))?.data
-            ?.result?.code ?? ''
-        this.brokerCodes.set(this.exchange, code)
+          codeWithZone ??
+          (
+            await brokerCodesDb.readData({
+              exchange: eName,
+            })
+          )?.data?.result?.code ??
+          ''
+        this.brokerCodes.set(key, code)
       }
     }
     if (request.isPrivate) {

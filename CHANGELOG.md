@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.7.4] - 2026-01-06
+### Changed
+- Broker codes with zone. 
+
 ## [1.7.3] - 2026-01-02
 ### Changed
 - Exchange error dictionary. 

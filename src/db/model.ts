@@ -196,6 +196,8 @@ export const syncIndexes = async (user = true) => {
   await models.userProfitByHour.syncIndexes()
   await models.hedgeComboBot.syncIndexes()
   await models.hedgeDcaBot.syncIndexes()
+  await models.brokerCodes.collection.dropIndexes()
+  await models.brokerCodes.syncIndexes()
 }
 
 export default models
