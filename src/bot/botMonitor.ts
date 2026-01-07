@@ -11,18 +11,89 @@ import {
   Symbols,
   ClearComboBotSchema,
   ComboTpBase,
+  ClearBotSchema,
+  GridLiveStats,
+  BotSettings,
+  BotMarginTypeEnum,
+  PositionSide,
 } from '../../types'
 import { MathHelper } from '../utils/math'
 import ExchangeChooser from '../exchange/exchangeChooser'
 import { removePaperFormExchangeName } from '../exchange/helpers'
-import utils from '../utils'
+import utils, { isCoinm } from '../utils'
 import { IdMute, IdMutex } from '../utils/mutex'
+import { botDb, comboBotDb, dcaBotDb } from '../db/dbInit'
+import logger from '../utils/logger'
 
 const { findUSDRate } = utils
 
 const math = new MathHelper()
 const mutexStats = new IdMutex(500)
 const mutex = new IdMutex()
+
+export type CalculateDCALiveStatsParams = {
+  bot: Pick<
+    ClearComboBotSchema,
+    | '_id'
+    | 'exchange'
+    | 'workingShift'
+    | 'profit'
+    | 'symbol'
+    | 'usage'
+    | 'currentBalances'
+    | 'initialBalances'
+    | 'dealsStatsForBot'
+    | 'dealsReduceForBot'
+    | 'deals'
+  > & {
+    settings: Pick<
+      DCABotSettings,
+      | 'strategy'
+      | 'futures'
+      | 'coinm'
+      | 'orderSizeType'
+      | 'useReinvest'
+      | 'profitCurrency'
+    >
+    stats: {
+      numerical: {
+        general: Pick<BotStats['numerical']['general'], 'netProfitPerc'>
+      }
+    }
+  }
+  fee: number
+  combo: boolean
+}
+
+export type CalculateGridLiveStatsParams = {
+  bot: Pick<
+    ClearBotSchema,
+    | '_id'
+    | 'stats'
+    | 'symbol'
+    | 'initialBalances'
+    | 'initialPrice'
+    | 'usdRate'
+    | 'exchange'
+    | 'profit'
+    | 'status'
+    | 'position'
+    | 'currentBalances'
+    | 'lastPrice'
+    | 'lastUsdRate'
+    | 'workingShift'
+  > & {
+    settings: Pick<
+      BotSettings,
+      | 'profitCurrency'
+      | 'marginType'
+      | 'leverage'
+      | 'budget'
+      | 'pair'
+      | 'futures'
+    >
+  }
+}
 
 class BotMonitor {
   static instance: BotMonitor
@@ -35,7 +106,7 @@ class BotMonitor {
   }
 
   private latestPrices: ExpirableMap<ExchangeEnum, Prices> = new ExpirableMap(
-    60 * 60 * 1000,
+    60 * 1000,
   )
 
   @IdMute(mutex, (exchange: ExchangeEnum) => `getLatestPrices-${exchange}`)
@@ -79,41 +150,14 @@ class BotMonitor {
 
   @IdMute(
     mutexStats,
-    (bot: { _id: string }) => `calculateDCALiveStats-${bot._id}`,
+    ({ bot: { _id } }: CalculateDCALiveStatsParams) =>
+      `calculateDCALiveStats-${_id}`,
   )
-  async calculateDCALiveStats(
-    bot: Pick<
-      ClearComboBotSchema,
-      | '_id'
-      | 'exchange'
-      | 'workingShift'
-      | 'profit'
-      | 'symbol'
-      | 'usage'
-      | 'currentBalances'
-      | 'initialBalances'
-      | 'dealsStatsForBot'
-      | 'dealsReduceForBot'
-      | 'deals'
-    > & {
-      settings: Pick<
-        DCABotSettings,
-        | 'strategy'
-        | 'futures'
-        | 'coinm'
-        | 'orderSizeType'
-        | 'useReinvest'
-        | 'profitCurrency'
-      >
-      stats: {
-        numerical: {
-          general: Pick<BotStats['numerical']['general'], 'netProfitPerc'>
-        }
-      }
-    },
-    fee: number,
-    combo: boolean,
-  ): Promise<BotLiveStats> {
+  async calculateDCALiveStats({
+    bot,
+    fee,
+    combo,
+  }: CalculateDCALiveStatsParams) {
     const latestPrices = await this.getLatestPrices(bot.exchange)
     const workingTime =
       bot.workingShift && bot.workingShift.length > 0
@@ -135,15 +179,15 @@ class BotMonitor {
     let count: number
     count = Math.floor(workingTime / (24 * 60 * 60 * 1000))
     if (count >= 1) {
-      resWork = `${resWork} ${count}d`
+      resWork = `${resWork}${resWork.length ? ' ' : ''}${count}d`
     }
     count = Math.floor(workingTime / (60 * 60 * 1000))
     if (count >= 1) {
-      resWork = `${resWork} ${count % 24}h`
+      resWork = `${resWork}${resWork.length ? ' ' : ''}${count % 24}h`
     }
     count = Math.floor(workingTime / (60 * 1000))
     if (count >= 1) {
-      resWork = `${resWork} ${count % 60}min`
+      resWork = `${resWork}${resWork.length ? ' ' : ''}${count % 60}min`
     }
     if (resWork === '') {
       resWork = `${Math.floor(workingTime / 1000)}s`
@@ -221,48 +265,51 @@ class BotMonitor {
     maxValue = math.round(maxValue, 2)
     avgDailyPerc = math.round(avgDailyPerc * 100, 2)
     avgDaily = math.round(avgDaily, 2, avgDaily < 0, avgDaily > 0)
-    const botSymbols = symbols.concat(
-      ...[...bot.currentBalances.base.keys()].map((key) => {
-        const quoteKey = bot.currentBalances.quote.keys().next().value ?? ''
-        const name1 = `${key}${quoteKey}`
-        const name2 = `${key}-${quoteKey}`
-        return [
-          {
-            symbol: name1,
-            baseAsset: key,
-            quoteAsset: quoteKey,
-          },
-          {
-            symbol: name2,
-            baseAsset: key,
-            quoteAsset: quoteKey,
-          },
-        ]
-      }),
-      ...[...bot.currentBalances.quote.keys()].flatMap((key) => {
-        const baseKey = bot.currentBalances.base.keys().next().value ?? ''
-        const name1 = `${baseKey}${key}`
-        const name2 = `${baseKey}${key}`
-        return [
-          {
-            symbol: name1,
-            baseAsset: baseKey,
-            quoteAsset: key,
-          },
-          {
-            symbol: name2,
-            baseAsset: baseKey,
-            quoteAsset: key,
-          },
-        ]
-      }),
-    )
+    const botSymbols = [
+      ...new Map(
+        symbols
+          .concat(
+            ...[...bot.currentBalances.base.keys()].map((key) => {
+              const quoteKey =
+                bot.currentBalances.quote.keys().next().value ?? ''
+              const name1 = `${key}${quoteKey}`
+              const name2 = `${key}-${quoteKey}`
+              return [
+                {
+                  symbol: name1,
+                  baseAsset: key,
+                  quoteAsset: quoteKey,
+                },
+                {
+                  symbol: name2,
+                  baseAsset: key,
+                  quoteAsset: quoteKey,
+                },
+              ]
+            }),
+            ...[...bot.currentBalances.quote.keys()].flatMap((key) => {
+              const baseKey = bot.currentBalances.base.keys().next().value ?? ''
+              const name1 = `${baseKey}${key}`
+              const name2 = `${baseKey}${key}`
+              return [
+                {
+                  symbol: name1,
+                  baseAsset: baseKey,
+                  quoteAsset: key,
+                },
+                {
+                  symbol: name2,
+                  baseAsset: baseKey,
+                  quoteAsset: key,
+                },
+              ]
+            }),
+          )
+          .map((s) => [s.symbol, s]),
+      ).values(),
+    ]
     const findRates = latestPrices
-      .filter(
-        (lp) =>
-          botSymbols.map((bs) => bs.symbol).includes(lp.pair) &&
-          lp.exchange === bot.exchange,
-      )
+      .filter((lp) => botSymbols.map((bs) => bs.symbol).includes(lp.pair))
       .reduce((acc, lp) => ({ ...acc, [lp.pair]: lp }), {}) as {
       [key: string]: Prices[0]
     }
@@ -499,8 +546,201 @@ class BotMonitor {
       dealsTotal: bot.deals.all,
     }
 
-    return result
+    logger.debug(
+      `[BotStatsMonitor] | ${bot._id} | Live stats calculated: ${JSON.stringify(result)}`,
+    )
+
+    if (combo) {
+      await comboBotDb.updateData(
+        { _id: bot._id },
+        { liveStats: result, unrealizedProfit: unPnl },
+      )
+    } else {
+      await dcaBotDb.updateData(
+        { _id: bot._id },
+        { liveStats: result, unrealizedProfit: unPnl },
+      )
+    }
+  }
+
+  @IdMute(
+    mutexStats,
+    ({ bot: { _id } }: CalculateGridLiveStatsParams) =>
+      `calculateGridLiveStats-${_id}`,
+  )
+  async calculateGridLiveStats({ bot }: CalculateGridLiveStatsParams) {
+    const latestPrices = await this.getLatestPrices(bot.exchange)
+    let initialBalance = 0
+    if (bot.initialBalances && bot.initialPrice && bot.usdRate) {
+      initialBalance =
+        (bot.initialBalances.base * bot.initialPrice +
+          bot.initialBalances.quote) *
+        bot.usdRate
+    }
+    let valueCurrent = 0
+    let valueChange = 0
+    let notUseValueChange = false
+    const leverage =
+      bot.settings.marginType !== BotMarginTypeEnum.inherit
+        ? (bot.settings.leverage ?? 1)
+        : 1
+    let usdRateBudget = 1
+    const findPrice = latestPrices.find((p) => p.pair === bot.settings.pair)
+    if (bot.status !== 'closed') {
+      if (!findPrice) {
+        notUseValueChange = true
+      }
+      const usdRate = findUSDRate(
+        bot.symbol.quoteAsset,
+        latestPrices,
+        bot.exchange,
+      )
+      usdRateBudget = usdRate
+      if (bot.settings.futures && findPrice) {
+        const current = bot.position
+        if (!current) {
+          notUseValueChange = true
+        } else {
+          const diff =
+            current.side === PositionSide.LONG
+              ? +findPrice.price - current.price
+              : current.price - +findPrice.price
+
+          const perc = current.price !== 0 ? diff / current.price : 0
+          const val = current.qty * perc * +findPrice.price
+          valueCurrent = bot.profit.totalUsd + initialBalance / leverage + val
+          valueChange = bot.profit.totalUsd + val
+        }
+      } else if (bot.currentBalances && findPrice && bot.symbol) {
+        const profitBase = bot.settings.profitCurrency === 'base'
+        valueCurrent =
+          (bot.currentBalances.base +
+            (profitBase
+              ? ((bot.profit.freeTotal || bot.profit?.total) ?? 0)
+              : 0)) *
+            findPrice.price +
+          bot.currentBalances.quote +
+          (!profitBase ? ((bot.profit.freeTotal || bot.profit?.total) ?? 0) : 0)
+
+        if (usdRate) {
+          valueCurrent *= usdRate
+        }
+      }
+    } else if (
+      bot.status === 'closed' &&
+      bot.lastPrice &&
+      bot.lastUsdRate &&
+      bot.currentBalances
+    ) {
+      if (bot.settings.futures) {
+        valueCurrent = bot.profit.totalUsd + initialBalance / leverage
+        valueChange = bot.profit.totalUsd
+      } else {
+        valueCurrent =
+          bot.currentBalances.base * bot.lastPrice + bot.currentBalances.quote
+        valueCurrent += bot.profit?.total || 0
+        valueCurrent *= bot.lastUsdRate
+      }
+    } else {
+      notUseValueChange = true
+    }
+    if (isCoinm(bot.exchange) && bot.status === 'closed') {
+      usdRateBudget = findUSDRate(
+        bot.symbol.baseAsset,
+        latestPrices,
+        bot.exchange,
+      )
+    }
+    const valueChangeUsd = notUseValueChange
+      ? 0
+      : bot.settings.futures
+        ? math.round(valueChange, 2)
+        : math.round(math.round(valueCurrent) - math.round(initialBalance), 2)
+    valueChange = notUseValueChange
+      ? 0
+      : bot.settings.futures
+        ? math.round((valueChange / (initialBalance / leverage)) * 100, 2)
+        : math.round(
+            ((valueCurrent - initialBalance) / (initialBalance / leverage)) *
+              100,
+            2,
+          )
+    const workingTime =
+      bot.workingShift && bot.workingShift.length > 0
+        ? bot.workingShift.reduce((acc, v) => {
+            if (v.end) {
+              acc += v.end - v.start
+            } else if (!v.end) {
+              acc += new Date().getTime() - v.start
+            }
+            return acc
+          }, 0)
+        : 0
+    const avgDaily = math.round(
+      (bot.profit?.totalUsd || 0) /
+        math.round(workingTime / (24 * 60 * 60 * 1000), 4),
+      2,
+    )
+    let resWork = ''
+    let count: number
+    count = Math.floor(workingTime / (24 * 60 * 60 * 1000))
+    if (count >= 1) {
+      resWork = `${resWork} ${count}d`
+    }
+    count = Math.floor(workingTime / (60 * 60 * 1000))
+    if (count >= 1) {
+      resWork = `${resWork} ${count % 24}h`
+    }
+    count = Math.floor(workingTime / (60 * 1000))
+    if (count >= 1) {
+      resWork = `${resWork} ${count % 60}min`
+    }
+    if (resWork === '') {
+      resWork = `${Math.floor(workingTime / 1000)}s`
+    }
+    const val =
+      bot.initialBalances && bot.initialPrice && bot.usdRate
+        ? math.round(initialBalance * bot.usdRate, 2)
+        : 0
+    let avgDailyPerc = avgDaily / initialBalance
+    let annualizedReturn = 0
+    if (!isNaN(avgDailyPerc) && isFinite(avgDailyPerc) && avgDailyPerc) {
+      annualizedReturn = avgDailyPerc * 365 * 100
+      if (annualizedReturn > Number.MAX_SAFE_INTEGER) {
+        annualizedReturn = Infinity
+      } else {
+        annualizedReturn = math.round(annualizedReturn, 2)
+      }
+    }
+    avgDailyPerc = math.round(avgDailyPerc * 100, 2)
+    const result: GridLiveStats = {
+      budget: math.round(
+        bot.settings.budget *
+          (bot.usdRate || usdRateBudget) *
+          (isCoinm(bot.exchange) ? bot.initialPrice || 1 : 1),
+        2,
+      ),
+      value: math.round(valueCurrent || val, 2),
+      valueChange: valueChangeUsd,
+      valueChangePerc: valueChange,
+      avgDaily,
+      avgDailyPerc,
+      annualizedReturn,
+      freePorfit: bot.profit.freeTotal,
+      freeProfitUsd: bot.profit.freeTotalUsd,
+      totalProfit: math.round(bot.profit?.total || 0, 2),
+      totalProfitUsd: math.round(bot.profit?.totalUsd || 0, 2),
+      tradingTime: workingTime,
+      tradingTimeString: resWork,
+    }
+    logger.debug(
+      `[BotStatsMonitor] | ${bot._id} | Live stats calculated: ${JSON.stringify(result)}`,
+    )
+    await botDb.updateData({ _id: bot._id }, { liveStats: result })
   }
 }
 
-export default BotMonitor.getInstance()
+export default BotMonitor
+
+const botMonitor = BotMonitor.getInstance()
+export { botMonitor }

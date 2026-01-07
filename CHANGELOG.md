@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.8.0] - 2026-01-07
+### Added
+- Bot live stats. 
+
 ## [1.7.4] - 2026-01-06
 ### Changed
 - Broker codes with zone. 

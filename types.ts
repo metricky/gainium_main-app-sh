@@ -1756,6 +1756,23 @@ export interface BotSchema extends MainBot<BotSettings> {
   stats: ProfitLossStats
   lastPositionChange?: number
   lastPriceRangeAlert?: number
+  liveStats?: GridLiveStats
+}
+
+export type GridLiveStats = {
+  budget: number
+  value: number
+  valueChange: number
+  valueChangePerc: number
+  avgDaily: number
+  avgDailyPerc: number
+  annualizedReturn: number
+  freePorfit: number
+  freeProfitUsd: number
+  totalProfit: number
+  totalProfitUsd: number
+  tradingTime: number
+  tradingTimeString: string
 }
 
 export type ClearBotSchema = ExcludeDoc<BotSchema>
@@ -1807,6 +1824,12 @@ export type BotStatsSeries = {
   perc: number
 }
 
+export type BotStatsBestDay = {
+  time: number
+  value: number
+  percentage: number
+}
+
 export type BotStats = {
   numerical: {
     profit: {
@@ -1840,8 +1863,8 @@ export type BotStats = {
       seriesEquity: { value: number; min: number; max: number; perc: number }
     }
     general: {
-      bestDay?: number
-      worstDay?: number
+      bestDay?: BotStatsBestDay
+      worstDay?: BotStatsBestDay
       netProfitPerc: number
       avgDaily: UsdAssetNumber
       avgDailyPerc: number
