@@ -2574,6 +2574,37 @@ export const BotSchema = /* GraphQL */ `
     path: String
     variable: String
   }
+  type liveStats {
+    currentCost: Float
+    maxCost: Float
+    relativeCost: Float
+    relativeCostString: String
+    totalProfit: Float
+    relativeProfit: Float
+    value: Float
+    relativeValue: Float
+    avgDaily: Float
+    avgDailyRelative: Float
+    annualizedReturn: Float
+    tradingTimeString: String
+    tradingTimeNumber: Float
+    dealsTotal: Float
+  }
+  type GridLiveStats {
+    budget: Float
+    value: Float
+    valueChange: Float
+    valueChangePerc: Float
+    avgDaily: Float
+    avgDailyPerc: Float
+    annualizedReturn: Float
+    freePorfit: Float
+    freeProfitUsd: Float
+    totalProfit: Float
+    totalProfitUsd: Float
+    tradingTime: Float
+    tradingTimeString: String
+  }
   type fullBot {
     _id: String
     userId: String
@@ -2620,6 +2651,7 @@ export const BotSchema = /* GraphQL */ `
     lastPositionChange: Float
     notEnoughBalance: botNotEnoughBalance
     cost: Float
+    liveStats: GridLiveStats
   }
   type botNotEnoughBalance {
     thresholdPassed: Boolean
@@ -3187,7 +3219,14 @@ export const BotSchema = /* GraphQL */ `
     series: botStatsSeries
     seriesEquity: botStatsNumericalLossSeriesEquity
   }
+  type BotStatsBestDay {
+    time: Float
+    value: Float
+    percentage: Float
+  }
   type botStatsNumericalGeneral {
+    bestDay: BotStatsBestDay
+    worstDay: BotStatsBestDay
     netProfitPerc: Float
     avgDaily: usdAssetNumber
     avgDailyPerc: Float
@@ -3327,6 +3366,7 @@ export const BotSchema = /* GraphQL */ `
     dealsReduceForBot: [dealsReduceForBot]
     notEnoughBalance: botNotEnoughBalance
     cost: Float
+    liveStats: liveStats
   }
   type minigridSettings {
     topPrice: Float
@@ -3454,6 +3494,7 @@ export const BotSchema = /* GraphQL */ `
     useAssets: Boolean
     notEnoughBalance: botNotEnoughBalance
     cost: Float
+    liveStats: liveStats
   }
   type dealsReduceForBot {
     profit: Float

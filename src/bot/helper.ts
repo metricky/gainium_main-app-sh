@@ -36,6 +36,7 @@ import utils from '../utils'
 import { IdMutex, IdMute } from '../utils/mutex'
 import { botDb, transactionDb } from '../db/dbInit'
 import { DealStats } from './worker/statsService'
+import { botMonitor, CalculateGridLiveStatsParams } from './botMonitor'
 
 /**
  * Price in initial grids
@@ -147,6 +148,8 @@ function createBotHelper<
     protected startTimeoutTime = 0
     protected limitTimer: NodeJS.Timeout | null = null
     protected enterMarketTimer: NodeJS.Timeout | null = null
+    private statsTimer: NodeJS.Timeout | null = null
+    private lastStatsCheck = 0
     /**
      * Prepare DB instaces
      *
@@ -206,6 +209,15 @@ function createBotHelper<
     }
     get lastFilled() {
       return this._lastFilled
+    }
+    setStatsTimer() {
+      const newTime = new Date()
+      newTime.setMinutes(newTime.getMinutes() + 1)
+      newTime.setSeconds(15, 0)
+      this.statsTimer = setTimeout(
+        () => this.updateLiveStats.bind(this)(this.botId, +newTime),
+        +newTime - +new Date(),
+      )
     }
     /**
      * Read orders from {@link MainBot#_loadOrders}<br />
@@ -2118,12 +2130,17 @@ function createBotHelper<
       if (clearRedis) {
         this.clearRedis()
       }
+      if (this.statsTimer) {
+        clearTimeout(this.statsTimer)
+      }
+      this.lastStatsCheck = 0
       if (start) {
         if (this.closeTimer) {
           this.handleLog(`Clear close timer`)
           clearTimeout(this.closeTimer)
           this.closeTimer = null
         }
+        this.setStatsTimer()
       }
       this.precisions = new Map()
     }
@@ -2732,6 +2749,9 @@ function createBotHelper<
         await this.unsubscribeFromGlobalVars(_var)
       }
       this.updateProgress()
+      if (this.statsTimer) {
+        clearInterval(this.statsTimer)
+      }
     }
     @IdMute(mutex, (order: Order) => `${order.botId}stab`)
     async checkBalances(order: Order) {
@@ -4626,6 +4646,52 @@ function createBotHelper<
           this.avgPrice()
         }
       }
+    }
+    @IdMute(mutex, (botId: string) => `${botId}updateLiveStats`)
+    async updateLiveStats(_botId: string, time: number) {
+      if (!this.data || !this.shouldProceed()) {
+        this.handleDebug(`No data or shouldn't proceed for live stats update`)
+        return
+      }
+      if (time < this.lastStatsCheck) {
+        this.handleDebug(
+          `Time ${time} is before last stats check ${this.lastStatsCheck}`,
+        )
+        return
+      }
+      if (this.statsTimer) {
+        clearTimeout(this.statsTimer)
+      }
+      this.handleDebug(`Updating live stats at time ${time}`)
+      this.lastStatsCheck = time
+      const botStats: CalculateGridLiveStatsParams = {
+        bot: {
+          _id: this.botId,
+          stats: this.data.stats,
+          symbol: this.data.symbol,
+          initialBalances: this.data.initialBalances,
+          initialPrice: this.data.initialPrice,
+          usdRate: this.data.usdRate,
+          exchange: this.data.exchange,
+          profit: this.data.profit,
+          status: this.data.status,
+          position: this.data.position,
+          currentBalances: this.data.currentBalances,
+          lastPrice: this.data.lastPrice,
+          lastUsdRate: this.data.lastUsdRate,
+          workingShift: this.data.workingShift,
+          settings: {
+            profitCurrency: this.data.settings.profitCurrency,
+            marginType: this.data.settings.marginType,
+            leverage: this.data.settings.leverage,
+            budget: this.data.settings.budget,
+            pair: this.data.settings.pair,
+            futures: this.data.settings.futures,
+          },
+        },
+      }
+      await botMonitor.calculateGridLiveStats(botStats)
+      this.setStatsTimer()
     }
   }
 

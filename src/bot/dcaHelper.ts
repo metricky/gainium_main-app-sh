@@ -81,6 +81,7 @@ import {
   OBFVGRefEnum,
   OBFVGValueEnum,
   RRSlTypeEnum,
+  ComboBotSchema,
 } from '../../types'
 import { MathHelper } from '../utils/math'
 import MainBot, { notEnoughErrors } from './main'
@@ -126,6 +127,7 @@ import {
   QFLResult,
   SuperTrendResult,
 } from '@gainium/indicators'
+import { botMonitor, CalculateDCALiveStatsParams } from './botMonitor'
 
 export type PercentileResult = {
   percentile?: number
@@ -310,6 +312,8 @@ function createDCABotHelper<
       }[]
     > = new Map()
     equityTimer: NodeJS.Timeout | null = null
+    statsTimer: NodeJS.Timeout | null = null
+    lastStatsCheck = 0
     indicatorCheckTimers: { [x: string]: NodeJS.Timeout | null | undefined } =
       {}
     indicatorCheckTimersFired: {
@@ -13351,6 +13355,16 @@ function createDCABotHelper<
       )
     }
 
+    setStatsTimer() {
+      const newTime = new Date()
+      newTime.setMinutes(newTime.getMinutes() + 1)
+      newTime.setSeconds(15, 0)
+      this.statsTimer = setTimeout(
+        () => this.updateLiveStats.bind(this)(this.botId, +newTime),
+        +newTime - +new Date(),
+      )
+    }
+
     async setClassProperties() {
       const settings = await this.getAggregatedSettings()
       if (this.data) {
@@ -14980,6 +14994,9 @@ function createDCABotHelper<
         if (this.equityTimer && closeType !== CloseDCATypeEnum.leave) {
           clearTimeout(this.equityTimer)
         }
+        if (this.statsTimer && closeType !== CloseDCATypeEnum.leave) {
+          clearTimeout(this.statsTimer)
+        }
         if (closeType === CloseDCATypeEnum.cancel) {
           await this.afterBotStop()
         }
@@ -15843,6 +15860,10 @@ function createDCABotHelper<
       if (this.equityTimer) {
         clearTimeout(this.equityTimer)
       }
+      if (this.statsTimer) {
+        clearTimeout(this.statsTimer)
+      }
+      this.lastStatsCheck = 0
       for (const [id, timer] of this.openNewDealTimer.entries()) {
         if (timer) {
           clearTimeout(timer)
@@ -15885,6 +15906,7 @@ function createDCABotHelper<
       }
       if (start) {
         this.setEquityTimer()
+        this.setStatsTimer()
       }
       this.indicatorActions = {
         startDeal: new Map<string, number>(),
@@ -18076,6 +18098,26 @@ function createDCABotHelper<
           }
         }
       }
+      if (stats.chart.length >= 2) {
+        const last = stats.chart[stats.chart.length - 1]
+        const profit = last.realizedProfit
+        if (profit > (stats.numerical.general.bestDay?.value ?? 0)) {
+          stats.numerical.general.bestDay = {
+            time: last.time,
+            value: profit,
+            percentage:
+              profit / (stats.numerical.general.startBalance.usd || 1),
+          }
+        }
+        if (profit < (stats.numerical.general.worstDay?.value ?? 0)) {
+          stats.numerical.general.worstDay = {
+            time: last.time,
+            value: profit,
+            percentage:
+              profit / (stats.numerical.general.startBalance.usd || 1),
+          }
+        }
+      }
       this.data.stats = stats
       this.data.symbolStats = symbolStats
       this.updateData({ stats, symbolStats })
@@ -18725,6 +18767,61 @@ function createDCABotHelper<
         symbolStats: this.data.symbolStats,
       })
       this.endMethod(_id)
+    }
+
+    @IdMute(mutex, (botId: string) => `${botId}updateLiveStats`)
+    async updateLiveStats(_botId: string, time: number) {
+      if (!this.data || !this.shouldProceed()) {
+        this.handleDebug(`No data or shouldn't proceed for live stats update`)
+        return
+      }
+      if (time < this.lastStatsCheck) {
+        this.handleDebug(
+          `Time ${time} is before last stats check ${this.lastStatsCheck}`,
+        )
+        return
+      }
+      if (this.statsTimer) {
+        clearTimeout(this.statsTimer)
+      }
+      this.handleDebug(`Updating live stats at time ${time}`)
+      this.lastStatsCheck = time
+      const botStats: CalculateDCALiveStatsParams = {
+        bot: {
+          _id: this.botId,
+          exchange: this.data.exchange,
+          workingShift: this.data.workingShift,
+          profit: this.data.profit,
+          symbol: this.data.symbol,
+          usage: this.data.usage,
+          currentBalances: this.data.currentBalances,
+          initialBalances: this.data.initialBalances,
+          dealsStatsForBot: (this.data as unknown as ExcludeDoc<ComboBotSchema>)
+            .dealsStatsForBot,
+          dealsReduceForBot: this.data.dealsReduceForBot,
+          deals: this.data.deals,
+          settings: {
+            strategy: this.data.settings.strategy,
+            futures: this.data.settings.futures,
+            coinm: this.data.settings.coinm,
+            orderSizeType: this.data.settings.orderSizeType,
+            useReinvest: this.data.settings.useReinvest,
+            profitCurrency: this.data.settings.profitCurrency,
+          },
+          stats: {
+            numerical: {
+              general: {
+                netProfitPerc:
+                  this.data.stats?.numerical.general.netProfitPerc ?? 0,
+              },
+            },
+          },
+        },
+        combo: this.combo,
+        fee: (await this.getUserFee(this.data.settings.pair[0]))?.maker ?? 0,
+      }
+      await botMonitor.calculateDCALiveStats(botStats)
+      this.setStatsTimer()
     }
   }
 

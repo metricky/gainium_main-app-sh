@@ -530,6 +530,21 @@ const botSchema: Schema<BotSchema> = new Schema({
     unrealizedProfit: Number,
   },
   lastPriceRangeAlert: Number,
+  liveStats: {
+    budget: Number,
+    value: Number,
+    valueChange: Number,
+    valueChangePerc: Number,
+    avgDaily: Number,
+    avgDailyPerc: Number,
+    annualizedReturn: Number,
+    freePorfit: Number,
+    freeProfitUsd: Number,
+    totalProfit: Number,
+    totalProfitUsd: Number,
+    tradingTime: Number,
+    tradingTimeString: String,
+  },
 })
 
 const orderSchema: Schema<OrderSchema> = new Schema({
@@ -1381,6 +1396,16 @@ const botStats: Schema<BotStats> = new Schema({
       coveredPriceDeviation: Number,
       actualPriceDeviation: Number,
       confidenceGrade: String,
+      bestDay: {
+        time: Number,
+        value: Number,
+        percentage: Number,
+      },
+      worstDay: {
+        time: Number,
+        value: Number,
+        percentage: Number,
+      },
     },
     ratios: {
       profitFactor: Number,
@@ -1452,6 +1477,23 @@ const botSymbolsStats: Schema<BotSymbolsStats> = new Schema({
   },
   symbol: String,
 })
+
+const liveStats = {
+  currentCost: Number,
+  maxCost: Number,
+  relativeCost: Number,
+  relativeCostString: String,
+  totalProfit: Number,
+  relativeProfit: Number,
+  value: Number,
+  relativeValue: Number,
+  avgDaily: Number,
+  avgDailyRelative: Number,
+  annualizedReturn: Number,
+  tradingTimeString: String,
+  tradingTimeNumber: Number,
+  dealsTotal: Number,
+}
 
 const comboBotSchema: Schema<ComboBotSchema> = new Schema({
   ...botCommon,
@@ -1528,6 +1570,7 @@ const comboBotSchema: Schema<ComboBotSchema> = new Schema({
     type: String,
     enum: ActionsEnum,
   },
+  liveStats,
 })
 
 const dcaBotSchema: Schema<DCABotSchema> = new Schema({
@@ -1582,6 +1625,7 @@ const dcaBotSchema: Schema<DCABotSchema> = new Schema({
     type: String,
     enum: ActionsEnum,
   },
+  liveStats,
 })
 
 const funds = [
