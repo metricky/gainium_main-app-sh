@@ -13777,6 +13777,7 @@ function createDCABotHelper<
 
       return (
         ((((settings.trailingSl &&
+          !settings.useMultiSl &&
           settings.useSl &&
           settings.dealCloseConditionSL === CloseConditionEnum.tp) ||
           (settings.trailingTp &&
@@ -13785,7 +13786,7 @@ function createDCABotHelper<
           d.deal.trailingMode &&
           d.deal.trailingLevel) ||
           (settings.useSl &&
-            !settings.trailingSl &&
+            (!settings.trailingSl || settings.useMultiSl) &&
             (settings.dealCloseConditionSL === CloseConditionEnum.tp ||
               (settings.moveSL && d.deal.moveSlActivated))) ||
           (this.slAr &&
@@ -13817,6 +13818,7 @@ function createDCABotHelper<
 
       if (
         ((trailingSl &&
+          !useMultiSl &&
           useSl &&
           dealCloseConditionSL === CloseConditionEnum.tp) ||
           (trailingTp &&
@@ -13833,7 +13835,7 @@ function createDCABotHelper<
         return d.deal.trailingLevel
       } else if (
         useSl &&
-        !trailingSl &&
+        (!trailingSl || useMultiSl) &&
         (dealCloseConditionSL === CloseConditionEnum.tp ||
           (moveSL && d.deal.moveSlActivated))
       ) {
@@ -15065,7 +15067,7 @@ function createDCABotHelper<
       }
       const settings = await this.getAggregatedSettings(deal)
       const result =
-        settings.trailingSl || settings.moveSL
+        (settings.trailingSl && !settings.useMultiSl) || settings.moveSL
           ? BaseSlOnEnum.avg
           : (settings.baseSlOn ?? BaseSlOnEnum.avg)
       this.baseSlOnMap.set(key, result)
@@ -15126,6 +15128,7 @@ function createDCABotHelper<
         if (
           close &&
           ((trailingSl &&
+            !useMultiSl &&
             !moveSL &&
             useSl &&
             dealCloseConditionSL === CloseConditionEnum.tp) ||
@@ -15145,7 +15148,7 @@ function createDCABotHelper<
         } else if (
           close &&
           useSl &&
-          !trailingSl &&
+          (!trailingSl || useMultiSl) &&
           (dealCloseConditionSL === CloseConditionEnum.tp ||
             (moveSL && d.deal.moveSlActivated))
         ) {
@@ -15562,7 +15565,11 @@ function createDCABotHelper<
 
     @IdMute(mutex, (botId: string) => `${botId}checkTPLevel`)
     public async checkTPLevel(_botId: string, price: number, symbol: string) {
-      for (const [d, v] of [...this.dealsForTPLevelCheck]) {
+      for (const [d] of [...this.dealsForTPLevelCheck]) {
+        const v = this.dealsForTPLevelCheck.get(d)
+        if (!v) {
+          continue
+        }
         if (!(this.isLong ? price >= v : price <= v)) {
           this.handleDebug(
             `Price ${price} not reached TP level check value ${v}`,

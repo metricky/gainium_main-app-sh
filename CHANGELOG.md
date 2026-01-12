@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.8.1] - 2026-01-12
+### Fixed
+- Multi TP by Market caught duplicate order error, Multi SL not fired. 
+
 ## [1.8.0] - 2026-01-07
 ### Added
 - Bot live stats. 
