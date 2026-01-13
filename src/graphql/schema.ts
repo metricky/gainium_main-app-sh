@@ -2585,7 +2585,7 @@ export const BotSchema = /* GraphQL */ `
     relativeValue: Float
     avgDaily: Float
     avgDailyRelative: Float
-    annualizedReturn: Float
+    annualizedReturn: FloatOrInfinity
     tradingTimeString: String
     tradingTimeNumber: Float
     dealsTotal: Float
@@ -2597,7 +2597,7 @@ export const BotSchema = /* GraphQL */ `
     valueChangePerc: Float
     avgDaily: Float
     avgDailyPerc: Float
-    annualizedReturn: Float
+    annualizedReturn: FloatOrInfinity
     freePorfit: Float
     freeProfitUsd: Float
     totalProfit: Float
@@ -3835,6 +3835,7 @@ export const BotSchema = /* GraphQL */ `
     trackTime: Float
     timeCountStart: String
     currentCount: String
+    unrealizedProfit: Float
   }
   type dynamicAr {
     value: Float

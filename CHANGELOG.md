@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.8.2] - 2026-01-13
+### Changed
+- GQL schema. 
+
 ## [1.8.1] - 2026-01-12
 ### Fixed
 - Multi TP by Market caught duplicate order error, Multi SL not fired. 
