@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.8.3] - 2026-01-14
+### Changed
+- GQL schema. 
+
 ## [1.8.2] - 2026-01-13
 ### Changed
 - GQL schema. 

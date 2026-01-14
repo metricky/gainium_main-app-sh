@@ -3239,8 +3239,8 @@ export const BotSchema = /* GraphQL */ `
     confidenceGrade: String
   }
   type botStatsNumericalRatiosBuyAndHold {
-    result: Float
-    perc: Float
+    result: FloatOrInfinity
+    perc: FloatOrInfinity
     symbol: String
     startPrice: Float
   }
