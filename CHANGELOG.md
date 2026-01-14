@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.8.4] - 2026-01-14
+### Changed
+- Bot id in bot live stats. 
+
 ## [1.8.3] - 2026-01-14
 ### Changed
 - GQL schema. 

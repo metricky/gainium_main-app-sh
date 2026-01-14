@@ -552,12 +552,12 @@ class BotMonitor {
 
     if (combo) {
       await comboBotDb.updateData(
-        { _id: bot._id },
+        { _id: `${bot._id}` },
         { liveStats: result, unrealizedProfit: unPnl },
       )
     } else {
       await dcaBotDb.updateData(
-        { _id: bot._id },
+        { _id: `${bot._id}` },
         { liveStats: result, unrealizedProfit: unPnl },
       )
     }
@@ -736,7 +736,7 @@ class BotMonitor {
     logger.debug(
       `[BotStatsMonitor] | ${bot._id} | Live stats calculated: ${JSON.stringify(result)}`,
     )
-    await botDb.updateData({ _id: bot._id }, { liveStats: result })
+    await botDb.updateData({ _id: `${bot._id}` }, { liveStats: result })
   }
 }
 
