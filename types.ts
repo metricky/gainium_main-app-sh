@@ -849,6 +849,12 @@ export interface DCABotSettings extends BaseSettings {
   startBotLogic?: IndicatorsLogicEnum
   botActualStart?: BotStartTypeEnum
   useNoOverlapDeals?: boolean
+  useSeparateMaxDealsOverAndUnder?: boolean
+  maxDealsOver?: string
+  maxDealsUnder?: string
+  useSeparateMaxDealsOverAndUnderPerSymbol?: boolean
+  maxDealsOverPerSymbol?: string
+  maxDealsUnderPerSymbol?: string
 }
 
 export enum IndicatorsLogicEnum {

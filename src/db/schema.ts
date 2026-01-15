@@ -1163,6 +1163,12 @@ const dcaBotSettings = new Schema({
   stopBotPriceValue: String,
   startBotLogic: String,
   botActualStart: String,
+  useSeparateMaxDealsOverAndUnder: Boolean,
+  maxDealsOver: String,
+  maxDealsUnder: String,
+  useSeparateMaxDealsOverAndUnderPerSymbol: Boolean,
+  maxDealsOverPerSymbol: String,
+  maxDealsUnderPerSymbol: String,
 })
 
 const comboBotSettings = new Schema<ComboBotSettings>({
@@ -1330,6 +1336,12 @@ const comboBotSettings = new Schema<ComboBotSettings>({
   stopBotPriceValue: String,
   startBotLogic: String,
   botActualStart: String,
+  useSeparateMaxDealsOverAndUnder: Boolean,
+  maxDealsOver: String,
+  maxDealsUnder: String,
+  useSeparateMaxDealsOverAndUnderPerSymbol: Boolean,
+  maxDealsOverPerSymbol: String,
+  maxDealsUnderPerSymbol: String,
 })
 
 const botProfitChart: Schema<BotProfitChartSchema> = new Schema({

@@ -2966,6 +2966,12 @@ export const BotSchema = /* GraphQL */ `
     useRelativeVolumeFilter: Boolean
     relativeVolumeTop: String
     relativeVolumeValue: String
+    useSeparateMaxDealsOverAndUnder: Boolean
+    maxDealsOver: String
+    maxDealsUnder: String
+    useSeparateMaxDealsOverAndUnderPerSymbol: Boolean
+    maxDealsOverPerSymbol: String
+    maxDealsUnderPerSymbol: String
   }
   type ComboBotSettings {
     pair: [String]
@@ -3129,6 +3135,12 @@ export const BotSchema = /* GraphQL */ `
     useRelativeVolumeFilter: Boolean
     relativeVolumeTop: String
     relativeVolumeValue: String
+    useSeparateMaxDealsOverAndUnder: Boolean
+    maxDealsOver: String
+    maxDealsUnder: String
+    useSeparateMaxDealsOverAndUnderPerSymbol: Boolean
+    maxDealsOverPerSymbol: String
+    maxDealsUnderPerSymbol: String
   }
   enum CloseConditionEnum {
     tp
@@ -4580,6 +4592,12 @@ export const BotSchema = /* GraphQL */ `
     relativeVolumeTop: String
     relativeVolumeValue: String
     uuid: String
+    useSeparateMaxDealsOverAndUnder: Boolean
+    maxDealsOver: String
+    maxDealsUnder: String
+    useSeparateMaxDealsOverAndUnderPerSymbol: Boolean
+    maxDealsOverPerSymbol: String
+    maxDealsUnderPerSymbol: String
   }
   input sharedSettingsInput {
     useSl: Boolean
@@ -4784,6 +4802,12 @@ export const BotSchema = /* GraphQL */ `
     useRelativeVolumeFilter: Boolean
     relativeVolumeTop: String
     relativeVolumeValue: String
+    useSeparateMaxDealsOverAndUnder: Boolean
+    maxDealsOver: String
+    maxDealsUnder: String
+    useSeparateMaxDealsOverAndUnderPerSymbol: Boolean
+    maxDealsOverPerSymbol: String
+    maxDealsUnderPerSymbol: String
   }
   enum BotMarginTypeEnum {
     inherit
@@ -4961,6 +4985,12 @@ export const BotSchema = /* GraphQL */ `
     useRelativeVolumeFilter: Boolean
     relativeVolumeTop: String
     relativeVolumeValue: String
+    useSeparateMaxDealsOverAndUnder: Boolean
+    maxDealsOver: String
+    maxDealsUnder: String
+    useSeparateMaxDealsOverAndUnderPerSymbol: Boolean
+    maxDealsOverPerSymbol: String
+    maxDealsUnderPerSymbol: String
   }
   input changeHedgeComboBotInput {
     long: changeComboBotInput!
@@ -5137,6 +5167,12 @@ export const BotSchema = /* GraphQL */ `
     useRelativeVolumeFilter: Boolean
     relativeVolumeTop: String
     relativeVolumeValue: String
+    useSeparateMaxDealsOverAndUnder: Boolean
+    maxDealsOver: String
+    maxDealsUnder: String
+    useSeparateMaxDealsOverAndUnderPerSymbol: Boolean
+    maxDealsOverPerSymbol: String
+    maxDealsUnderPerSymbol: String
   }
   input changeBotInput {
     vars: botVarsInput

@@ -278,6 +278,8 @@ function createDCABotHelper<
     lockSLCheck = false
     /** Pending deals */
     pendingDeals = 0
+    pendingDealsOver = 0
+    pendingDealsUnder = 0
     /** Pending deals per pair */
     pendingDealsPerPair: Map<string, number> = new Map()
     /** Last indicators data map */
@@ -4410,6 +4412,74 @@ function createDCABotHelper<
         return true
       }
       const settings = await this.getAggregatedSettings()
+      if (this.useMaxDealsPerSymbolOverAndUnder) {
+        const deals = this.getOpenDeals(true, symbol)
+        if (!deals.length) {
+          return true
+        }
+        const firstDeal = deals.sort(
+          (a, b) => a.deal.createTime - b.deal.createTime,
+        )[0]
+        if (!firstDeal) {
+          return true
+        }
+        const overDeals = deals.filter(
+          (d) =>
+            d.deal._id !== firstDeal.deal._id &&
+            d.deal.initialPrice >= firstDeal.deal.initialPrice,
+        )
+        const underDeals = deals.filter(
+          (d) =>
+            d.deal._id !== firstDeal.deal._id &&
+            d.deal.initialPrice < firstDeal.deal.initialPrice,
+        )
+        const maxDealsOver = +(settings.maxDealsOverPerSymbol || '1') || 1
+        const maxDealsUnder = +(settings.maxDealsUnderPerSymbol || '1') || 1
+        const latestPrice = await this.getLatestPrice(symbol)
+        if (!latestPrice) {
+          this.handleErrors(
+            `Latest price is 0`,
+            'checkMaxDealsPerPair()',
+            'Get latest price',
+            false,
+            false,
+            false,
+          )
+          return false
+        }
+        this.handleDebug(
+          `Max Deals Per Symbol Over and Under | Over deals: ${overDeals.length}, Under deals: ${underDeals.length}, Max Over: ${maxDealsOver}, Max Under: ${maxDealsUnder}, Latest price: ${latestPrice}, First deal price: ${firstDeal.deal.initialPrice}`,
+        )
+        const isGoingToBeOver = latestPrice >= firstDeal.deal.initialPrice
+        if (isGoingToBeOver) {
+          this.handleDebug(
+            `Max Deals Per Symbol Over and Under | Latest price is going to be over first deal price`,
+          )
+        } else {
+          this.handleDebug(
+            `Max Deals Per Symbol Over and Under | Latest price is going to be under first deal price`,
+          )
+        }
+        if (isGoingToBeOver) {
+          const key = `${symbol}-over`
+          const pendingDeals = this.pendingDealsPerPair.get(key) ?? 0
+          if (overDeals.length + pendingDeals < maxDealsOver) {
+            this.pendingDealsPerPair.set(key, pendingDeals + 1)
+            return true
+          } else {
+            return false
+          }
+        } else {
+          const key = `${symbol}-under`
+          const pendingDeals = this.pendingDealsPerPair.get(key) ?? 0
+          if (underDeals.length + pendingDeals < maxDealsUnder) {
+            this.pendingDealsPerPair.set(key, pendingDeals + 1)
+            return true
+          } else {
+            return false
+          }
+        }
+      }
       if (
         settings.useMulti &&
         settings.maxDealsPerPair &&
@@ -4432,6 +4502,24 @@ function createDCABotHelper<
       }
       return true
     }
+    get useMaxDealsOverAndUnder() {
+      return (
+        !this.data?.settings.useMulti &&
+        this.data?.settings?.useDynamicPriceFilter &&
+        this.data?.settings?.dynamicPriceFilterDirection ===
+          DynamicPriceFilterDirectionEnum.overAndUnder &&
+        this.data?.settings.useSeparateMaxDealsOverAndUnder
+      )
+    }
+    get useMaxDealsPerSymbolOverAndUnder() {
+      return (
+        this.data?.settings.useMulti &&
+        this.data?.settings?.useDynamicPriceFilter &&
+        this.data?.settings?.dynamicPriceFilterDirection ===
+          DynamicPriceFilterDirectionEnum.overAndUnder &&
+        this.data?.settings.useSeparateMaxDealsOverAndUnderPerSymbol
+      )
+    }
     /**
      * Check max amount of active deals
      */
@@ -4441,6 +4529,71 @@ function createDCABotHelper<
         return true
       }
       const settings = await this.getAggregatedSettings()
+      if (this.useMaxDealsOverAndUnder) {
+        const deals = this.getOpenDeals(true)
+        if (!deals.length) {
+          return true
+        }
+        const firstDeal = deals.sort(
+          (a, b) => a.deal.createTime - b.deal.createTime,
+        )[0]
+        if (!firstDeal) {
+          return true
+        }
+        const overDeals = deals.filter(
+          (d) =>
+            d.deal._id !== firstDeal.deal._id &&
+            d.deal.initialPrice >= firstDeal.deal.initialPrice,
+        )
+        const underDeals = deals.filter(
+          (d) =>
+            d.deal._id !== firstDeal.deal._id &&
+            d.deal.initialPrice < firstDeal.deal.initialPrice,
+        )
+        const maxDealsOver = +(settings.maxDealsOver || '1') || 1
+        const maxDealsUnder = +(settings.maxDealsUnder || '1') || 1
+        const latestPrice = await this.getLatestPrice(symbol)
+        if (!latestPrice) {
+          this.handleErrors(
+            `Latest price is 0`,
+            'checkMaxDeals()',
+            'Get latest price',
+            false,
+            false,
+            false,
+          )
+          return false
+        }
+        this.handleDebug(
+          `Max Deals Over and Under | Over deals: ${overDeals.length}, Under deals: ${underDeals.length}, Max Over: ${maxDealsOver}, Max Under: ${maxDealsUnder}, Latest price: ${latestPrice}, First deal price: ${firstDeal.deal.initialPrice}`,
+        )
+        const isGoingToBeOver = latestPrice >= firstDeal.deal.initialPrice
+        if (isGoingToBeOver) {
+          this.handleDebug(
+            `Max Deals Over and Under | Latest price is going to be over first deal price`,
+          )
+        } else {
+          this.handleDebug(
+            `Max Deals Over and Under | Latest price is going to be under first deal price`,
+          )
+        }
+        if (isGoingToBeOver) {
+          if (overDeals.length + this.pendingDealsOver < maxDealsOver) {
+            this.pendingDealsOver += 1
+            return true
+          } else {
+            return false
+          }
+        } else {
+          if (underDeals.length + this.pendingDealsUnder < maxDealsUnder) {
+            this.pendingDealsUnder += 1
+            return true
+          } else {
+            return false
+          }
+        }
+      }
+
       if (
         settings.maxNumberOfOpenDeals &&
         settings.maxNumberOfOpenDeals !== ''
@@ -10386,12 +10539,23 @@ function createDCABotHelper<
       if (this.pendingDeals < 0) {
         this.pendingDeals = 0
       }
-      const perPair = this.pendingDealsPerPair.get(symbol)
-      if (perPair && perPair <= 1) {
-        this.pendingDealsPerPair.delete(symbol)
+      this.pendingDealsOver -= 1
+      if (this.pendingDealsOver < 0) {
+        this.pendingDealsOver = 0
       }
-      if (!perPair || perPair > 1) {
-        this.pendingDealsPerPair.set(symbol, perPair ? perPair - 1 : 1)
+      this.pendingDealsUnder -= 1
+      if (this.pendingDealsUnder < 0) {
+        this.pendingDealsUnder = 0
+      }
+      const keys = [symbol, `${symbol}-over`, `${symbol}-under`]
+      for (const key of keys) {
+        const perPair = this.pendingDealsPerPair.get(key)
+        if (perPair && perPair <= 1) {
+          this.pendingDealsPerPair.delete(key)
+        }
+        if (!perPair || perPair > 1) {
+          this.pendingDealsPerPair.set(key, perPair ? perPair - 1 : 1)
+        }
       }
     }
 
@@ -15937,6 +16101,8 @@ function createDCABotHelper<
       this.lastIndicatorsDataMap = new Map()
       this.allowToPlaceOrders = new Map()
       this.pendingDeals = 0
+      this.pendingDealsOver = 0
+      this.pendingDealsUnder = 0
       this.pendingDealsPerPair = new Map()
       this.loadingComplete = false
       this.runAfterLoadingQueue = []

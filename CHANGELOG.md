@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.9.0] - 2026-01-15
+### Added
+- Separate max deal limits when using dynamic price filter over and under
+
 ## [1.8.4] - 2026-01-14
 ### Changed
 - Bot id in bot live stats. 
