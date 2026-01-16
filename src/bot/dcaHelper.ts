@@ -12887,7 +12887,11 @@ function createDCABotHelper<
             settings.useTp &&
             (settings.dealCloseCondition === CloseConditionEnum.tp ||
               settings.dealCloseCondition === CloseConditionEnum.dynamicAr) &&
-            (!(settings.useTp && settings.trailingTp) ||
+            (!(
+              settings.useTp &&
+              settings.trailingTp &&
+              settings.dealCloseCondition === CloseConditionEnum.tp
+            ) ||
               (settings.trailingTp &&
                 settings.useMultiTp &&
                 settings.multiTp)) &&
@@ -13018,8 +13022,12 @@ function createDCABotHelper<
           }
           if (
             deal?.trailingLevel &&
-            ((settings.useTp && settings.trailingTp) ||
-              (settings.useSl && settings.trailingSl)) &&
+            ((settings.useTp &&
+              settings.trailingTp &&
+              settings.dealCloseCondition === CloseConditionEnum.tp) ||
+              (settings.useSl &&
+                settings.trailingSl &&
+                settings.dealCloseConditionSL === CloseConditionEnum.tp)) &&
             filterSl
           ) {
             currentOrders = currentOrders.filter((o) =>
@@ -13033,8 +13041,12 @@ function createDCABotHelper<
             result = [...currentOrders, ...tpOrders]
               .filter((o) => (!useTp ? o.type !== TypeOrderEnum.dealTP : true))
               .filter((o) =>
-                ((settings.useTp && settings.useMultiTp) ||
-                  (settings.useSl && settings.useMultiSl)) &&
+                ((settings.useTp &&
+                  settings.useMultiTp &&
+                  settings.dealCloseCondition === CloseConditionEnum.tp) ||
+                  (settings.useSl &&
+                    settings.useMultiSl &&
+                    settings.dealCloseConditionSL === CloseConditionEnum.tp)) &&
                 (deal?.tpSlTargetFilled ?? []).length > 0
                   ? o.type !== TypeOrderEnum.dealRegular
                   : true,

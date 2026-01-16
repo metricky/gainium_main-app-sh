@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.9.1] - 2026-01-16
+### Fixed
+- TP section settings mixed up
+
 ## [1.9.0] - 2026-01-15
 ### Added
 - Separate max deal limits when using dynamic price filter over and under
