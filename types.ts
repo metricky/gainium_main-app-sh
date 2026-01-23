@@ -855,6 +855,7 @@ export interface DCABotSettings extends BaseSettings {
   useSeparateMaxDealsOverAndUnderPerSymbol?: boolean
   maxDealsOverPerSymbol?: string
   maxDealsUnderPerSymbol?: string
+  dcaByMarket?: boolean
 }
 
 export enum IndicatorsLogicEnum {
@@ -1129,6 +1130,7 @@ export type DCADealsSettings = Pick<
   | 'dcaVolumeMaxValue'
   | 'dcaVolumeRequiredChange'
   | 'closeOrderType'
+  | 'dcaByMarket'
 > & {
   avgPrice: number
   changed: boolean

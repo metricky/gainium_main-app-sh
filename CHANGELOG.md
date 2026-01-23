@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.0] - 2026-01-23
+### Added
+- DCA By Market
+
 ## [1.9.1] - 2026-01-16
 ### Fixed
 - TP section settings mixed up

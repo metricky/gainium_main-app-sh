@@ -354,6 +354,7 @@ function createDCABotHelper<
     dealsForIndicatorUnpnl: Map<string, DealIndicatorUnpnlVal> = new Map()
     dealsForStopLossCombo: Map<string, DealStopLossCombo> = new Map()
     dealsDCALevelCheck: Map<string, number> = new Map()
+    dealsDCAByMarket: Map<string, number> = new Map()
     dealsForTPLevelCheck: Map<string, number> = new Map()
     startSent = false
     stopSent = false
@@ -8547,7 +8548,11 @@ function createDCABotHelper<
               }
             }
           }
-          if (deal?.deal.action !== ActionsEnum.useOppositeBalance) {
+
+          if (
+            deal?.deal.action !== ActionsEnum.useOppositeBalance &&
+            !(await this.getAggregatedSettings(deal?.deal)).dcaByMarket
+          ) {
             const activeRegularOrders = orders.filter(
               (o) =>
                 this.orderStatuses.includes(o.status) &&
@@ -11507,7 +11512,8 @@ function createDCABotHelper<
             continue
           }
           if (
-            deal?.deal.action === ActionsEnum.useOppositeBalance &&
+            (deal?.deal.action === ActionsEnum.useOppositeBalance ||
+              settings.dcaByMarket) &&
             order.type === TypeOrderEnum.dealRegular
           ) {
             continue
@@ -12363,9 +12369,10 @@ function createDCABotHelper<
       breakpoint: { price: number; displacedPrice: number },
       deal: ExcludeDoc<Deal>,
     ) {
+      const settings = await this.getAggregatedSettings(deal)
       if (
-        (await this.getAggregatedSettings(deal)).dcaCondition ===
-        DCAConditionEnum.indicators
+        settings.dcaCondition === DCAConditionEnum.indicators ||
+        settings.dcaByMarket
       ) {
         return deal.gridBreakpoints
       }
@@ -14208,6 +14215,7 @@ function createDCABotHelper<
       this.dealsDCALevelCheck.delete(dealId)
       this.dealsForIndicatorUnpnl.delete(dealId)
       this.dealsForTPLevelCheck.delete(dealId)
+      this.dealsDCAByMarket.delete(dealId)
     }
 
     async checkDealsForStopLossMethods() {
@@ -14216,11 +14224,37 @@ function createDCABotHelper<
       await this.checkDealsForStopLoss()
       await this.checkDealsForIndicatorUnpnl()
       this.checkDealsForDCALevelCheck()
+      await this.checkDealsForDCAByMarketCheck()
       await this.checkDealsForTPLevelCheck()
+    }
+    async isDealForDCAByMarketCheck(d: FullDeal<ExcludeDoc<Deal>>) {
+      const settings = await this.getAggregatedSettings(d.deal)
+      return (
+        !!settings.dcaByMarket &&
+        d.deal.action !== ActionsEnum.useOppositeBalance
+      )
+    }
+    async checkDealsForDCAByMarketCheck() {
+      const activeDeals: [string, number][] = []
+      for (const d of this.allDealsData) {
+        if (await this.isDealForDCAByMarketCheck(d)) {
+          activeDeals.push([
+            `${d.deal._id}`,
+            this.getDealDCAByMarketToCheck(d),
+          ] as [string, number])
+        } else {
+          this.handleDebug(`Deal ${d.deal._id} is not for DCA By Market Check`)
+        }
+      }
+
+      this.dealsDCAByMarket = new Map(activeDeals)
     }
     async isDealForTPLevelCheck(d: FullDeal<ExcludeDoc<Deal>>) {
       const settings = await this.getAggregatedSettings(d.deal)
-      return settings.closeOrderType === OrderTypeEnum.market
+      return (
+        settings.closeOrderType === OrderTypeEnum.market &&
+        d.deal.action !== ActionsEnum.useOppositeBalance
+      )
     }
     async checkDealsForTPLevelCheck() {
       const activeDeals: [string, number][] = []
@@ -14266,6 +14300,15 @@ function createDCABotHelper<
         this.allowedMethods.add('checkDCALevel')
       }
     }
+    async setDealForDCAByMarketCheck(deal: FullDeal<ExcludeDoc<Deal>>) {
+      if (await this.isDealForDCAByMarketCheck(deal)) {
+        this.dealsDCAByMarket.set(
+          deal.deal._id,
+          this.getDealDCAByMarketToCheck(deal),
+        )
+        this.allowedMethods.add('checkDCAByMarketLevel')
+      }
+    }
     async setDealForTPLevelCheck(deal: FullDeal<ExcludeDoc<Deal>>) {
       if (await this.isDealForTPLevelCheck(deal)) {
         this.dealsForTPLevelCheck.set(
@@ -14274,6 +14317,23 @@ function createDCABotHelper<
         )
         this.allowedMethods.add('checkTPLevel')
       }
+    }
+    private getDealDCAByMarketToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
+      const def = this.isLong ? 0 : Infinity
+      const closestPrice = +[...d.currentOrders]
+        .filter(
+          (o) =>
+            o.type === TypeOrderEnum.dealRegular &&
+            (o.levelNumber || 0) >
+              d.deal.levels.complete - 1 - (d.deal.funds?.length || 0),
+        )
+        .sort((a, b) =>
+          this.isLong ? +b.price - +a.price : +a.price - +b.price,
+        )[0]?.price
+      this.handleDebug(
+        `Deal ${d.deal._id} DCA By Market Check Price: ${closestPrice}`,
+      )
+      return closestPrice || def
     }
     private getDealTPLevelToCheck(d: FullDeal<ExcludeDoc<Deal>>): number {
       const def = this.isLong ? Infinity : 0
@@ -14367,12 +14427,19 @@ function createDCABotHelper<
         this.lowestHigh.set(this.data?.settings.pair[0] ?? '', max || Infinity)
 
         const valuesDCACheck = [...this.dealsDCALevelCheck.values()]
+        const valuesDCAByMarketCheck = [...this.dealsDCAByMarket.values()]
         const minDCACheck = this.isLong
-          ? (valuesDCACheck.sort((a, b) => b - a)?.[0] ?? 0)
+          ? Math.max(
+              valuesDCAByMarketCheck.sort((a, b) => b - a)?.[0] ?? 0,
+              valuesDCACheck.sort((a, b) => b - a)?.[0] ?? 0,
+            )
           : 0
         const maxDCACheck = this.isLong
           ? Infinity
-          : valuesDCACheck.sort((a, b) => a - b)?.[0] || Infinity
+          : Math.min(
+              valuesDCAByMarketCheck.sort((a, b) => a - b)?.[0] || Infinity,
+              valuesDCACheck.sort((a, b) => a - b)?.[0] || Infinity,
+            )
         this.highestLow.set(
           this.data?.settings.pair[0] ?? '',
           Math.max(min ?? 0, minDCACheck),
@@ -14486,14 +14553,33 @@ function createDCABotHelper<
           },
           new Map<string, number>(),
         )
+        const dcaByMarketMax = [...this.dealsDCAByMarket.entries()].reduce(
+          (acc, [k, v]) => {
+            const deal = this.getDeal(k)
+            const symbol = deal?.deal.symbol.symbol ?? ''
+            acc.set(
+              symbol,
+              this.isLong
+                ? Math.max(acc.get(symbol) ?? 0, v)
+                : Math.min(acc.get(symbol) ?? Infinity, v),
+            )
+            return acc
+          },
+          new Map<string, number>(),
+        )
         if (this.isLong) {
-          const slKeys = [...stopLossMin.keys(), ...indicatorUnpnlMin.keys()]
+          const slKeys = [
+            ...stopLossMin.keys(),
+            ...indicatorUnpnlMin.keys(),
+            ...dcaByMarketMax.keys(),
+          ]
           for (const key of slKeys) {
             this.highestLow.set(
               key,
               Math.max(
                 stopLossMin.get(key) ?? 0,
                 indicatorUnpnlMin.get(key) ?? 0,
+                dcaByMarketMax.get(key) ?? 0,
               ),
             )
           }
@@ -14539,11 +14625,16 @@ function createDCABotHelper<
               .join(', ')}`,
           )
         } else {
-          const slKeys = [...stopLossMin.keys(), ...indicatorUnpnlMin.keys()]
+          const slKeys = [
+            ...stopLossMin.keys(),
+            ...indicatorUnpnlMin.keys(),
+            ...dcaByMarketMax.keys(),
+          ]
           for (const key of slKeys) {
             this.lowestHigh.set(
               key,
               Math.min(
+                dcaByMarketMax.get(key) ?? Infinity,
                 stopLossMin.get(key) ?? Infinity,
                 indicatorUnpnlMin.get(key) ?? Infinity,
               ),
@@ -14600,6 +14691,7 @@ function createDCABotHelper<
       await this.setDealForStopLoss(deal)
       await this.setDealForIndicatorUnpnl(deal)
       this.setDealForDCALevelCheck(deal)
+      await this.setDealForDCAByMarketCheck(deal)
       await this.setDealForTPLevelCheck(deal)
     }
 
@@ -14614,6 +14706,7 @@ function createDCABotHelper<
       let sl = 0
       let countDCALevelCheck = 0
       let tp = 0
+      let dcaByMarket = 0
       for (const d of activeDeals) {
         if (await this.isDealForStopLoss(d)) {
           sl++
@@ -14623,6 +14716,9 @@ function createDCABotHelper<
         }
         if (await this.isDealForTPLevelCheck(d)) {
           tp++
+        }
+        if (await this.isDealForDCAByMarketCheck(d)) {
+          dcaByMarket++
         }
       }
       if (activeDeals.length && sl) {
@@ -14662,6 +14758,11 @@ function createDCABotHelper<
       } else {
         this.allowedMethods.delete('checkTPLevel')
       }
+      if (activeDeals.length && dcaByMarket) {
+        this.allowedMethods.add('checkDCAByMarketLevel')
+      } else {
+        this.allowedMethods.delete('checkDCAByMarketLevel')
+      }
       this.handleDebug(
         `Check deals allowed methods: ${[...this.allowedMethods].join(', ')}`,
       )
@@ -14675,7 +14776,8 @@ function createDCABotHelper<
         this.allowedMethods.has('checkTrailing') ||
         this.allowedMethods.has('checkDealsStopLoss') ||
         this.allowedMethods.has('checkIndicatorUnpnl') ||
-        this.allowedMethods.has('checkTPLevel')
+        this.allowedMethods.has('checkTPLevel') ||
+        this.allowedMethods.has('checkDCAByMarketLevel')
       )
     }
 
@@ -15690,6 +15792,9 @@ function createDCABotHelper<
 
     @IdMute(mutex, (botId: string) => `${botId}checkDCALevel`)
     public async checkDCALevel(_botId: string, price: number, symbol: string) {
+      if (!this.allowedMethods.has('checkDCALevel')) {
+        return
+      }
       for (const [d, v] of this.dealsDCALevelCheck) {
         if (!(this.isLong ? price <= v : price >= v)) {
           continue
@@ -15739,8 +15844,65 @@ function createDCABotHelper<
       }
     }
 
+    @IdMute(mutex, (botId: string) => `${botId}checkDCAByMarketLevel`)
+    public async checkDCAByMarketLevel(
+      _botId: string,
+      price: number,
+      symbol: string,
+    ) {
+      if (!this.allowedMethods.has('checkDCAByMarketLevel')) {
+        return
+      }
+      for (const [d, v] of this.dealsDCAByMarket) {
+        if (!(this.isLong ? price <= v : price >= v)) {
+          continue
+        }
+        const deal = this.getDeal(d)
+        if (!deal || deal.deal.symbol.symbol !== symbol) {
+          continue
+        }
+        const value = this.dealsDCAByMarket.get(deal.deal._id)
+        if (value) {
+          const trigger = this.isLong ? price <= value : price >= value
+          if (trigger) {
+            this.handleDebug(
+              `Deal: ${deal.deal._id} adding DCA level by DCA By Market check`,
+            )
+            const order = deal.currentOrders.find((o) => +o.price === value)
+            if (!order) {
+              return this.handleErrors(
+                `Cannot find order for DCA By Market level check`,
+                'checkDCAByMarketLevel',
+                '',
+                false,
+                false,
+                false,
+              )
+            }
+            const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
+            if (ed) {
+              const orderResult = await this.sendGridToExchange(
+                order,
+                {
+                  dealId: deal.deal._id,
+                  type: 'MARKET',
+                },
+                ed,
+              )
+              if (orderResult && orderResult.status === 'FILLED') {
+                this.processFilledOrder(orderResult)
+              }
+            }
+          }
+        }
+      }
+    }
+
     @IdMute(mutex, (botId: string) => `${botId}checkTPLevel`)
     public async checkTPLevel(_botId: string, price: number, symbol: string) {
+      if (!this.allowedMethods.has('checkTPLevel')) {
+        return
+      }
       for (const [d] of [...this.dealsForTPLevelCheck]) {
         const v = this.dealsForTPLevelCheck.get(d)
         if (!v) {
@@ -15931,6 +16093,7 @@ function createDCABotHelper<
             await this.checkDealsStopLoss(this.botId, msg.symbol)
             await this.checkDealsIndicatorUnpnl(this.botId, msg.symbol)
             await this.checkDCALevel(this.botId, msg.price, msg.symbol)
+            await this.checkDCAByMarketLevel(this.botId, msg.price, msg.symbol)
             await this.checkTPLevel(this.botId, msg.price, msg.symbol)
           }
         }

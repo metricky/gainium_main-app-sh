@@ -1100,6 +1100,7 @@ const dcaBotSettings = new Schema({
   minTp: String,
   closeDealType: { type: String, enum: CloseDCATypeEnum },
   closeOrderType: { type: String, enum: OrderTypeEnum },
+  dcaByMarket: Boolean,
   terminalDealType: { type: String, enum: TerminalDealTypeEnum },
   useMultiTp: Boolean,
   multiTp: [multiTP],
@@ -1342,6 +1343,7 @@ const comboBotSettings = new Schema<ComboBotSettings>({
   useSeparateMaxDealsOverAndUnderPerSymbol: Boolean,
   maxDealsOverPerSymbol: String,
   maxDealsUnderPerSymbol: String,
+  dcaByMarket: Boolean,
 })
 
 const botProfitChart: Schema<BotProfitChartSchema> = new Schema({
@@ -1745,6 +1747,7 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
     minTp: String,
     closeDealType: { type: String, enum: CloseDCATypeEnum },
     closeOrderType: { type: String, enum: OrderTypeEnum },
+    dcaByMarket: Boolean,
     orderSizeType: { type: String, enum: OrderSizeTypeEnum },
     useMultiSl: Boolean,
     multiSl: [multiTP],
@@ -1938,6 +1941,7 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
     comboUseSmartGrids: Boolean,
     comboActiveMinigrids: String,
     useActiveMinigrids: Boolean,
+    dcaByMarket: Boolean,
   },
   gridBreakpoints: [
     {

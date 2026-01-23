@@ -151,6 +151,7 @@ class DCAUtils {
       dcaVolumeBaseOn: settings.dcaVolumeBaseOn,
       dcaVolumeMaxValue: settings.dcaVolumeMaxValue,
       dcaVolumeRequiredChange: settings.dcaVolumeRequiredChange,
+      dcaByMarket: settings.dcaByMarket,
     }
     if (type === BotType.dca) {
       const set = settings as ComboBotSettings
