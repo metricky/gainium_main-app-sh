@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.1] - 2026-01-26
+### Fixed
+- Missed orders in search by status
+  
 ## [1.10.0] - 2026-01-23
 ### Added
 - DCA By Market

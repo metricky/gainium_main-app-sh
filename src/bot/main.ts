@@ -645,8 +645,11 @@ class MainBot<T extends IMainBot> {
     }
   }
 
-  removeOrderByStatus(id: string) {
+  removeOrderByStatus(id: string, skipStatus?: OrderStatusType) {
     for (const s of [...this.orderStatusMap.keys()]) {
+      if (skipStatus && s === skipStatus) {
+        continue
+      }
       const get = this.orderStatusMap.get(s)
       if (get) {
         get.delete(id)
@@ -665,11 +668,11 @@ class MainBot<T extends IMainBot> {
     if (!id) {
       return
     }
-    this.removeOrderByStatus(id)
     this.orderStatusMap.set(
       status,
       (this.orderStatusMap.get(status) ?? new Set()).add(id),
     )
+    this.removeOrderByStatus(id, status)
   }
 
   setOrderByDeal(dealId: string, id: string) {
