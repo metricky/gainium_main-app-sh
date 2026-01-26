@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.2] - 2026-01-26
+### Fixed
+- Hyperliquid reposition partially filled order
+
 ## [1.10.1] - 2026-01-26
 ### Fixed
 - Missed orders in search by status

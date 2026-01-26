@@ -6406,6 +6406,12 @@ function createDCABotHelper<
     ) {
       if (this.orders) {
         const find = this.getOrderFromMap(id)
+        if (this.hyperliquid && +(find?.executedQty || '0') > 0) {
+          this.handleLog(
+            `Hyperliquid base order ${id} has partial fill ${find?.executedQty}, skip check`,
+          )
+          return
+        }
         if (
           find &&
           find.status !== 'FILLED' &&
@@ -6460,6 +6466,12 @@ function createDCABotHelper<
       if (this.orders) {
         if (id) {
           const find = this.getOrderFromMap(id)
+          if (this.hyperliquid && +(find?.executedQty || '0') > 0) {
+            this.handleLog(
+              `Hyperliquid base order ${id} has partial fill ${find?.executedQty}, skip check`,
+            )
+            return
+          }
           if (
             find &&
             find.status !== 'FILLED' &&
@@ -6509,6 +6521,12 @@ function createDCABotHelper<
           const find = this.getOrdersByStatusAndDealId({ dealId }).find(
             (o) => o.typeOrder === TypeOrderEnum.dealStart,
           )
+          if (this.hyperliquid && +(find?.executedQty || '0') > 0) {
+            this.handleLog(
+              `Hyperliquid base order for deal ${dealId} has partial fill ${find?.executedQty}, skip check`,
+            )
+            return
+          }
           this.handleLog(
             `Deal ${dealId} ${
               find
