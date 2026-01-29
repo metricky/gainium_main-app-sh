@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.3] - 2026-01-29
+### Changed
+- Connect to user streams for active users
+
 ## [1.10.2] - 2026-01-26
 ### Fixed
 - Hyperliquid reposition partially filled order

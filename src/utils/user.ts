@@ -463,7 +463,11 @@ const connectUserBalance = async (
   ec = ExchangeChooser,
 ) => {
   const users = await userDb.readData(
-    id ? { _id: id } : {},
+    id
+      ? { _id: id }
+      : {
+          last_active: { $gt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000) },
+        },
     undefined,
     {},
     true,
