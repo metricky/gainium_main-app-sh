@@ -15889,7 +15889,7 @@ function createDCABotHelper<
             const order = deal.currentOrders.find((o) => +o.price === value)
             if (!order) {
               return this.handleErrors(
-                `Cannot find order for DCA By Market level check`,
+                `Cannot find order for DCA By Market level check ${value}, deal ${deal.deal._id}, orders count ${deal.currentOrders.length}`,
                 'checkDCAByMarketLevel',
                 '',
                 false,

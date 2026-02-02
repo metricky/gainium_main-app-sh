@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.4] - 2026-02-02
+### Changed
+- Enhanced log DCA by Market
+
 ## [1.10.3] - 2026-01-29
 ### Changed
 - Connect to user streams for active users
