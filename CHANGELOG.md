@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.5] - 2026-02-05
+### Fixed
+- Prevent duplicates in DCA by market orders
+
 ## [1.10.4] - 2026-02-02
 ### Changed
 - Enhanced log DCA by Market

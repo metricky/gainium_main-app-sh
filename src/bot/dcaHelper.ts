@@ -355,6 +355,7 @@ function createDCABotHelper<
     dealsForStopLossCombo: Map<string, DealStopLossCombo> = new Map()
     dealsDCALevelCheck: Map<string, number> = new Map()
     dealsDCAByMarket: Map<string, number> = new Map()
+    dealsByMarketProcessing: Set<string> = new Set()
     dealsForTPLevelCheck: Map<string, number> = new Map()
     startSent = false
     stopSent = false
@@ -14234,6 +14235,11 @@ function createDCABotHelper<
       this.dealsForIndicatorUnpnl.delete(dealId)
       this.dealsForTPLevelCheck.delete(dealId)
       this.dealsDCAByMarket.delete(dealId)
+      this.dealsByMarketProcessing.forEach((key) => {
+        if (key.includes(dealId)) {
+          this.dealsByMarketProcessing.delete(key)
+        }
+      })
     }
 
     async checkDealsForStopLossMethods() {
@@ -15872,6 +15878,13 @@ function createDCABotHelper<
         return
       }
       for (const [d, v] of this.dealsDCAByMarket) {
+        const key = `${v}@${d}`
+        if (this.dealsByMarketProcessing.has(key)) {
+          this.handleDebug(
+            `DCA By Market level ${v} for deal ${d} already processing`,
+          )
+          continue
+        }
         if (!(this.isLong ? price <= v : price >= v)) {
           continue
         }
@@ -15899,6 +15912,7 @@ function createDCABotHelper<
             }
             const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
             if (ed) {
+              this.dealsByMarketProcessing.add(key)
               const orderResult = await this.sendGridToExchange(
                 order,
                 {
@@ -15906,8 +15920,21 @@ function createDCABotHelper<
                   type: 'MARKET',
                 },
                 ed,
+                true,
               )
-              if (orderResult && orderResult.status === 'FILLED') {
+              if (!orderResult || typeof orderResult === 'string') {
+                this.handleDebug(
+                  `DCA By Market level ${value} for deal ${d} processed with error ${orderResult}. Skipping remove from processing set.`,
+                )
+              }
+              if (orderResult && typeof orderResult !== 'string') {
+                this.dealsByMarketProcessing.delete(key)
+              }
+              if (
+                orderResult &&
+                typeof orderResult !== 'string' &&
+                orderResult.status === 'FILLED'
+              ) {
                 this.processFilledOrder(orderResult)
               }
             }
@@ -16209,6 +16236,7 @@ function createDCABotHelper<
       this.currentMethods = new Map()
       this.afterIndicatorsConnected = []
       this.ordersInBetweenUpdates = new Set()
+      this.dealsByMarketProcessing = new Set()
       this.zeroFee = false
       this.startSent = false
       this.stopSent = false
