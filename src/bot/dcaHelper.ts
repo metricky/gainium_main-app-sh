@@ -15901,7 +15901,7 @@ function createDCABotHelper<
             )
             const order = deal.currentOrders.find((o) => +o.price === value)
             if (!order) {
-              return this.handleErrors(
+              this.handleErrors(
                 `Cannot find order for DCA By Market level check ${value}, deal ${deal.deal._id}, orders count ${deal.currentOrders.length}`,
                 'checkDCAByMarketLevel',
                 '',
@@ -15909,23 +15909,45 @@ function createDCABotHelper<
                 false,
                 false,
               )
+              continue
             }
             const ed = await this.getExchangeInfo(deal.deal.symbol.symbol)
             if (ed) {
               this.dealsByMarketProcessing.add(key)
-              const orderResult = await this.sendGridToExchange(
+              const orderPrepared = this.convertGridToOrder(
                 order,
                 {
                   dealId: deal.deal._id,
                   type: 'MARKET',
                 },
                 ed,
+              )
+              if (!orderPrepared) {
+                this.handleDebug(
+                  `DCA By Market level ${value} for deal ${d} cannot prepare order. Skipping remove from processing set.`,
+                )
+                continue
+              }
+              const orderResult = await this.sendOrderToExchange(
+                orderPrepared,
                 true,
               )
               if (!orderResult || typeof orderResult === 'string') {
                 this.handleDebug(
                   `DCA By Market level ${value} for deal ${d} processed with error ${orderResult}. Skipping remove from processing set.`,
                 )
+                if (typeof orderResult === 'string') {
+                  const setError = this.needToSendOrder(orderPrepared)
+                  this.handleOrderErrors(
+                    orderResult,
+                    orderPrepared,
+                    'limitOrders()',
+                    `Send new order request ${orderPrepared.clientOrderId}, qty ${orderPrepared.origQty}, price ${orderPrepared.price}, side ${orderPrepared.side}`,
+                    setError,
+                    setError,
+                  )
+                  continue
+                }
               }
               if (orderResult && typeof orderResult !== 'string') {
                 this.dealsByMarketProcessing.delete(key)

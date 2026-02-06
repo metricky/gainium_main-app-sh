@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.8] - 2026-02-06
+### Fixed
+- DCA by market errors not shown. 
+
 ## [1.10.7] - 2026-02-06
 ### Changed
 - Added OKX host app.okx.com

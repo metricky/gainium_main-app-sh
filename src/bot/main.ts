@@ -3504,7 +3504,7 @@ class MainBot<T extends IMainBot> {
     return result
   }
 
-  private needToSendOrder(order: Order) {
+  protected needToSendOrder(order: Order) {
     return (
       order.clientOrderId.indexOf('CMBH') === -1 &&
       order.clientOrderId.indexOf('CMB-H') === -1 &&
