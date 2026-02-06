@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.7] - 2026-02-06
+### Changed
+- Added OKX host app.okx.com
+
 ## [1.10.6] - 2026-02-06
 ### Changed
 - Add listen flag for candles provider
