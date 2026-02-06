@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.6] - 2026-02-06
+### Changed
+- Add listen flag for candles provider
+
 ## [1.10.5] - 2026-02-05
 ### Fixed
 - Prevent duplicates in DCA by market orders

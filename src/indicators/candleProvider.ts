@@ -32,11 +32,13 @@ type CandlesRequestMessage = {
 }
 
 export class CandlesProvider {
+  static skipListen = false
   static instance: CandlesProvider
 
-  static getInstance() {
+  static getInstance(skipListen = false) {
     if (!CandlesProvider.instance) {
       CandlesProvider.instance = new CandlesProvider()
+      CandlesProvider.skipListen = skipListen
     }
     return CandlesProvider.instance
   }
@@ -47,7 +49,7 @@ export class CandlesProvider {
 
   constructor() {
     this.getCandles = this.getCandles.bind(this)
-    if (isMainThread) {
+    if (isMainThread && !CandlesProvider.skipListen) {
       this.rabbitClient.listenWithCallback<
         CandlesRequestMessage,
         Promise<BaseReturn<CandleResponse[]>>
