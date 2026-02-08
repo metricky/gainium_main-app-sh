@@ -37,8 +37,8 @@ export class CandlesProvider {
 
   static getInstance(skipListen = false) {
     if (!CandlesProvider.instance) {
-      CandlesProvider.instance = new CandlesProvider()
       CandlesProvider.skipListen = skipListen
+      CandlesProvider.instance = new CandlesProvider()
     }
     return CandlesProvider.instance
   }
