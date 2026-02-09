@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.9] - 2026-02-09
+### Fixed 
+- Short required change calculation
+
 ## [1.10.8] - 2026-02-06
 ### Fixed
 - DCA by market errors not shown. 
