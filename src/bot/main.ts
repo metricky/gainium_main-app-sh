@@ -4292,14 +4292,12 @@ class MainBot<T extends IMainBot> {
               )
             : (this.okx || this.kucoinFutures) && this.futures
               ? Math.max(
-                  this.data.exchange === ExchangeEnum.okxLinear
-                    ? (ed?.quoteAsset.minAmount ?? 0)
-                    : 1,
+                  this.data.exchange === ExchangeEnum.okxLinear ? 0 : 1,
                   this.math.round(
                     +order.origQty *
                       (await this.getOKXDenominator(order.symbol)),
                     this.data.exchange === ExchangeEnum.okxLinear
-                      ? await this.baseAssetPrecision(order.symbol)
+                      ? /* await this.baseAssetPrecision(order.symbol) */ 8
                       : 0,
                   ),
                 )

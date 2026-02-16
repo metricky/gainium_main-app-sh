@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.10] - 2026-02-16
+### Fixed 
+- OKX position size and order size
+
 ## [1.10.9] - 2026-02-09
 ### Fixed 
 - Short required change calculation

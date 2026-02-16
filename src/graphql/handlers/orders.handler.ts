@@ -13,6 +13,7 @@ import {
   ExcludeDoc,
   DCABotSchema,
   DCABotSettings,
+  ClearPairsSchema,
 } from '../../../types'
 import {
   botDb,
@@ -197,8 +198,23 @@ export const getAllOpenPositions = async (
     queries.push(
       exchangeInstance
         .futures_getPositions()
-        .then((positions) => {
+        .then(async (positions) => {
           if (positions.status === StatusEnum.ok) {
+            let pairs: ClearPairsSchema[] = []
+            if (exchange.provider === ExchangeEnum.okxLinear) {
+              pairs =
+                (
+                  await pairDb.readData(
+                    {
+                      exchange: ExchangeEnum.okxLinear,
+                      pair: { $in: positions.data.map((p) => p.symbol) },
+                    },
+                    {},
+                    {},
+                    true,
+                  )
+                ).data?.result ?? []
+            }
             return positions.data
               .filter((p) => +p.positionAmt !== 0)
               .map((position) => ({
@@ -225,6 +241,15 @@ export const getAllOpenPositions = async (
                 quantity: `${Math.abs(+position.positionAmt)}`,
                 marginType: getPositionMarginType(position.isolated),
               }))
+              .map((position) => {
+                if (exchange.provider === ExchangeEnum.okxLinear) {
+                  const multiplier =
+                    pairs.find((p) => p.pair === position.symbol)?.baseAsset
+                      ?.multiplier ?? 1
+                  position.quantity = `${+position.quantity * multiplier}`
+                }
+                return position
+              })
           }
           return []
         })
