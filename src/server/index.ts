@@ -1,6 +1,7 @@
 import fs from 'fs'
+import path from 'path'
 import express from 'express'
-import rateLimit from 'express-rate-limit'
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit'
 import bodyParser from 'body-parser'
 import { ApolloServer } from '@apollo/server'
 import { expressMiddleware } from '@as-integrations/express5'
@@ -13,7 +14,9 @@ import userUtils from '../utils/user'
 import { liveupdate, StatusEnum } from '../../types'
 import methods from '../exchange/additionalAPIs'
 import _API, { middleware as _middleware, bodyMiddleware } from './api'
+import { v2API } from './v2'
 import swaggerUi from 'swagger-ui-express'
+import { apiReference } from '@scalar/express-api-reference'
 import cookieParser from 'cookie-parser'
 import logger from '../utils/logger'
 import saveFileHelper from '../utils/files'
@@ -49,6 +52,14 @@ const apiLimiter = rateLimit({
   max: 50,
   standardHeaders: false,
   legacyHeaders: true,
+  keyGenerator: (req) => {
+    return ipKeyGenerator(
+      (req.headers['x-forwarded-for'] as string) ||
+        req.socket.remoteAddress ||
+        req.ip ||
+        'unknown',
+    )
+  },
 })
 
 type ApolloContext = {
@@ -107,6 +118,41 @@ async function start() {
     }),
   )
 
+  // Scalar API Documentation v2.0
+  app.use(
+    '/api/docs/v2',
+    apiReference({
+      spec: {
+        url: '/api/v2/openapi.yaml',
+      },
+      configuration: {
+        theme: 'default',
+        layout: 'classic',
+        defaultHttpClient: {
+          targetKey: 'javascript',
+          clientKey: 'fetch',
+        },
+        metaData: {
+          title: 'Gainium API v2.0 Documentation',
+          description:
+            'Modern API documentation with field selection capabilities',
+        },
+      },
+    }),
+  )
+
+  // Serve OpenAPI v2.0 YAML spec
+  app.get('/api/v2/openapi.yaml', (_req, res) => {
+    res.setHeader('Content-Type', 'application/yaml')
+    try {
+      const specPath = path.join(__dirname, 'v2/openapi-v2.yaml')
+      const spec = fs.readFileSync(specPath, 'utf8')
+      res.send(spec)
+    } catch (error) {
+      res.status(404).json({ error: 'OpenAPI spec not found' })
+    }
+  })
+
   app.use(cors({ origin: cors_origin, credentials: true }))
 
   app.use('/api/serverSideBacktestSaveFile', bodyParser.json({ limit: '2gb' }))
@@ -135,6 +181,56 @@ async function start() {
 
   API.delete.forEach((fn, r) =>
     app.delete(r, apiLimiter, bodyMiddleware, middleware, fn),
+  )
+
+  const v2 = v2API()
+
+  v2.get.forEach((fn, r) =>
+    app.get(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.post.forEach((fn, r) =>
+    app.post(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.put.forEach((fn, r) =>
+    app.put(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.delete.forEach((fn, r) =>
+    app.delete(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.getPublic.forEach((fn, r) =>
+    app.get(r, apiLimiter, bodyMiddleware, ...fn.middlewares, fn.handler),
   )
 
   app.get('/datafeed_ws', async (_req, res) => {
