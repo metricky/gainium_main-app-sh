@@ -20,6 +20,7 @@ import {
   OrderTypeEnum,
   ExchangeEnum,
   MainBot,
+  BotStatusEnum,
 } from '../../types'
 import utils from '../utils'
 import { detailedDiff } from 'deep-object-diff'
@@ -644,6 +645,8 @@ type ResponseBot = {
   _id: string
   settings: { name: string }
   vars?: BotVars | null
+  status: BotStatusEnum
+  paperContext?: boolean
 }
 
 const prepareBots = async (bots: ResponseBot[]) => {
@@ -660,6 +663,8 @@ const prepareBots = async (bots: ResponseBot[]) => {
       return {
         _id: `${b._id}`,
         name,
+        status: b.status,
+        paperContext: b.paperContext ?? false,
       }
     }),
   )
@@ -679,6 +684,8 @@ export const getBotsByGlobalVar: getBotsByGlobalVarOverload = (async (
       _id: 1,
       'settings.name': 1,
       vars: 1,
+      status: 1,
+      paperContext: 1,
     }
     const options = { limit: 30 }
     const findDca = await dcaBotDb.readData<ResponseBot>(

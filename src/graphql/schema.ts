@@ -5413,6 +5413,8 @@ export const GlobalVariablesSchema = /* GraphQL */ `
   type getGlobalVariableRelatedBotsResponseDataBots {
     _id: String
     name: String
+    status: BotStatus
+    paperContext: Boolean
   }
   type getGlobalVariableRelatedBotsResponseData {
     type: botTypeEnum

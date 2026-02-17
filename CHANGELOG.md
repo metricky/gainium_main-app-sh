@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.11] - 2026-02-17
+### Changed 
+- Added paperContext and bot status to related bots query
+
 ## [1.10.10] - 2026-02-16
 ### Fixed 
 - OKX position size and order size
