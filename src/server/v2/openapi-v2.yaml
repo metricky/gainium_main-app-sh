@@ -1,0 +1,5781 @@
+openapi: 3.1.0
+info:
+  title: Gainium API v2.0
+  version: 2.0.0
+  description: |
+    # Gainium API v2.0 with Field Selection
+
+    API v2.0 introduces efficient field selection to reduce payload size by 70-90%.
+
+    ## Authentication
+
+    All REST requests must contain the following headers:
+
+    - **token**: Public key of the user  
+    - **time**: Timestamp of the request in ms  
+    - **signature**: The base64-encoded signature  
+
+    ### To sign a request:
+
+    1. Use API-Secret to encrypt the prehash string {body+method+endpoint+timestamp} with sha256 HMAC
+    2. The request body is a JSON string and need to be the same with the parameters passed by the API
+    3. After that, use base64-encode to encrypt the result in step 1 again
+
+    **Example:**
+    ```javascript
+    crypto.createHmac('sha256', secret).update(body + method + endpoint + time).digest('base64')
+    ```
+
+    ## Field Selection
+
+    All GET endpoints in v2 support field selection via the `fields` query parameter.
+
+    ### Field Presets
+
+    - **minimal**: Essential fields only (IDs, names, status)
+    - **standard**: Commonly requested fields (default)
+    - **extended**: Additional useful fields
+    - **full**: All available fields
+
+    ### Custom Fields
+
+    Specify custom fields with comma-separated list:
+    ```
+    ?fields=_id,uuid,settings.name,profit.total
+    ```
+
+    Supports dot notation for nested fields:
+    ```
+    ?fields=settings.name,settings.pair,profit.total,profit.totalUsd
+    ```
+
+    ### Response Metadata
+
+    All responses include metadata with selected fields:
+    ```json
+    {
+      "status": "OK",
+      "reason": null,
+      "data": [...],
+      "meta": {
+        "page": 1,
+        "total": 150,
+        "count": 150,
+        "onPage": 10,
+        "fields": ["_id", "uuid", "settings.name", ...]
+      }
+    }
+    ```
+
+    ### Benefits
+
+    - **70-90% smaller payloads** with minimal/standard presets
+    - **Faster response times** via MongoDB projection
+    - **Reduced network bandwidth** usage
+    - **Better API performance** overall
+servers:
+  - url: http://localhost:7503
+    description: Local development server
+  - url: https://api.gainium.io
+    description: Production server
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: token
+      description: Public API key
+    SecretAuth:
+      type: apiKey
+      in: header
+      name: secret
+      description: Your HMAC secret (used to sign requests, never sent)
+    TimeHeader:
+      type: apiKey
+      in: header
+      name: time
+      description: Request timestamp in milliseconds. Auto-generated — do not fill in
+    SignatureAuth:
+      type: apiKey
+      in: header
+      name: signature
+      description: HMAC-SHA256 signature of {body+method+endpoint+timestamp}. Auto-generated — do not fill in
+  parameters:
+    FieldsParam:
+      name: fields
+      in: query
+      required: false
+      description: |
+        Field selection parameter. Accepts:
+        - **Presets**: `minimal`, `standard`, `extended`, `full`
+        - **Custom fields**: Comma-separated list (e.g., `_id,uuid,settings.name,profit.total`)
+        - **Dot notation**: For nested fields (e.g., `settings.name`, `profit.total`)
+
+        Default: `standard`
+      schema:
+        type: string
+        default: standard
+        examples:
+          - minimal
+          - standard
+          - extended
+          - full
+          - _id,uuid,settings.name,profit.total
+    PageParam:
+      name: page
+      in: query
+      required: false
+      description: Page number for pagination (1-based)
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+        example: 1
+  schemas:
+    ResponseMeta:
+      type: object
+      required:
+        - page
+        - total
+        - count
+        - onPage
+        - fields
+      properties:
+        page:
+          type: integer
+          description: Current page number (1-based)
+          example: 1
+        total:
+          type: integer
+          description: Total number of items matching query
+          example: 150
+        count:
+          type: integer
+          description: Total items in database
+          example: 150
+        onPage:
+          type: integer
+          description: Number of items on current page
+          example: 10
+        fields:
+          type: array
+          description: List of fields included in response
+          items:
+            type: string
+          example:
+            - _id
+            - uuid
+            - settings.name
+            - status
+            - exchange
+    APIResponse:
+      type: object
+      required:
+        - status
+        - reason
+        - data
+      properties:
+        status:
+          type: string
+          enum:
+            - OK
+            - NOTOK
+          description: Request execution status
+          example: OK
+        reason:
+          type: string
+          nullable: true
+          description: Error reason if status is NOTOK
+          example: null
+    APIListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of response items
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    DCABotListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of DCA bots
+              items:
+                $ref: "#/components/schemas/DCABotExtended"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    ComboBotListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of Combo bots
+              items:
+                $ref: "#/components/schemas/ComboBotExtended"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    GridBotListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of Grid bots
+              items:
+                $ref: "#/components/schemas/GridBotExtended"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    DealListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of deals (DCA or Combo)
+              items:
+                $ref: "#/components/schemas/DCADealExtended"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    BalanceListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of balances
+              items:
+                $ref: "#/components/schemas/BalanceStandard"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    ExchangeListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of exchanges
+              items:
+                $ref: "#/components/schemas/ExchangeStandard"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    ScreenerListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of screener coins
+              items:
+                $ref: "#/components/schemas/ScreenerExtended"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    ErrorResponse:
+      type: object
+      required:
+        - status
+        - reason
+      properties:
+        status:
+          type: string
+          enum:
+            - NOTOK
+          example: NOTOK
+        reason:
+          type: string
+          description: Error description
+          examples:
+            - Invalid fields parameter
+            - Bot not found
+            - Unauthorized
+    BaseSettings:
+      type: object
+      description: BaseSettings configuration
+      properties:
+        name:
+          type: string
+          example: null
+        profitCurrency:
+          type: object
+        orderFixedIn:
+          type: object
+        pair:
+          type: string
+          description: Trading pair symbol
+          example: BTC/USDT
+        futures:
+          type: boolean
+          description: Enable futures trading
+          example: false
+        coinm:
+          type: boolean
+          description: Coin-margined futures
+          example: false
+        marginType:
+          type: string
+          description: Margin type for futures
+          enum:
+            - inherit
+            - cross
+            - isolated
+          example: cross
+        leverage:
+          type: number
+          description: Leverage multiplier
+          example: 10
+        strategy:
+          type: string
+          description: Trading strategy direction (long or short)
+          enum:
+            - LONG
+            - SHORT
+          example: LONG
+    BotSettings:
+      type: object
+      description: BotSettings configuration
+      properties: {}
+      allOf:
+        - $ref: "#/components/schemas/BaseSettings"
+        - type: object
+          properties:
+            pair:
+              type: string
+              description: Trading pair symbol
+              example: BTC/USDT
+            topPrice:
+              type: number
+              description: Top price of grid range
+              example: 55000
+            lowPrice:
+              type: number
+              description: Bottom price of grid range
+              example: 45000
+            levels:
+              type: number
+              description: Number of grid levels
+              example: 10
+            gridStep:
+              type: number
+              description: Step between grid levels
+              example: 1000
+            budget:
+              type: number
+              description: Total budget allocated to bot
+              example: 10000
+            ordersInAdvance:
+              type: number
+              description: Orders to place in advance
+              example: 5
+            useOrderInAdvance:
+              type: boolean
+              description: Enable advance order placement
+              example: true
+            prioritize:
+              type: object
+              description: Prioritization settings
+              example: volume
+            sellDisplacement:
+              type: number
+              description: Displacement for sell orders
+              example: 0.5
+            gridType:
+              type: object
+              description: Type of grid
+              example: arithmetic
+            tpSl:
+              type: boolean
+              description: Combined TP/SL for grid
+              example: false
+            tpSlCondition:
+              type: object
+              description: Condition for TP/SL trigger
+              example: any
+            tpSlAction:
+              type: object
+              description: Action for TP/SL
+              example: close
+            sl:
+              type: boolean
+              description: Enable stop loss for grid
+              example: false
+            slCondition:
+              type: object
+              description: Stop loss trigger condition
+              example: price
+            slAction:
+              type: object
+              description: Stop loss action
+              example: closeAll
+            tpPerc:
+              type: number
+              description: Take profit percentage
+              example: "2.5"
+            slPerc:
+              type: number
+              description: Stop loss percentage
+              example: "1.5"
+            tpTopPrice:
+              type: number
+              description: Take profit top price
+              example: 60000
+            slLowPrice:
+              type: number
+              description: Stop loss bottom price
+              example: 40000
+            updatedBudget:
+              type: boolean
+              description: Budget has been updated
+              example: false
+            useStartPrice:
+              type: boolean
+              description: Use custom start price
+              example: false
+            startPrice:
+              type: string
+              description: Custom start price
+              example: "50000"
+            futures:
+              type: boolean
+              description: Enable futures trading
+              example: false
+            newProfit:
+              type: boolean
+              description: New profit calculation
+              example: false
+            newBalance:
+              type: boolean
+              description: New balance mode
+              example: false
+            coinm:
+              type: boolean
+              description: Coin-margined futures
+              example: false
+            strategy:
+              type: string
+              description: Trading strategy direction (long or short)
+              enum:
+                - LONG
+                - SHORT
+              example: LONG
+            futuresStrategy:
+              type: string
+              description: Futures trading strategy
+              enum:
+                - LONG
+                - SHORT
+                - NEUTRAL
+              example: LONG
+            slLimit:
+              type: boolean
+              description: Use limit orders for stop loss
+              example: false
+            tpSlLimit:
+              type: boolean
+              description: Use limit orders for TP/SL
+              example: false
+            feeOrder:
+              type: boolean
+              description: Include fees in order calculation
+              example: true
+            lastPriceRangeAlert:
+              type: number
+              description: Alert when price near range
+              example: 5
+            skipBalanceCheck:
+              type: boolean
+              description: Skip balance verification
+              example: false
+    DCABotSettings:
+      type: object
+      description: DCABotSettings configuration
+      properties: {}
+      allOf:
+        - $ref: "#/components/schemas/BaseSettings"
+        - type: object
+          properties:
+            skipBalanceCheck:
+              type: boolean
+              description: Skip balance verification
+              example: false
+            dcaCondition:
+              type: string
+              description: Condition for DCA orders
+              enum:
+                - percentage
+                - indicators
+                - custom
+                - dynamicAr
+              example: percentage
+            dcaVolumeBaseOn:
+              type: string
+              description: How DCA volume is calculated
+              enum:
+                - scale
+                - change
+              example: scale
+            dcaVolumeRequiredChange:
+              type: string
+              description: Required change for volume adjustment
+              example: "10"
+            dcaVolumeMaxValue:
+              type: string
+              description: Maximum volume value
+              example: "1000"
+            dcaVolumeRequiredChangeRef:
+              type: string
+              description: Reference for volume change (TP or average)
+              enum:
+                - tp
+                - avg
+              example: tp
+            baseSlOn:
+              type: string
+              description: Stop loss based on start or average price
+              enum:
+                - start
+                - avg
+              example: avg
+            dcaCustom:
+              type: array
+              description: Custom DCA configuration array
+              items:
+                $ref: "#/components/schemas/DCACustom"
+              example: []
+            strategy:
+              type: string
+              description: Trading strategy direction (long or short)
+              enum:
+                - LONG
+                - SHORT
+              example: LONG
+            baseOrderSize:
+              type: string
+              description: Size of the initial base order
+              example: "100"
+            baseOrderPrice:
+              type: string
+              description: Price for the base order
+              example: "50000"
+            useLimitPrice:
+              type: boolean
+              description: Use limit price for orders
+              example: false
+            startOrderType:
+              type: string
+              description: Order type for opening position
+              enum:
+                - LIMIT
+                - MARKET
+              example: MARKET
+            startCondition:
+              type: string
+              description: Condition to start a new deal
+              enum:
+                - ASAP
+                - Manual
+                - TradingviewSignals
+                - Timer
+                - TechnicalIndicators
+              example: ASAP
+            tpPerc:
+              type: string
+              description: Take profit percentage
+              example: "2.5"
+            slPerc:
+              type: string
+              description: Stop loss percentage
+              example: "1.5"
+            orderSize:
+              type: string
+              description: Size of each order
+              example: "100"
+            step:
+              type: string
+              description: Price deviation % for next DCA order
+              example: "1.5"
+            ordersCount:
+              type: number
+              description: Maximum number of DCA orders
+              example: 5
+            activeOrdersCount:
+              type: number
+              description: Number of active orders to maintain
+              example: 3
+            volumeScale:
+              type: string
+              description: Volume multiplier for each DCA order
+              example: "1.5"
+            stepScale:
+              type: string
+              description: Step multiplier for each DCA order
+              example: "1.2"
+            minimumDeviation:
+              type: string
+              description: Minimum price deviation to trigger DCA
+              example: "0.5"
+            useTp:
+              type: boolean
+              description: Enable take profit
+              example: true
+            useSl:
+              type: boolean
+              description: Enable stop loss
+              example: true
+            useSmartOrders:
+              type: boolean
+              description: Enable smart order execution
+              example: false
+            minOpenDeal:
+              type: string
+              description: Minimum price to open deals
+              example: "1"
+            maxOpenDeal:
+              type: string
+              description: Maximum price to open deals
+              example: "5"
+            useDca:
+              type: boolean
+              description: Enable Dollar Cost Averaging
+              example: true
+            hodlDay:
+              type: string
+              description: Days between opening new deal
+              example: "7"
+            hodlAt:
+              type: string
+              description: Time to open new deal
+              example: "23:59"
+            hodlHourly:
+              type: boolean
+              description: Hold on hourly basis
+              example: false
+            hodlNextBuy:
+              type: number
+              description: Next buy time in hours
+              example: 24
+            maxNumberOfOpenDeals:
+              type: string
+              description: Maximum concurrent open deals
+              example: "3"
+            indicators:
+              type: array
+              description: Array of technical indicators
+              items:
+                $ref: "#/components/schemas/SettingsIndicators"
+              example: []
+            indicatorGroups:
+              type: array
+              description: Groups of indicator conditions
+              items:
+                $ref: "#/components/schemas/SettingsIndicatorGroup"
+              example: []
+            type:
+              type: string
+              description: Bot or indicator type
+              enum:
+                - regular
+                - terminal
+                - trigger
+              example: regular
+            orderSizeType:
+              type: string
+              description: Order reference
+              enum:
+                - base
+                - quote
+                - percTotal
+                - percFree
+                - usd
+              example: quote
+            limitTimeout:
+              type: string
+              description: Timeout for limit orders (seconds)
+              example: "300"
+            useLimitTimeout:
+              type: boolean
+              description: Enable limit order timeout
+              example: false
+            notUseLimitReposition:
+              type: boolean
+              description: Disable limit order repositioning
+              example: false
+            cooldownAfterDealStart:
+              type: boolean
+              description: Enable cooldown after deal starts
+              example: false
+            cooldownAfterDealStartUnits:
+              type: string
+              description: Time units for cooldown
+              enum:
+                - seconds
+                - minutes
+                - hours
+                - days
+              example: minutes
+            cooldownAfterDealStartInterval:
+              type: number
+              description: Cooldown interval value
+              example: 60
+            cooldownAfterDealStartOption:
+              type: string
+              description: Apply cooldown per symbol or bot
+              enum:
+                - symbol
+                - bot
+              example: symbol
+            cooldownAfterDealStop:
+              type: boolean
+              description: Enable cooldown after deal stops
+              example: false
+            cooldownAfterDealStopUnits:
+              type: string
+              description: Time units for stop cooldown
+              enum:
+                - seconds
+                - minutes
+                - hours
+                - days
+              example: minutes
+            cooldownAfterDealStopInterval:
+              type: number
+              description: Stop cooldown interval
+              example: 30
+            cooldownAfterDealStopOption:
+              type: string
+              description: Apply stop cooldown per symbol or bot
+              enum:
+                - symbol
+                - bot
+              example: bot
+            moveSL:
+              type: boolean
+              description: Enable moving stop loss
+              example: false
+            moveSLTrigger:
+              type: string
+              description: Trigger value for moving SL
+              example: "2.0"
+            moveSLValue:
+              type: string
+              description: New SL value when triggered
+              example: "0.5"
+            moveSLForAll:
+              type: boolean
+              description: Apply moving SL to all orders
+              example: false
+            trailingSl:
+              type: boolean
+              description: Enable trailing stop loss
+              example: false
+            trailingTp:
+              type: boolean
+              description: Enable trailing take profit
+              example: false
+            trailingTpPerc:
+              type: string
+              description: Trailing take profit percentage
+              example: "1.5"
+            useCloseAfterX:
+              type: boolean
+              description: Enable close after X feature
+              example: false
+            useCloseAfterXwin:
+              type: boolean
+              description: Close after X wins
+              example: false
+            closeAfterXwin:
+              type: string
+              description: Number of wins before closing
+              example: "5"
+            useCloseAfterXloss:
+              type: boolean
+              description: Close after X losses
+              example: false
+            closeAfterXloss:
+              type: string
+              description: Number of losses before closing
+              example: "3"
+            useCloseAfterXprofit:
+              type: boolean
+              description: Close after reaching profit
+              example: false
+            closeAfterXprofitValue:
+              type: string
+              description: Profit value to trigger close
+              example: "1000"
+            closeAfterXprofitCond:
+              type: string
+              description: Condition for profit close
+              enum:
+                - cd
+                - cu
+                - gt
+                - lt
+              example: gt
+            closeAfterX:
+              type: string
+              description: Close after X value
+              example: "10"
+            useCloseAfterXopen:
+              type: boolean
+              description: Close after X open deals
+              example: false
+            closeAfterXopen:
+              type: string
+              description: Number of open deals before closing
+              example: "10"
+            pair:
+              type: array
+              description: Trading pair symbol
+              items:
+                type: string
+              example: BTC/USDT
+            useMulti:
+              type: boolean
+              description: Enable multiple pairs trading
+              example: false
+            maxDealsPerPair:
+              type: string
+              description: Max deals per trading pair
+              example: "2"
+            ignoreStartDeals:
+              type: boolean
+              description: Ignore deals in start condition check
+              example: false
+            comboTpBase:
+              type: string
+              description: Base for combo TP calculation
+              enum:
+                - full
+                - filled
+              example: full
+            botStart:
+              type: string
+              description: How the bot is started
+              enum:
+                - manual
+                - webhook
+                - indicators
+                - price
+              example: manual
+            useBotController:
+              type: boolean
+              description: Enable bot controller
+              example: false
+            stopType:
+              type: string
+              description: How to stop the bot
+              enum:
+                - leave
+                - cancel
+                - closeByLimit
+                - closeByMarket
+              example: cancel
+            stopStatus:
+              type: string
+              description: Bot status for stopping
+              enum:
+                - open
+                - closed
+                - range
+                - error
+                - archive
+                - monitoring
+              example: monitoring
+            dealCloseCondition:
+              type: string
+              description: Condition for closing deal
+              enum:
+                - tp
+                - techInd
+                - manual
+                - webhook
+                - dynamicAr
+              example: tp
+            dealCloseConditionSL:
+              type: string
+              description: Condition for SL close
+              enum:
+                - tp
+                - techInd
+                - manual
+                - webhook
+                - dynamicAr
+              example: tp
+            useMinTP:
+              type: boolean
+              description: Use minimum take profit
+              example: false
+            minTp:
+              type: string
+              description: Minimum take profit value
+              example: "1.0"
+            closeDealType:
+              type: string
+              description: Type of deal close action
+              enum:
+                - leave
+                - cancel
+                - closeByLimit
+                - closeByMarket
+              example: closeByLimit
+            closeOrderType:
+              type: string
+              description: Order type for closing position
+              enum:
+                - LIMIT
+                - MARKET
+              example: LIMIT
+            terminalDealType:
+              type: string
+              description: Terminal deal handling type
+              enum:
+                - simple
+                - smart
+                - import
+              example: smart
+            useMultiTp:
+              type: boolean
+              description: Enable multiple take profit levels
+              example: false
+            multiTp:
+              type: array
+              description: Array of take profit targets
+              items:
+                $ref: "#/components/schemas/MultiTP"
+              example: []
+            useMultiSl:
+              type: boolean
+              description: Enable multiple stop loss levels
+              example: false
+            pairPrioritization:
+              type: string
+              description: How pairs are prioritized
+              enum:
+                - alphabetical
+                - random
+              example: alphabetical
+            multiSl:
+              type: array
+              description: Array of stop loss targets
+              items:
+                $ref: "#/components/schemas/MultiTP"
+              example: []
+            marginType:
+              type: string
+              description: Margin type for futures
+              enum:
+                - inherit
+                - cross
+                - isolated
+              example: cross
+            leverage:
+              type: number
+              description: Leverage multiplier
+              example: 10
+            futures:
+              type: boolean
+              description: Enable futures trading
+              example: false
+            importFrom:
+              type: string
+              description: Import settings from bot ID
+              example: bot-123
+            gridLevel:
+              type: string
+              description: Current grid level
+              example: "5"
+            useVolumeFilter:
+              type: boolean
+              description: Filter pairs by volume
+              example: false
+            useRelativeVolumeFilter:
+              type: boolean
+              description: Filter by relative volume
+              example: false
+            volumeTop:
+              type: string
+              description: Top volume threshold
+              example: "100"
+            relativeVolumeTop:
+              type: string
+              description: Relative volume threshold
+              example: "50"
+            volumeValue:
+              type: string
+              description: Volume filter value
+              enum:
+                - top25
+                - top100
+                - top200
+                - custom
+              example: top100
+            relativeVolumeValue:
+              type: string
+              description: Relative volume filter value
+              enum:
+                - top25
+                - top100
+                - top200
+                - custom
+              example: top100
+            useFixedTPPrices:
+              type: boolean
+              description: Use fixed TP prices
+              example: false
+            useFixedSLPrices:
+              type: boolean
+              description: Use fixed SL prices
+              example: false
+            fixedTpPrice:
+              type: string
+              description: Fixed take profit price
+              example: "55000"
+            fixedSlPrice:
+              type: string
+              description: Fixed stop loss price
+              example: "48000"
+            baseStep:
+              type: string
+              description: Base step for grid
+              example: "1.0"
+            baseGridLevels:
+              type: string
+              description: Base number of grid levels
+              example: "10"
+            useActiveMinigrids:
+              type: boolean
+              description: Enable active minigrids
+              example: false
+            comboActiveMinigrids:
+              type: string
+              description: Number of active minigrids
+              example: "3"
+            comboSlLimit:
+              type: boolean
+              description: Use limit orders for combo SL
+              example: false
+            comboTpLimit:
+              type: boolean
+              description: Use limit orders for combo TP
+              example: false
+            closeByTimer:
+              type: boolean
+              description: Enable close by timer
+              example: false
+            closeByTimerValue:
+              type: number
+              description: Time value before closing
+              example: 24
+            closeByTimerUnits:
+              type: string
+              description: Time units for timer
+              enum:
+                - seconds
+                - minutes
+                - hours
+                - days
+              example: hours
+            feeOrder:
+              type: boolean
+              description: Include fees in order calculation
+              example: true
+            maxDealsPerHigherTimeframe:
+              type: string
+              description: Max deals per timeframe
+              example: "5"
+            useMaxDealsPerHigherTimeframe:
+              type: boolean
+              description: Enable max deals per timeframe
+              example: false
+            remainderFullAmount:
+              type: boolean
+              description: Use full amount for remainder
+              example: false
+            autoRebalancing:
+              type: boolean
+              description: Enable automatic rebalancing
+              example: false
+            adaptiveClose:
+              type: boolean
+              description: Use adaptive close strategy
+              example: false
+            useStaticPriceFilter:
+              type: boolean
+              description: Enable static price filter
+              example: false
+            useCooldown:
+              type: boolean
+              description: Enable cooldown feature
+              example: false
+            useVolumeFilterAll:
+              type: boolean
+              description: Apply volume filter to all pairs
+              example: false
+            useDynamicPriceFilter:
+              type: boolean
+              description: Enable dynamic price filter
+              example: false
+            dynamicPriceFilterDeviation:
+              type: string
+              description: Deviation for dynamic price filter
+              example: "5.0"
+            dynamicPriceFilterOverValue:
+              type: string
+              description: Over value for price filter
+              example: "10"
+            dynamicPriceFilterUnderValue:
+              type: string
+              description: Under value for price filter
+              example: "10"
+            dynamicPriceFilterPriceType:
+              type: string
+              description: Price type for filter (avg/entry)
+              enum:
+                - avg
+                - entry
+              example: avg
+            dynamicPriceFilterDirection:
+              type: string
+              description: Filter direction
+              enum:
+                - over
+                - under
+                - overAndUnder
+              example: overAndUnder
+            useRiskReward:
+              type: boolean
+              description: Enable risk/reward ratio
+              example: false
+            rrSlType:
+              type: string
+              description: Type of risk/reward stop loss
+              enum:
+                - fixed
+                - indicator
+              example: fixed
+            rrSlFixedValue:
+              type: string
+              description: Fixed SL value for risk/reward
+              example: "2.0"
+            riskSlType:
+              type: string
+              description: Risk stop loss type
+              enum:
+                - perc
+                - fixed
+              example: perc
+            riskSlAmountPerc:
+              type: string
+              description: Risk amount as percentage
+              example: "2.0"
+            riskSlAmountValue:
+              type: string
+              description: Risk amount value
+              example: "100"
+            riskUseTpRatio:
+              type: boolean
+              description: Use TP ratio in risk management
+              example: false
+            riskTpRatio:
+              type: string
+              description: Take profit ratio
+              example: "2.0"
+            riskMinPositionSize:
+              type: string
+              description: Minimum position size
+              example: "50"
+            riskMaxPositionSize:
+              type: string
+              description: Maximum position size
+              example: "5000"
+            dynamicArLockValue:
+              type: boolean
+              description: Lock dynamic AR value
+              example: false
+            comboUseSmartGrids:
+              type: boolean
+              description: Enable smart grids for combo bot
+              example: false
+            comboSmartGridsCount:
+              type: string
+              description: Number of smart grids
+              example: "5"
+            riskMaxSl:
+              type: string
+              description: Maximum stop loss
+              example: "5.0"
+            riskMinSl:
+              type: string
+              description: Minimum stop loss
+              example: "0.5"
+            scaleDcaType:
+              type: string
+              description: Type of DCA scaling
+              enum:
+                - percentage
+                - atr
+                - adr
+              example: percentage
+            startDealLogic:
+              type: string
+              description: Logic for start deal conditions (AND/OR)
+              enum:
+                - and
+                - or
+              example: and
+            stopDealLogic:
+              type: string
+              description: Logic for stop deal conditions
+              enum:
+                - and
+                - or
+              example: or
+            stopDealSlLogic:
+              type: string
+              description: Logic for stop loss conditions
+              enum:
+                - and
+                - or
+              example: and
+            stopBotLogic:
+              type: string
+              description: Logic for stop bot conditions
+              enum:
+                - and
+                - or
+              example: or
+            useRiskReduction:
+              type: boolean
+              description: Enable risk reduction
+              example: false
+            riskReductionValue:
+              type: string
+              description: Risk reduction percentage
+              example: "10"
+            useReinvest:
+              type: boolean
+              description: Enable profit reinvestment
+              example: false
+            reinvestValue:
+              type: string
+              description: Percentage of profit to reinvest
+              example: "50"
+            startBotPriceCondition:
+              type: string
+              description: Price condition to start bot
+              enum:
+                - cd
+                - cu
+                - gt
+                - lt
+              example: gt
+            startBotPriceValue:
+              type: string
+              description: Price value for bot start
+              example: "50000"
+            stopBotPriceCondition:
+              type: string
+              description: Price condition to stop bot
+              enum:
+                - cd
+                - cu
+                - gt
+                - lt
+              example: lt
+            stopBotPriceValue:
+              type: string
+              description: Price value for bot stop
+              example: "45000"
+            startBotLogic:
+              type: string
+              description: Logic for start bot conditions
+              enum:
+                - and
+                - or
+              example: and
+            botActualStart:
+              type: string
+              description: Actual trigger for bot start
+              enum:
+                - manual
+                - webhook
+                - indicators
+                - price
+              example: indicators
+            useNoOverlapDeals:
+              type: boolean
+              description: Prevent overlapping deals
+              example: false
+            useSeparateMaxDealsOverAndUnder:
+              type: boolean
+              description: Separate limits for over/under deals
+              example: false
+            maxDealsOver:
+              type: string
+              description: Max deals above entry
+              example: "3"
+            maxDealsUnder:
+              type: string
+              description: Max deals below entry
+              example: "5"
+            useSeparateMaxDealsOverAndUnderPerSymbol:
+              type: boolean
+              description: Per-symbol over/under limits
+              example: false
+            maxDealsOverPerSymbol:
+              type: string
+              description: Max over deals per symbol
+              example: "2"
+            maxDealsUnderPerSymbol:
+              type: string
+              description: Max under deals per symbol
+              example: "3"
+            dcaByMarket:
+              type: boolean
+              description: Execute DCA orders at market price
+              example: false
+    ComboBotSettings:
+      type: object
+      description: ComboBotSettings configuration
+      properties: {}
+      allOf:
+        - $ref: "#/components/schemas/DCABotSettings"
+        - type: object
+          properties:
+            gridLevel:
+              type: string
+              description: Current grid level
+              example: "5"
+            newBalance:
+              type: boolean
+              description: New balance mode
+              example: false
+            feeOrder:
+              type: boolean
+              description: Include fees in order calculation
+              example: true
+    SettingsIndicators:
+      type: object
+      description: SettingsIndicators configuration
+      properties:
+        type:
+          type: string
+          description: Bot or indicator type
+          enum:
+            - RSI
+            - ADX
+            - BBW
+            - BB
+            - MACD
+            - Stoch
+            - CCI
+            - AO
+            - StochRSI
+            - WR
+            - BullBear
+            - UO
+            - IC
+            - TV
+            - MA
+            - SR
+            - QFL
+            - MFI
+            - PSAR
+            - VO
+            - MOM
+            - BBWP
+            - ECD
+            - XO
+            - MAR
+            - BBPB
+            - DIV
+            - ST
+            - PC
+            - ATR
+            - PP
+            - ADR
+            - ATH
+            - KC
+            - KCPB
+            - UNPNL
+            - DC
+            - OBFVG
+          example: regular
+        indicatorLength:
+          type: number
+          description: Indicator period length
+          example: 14
+        indicatorValue:
+          type: string
+          description: Indicator value threshold
+          example: "70"
+        indicatorCondition:
+          type: string
+          description: Comparison condition
+          enum:
+            - cd
+            - cu
+            - gt
+            - lt
+          example: gt
+        indicatorInterval:
+          type: string
+          description: Chart timeframe
+          enum:
+            - 1m
+            - 3m
+            - 5m
+            - 15m
+            - 30m
+            - 1h
+            - 2h
+            - 4h
+            - 8h
+            - 1d
+            - 1w
+          example: oneH
+        groupId:
+          type: string
+          description: Indicator group ID
+          example: group-1
+        uuid:
+          type: string
+          description: Unique identifier
+          example: 123e4567-e89b-12d3-a456-426614174000
+        signal:
+          type: string
+          description: Trading signal type
+          enum:
+            - strongBuy
+            - strongSell
+            - buy
+            - sell
+            - bothBuy
+            - bothSell
+          example: strongBuy
+        condition:
+          type: string
+          description: Check condition timing
+          enum:
+            - every
+            - entry
+          example: entry
+        checkLevel:
+          type: number
+          description: Level to check indicator
+          example: 1
+        maType:
+          type: string
+          description: Moving average type
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: ema
+        maCrossingValue:
+          type: string
+          description: MA crossing reference
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: sma
+        maCrossingLength:
+          type: number
+          description: Crossing MA length
+          example: 50
+        maCrossingInterval:
+          type: string
+          description: Crossing MA timeframe
+          enum:
+            - 1m
+            - 3m
+            - 5m
+            - 15m
+            - 30m
+            - 1h
+            - 2h
+            - 4h
+            - 8h
+            - 1d
+            - 1w
+          example: 4h
+        maUUID:
+          type: string
+          description: MA indicator UUID reference
+          example: "123e4567"
+        bbCrossingValue:
+          type: string
+          description: Bollinger Band line to cross
+          enum:
+            - middle
+            - upper
+            - lower
+          example: upper
+        stochSmoothK:
+          type: number
+          description: Stochastic K smoothing
+          example: 3
+        stochSmoothD:
+          type: number
+          description: Stochastic D smoothing
+          example: 3
+        stochUpper:
+          type: string
+          description: Stochastic overbought level
+          example: "80"
+        stochLower:
+          type: string
+          description: Stochastic oversold level
+          example: "20"
+        stochRSI:
+          type: number
+          description: Stochastic RSI period
+          example: 14
+        rsiValue:
+          type: string
+          description: RSI value (K or D line)
+          enum:
+            - k
+            - d
+          example: k
+        rsiValue2:
+          type: string
+          description: Second RSI value
+          enum:
+            - k
+            - d
+            - custom
+          example: d
+        valueInsteadof:
+          type: number
+          description: Custom value instead of price
+          example: 50000
+        leftBars:
+          type: number
+          description: Bars to check on left
+          example: 5
+        rightBars:
+          type: number
+          description: Bars to check on right
+          example: 5
+        srCrossingValue:
+          type: string
+          description: Support or resistance line
+          enum:
+            - support
+            - resistance
+          example: resistance
+        basePeriods:
+          type: number
+          description: Base period for calculation
+          example: 20
+        pumpPeriods:
+          type: number
+          description: Pump detection periods
+          example: 5
+        pump:
+          type: number
+          description: Pump threshold value
+          example: 10
+        interval:
+          type: number
+          description: Calculation interval
+          example: 14
+        baseCrack:
+          type: number
+          description: Base crack threshold
+          example: 5
+        indicatorAction:
+          type: string
+          description: Action triggered by indicator
+          enum:
+            - startDeal
+            - closeDeal
+            - startDca
+            - stopBot
+            - riskReward
+            - startBot
+          example: startDeal
+        section:
+          type: string
+          description: Settings section (tp/sl/dca/controller)
+          enum:
+            - tp
+            - sl
+            - dca
+            - controller
+          example: sl
+        psarStart:
+          type: number
+          description: Parabolic SAR start value
+          example: 0.02
+        psarInc:
+          type: number
+          description: Parabolic SAR increment
+          example: 0.02
+        psarMax:
+          type: number
+          description: Parabolic SAR maximum
+          example: 0.2
+        stochRange:
+          type: string
+          description: Stochastic range to check
+          enum:
+            - upper
+            - lower
+            - both
+            - none
+          example: upper
+        minPercFromLast:
+          type: string
+          description: Minimum % from last signal
+          example: "1.0"
+        orderSize:
+          type: string
+          description: Size of each order
+          example: "100"
+        keepConditionBars:
+          type: string
+          description: Bars to keep condition
+          example: "3"
+        voShort:
+          type: number
+          description: Volume oscillator short period
+          example: 5
+        voLong:
+          type: number
+          description: Volume oscillator long period
+          example: 10
+        uoFast:
+          type: number
+          description: Ultimate Oscillator fast period
+          example: 7
+        uoMiddle:
+          type: number
+          description: Ultimate Oscillator middle period
+          example: 14
+        uoSlow:
+          type: number
+          description: Ultimate Oscillator slow period
+          example: 28
+        momSource:
+          type: string
+          description: Momentum source price
+          example: close
+        bbwpLookback:
+          type: number
+          description: BBWP lookback period
+          example: 252
+        ecdTrigger:
+          type: string
+          description: ECD trigger type
+          enum:
+            - bearish
+            - bullish
+            - both
+          example: bullish
+        xOscillator2length:
+          type: number
+          description: Second oscillator length
+          example: 14
+        xOscillator2Interval:
+          type: string
+          description: Second oscillator timeframe
+          enum:
+            - 1m
+            - 3m
+            - 5m
+            - 15m
+            - 30m
+            - 1h
+            - 2h
+            - 4h
+            - 8h
+            - 1d
+            - 1w
+          example: 1h
+        xOscillator2voLong:
+          type: number
+          description: Second oscillator long period
+          example: 10
+        xOscillator2voShort:
+          type: number
+          description: Second oscillator short period
+          example: 5
+        xoUUID:
+          type: string
+          description: Cross oscillator UUID
+          example: "123e4567"
+        mar1length:
+          type: number
+          description: First MA length for ratio
+          example: 20
+        mar1type:
+          type: string
+          description: First MA type
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: ema
+        mar2length:
+          type: number
+          description: Second MA length for ratio
+          example: 50
+        mar2type:
+          type: string
+          description: Second MA type
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: sma
+        bbwMult:
+          type: number
+          description: Bollinger Band width multiplier
+          example: 2
+        bbwMa:
+          type: string
+          description: BB moving average type
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: sma
+        bbwMaLength:
+          type: number
+          description: BB MA length
+          example: 20
+        macdFast:
+          type: number
+          description: MACD fast period
+          example: 12
+        macdSlow:
+          type: number
+          description: MACD slow period
+          example: 26
+        macdMaSource:
+          type: string
+          description: MACD MA source type
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: ema
+        macdMaSignal:
+          type: string
+          description: MACD signal line type
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: ema
+        divOscillators:
+          type: array
+          description: Oscillators for divergence
+          items:
+            type: object
+          example: []
+        divType:
+          type: string
+          description: Divergence type
+          enum:
+            - Bullish
+            - Bearish
+            - Hidden Bullish
+            - Hidden Bearish
+            - Any Bullish
+            - Any Bearish
+          example: Bullish
+        divMinCount:
+          type: number
+          description: Minimum divergence count
+          example: 2
+        factor:
+          type: number
+          description: Supertrend multiplier factor
+          example: 3
+        atrLength:
+          type: number
+          description: ATR period length
+          example: 10
+        stCondition:
+          type: string
+          description: Supertrend condition
+          enum:
+            - up
+            - down
+            - upToDown
+            - downToUp
+          example: up
+        pcUp:
+          type: string
+          description: Price change up threshold
+          example: "5"
+        pcDown:
+          type: string
+          description: Price change down threshold
+          example: "5"
+        pcCondition:
+          type: string
+          description: Price change direction
+          enum:
+            - UP
+            - DOWN
+          example: UP
+        pcValue:
+          type: string
+          description: Price change value
+          example: "10"
+        ppHighLeft:
+          type: number
+          description: Pivot high left bars
+          example: 10
+        ppHighRight:
+          type: number
+          description: Pivot high right bars
+          example: 10
+        ppLowLeft:
+          type: number
+          description: Pivot low left bars
+          example: 10
+        ppLowRight:
+          type: number
+          description: Pivot low right bars
+          example: 10
+        ppMult:
+          type: number
+          description: Pivot point multiplier
+          example: 1
+        ppValue:
+          type: string
+          description: Pivot point value type
+          enum:
+            - HH
+            - HL
+            - LH
+            - LL
+            - Any High
+            - Any Low
+            - SL
+            - WL
+            - SH
+            - WH
+            - anyL
+            - anyH
+            - BullM
+            - BearM
+            - SBullBoS
+            - SBearBoS
+            - SBullCHoCH
+            - SBearCHoCH
+            - IBullBoS
+            - IBearBoS
+            - IBullCHoCH
+            - IBearCHoCH
+            - IAnyBull
+            - IAnyBear
+            - SAnyBull
+            - SAnyBear
+            - BullAnyBoS
+            - BearAnyBoS
+            - BullAnyCHoCH
+            - BearAnyCHoCH
+          example: HH
+        ppType:
+          type: string
+          description: Pivot point type
+          enum:
+            - Price Based
+            - Event Based
+            - Market Based
+          example: Price Based
+        riskAtrMult:
+          type: string
+          description: ATR multiplier for risk
+          example: "2.0"
+        dynamicArFactor:
+          type: string
+          description: Dynamic AR factor
+          example: "1.5"
+        athLookback:
+          type: number
+          description: All-time high lookback period
+          example: 365
+        kcMa:
+          type: string
+          description: Keltner Channel MA type
+          enum:
+            - ema
+            - sma
+            - wma
+            - price
+            - dema
+            - tema
+            - vwma
+            - hma
+            - rma
+          example: ema
+        kcRange:
+          type: string
+          description: Keltner Channel range type
+          enum:
+            - ATR
+            - TR
+            - R
+          example: ATR
+        kcRangeLength:
+          type: number
+          description: Keltner Channel range length
+          example: 20
+        unpnlValue:
+          type: number
+          description: Unrealized PnL threshold
+          example: 100
+        unpnlCondition:
+          type: string
+          description: Unrealized PnL condition
+          enum:
+            - cd
+            - cu
+            - gt
+            - lt
+          example: gt
+        dcValue:
+          type: string
+          description: Donchian Channel line
+          enum:
+            - basis
+            - lower
+            - upper
+          example: upper
+        obfvgValue:
+          type: string
+          description: Order block/FVG type
+          enum:
+            - bullish
+            - bearish
+            - any
+          example: bullish
+        obfvgRef:
+          type: string
+          description: Order block/FVG reference
+          enum:
+            - high
+            - low
+            - middle
+          example: high
+    SettingsIndicatorGroup:
+      type: object
+      description: SettingsIndicatorGroup configuration
+      properties:
+        id:
+          type: string
+          description: Group or item identifier
+          example: group-1
+        logic:
+          type: string
+          description: Logic operator (AND/OR)
+          enum:
+            - and
+            - or
+          example: and
+        action:
+          type: string
+          description: Action to trigger
+          enum:
+            - startDeal
+            - closeDeal
+            - startDca
+            - stopBot
+            - riskReward
+            - startBot
+          example: startDeal
+        section:
+          type: string
+          description: Settings section (tp/sl/dca/controller)
+          enum:
+            - tp
+            - sl
+            - dca
+            - controller
+          example: sl
+    MultiTP:
+      type: object
+      description: MultiTP configuration
+      properties:
+        target:
+          type: string
+          description: Target profit/loss percentage
+          example: "2.5"
+        amount:
+          type: string
+          description: Amount to close at target
+          example: "50"
+        uuid:
+          type: string
+          description: Unique identifier
+          example: 123e4567-e89b-12d3-a456-426614174000
+        fixed:
+          type: string
+          description: Fixed price target
+          example: "55000"
+    DCACustom:
+      type: object
+      description: DCACustom configuration
+      properties:
+        step:
+          type: string
+          description: Price deviation % for next DCA order
+          example: "1.5"
+        size:
+          type: string
+          description: Custom order size
+          example: "150"
+        uuid:
+          type: string
+          description: Unique identifier
+          example: 123e4567-e89b-12d3-a456-426614174000
+    DCABotMinimal:
+      type: object
+      description: Minimal DCA bot representation
+      properties:
+        _id:
+          type: string
+          description: Internal MongoDB ID
+          example: 507f1f77bcf86cd799439011
+        uuid:
+          type: string
+          format: uuid
+          description: Unique bot identifier
+          example: 550e8400-e29b-41d4-a716-446655440000
+        settings:
+          type: object
+          properties:
+            name:
+              type: string
+              description: Bot name
+              example: BTC Long DCA
+        status:
+          type: string
+          enum:
+            - open
+            - closed
+            - range
+            - error
+            - archive
+            - monitoring
+          description: Bot operational status
+          example: open
+        exchange:
+          type: string
+          description: Exchange code
+          example: binance
+        exchangeUUID:
+          type: string
+          format: uuid
+          description: Exchange connection UUID
+          example: 650e8400-e29b-41d4-a716-446655440001
+        paperContext:
+          type: boolean
+          nullable: true
+          description: Paper trading context ID (null for real trading)
+          example: false
+    DCABotStandard:
+      allOf:
+        - $ref: "#/components/schemas/DCABotMinimal"
+        - type: object
+          description: Standard DCA bot representation with commonly used fields
+          properties:
+            settings:
+              type: object
+              properties:
+                pair:
+                  type: array
+                  description: Trading pairs
+                  items:
+                    type: string
+                  example:
+                    - BTC_USDT
+                profitCurrency:
+                  type: string
+                  enum:
+                    - base
+                    - quote
+                  description: Profit currency
+                  example: quote
+            profit:
+              type: object
+              description: Bot profit statistics
+              properties:
+                total:
+                  type: number
+                  description: Total profit in profit currency
+                  example: 0.025
+                totalUsd:
+                  type: number
+                  description: Total profit in USD
+                  example: 1250.5
+            deals:
+              type: object
+              description: Deal statistics
+              properties:
+                all:
+                  type: integer
+                  description: Total number of deals
+                  example: 42
+                active:
+                  type: integer
+                  description: Number of active deals
+                  example: 3
+            created:
+              type: string
+              format: date-time
+              description: Bot creation timestamp
+              example: "2024-01-15T10:30:00Z"
+            updated:
+              type: string
+              format: date-time
+              description: Last update timestamp
+              example: "2024-01-20T14:22:33Z"
+    DCABotExtended:
+      allOf:
+        - $ref: "#/components/schemas/DCABotStandard"
+        - type: object
+          description: Extended DCA bot representation with comprehensive settings
+          properties:
+            symbol:
+              type: array
+              description: Trading symbols
+              items:
+                type: object
+                properties:
+                  key:
+                    type: string
+                    description: Symbol key (e.g., BTC_USDT)
+                    example: BTC_USDT
+                  value:
+                    type: object
+                    description: Symbol-specific settings
+                    properties:
+                      symbol:
+                        type: string
+                        description: Trading symbol
+                        example: BTCUSDT
+                      baseAsset:
+                        type: string
+                        description: Base asset of the pair
+                        example: BTC
+                      quoteAsset:
+                        type: string
+                        description: Quote asset of the pair
+                        example: USDT
+            settings:
+              description: DCA bot settings configuration
+              $ref: "#/components/schemas/DCABotSettings"
+            profitToday:
+              type: object
+              nullable: true
+              description: Today's profit tracking
+              properties:
+                start:
+                  type: number
+                  example: 1705305600000
+                end:
+                  type: number
+                  example: 1705391999999
+                totalToday:
+                  type: number
+                  example: 45.2
+                totalTodayUsd:
+                  type: number
+                  example: 45.2
+            statusReason:
+              type: string
+              nullable: true
+              description: Reason for current status
+              example: null
+            previousStatus:
+              type: string
+              enum:
+                - open
+                - closed
+                - range
+                - error
+                - archive
+                - monitoring
+              nullable: true
+              description: Previous bot status
+              example: null
+            currentBalances:
+              type: array
+              nullable: true
+              description: Current asset balances
+              items:
+                type: object
+                properties:
+                  key: 
+                    type: string
+                    description: Asset symbol
+                    example: BTC
+                  value:
+                    type: number
+                    description: Initial balance of the asset
+                    example: 0.1
+            initialBalances:
+              type: array
+              nullable: true
+              description: Initial asset balances when bot started
+              items:
+                type: object
+                properties:
+                  key: 
+                    type: string
+                    description: Asset symbol
+                    example: BTC
+                  value:
+                    type: number
+                    description: Initial balance of the asset
+                    example: 0.1
+            usage:
+              type: object
+              nullable: true
+              description: Bot usage
+              properties:
+                current:
+                  type: object
+                  description: Current usage
+                  properties:
+                    base: 
+                      type: number
+                      description: Current base asset usage
+                      example: 0.05
+                    quote:
+                      type: number                     
+                      description: Current quote asset usage
+                      example: 2500
+                max:
+                  type: object
+                  description: Maximum usage
+                  properties:
+                    base: 
+                      type: number
+                      description: Maximum base asset usage
+                      example: 0.1
+                    quote:
+                      type: number                     
+                      description: Maximum quote asset usage
+                      example: 5000
+            userId:
+              type: string
+              description: User ID who owns the bot
+              example: 123456789
+            workingShift:
+              type: array
+              items:
+                type: object
+                properties:
+                  start:
+                    type: number
+                    description: Shift start timestamp
+                    example: 1705305600000
+                  end:
+                    type: number
+                    description: Shift end timestamp
+                    example: 1705391999999
+            assets:
+              type: object
+              nullable: true
+              description: Asset-specific information
+              properties:
+                used:
+                  type: array
+                  description: Assets currently used in active deals
+                  items:
+                    type: object
+                    properties:
+                      key:
+                        type: string
+                        description: Asset symbol
+                        example: BTC
+                      value:
+                        type: number
+                        description: Amount of the asset used in active deals
+                        example: 0.05
+                required:
+                  type: array
+                  description: Assets required for next DCA orders
+                  items:
+                    type: object
+                    properties:
+                      key:
+                        type: string
+                        description: Asset symbol
+                        example: USDT
+                      value:
+                        type: number
+                        description: Amount of the asset required for next DCA orders
+                        example: 2500
+    ComboBotMinimal:
+      $ref: "#/components/schemas/DCABotMinimal"
+    ComboBotStandard:
+      $ref: "#/components/schemas/DCABotStandard"
+    ComboBotExtended:
+      $ref: "#/components/schemas/DCABotExtended"
+    GridBotMinimal:
+      type: object
+      description: Minimal Grid bot representation
+      properties:
+        _id:
+          type: string
+          example: 507f1f77bcf86cd799439011
+        uuid:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+        settings:
+          type: object
+          properties:
+            name:
+              type: string
+              example: BTC Grid 30k-35k
+        status:
+          type: string
+          enum:
+            - open
+            - closed
+            - range
+            - error
+            - archive
+            - monitoring
+          example: open
+        exchange:
+          type: string
+          example: binance
+        exchangeUUID:
+          type: string
+          format: uuid
+          example: 650e8400-e29b-41d4-a716-446655440001
+        paperContext:
+          type: boolean
+          nullable: true
+          example: false
+    GridBotStandard:
+      allOf:
+        - $ref: "#/components/schemas/GridBotMinimal"
+        - type: object
+          properties:
+            settings:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                  description: Trading symbol
+                  example: BTCUSDT
+            profit:
+              type: object
+              properties:
+                total:
+                  type: number
+                  example: 0.15
+                totalUsd:
+                  type: number
+                  example: 4500
+            levels:
+              type: object
+              description: Grid level statistics
+              properties:
+                active:
+                  type: object
+                  properties:
+                    buy:
+                      type: integer
+                      example: 4
+                    sell:
+                      type: integer
+                      example: 4
+                all:
+                  type: object
+                  properties:
+                    buy:
+                      type: integer
+                      example: 5
+                    sell:
+                      type: integer
+                      example: 5
+            created:
+              type: number
+              description: Creation timestamp
+              example: 1705305600000
+            updated:
+              type: number
+              description: Last update timestamp
+              example: 1705391999999
+    GridBotExtended:
+      allOf:
+        - $ref: "#/components/schemas/GridBotStandard"
+        - type: object
+          properties:
+            settings:
+              $ref: "#/components/schemas/BotSettings"         
+            initialPrice:
+              type: number
+              nullable: true
+              description: Initial price when bot started
+              example: 32500
+            initialPriceFrom:
+              type: string
+              enum:
+                - swap
+                - user
+                - start
+              nullable: true
+              description: Source of initial price
+              example: swap
+            initialPriceStart:
+              type: number
+              nullable: true
+              description: Initial start price
+              example: null
+            initialPriceStartFrom:
+              type: string
+              enum:
+                - swap
+                - user
+                - start
+              nullable: true
+              description: Source of initial start price
+              example: swap
+            transactionsCount:
+              type: object
+              nullable: true
+              description: Transaction counters
+              properties:
+                buy:
+                  type: integer
+                  example: 15
+                sell:
+                  type: integer
+                  example: 13
+            statusReason:
+              type: string
+              nullable: true
+              example: null
+    DCADealMinimal:
+      type: object
+      description: Minimal DCA deal representation
+      properties:
+        _id:
+          type: string
+          example: 507f1f77bcf86cd799439012
+        botId:
+          type: string
+          description: Parent bot UUID
+          example: 550e8400-e29b-41d4-a716-446655440000
+        status:
+          type: string
+          enum:
+            - closed
+            - open
+            - start
+            - error
+            - canceled
+          description: Deal status
+          example: open
+        symbol:
+          type: object
+          properties:
+            symbol:
+              type: string
+              example: BTC_USDT
+        profit:
+          type: object
+          properties:
+            total:
+              type: number
+              description: Total profit in base currency
+              example: 0.0015
+            totalUsd:
+              type: number
+              description: Total profit in USD
+              example: 75
+        created:
+          type: number
+          description: Deal creation timestamp
+          example: 1705737300000
+    DCADealStandard:
+      allOf:
+        - $ref: "#/components/schemas/DCADealMinimal"
+        - type: object
+          properties:
+            exchange:
+              type: string
+              example: binance
+            exchangeUUID:
+              type: string
+              format: uuid
+              example: 650e8400-e29b-41d4-a716-446655440001
+            paperContext:
+              type: boolean
+              nullable: true
+              example: false
+            avgPrice:
+              type: string
+              description: Average entry price
+              example: "42350.50"
+            lastPrice:
+              type: string
+              description: Current market price
+              example: "43120.00"
+            levels:
+              type: object
+              description: Safety order levels
+              properties:
+                all:
+                  type: integer
+                  description: Total levels configured
+                  example: 5
+                complete:
+                  type: integer
+                  description: Completed levels
+                  example: 2
+            cost:
+              type: number
+              description: Total investment
+              example: 500
+            value:
+              type: number
+              description: Current position value
+              example: 575
+            updated:
+              type: number
+              description: Last update timestamp
+              example: 1705823400000
+            closed:
+              type: number
+              nullable: true
+              description: Deal close timestamp (null if active)
+              example: null
+    DCADealExtended:
+      allOf:
+        - $ref: "#/components/schemas/DCADealStandard"
+        - type: object
+          properties:
+            settings:
+              type: object
+              description: Deal-specific settings
+              properties:
+                baseOrderSize:
+                  type: string
+                  example: "100"
+                safetyOrderSize:
+                  type: string
+                  example: "100"
+                maxSafetyTradesCount:
+                  type: integer
+                  example: 5
+            initialBalances:
+              type: object
+              description: Initial asset balances
+              additionalProperties:
+                type: number
+              example:
+                BTC: 0.01
+                USDT: 1000
+            currentBalances:
+              type: object
+              description: Current asset balances
+              additionalProperties:
+                type: number
+              example:
+                BTC: 0.0118
+                USDT: 575
+            feePaid:
+              type: number
+              description: Total fees paid
+              example: 2.5
+            usage:
+              type: object
+              description: Resource usage stats
+            stats:
+              type: object
+              description: Deal statistics
+            strategy:
+              type: object
+              description: Strategy information
+    ComboDealMinimal:
+      $ref: "#/components/schemas/DCADealMinimal"
+    ComboDealStandard:
+      $ref: "#/components/schemas/DCADealStandard"
+    ComboDealExtended:
+      $ref: "#/components/schemas/DCADealExtended"
+    BalanceMinimal:
+      type: object
+      description: Minimal balance representation
+      required:
+        - asset
+        - free
+        - locked
+        - exchangeUUID
+      properties:
+        asset:
+          type: string
+          description: Asset symbol
+          example: BTC
+        free:
+          type: string
+          description: Available balance
+          example: "0.5"
+        locked:
+          type: string
+          description: Locked balance (in orders)
+          example: "0.1"
+        exchangeUUID:
+          type: string
+          format: uuid
+          description: Exchange connection UUID
+          example: 650e8400-e29b-41d4-a716-446655440001
+    BalanceStandard:
+      allOf:
+        - $ref: "#/components/schemas/BalanceMinimal"
+        - type: object
+          properties:
+            exchange:
+              type: string
+              description: Exchange code
+              example: binance
+            paperContext:
+              type: boolean
+              nullable: true
+              description: Whether this is a paper trading context
+              example: false
+    ExchangeMinimal:
+      type: object
+      description: Minimal exchange representation
+      required:
+        - code
+        - market
+        - id
+        - name
+      properties:
+        code:
+          type: string
+          description: Exchange code
+          example: binance
+        market:
+          type: string
+          description: Market type
+          enum:
+            - spot
+            - futures
+          example: spot
+        id:
+          type: string
+          description: Exchange connection ID
+          example: 650e8400-e29b-41d4-a716-446655440001
+        name:
+          type: string
+          description: Exchange display name
+          example: Binance Main
+    ExchangeStandard:
+      allOf:
+        - $ref: "#/components/schemas/ExchangeMinimal"
+        - type: object
+          properties:
+            type:
+              type: string
+              description: Connection type
+              enum:
+                - real
+                - paper
+              example: real
+    ScreenerMinimal:
+      type: object
+      description: Minimal screener coin representation
+      required:
+        - symbol
+        - name
+        - currentPrice
+        - priceChangePercentage24h
+        - totalVolume
+        - marketCap
+        - marketCapRank
+      properties:
+        symbol:
+          type: string
+          description: Coin symbol
+          example: BTC
+        name:
+          type: string
+          description: Coin full name
+          example: Bitcoin
+        currentPrice:
+          type: number
+          description: Current price in USD
+          example: 43250.5
+        priceChangePercentage24h:
+          type: number
+          description: 24h price change percentage
+          example: 2.5
+        totalVolume:
+          type: number
+          description: 24h trading volume
+          example: 28500000000
+        marketCap:
+          type: number
+          description: Market capitalization
+          example: 850000000000
+        marketCapRank:
+          type: integer
+          description: Market cap rank
+          example: 1
+    ScreenerStandard:
+      allOf:
+        - $ref: "#/components/schemas/ScreenerMinimal"
+        - type: object
+          properties:
+            priceChangePercentage1h:
+              type: number
+              description: 1h price change percentage
+              example: 0.5
+            priceChangePercentage7d:
+              type: number
+              description: 7d price change percentage
+              example: 8.2
+            volumeChange24h:
+              type: number
+              description: 24h volume change percentage
+              example: 15.3
+            marketCapChangePercentage24h:
+              type: number
+              description: 24h market cap change percentage
+              example: 2.8
+            volatility1d:
+              type: number
+              description: 1 day volatility metric
+              example: 0.025
+            liquidityScore:
+              type: number
+              description: Liquidity score (0-100)
+              example: 95
+            category:
+              type: string
+              description: Coin category
+              example: Layer 1
+    ScreenerExtended:
+      allOf:
+        - $ref: "#/components/schemas/ScreenerStandard"
+        - type: object
+          properties:
+            priceChangePercentage30d:
+              type: number
+              description: 30d price change percentage
+              example: 25.5
+            priceChangePercentage1y:
+              type: number
+              description: 1 year price change percentage
+              example: 125.8
+            atlChangePercentage:
+              type: number
+              description: Change from all-time low percentage
+              example: 45000
+            athChangePercentage:
+              type: number
+              description: Change from all-time high percentage
+              example: -35.5
+            volatility3d:
+              type: number
+              description: 3 day volatility
+              example: 0.035
+            volatility7d:
+              type: number
+              description: 7 day volatility
+              example: 0.045
+            exchanges:
+              type: array
+              description: List of exchanges trading this coin
+              items:
+                type: string
+              example:
+                - binance
+                - coinbase
+                - kraken
+            sparkline:
+              type: array
+              description: Price sparkline data (7 days)
+              items:
+                type: number
+              example:
+                - 42000
+                - 42500
+                - 43000
+                - 42800
+                - 43250
+    UpdateDCABotInput:
+      type: object
+      description: Input schema for updating DCA bot settings
+      properties:
+        pair:
+          type: array
+          description: Trading pairs. In the format {base}_{quote}
+          items:
+            type: string
+            example: BTC_USDT
+        name:
+          type: string
+          description: Bot name
+        step:
+          type: string
+          description: Step percentage between DCA orders
+        ordersCount:
+          type: integer
+          description: DCA orders count
+        tpPerc:
+          type: string
+          description: Take profit percent
+        slPerc:
+          type: string
+          description: Stop loss percent
+        profitCurrency:
+          type: string
+          enum:
+            - base
+            - quote
+          description: Profit currency
+        orderSize:
+          type: string
+          description: DCA order qty of the deal.
+        baseOrderSize:
+          type: string
+          description: Base order qty of the deal.
+        orderSizeType:
+          type: string
+          description: Currency reference
+          enum:
+            - base
+            - quote
+            - percFree
+            - percTotal
+            - usd
+        startOrderType:
+          type: string
+          description: Currency reference
+          enum:
+            - limit
+            - market
+        useRiskReduction:
+          type: boolean
+          description: Use risk reduction. Requires riskReductionValue value
+        riskReductionValue:
+          type: string
+          description: Risk reduction value in %
+        useReinvest:
+          type: boolean
+          description: Use reinvest profit. Requires reinvestValue value
+        reinvestValue:
+          type: string
+          description: Reinvest profit value in %
+        skipBalanceCheck:
+          type: boolean
+          description: Skip balance check
+        startCondition:
+          type: string
+          description: Start deal condition
+          enum:
+            - ASAP
+            - Manual
+        maxNumberOfOpenDeals:
+          type: string
+          description: Max number of open deals
+        useStaticPriceFilter:
+          type: boolean
+          description: Use static price filter. Require minOpenDeal or maxOpenDeal
+        minOpenDeal:
+          type: string
+          description: Minimum price for open deal
+        maxOpenDeal:
+          type: string
+          description: Maximum price for open deal
+        useDynamicPriceFilter:
+          type: boolean
+          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+        dynamicPriceFilterDirection:
+          type: string
+          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          enum:
+            - over
+            - under
+            - overAndUnder
+        dynamicPriceFilterOverValue:
+          type: string
+          description: Over value
+        dynamicPriceFilterUnderValue:
+          type: string
+          description: Over value
+        dynamicPriceFilterPriceType:
+          type: string
+          description: Price sourse
+          enum:
+            - avg
+            - entry
+        useNoOverlapDeals:
+          type: boolean
+          description: Use no overlap deals in dynamic price filter
+        useCooldown:
+          type: boolean
+          description: Use cooldown
+        cooldownAfterDealStart:
+          type: boolean
+          description: Use cooldown after deal start. Require cooldownAfterDealStartInterval and cooldownAfterDealStartUnits
+        cooldownAfterDealStartInterval:
+          type: number
+          description: Cooldown after deal start interval
+        cooldownAfterDealStartUnits:
+          type: string
+          description: Cooldown after deal start units
+          enum:
+            - seconds
+            - minutes
+            - hours
+            - days
+        cooldownAfterDealStop:
+          type: boolean
+          description: Use cooldown after deal stop. Require cooldownAfterDealStopInterval and cooldownAfterDealStopUnits
+        cooldownAfterDealStopInterval:
+          type: number
+          description: Cooldown after deal stop interval
+        cooldownAfterDealStopUnits:
+          type: string
+          description: Cooldown after deal stop units
+          enum:
+            - seconds
+            - minutes
+            - hours
+            - days
+        useTp:
+          type: boolean
+          description: Use take profit
+        useSl:
+          type: boolean
+          description: Use stop loss
+        useDca:
+          type: boolean
+          description: Use DCA orders
+        useSmartOrders:
+          type: boolean
+          description: Use smart orders
+        activeOrdersCount:
+          type: integer
+          description: Active orders count
+        volumeScale:
+          type: string
+          description: Volume scale of DCA orders
+        stepScale:
+          type: string
+          description: Step scale of DCA orders
+        dealCloseConditionSL:
+          type: string
+          description: Deal close options.
+          enum:
+            - tp
+        useMultiSl:
+          type: boolean
+          description: Use multiple SL targets. multiSl array should be provided.
+        multiSl:
+          type: array
+          description: Multiple SL targets.
+          items:
+            type: object
+            description: Multiple SL target object
+            properties:
+              target:
+                type: string
+                description: Target level in %
+                example: -10
+              amount:
+                type: string
+                description: Amount to close in %
+                example: 50
+              uuid:
+                type: string
+                description: Unique Id of the target
+        baseSlOn:
+          type: string
+          description: Base SL on. Default - avg.
+          enum:
+            - start
+            - avg
+        trailingSl:
+          type: boolean
+          description: Use trailing SL. Cannot be checked with active moveSL or multiSl.
+        moveSL:
+          type: boolean
+          description: Use move SL. Cannot be checked with active trailingSl or multiSl. Require moveSLTrigger and moveSLValue.
+        moveSLTrigger:
+          type: string
+          description: Move SL trigger in %.
+          example: 10
+        moveSLValue:
+          type: string
+          description: Move SL value in %.
+          example: 5
+        dealCloseCondition:
+          type: string
+          description: Deal close options. For deal only possible option - tp.
+          enum:
+            - tp
+        closeByTimer:
+          type: boolean
+          description: Close deal by timer. Require closeByTimerValue and closeByTimerUnits.
+        closeByTimerValue:
+          type: integer
+          description: Close deal by timer value.
+        closeByTimerUnits:
+          type: string
+          description: Close deal by timer units.
+          enum:
+            - seconds
+            - minutes
+            - hours
+            - days
+        useMultiTp:
+          type: boolean
+          description: Use multiple TP targets. multiTp array should be provided.
+        multiTp:
+          type: array
+          description: Multiple TP targets.
+          items:
+            type: object
+            description: Multiple TP target object
+            properties:
+              target:
+                type: string
+                description: Target level in %
+                example: 10
+              amount:
+                type: string
+                description: Amount to close in %
+                example: 50
+              uuid:
+                type: string
+                description: Unique Id of the target
+        trailingTp:
+          type: boolean
+          description: Use trailing TP. Cannot be checked with active multiTp. Require trailingTpPerc.
+        trailingTpPerc:
+          type: string
+          description: Trailing take profit deviation on %.
+          example: 5
+        dcaCondition:
+          type: string
+          description: DCA Type. For deal available options - percentage, custom. Custom required dcaCustom array.
+          enum:
+            - percentage
+            - custom
+        dcaCustom:
+          type: array
+          description: DCA custom objects.
+          items:
+            type: object
+            description: DCA custom object
+            properties:
+              step:
+                type: string
+                description: From previous order price in %
+                example: 1
+              size:
+                type: string
+                description: Order amount in orderSizeType currency
+                example: 1
+              uuid:
+                type: string
+                description: Unique Id of the level
+    UpdateComboBotInput:
+      type: object
+      description: Input schema for updating Combo bot settings
+      properties:
+        name:
+          type: string
+          description: Bot name
+        step:
+          type: string
+          description: Step percentage between DCA orders
+        ordersCount:
+          type: integer
+          description: DCA orders count
+        tpPerc:
+          type: string
+          description: Take profit percent
+        slPerc:
+          type: string
+          description: Stop loss percent
+        profitCurrency:
+          type: string
+          enum:
+            - base
+            - quote
+          description: Profit currency
+        orderSize:
+          type: string
+          description: DCA order qty of the deal.
+        baseOrderSize:
+          type: string
+          description: Base order qty of the deal.
+        baseStep:
+          type: string
+          description: Top price of base minigrid.
+        baseGridLevels:
+          type: string
+          description: Base minigrid levels.
+        gridLevel:
+          type: string
+          description: DCA minigrid levels.
+        orderSizeType:
+          type: string
+          description: Currency reference
+          enum:
+            - base
+            - quote
+            - percFree
+            - percTotal
+            - usd
+        startOrderType:
+          type: string
+          description: Currency reference
+          enum:
+            - limit
+            - market
+        useRiskReduction:
+          type: boolean
+          description: Use risk reduction. Requires riskReductionValue value
+        riskReductionValue:
+          type: string
+          description: Risk reduction value in %
+        useReinvest:
+          type: boolean
+          description: Use reinvest profit. Requires reinvestValue value
+        reinvestValue:
+          type: string
+          description: Reinvest profit value in %
+        skipBalanceCheck:
+          type: boolean
+          description: Skip balance check
+        startCondition:
+          type: string
+          description: Start deal condition
+          enum:
+            - ASAP
+            - Manual
+        maxNumberOfOpenDeals:
+          type: string
+          description: Max number of open deals
+        useStaticPriceFilter:
+          type: boolean
+          description: Use static price filter. Require minOpenDeal or maxOpenDeal
+        minOpenDeal:
+          type: string
+          description: Minimum price for open deal
+        maxOpenDeal:
+          type: string
+          description: Maximum price for open deal
+        useDynamicPriceFilter:
+          type: boolean
+          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+        dynamicPriceFilterDirection:
+          type: string
+          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          enum:
+            - over
+            - under
+            - overAndUnder
+        dynamicPriceFilterOverValue:
+          type: string
+          description: Over value
+        dynamicPriceFilterUnderValue:
+          type: string
+          description: Over value
+        dynamicPriceFilterPriceType:
+          type: string
+          description: Price sourse
+          enum:
+            - avg
+            - entry
+        useNoOverlapDeals:
+          type: boolean
+          description: Use no overlap deals in dynamic price filter
+        useCooldown:
+          type: boolean
+          description: Use cooldown
+        cooldownAfterDealStart:
+          type: boolean
+          description: Use cooldown after deal start. Require cooldownAfterDealStartInterval and cooldownAfterDealStartUnits
+        cooldownAfterDealStartInterval:
+          type: number
+          description: Cooldown after deal start interval
+        cooldownAfterDealStartUnits:
+          type: string
+          description: Cooldown after deal start units
+          enum:
+            - seconds
+            - minutes
+            - hours
+            - days
+        cooldownAfterDealStop:
+          type: boolean
+          description: Use cooldown after deal stop. Require cooldownAfterDealStopInterval and cooldownAfterDealStopUnits
+        cooldownAfterDealStopInterval:
+          type: number
+          description: Cooldown after deal stop interval
+        cooldownAfterDealStopUnits:
+          type: string
+          description: Cooldown after deal stop units
+          enum:
+            - seconds
+            - minutes
+            - hours
+            - days
+        useTp:
+          type: boolean
+          description: Use take profit
+        useSl:
+          type: boolean
+          description: Use stop loss
+        useDca:
+          type: boolean
+          description: Use DCA orders
+        useSmartOrders:
+          type: boolean
+          description: Use smart orders
+        activeOrdersCount:
+          type: integer
+          description: Active orders count
+        useActiveMinigrids:
+          type: boolean
+          description: Use active minigrids.
+        comboActiveMinigrids:
+          type: string
+          description: Active minigrids count.
+        comboUseSmartGrids:
+          type: boolean
+          description: Use smart grids.
+        comboSmartGridsCount:
+          type: integer
+          description: Smart grids count.
+        volumeScale:
+          type: string
+          description: Volume scale of DCA orders
+        stepScale:
+          type: string
+          description: Step scale of DCA orders
+        comboTpBase:
+          type: string
+          description: Base SL on user DCA or max DCA. Default - filled.
+          enum:
+            - full
+            - filled
+  responses:
+    BadRequest:
+      description: Bad request - invalid parameters
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            status: NOTOK
+            reason: "Invalid fields parameter: unknown_field"
+    Unauthorized:
+      description: Unauthorized - missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            status: NOTOK
+            reason: Invalid signature
+    Forbidden:
+      description: Forbidden - insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+security:
+  - ApiKeyAuth: []
+    SecretAuth: []
+paths:
+  /api/v2/bots/dca:
+    get:
+      summary: Get DCA Bots
+      description: |
+        Retrieve a list of DCA (Dollar Cost Averaging) bots with optional field selection.
+
+        **Field Presets:**
+        - `minimal`: _id, uuid, settings.name, status, exchange, exchangeUUID, paperContext
+        - `standard`: minimal + settings.pair, profit.*, deals.*, createdAt, updatedAt
+        - `extended`: standard + settings.baseOrderSize, cost, workingTimeNumber, profitToday, statusReason
+        - `full`: All available fields
+
+        **Performance:** Using `minimal` reduces response size by ~85%, `standard` by ~70%
+      tags:
+        - Bots
+      operationId: getDCABots
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+        - name: status
+          in: query
+          required: false
+          description: Filter by bot status
+          schema:
+            type: string
+            enum:
+              - open
+              - closed
+              - range
+              - error
+              - archive
+              - monitoring
+            example: open
+        - name: paperContext
+          in: query
+          required: false
+          description: Filter by paper trading context (true for paper, false for real trading)
+          schema:
+            type: boolean
+            example: false
+      responses:
+        "200":
+          description: Successful response with DCA bots list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DCABotListResponse"
+              examples:
+                minimal:
+                  summary: Minimal preset response
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - _id: 507f1f77bcf86cd799439011
+                        uuid: 550e8400-e29b-41d4-a716-446655440000
+                        settings:
+                          name: BTC Long DCA
+                        status: open
+                        exchange: binance
+                        exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+                        paperContext: false
+                    meta:
+                      page: 1
+                      total: 42
+                      count: 42
+                      onPage: 1
+                      fields:
+                        - _id
+                        - uuid
+                        - settings.name
+                        - status
+                        - exchange
+                        - exchangeUUID
+                        - paperContext
+                standard:
+                  summary: Standard preset response (default)
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - _id: 507f1f77bcf86cd799439011
+                        uuid: 550e8400-e29b-41d4-a716-446655440000
+                        settings:
+                          name: BTC Long DCA
+                          pair:
+                            - BTC_USDT
+                          profitCurrency: quote
+                        status: open
+                        exchange: binance
+                        exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+                        paperContext: false
+                        profit:
+                          total: 0.025
+                          totalUsd: 1250.5
+                        deals:
+                          all: 42
+                          active: 3
+                        created: "2024-01-15T10:30:00Z"
+                        updated: "2024-01-20T14:22:33Z"
+                    meta:
+                      page: 1
+                      total: 42
+                      count: 42
+                      onPage: 1
+                      fields:
+                        - _id
+                        - uuid
+                        - settings.name
+                        - settings.pair
+                        - settings.profitCurrency
+                        - status
+                        - exchange
+                        - exchangeUUID
+                        - paperContext
+                        - profit.total
+                        - profit.totalUsd
+                        - deals.all
+                        - deals.active
+                        - created
+                        - updated
+                custom:
+                  summary: Custom fields selection
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - uuid: 550e8400-e29b-41d4-a716-446655440000
+                        settings:
+                          name: BTC Long DCA
+                        profit:
+                          totalUsd: 1250.5
+                    meta:
+                      page: 1
+                      total: 42
+                      count: 42
+                      onPage: 1
+                      fields:
+                        - uuid
+                        - settings.name
+                        - profit.totalUsd
+        "400":
+          description: Bad request - invalid fields parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                status: NOTOK
+                reason: "Invalid fields parameter: unknown_field"
+        "401":
+          description: Unauthorized - missing or invalid authentication
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                status: NOTOK
+                reason: Invalid signature
+        "403":
+          description: Forbidden - insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v2/bots/combo:
+    get:
+      summary: Get Combo Bots
+      description: |
+        Retrieve a list of Combo (Long/Short) bots with optional field selection.
+
+        **Field Presets:**
+        - `minimal`: _id, uuid, settings.name, status, exchange, exchangeUUID, paperContext
+        - `standard`: minimal + settings.pair, profit.*, deals.*, createdAt, updatedAt
+        - `extended`: standard + settings configuration, cost, workingTimeNumber, profitToday, dealsStatsForBot
+        - `full`: All available fields
+      tags:
+        - Bots
+      operationId: getComboBots
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+        - name: status
+          in: query
+          required: false
+          description: Filter by bot status
+          schema:
+            type: string
+            enum:
+              - open
+              - closed
+              - range
+              - error
+              - archive
+              - monitoring
+            example: open
+        - name: paperContext
+          in: query
+          required: false
+          description: Filter by paper trading context (true for paper, false for real trading)
+          schema:
+            type: boolean
+            example: false
+      responses:
+        "200":
+          description: Successful response with Combo bots list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComboBotListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v2/bots/grid:
+    get:
+      summary: Get Grid Bots
+      description: |
+        Retrieve a list of Grid bots with optional field selection.
+
+        **Field Presets:**
+        - `minimal`: _id, uuid, settings.name, status, exchange, exchangeUUID, paperContext
+        - `standard`: minimal + settings.symbol, profit.*, levels.*, createdAt, updatedAt
+        - `extended`: standard + grid configuration (gridLevels, lowerPrice, upperPrice), cost, prices
+        - `full`: All available fields
+      tags:
+        - Bots
+      operationId: getGridBots
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+        - name: status
+          in: query
+          required: false
+          description: Filter by bot status
+          schema:
+            type: string
+            enum:
+              - open
+              - closed
+              - range
+              - error
+              - archive
+              - monitoring
+            example: open
+        - name: paperContext
+          in: query
+          required: false
+          description: Filter by paper trading context (true for paper, false for real trading)
+          schema:
+            type: boolean
+            example: false
+      responses:
+        "200":
+          description: Successful response with Grid bots list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GridBotListResponse"
+              examples:
+                standard:
+                  summary: Standard preset for Grid bots
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - _id: 507f1f77bcf86cd799439011
+                        uuid: 550e8400-e29b-41d4-a716-446655440000
+                        settings:
+                          name: BTC Grid 30k-35k
+                          symbol: BTCUSDT
+                        status: open
+                        exchange: binance
+                        exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+                        paperContext: false
+                        profit:
+                          total: 0.15
+                          totalUsd: 4500
+                        levels:
+                          active: 8
+                          all: 10
+                        created: "2024-01-15T10:30:00Z"
+                        updated: "2024-01-20T14:22:33Z"
+                    meta:
+                      page: 1
+                      total: 15
+                      count: 15
+                      onPage: 1
+                      fields:
+                        - _id
+                        - uuid
+                        - settings.name
+                        - settings.symbol
+                        - status
+                        - exchange
+                        - exchangeUUID
+                        - paperContext
+                        - profit.total
+                        - profit.totalUsd
+                        - levels.active
+                        - levels.all
+                        - created
+                        - updated
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v2/deals:
+    get:
+      summary: Get Deals
+      description: |
+        Retrieve a list of deals (both DCA and Combo) with optional field selection.
+
+        **Query Parameters:**
+        - `type`: Filter by deal type (`dca` or `combo`)
+        - `status`: Filter by status (`open`, `closed`, `start`, `error`, `canceled`)
+        - `botId`: Filter by bot UUID
+        - `terminal`: Filter by deal type (false for regular, true for terminal)
+        - `paperContext`: Filter by paper/real trading context
+
+        **Field Presets:**
+        - `minimal`: _id, botId, status, symbol.symbol, profit.*, createTime
+        - `standard`: minimal + exchange info, avgPrice, lastPrice, levels, cost, value, timestamps
+        - `extended`: standard + settings, balances, feePaid, usage, stats, strategy
+        - `full`: All available fields
+      tags:
+        - Deals
+      operationId: getDeals
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+        - name: type
+          in: query
+          required: false
+          description: Filter by deal type
+          schema:
+            type: string
+            enum:
+              - dca
+              - combo
+        - name: status
+          in: query
+          required: false
+          description: Filter by deal status
+          schema:
+            type: string
+            enum:
+              - open
+              - closed
+              - start
+              - error
+              - canceled
+        - name: botId
+          in: query
+          required: false
+          description: Filter by bot UUID
+          schema:
+            type: string
+            format: uuid
+        - name: terminal
+          in: query
+          required: false
+          description: Filter by deal type (false for regular deals, true for terminal deals)
+          schema:
+            type: boolean
+            default: false
+        - name: paperContext
+          in: query
+          required: false
+          description: Filter by paper trading context (true for paper, false for real trading)
+          schema:
+            type: boolean
+            example: false
+      responses:
+        "200":
+          description: Successful response with deals list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DealListResponse"
+              examples:
+                minimal:
+                  summary: Minimal preset for deals
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - _id: 507f1f77bcf86cd799439012
+                        botId: 550e8400-e29b-41d4-a716-446655440000
+                        status: active
+                        symbol:
+                          symbol: BTC_USDT
+                        profit:
+                          total: 0.0015
+                          totalUsd: 75
+                        createTime: "2024-01-20T08:15:00Z"
+                    meta:
+                      page: 1
+                      total: 128
+                      count: 128
+                      onPage: 1
+                      fields:
+                        - _id
+                        - botId
+                        - status
+                        - symbol.symbol
+                        - profit.total
+                        - profit.totalUsd
+                        - createTime
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v2/user/balances:
+    get:
+      summary: Get User Balances
+      description: |
+        Retrieve user balances across all exchanges with optional field selection.
+
+        **Query Parameters:**
+        - `exchangeId`: Filter by exchange connection ID  
+        - `asset`: Filter by specific asset (e.g., BTC, USDT)
+        - `assets`: Filter by multiple assets (comma-separated)
+        - `paperContext`: Filter by paper/real trading context
+
+        **Field Presets:**
+        - `minimal`: asset, free, locked, exchangeUUID
+        - `standard`: minimal + exchange, paperContext
+        - `full`: All available fields (same as standard for balances)
+      tags:
+        - User
+      operationId: getUserBalances
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: exchangeId
+          in: query
+          required: false
+          description: Filter by exchange connection ID (if not provided, all exchanges will be included)
+          schema:
+            type: string
+            format: uuid
+            example: 650e8400-e29b-41d4-a716-446655440001
+        - name: asset
+          in: query
+          required: false
+          description: Filter by specific asset symbol
+          schema:
+            type: string
+            example: BTC
+        - name: assets
+          in: query
+          required: false
+          description: Filter by multiple assets (comma-separated list)
+          schema:
+            type: string
+            example: BTC,USDT,ETH
+        - name: paperContext
+          in: query
+          required: false
+          description: Filter by paper trading context (true for paper, false for real trading)
+          schema:
+            type: boolean
+            example: false
+      responses:
+        "200":
+          description: Successful response with user balances
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceListResponse"
+              examples:
+                standard:
+                  summary: Standard preset for balances
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - asset: BTC
+                        free: "0.5"
+                        locked: "0.1"
+                        exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+                        exchange: binance
+                        paperContext: null
+                      - asset: USDT
+                        free: "10000"
+                        locked: "2500"
+                        exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+                        exchange: binance
+                        paperContext: null
+                    meta:
+                      page: 1
+                      total: 25
+                      count: 25
+                      onPage: 2
+                      fields:
+                        - asset
+                        - free
+                        - locked
+                        - exchangeUUID
+                        - exchange
+                        - paperContext
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v2/exchanges:
+    get:
+      summary: Get User Exchanges
+      description: |
+        Retrieve user's connected exchanges with optional field selection.
+
+        **Field Presets:**
+        - `minimal`: code, market, id, name
+        - `standard`: minimal + type
+        - `full`: All available fields (same as standard for exchanges)
+      tags:
+        - User
+      operationId: getUserExchanges
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+      responses:
+        "200":
+          description: Successful response with user exchanges
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExchangeListResponse"
+              examples:
+                standard:
+                  summary: Standard preset for exchanges
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - code: binance
+                        market: spot
+                        id: 650e8400-e29b-41d4-a716-446655440001
+                        name: Binance Main
+                        type: real
+                      - code: binance
+                        market: futures
+                        id: 650e8400-e29b-41d4-a716-446655440002
+                        name: Binance Futures
+                        type: real
+                    meta:
+                      page: 1
+                      total: 3
+                      count: 3
+                      onPage: 2
+                      fields:
+                        - code
+                        - market
+                        - id
+                        - name
+                        - type
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v2/screener:
+    get:
+      summary: Get Crypto Screener Data
+      description: |
+        Retrieve crypto screening data with market metrics and optional field selection.
+
+        **Query Parameters:**
+        - `category`: Filter by category (e.g., "Layer 1", "DeFi")
+        - `minMarketCap`: Minimum market cap filter
+        - `maxMarketCap`: Maximum market cap filter
+        - `minVolume`: Minimum 24h volume filter
+        - `sort`: Sort field (default: marketCapRank)
+        - `order`: Sort order (`asc` or `desc`, default: asc)
+
+        **Field Presets:**
+        - `minimal`: symbol, name, currentPrice, priceChangePercentage24h, totalVolume, marketCap, marketCapRank
+        - `standard`: minimal + 1h/7d price changes, volume change, market cap change, volatility, liquidity, category
+        - `extended`: standard + 30d/1y changes, ATH/ATL data, multi-day volatility, exchanges, sparkline
+        - `full`: All available fields
+
+        **Note:** Requires active subscription with screener access.
+      tags:
+        - Screener
+      operationId: getScreenerData
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+        - name: category
+          in: query
+          required: false
+          description: Filter by coin category
+          schema:
+            type: string
+            example: Layer 1
+        - name: minMarketCap
+          in: query
+          required: false
+          description: Minimum market capitalization
+          schema:
+            type: number
+            example: 1000000000
+        - name: maxMarketCap
+          in: query
+          required: false
+          description: Maximum market capitalization
+          schema:
+            type: number
+        - name: minVolume
+          in: query
+          required: false
+          description: Minimum 24h trading volume
+          schema:
+            type: number
+            example: 10000000
+        - name: sort
+          in: query
+          required: false
+          description: Sort field
+          schema:
+            type: string
+            default: marketCapRank
+            enum:
+              - marketCapRank
+              - currentPrice
+              - priceChangePercentage24h
+              - totalVolume
+              - marketCap
+        - name: order
+          in: query
+          required: false
+          description: Sort order
+          schema:
+            type: string
+            default: asc
+            enum:
+              - asc
+              - desc
+      responses:
+        "200":
+          description: Successful response with screener data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScreenerListResponse"
+              examples:
+                minimal:
+                  summary: Minimal preset for screener
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - symbol: BTC
+                        name: Bitcoin
+                        currentPrice: 43250.5
+                        priceChangePercentage24h: 2.5
+                        totalVolume: 28500000000
+                        marketCap: 850000000000
+                        marketCapRank: 1
+                      - symbol: ETH
+                        name: Ethereum
+                        currentPrice: 2450.75
+                        priceChangePercentage24h: 3.2
+                        totalVolume: 15200000000
+                        marketCap: 295000000000
+                        marketCapRank: 2
+                    meta:
+                      page: 1
+                      total: 500
+                      count: 500
+                      onPage: 2
+                      fields:
+                        - symbol
+                        - name
+                        - currentPrice
+                        - priceChangePercentage24h
+                        - totalVolume
+                        - marketCap
+                        - marketCapRank
+                standard:
+                  summary: Standard preset with additional metrics
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - symbol: BTC
+                        name: Bitcoin
+                        currentPrice: 43250.5
+                        priceChangePercentage24h: 2.5
+                        totalVolume: 28500000000
+                        marketCap: 850000000000
+                        marketCapRank: 1
+                        priceChangePercentage1h: 0.5
+                        priceChangePercentage7d: 8.2
+                        volumeChange24h: 15.3
+                        marketCapChangePercentage24h: 2.8
+                        volatility1d: 0.025
+                        liquidityScore: 95
+                        category: Layer 1
+                    meta:
+                      page: 1
+                      total: 500
+                      count: 500
+                      onPage: 1
+                      fields:
+                        - symbol
+                        - name
+                        - currentPrice
+                        - priceChangePercentage24h
+                        - priceChangePercentage1h
+                        - priceChangePercentage7d
+                        - totalVolume
+                        - volumeChange24h
+                        - marketCap
+                        - marketCapChangePercentage24h
+                        - marketCapRank
+                        - volatility1d
+                        - liquidityScore
+                        - category
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Forbidden - requires active subscription with screener access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                status: NOTOK
+                reason: Screener access requires active subscription
+  /api/v2/user/exchanges:
+    get:
+      summary: Get User Exchanges
+      description: Retrieve user's connected exchanges with optional filtering
+      tags:
+        - User
+      operationId: getUserExchanges
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: paperContext
+          in: query
+          required: false
+          description: Filter by paper trading context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Successful response with user exchanges
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExchangeListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/updateDCADeal:
+    post:
+      summary: Update DCA deal settings
+      tags:
+        - Deals
+      description: Requires write permission of API keys.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ordersCount:
+                  type: integer
+                  description: DCA orders count
+                step:
+                  type: string
+                  description: Step percentage between DCA orders
+                tpPerc:
+                  type: string
+                  description: Take profit percent
+                slPerc:
+                  type: string
+                  description: Stop loss percent
+                profitCurrency:
+                  type: string
+                  enum:
+                    - base
+                    - quote
+                  description: Profit currency
+                avgPrice:
+                  type: number
+                  description: Average price of the deal
+                orderSize:
+                  type: string
+                  description: DCA order qty of the deal
+                useTp:
+                  type: boolean
+                  description: Use take profit
+                useSl:
+                  type: boolean
+                  description: Use stop loss
+                useDca:
+                  type: boolean
+                  description: Use DCA orders
+                useSmartOrders:
+                  type: boolean
+                  description: Use smart orders
+                activeOrdersCount:
+                  type: integer
+                  description: Active orders count
+                volumeScale:
+                  type: string
+                  description: Volume scale of DCA orders
+                stepScale:
+                  type: string
+                  description: Step scale of DCA orders
+                dealCloseConditionSL:
+                  type: string
+                  description: Deal close options. For deal only possible option - tp
+                  enum:
+                    - tp
+                useMultiSl:
+                  type: boolean
+                  description: Use multiple SL targets. multiSl array should be provided
+                multiSl:
+                  type: array
+                  description: Multiple SL targets
+                  items:
+                    type: object
+                    description: Multiple SL target object
+                    properties:
+                      target:
+                        type: string
+                        description: Target level in %
+                        example: -10
+                      amount:
+                        type: string
+                        description: Amount to close in %
+                        example: 50
+                      uuid:
+                        type: string
+                        description: Unique Id of the target
+                baseSlOn:
+                  type: string
+                  description: Base SL on. Default - avg
+                  enum:
+                    - start
+                    - avg
+                trailingSl:
+                  type: boolean
+                  description: Use trailing SL. Cannot be checked with active moveSL or multiSl
+                moveSL:
+                  type: boolean
+                  description: Use move SL. Cannot be checked with active trailingSl or multiSl. Require moveSLTrigger and moveSLValue
+                moveSLTrigger:
+                  type: string
+                  description: Move SL trigger in %
+                  example: 10
+                moveSLValue:
+                  type: string
+                  description: Move SL value in %
+                  example: 5
+                dealCloseCondition:
+                  type: string
+                  description: Deal close options. For deal only possible option - tp
+                  enum:
+                    - tp
+                closeByTimer:
+                  type: boolean
+                  description: Close deal by timer. Require closeByTimerValue and closeByTimerUnits
+                closeByTimerValue:
+                  type: integer
+                  description: Close deal by timer value
+                closeByTimerUnits:
+                  type: string
+                  description: Close deal by timer units
+                  enum:
+                    - seconds
+                    - minutes
+                    - hours
+                    - days
+                useMultiTp:
+                  type: boolean
+                  description: Use multiple TP targets. multiTp array should be provided
+                multiTp:
+                  type: array
+                  description: Multiple TP targets
+                  items:
+                    type: object
+                    description: Multiple TP target object
+                    properties:
+                      target:
+                        type: string
+                        description: Target level in %
+                        example: 10
+                      amount:
+                        type: string
+                        description: Amount to close in %
+                        example: 50
+                      uuid:
+                        type: string
+                        description: Unique Id of the target
+                trailingTp:
+                  type: boolean
+                  description: Use trailing TP. Cannot be checked with active multiTp. Require trailingTpPerc
+                trailingTpPerc:
+                  type: string
+                  description: Trailing take profit deviation on %
+                  example: 5
+                dcaCondition:
+                  type: string
+                  description: DCA Type. For deal available options - percentage, custom. Custom required dcaCustom array
+                  enum:
+                    - percentage
+                    - custom
+                dcaCustom:
+                  type: array
+                  description: DCA custom objects
+                  items:
+                    type: object
+                    description: DCA custom object
+                    properties:
+                      step:
+                        type: string
+                        description: From previous order price in %
+                        example: 1
+                      size:
+                        type: string
+                        description: Order amount in orderSizeType currency
+                        example: 1
+                      uuid:
+                        type: string
+                        description: Unique Id of the level
+      parameters:
+        - in: query
+          name: dealId
+          required: true
+          description: Id of the deal
+          schema:
+            type: string
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Settings updated
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/updateComboDeal:
+    post:
+      summary: Update deal settings
+      tags:
+        - Deals
+      description: Requires write permission of API keys.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ordersCount:
+                  type: integer
+                  description: DCA orders count
+                step:
+                  type: string
+                  description: Step percentage between DCA orders
+                tpPerc:
+                  type: string
+                  description: Take profit percent
+                slPerc:
+                  type: string
+                  description: Stop loss percent
+                profitCurrency:
+                  type: string
+                  enum:
+                    - base
+                    - quote
+                  description: Profit currency
+                avgPrice:
+                  type: number
+                  description: Average price of the deal
+                useTp:
+                  type: boolean
+                  description: Use take profit
+                useSl:
+                  type: boolean
+                  description: Use stop loss
+                useDca:
+                  type: boolean
+                  description: Use DCA orders
+                useSmartOrders:
+                  type: boolean
+                  description: Use smart orders
+                activeOrdersCount:
+                  type: integer
+                  description: Active orders count
+                volumeScale:
+                  type: string
+                  description: Volume scale of DCA orders
+                stepScale:
+                  type: string
+                  description: Step scale of DCA orders
+                comboTpBase:
+                  type: string
+                  description: Base SL on user DCA or max DCA. Default - filled
+                  enum:
+                    - full
+                    - filled
+      parameters:
+        - in: query
+          name: dealId
+          required: true
+          description: Id of the deal
+          schema:
+            type: string
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Settings updated
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/updateDCABot:
+    post:
+      summary: Update DCA bot settings
+      tags:
+        - Bots
+      description: Requires write permission of API keys.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              $ref: "#/components/schemas/UpdateDCABotInput"
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Settings updated
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/updateComboBot:
+    post:
+      summary: Update Combo bot settings
+      tags:
+        - Bots
+      description: Requires write permission of API keys.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              $ref: "#/components/schemas/UpdateComboBotInput"
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Settings updated
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/changeBotPairs:
+    post:
+      summary: Change bot pairs
+      description: Requires write permission of API keys. Format of the pair is {base}_{quote}, example BTC_USDT
+      tags:
+        - Bots
+      parameters:
+        - in: query
+          name: botId
+          required: false
+          description: Id of the bot. Either botId or botName should be provided. botId has higher priority
+          schema:
+            type: string
+        - in: query
+          name: botName
+          required: false
+          description: Name to search. Either botId or botName should be provided. botId has higher priority
+          schema:
+            type: string
+        - in: query
+          name: pairsToChange
+          required: false
+          description: Pairs to update. Either pairsToChange or pairsToSet should be provided. pairsToSet has higher priority
+          explode: true
+          schema:
+            type: object
+            properties:
+              remove:
+                type: array
+                description: Pairs to remove
+                items:
+                  type: string
+                  example: BTC_USDT
+              add:
+                type: array
+                description: Pairs to add
+                items:
+                  type: string
+                  example: BTC_USDT
+        - in: query
+          name: pairsToSet
+          required: false
+          description: Pairs to set. Either pairsToChange or pairsToSet should be provided. pairsToSet has higher priority
+          schema:
+            type: array
+            items:
+              type: string
+              example: BTC_USDT
+        - in: query
+          name: pairsToSetMode
+          required: false
+          description: Pairs to set mode. Default replace
+          schema:
+            type: string
+            enum:
+              - add
+              - remove
+              - replace
+            default: replace
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: object
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    properties:
+                      removed:
+                        type: number
+                        description: Removed pairs count
+                        example: 1
+                      added:
+                        type: number
+                        description: Added pairs count
+                        example: 1
+                      current:
+                        type: array
+                        description: Current bot pairs
+                        items:
+                          type: string
+                          example: BTC_USDT
+                      previous:
+                        type: array
+                        description: Previous bot pairs
+                        items:
+                          type: string
+                          example: BTC_USDT
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/addFunds:
+    post:
+      summary: Add funds to deal
+      tags:
+        - Deals
+      description: Requires write permission of API keys.
+      parameters:
+        - in: query
+          name: dealId
+          required: false
+          description: Id of the deal
+          schema:
+            type: string
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: qty
+          required: true
+          description: Quantity to add
+          schema:
+            type: string
+        - in: query
+          name: asset
+          description: Quantity asset. Required if quantity type is fixed.
+          required: false
+          schema:
+            enum:
+              - base
+              - quote
+            type: string
+        - in: query
+          name: symbol
+          description: Add funds to deals for specific symbol. Format {base}_{quote}, example BTC_USDT
+          schema:
+            type: string
+            example: BTC_USDT
+        - in: query
+          name: type
+          description: Quantity type
+          required: true
+          schema:
+            enum:
+              - fixed
+              - perc
+            default: fixed
+        - in: query
+          name: paperContext
+          required: false
+          description: Check if bot created in paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Settings updated
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/reduceFunds:
+    post:
+      summary: Reduce funds from deal
+      description: Requires write permission of API keys.
+      tags:
+        - Deals
+      parameters:
+        - in: query
+          name: dealId
+          required: false
+          description: Id of the deal
+          schema:
+            type: string
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: qty
+          required: true
+          description: Quantity to add
+          schema:
+            type: string
+        - in: query
+          name: asset
+          description: Quantity asset. Required if quantity type is fixed.
+          required: false
+          schema:
+            enum:
+              - base
+              - quote
+            type: string
+        - in: query
+          name: symbol
+          description: Add funds to deals for specific symbol. Format {base}_{quote}, example BTC_USDT
+          schema:
+            type: string
+            example: BTC_USDT
+        - in: query
+          name: type
+          description: Quantity type
+          required: true
+          schema:
+            enum:
+              - fixed
+              - perc
+            default: fixed
+        - in: query
+          name: paperContext
+          required: false
+          description: Check if bot created in paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Settings updated
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/startDeal:
+    post:
+      summary: Start bot deal
+      description: Requires write permission of API keys.
+      tags:
+        - Deals
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: symbol
+          required: false
+          description: Symbol, used if bot is supported multicoins. Format {base}_{quote}, example BTC_USDT
+          schema:
+            type: string
+            example: BTC_USDT
+        - in: query
+          name: botType
+          required: true
+          description: Bot type
+          schema:
+            type: string
+            enum:
+              - dca
+              - combo
+            default: dca
+        - in: query
+          name: paperContext
+          required: false
+          description: Check if bot created in paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Deal started
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/startBot:
+    post:
+      summary: Start bot
+      description: Requires write permission of API keys.
+      tags:
+        - Bots
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot.
+          schema:
+            type: string
+        - in: query
+          name: type
+          required: true
+          description: Bot typ
+          schema:
+            type: string
+            enum:
+              - dca
+              - grid
+              - combo
+            default: grid
+        - in: query
+          name: paperContext
+          required: false
+          description: Check if bot created in paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Bot scheduled to start
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/restoreBot:
+    post:
+      summary: Restore bot from archive
+      description: Requires write permission of API keys.
+      tags:
+        - Bots
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: type
+          description: Bot type
+          required: true
+          schema:
+            enum:
+              - dca
+              - combo
+              - grid
+            type: string
+            default: grid
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Bot restored
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/closeDeal/{dealId}:
+    delete:
+      summary: Close deal
+      description: Requires write permission of API keys.
+      tags:
+        - Deals
+      parameters:
+        - in: path
+          name: dealId
+          required: true
+          description: Id of the deal
+          schema:
+            type: string
+        - in: query
+          name: type
+          description: Close type
+          required: true
+          schema:
+            enum:
+              - cancel
+              - closeByLimit
+              - closeByMarket
+              - leave
+            type: string
+            default: cancel
+        - in: query
+          name: botType
+          description: Bot type
+          required: true
+          schema:
+            enum:
+              - dca
+              - combo
+            type: string
+            default: dca
+        - in: query
+          name: paperContext
+          required: false
+          description: Check if bot created in paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Deal closed
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/cancelDeal/{dealId}:
+    delete:
+      deprecated: true
+      summary: Cancel deal
+      description: Requires write permission of API keys.
+      tags:
+        - Deals
+      parameters:
+        - in: path
+          name: dealId
+          required: true
+          description: Id of the deal
+          schema:
+            type: string
+        - in: query
+          name: botType
+          description: Bot type
+          required: true
+          schema:
+            enum:
+              - dca
+              - combo
+            type: string
+            default: dca
+        - in: query
+          name: paperContext
+          required: false
+          description: Check if bot created in paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Deal closed
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/cloneComboBot:
+    put:
+      summary: Clone Combo bot settings
+      tags:
+        - Bots
+      description: Requires write permission of API keys.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              allOf:
+                - $ref: "#/components/schemas/UpdateComboBotInput"
+              properties:
+                pair:
+                  type: array
+                  description: Array of trading pairs for the bot
+                  items:
+                    type: string
+                    example: BTC_USDT
+                  example:
+                    - BTC_USDT
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - id
+                    example: 671b865a5f1005de24969809
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/cloneDCABot:
+    put:
+      summary: Clone DCA bot
+      tags:
+        - Bots
+      description: Requires write permission of API keys.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              $ref: "#/components/schemas/UpdateDCABotInput"
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - id
+                    example: 671b865a5f1005de24969809
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/stopBot:
+    delete:
+      summary: Stop bot
+      description: Requires write permission of API keys.
+      tags:
+        - Bots
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: botType
+          description: Bot type
+          required: true
+          schema:
+            enum:
+              - dca
+              - combo
+              - grid
+            type: string
+            default: grid
+        - in: query
+          name: cancelPartiallyFilled
+          description: If bot type - grid, this property affect partially filled orders cancel
+          schema:
+            type: boolean
+            default: false
+        - in: query
+          name: closeType
+          description: Close type for DCA bots
+          schema:
+            enum:
+              - cancel
+              - closeByLimit
+              - closeByMarket
+              - leave
+            type: string
+            default: leave
+        - in: query
+          name: closeGridType
+          description: Close type for Grid bots
+          schema:
+            enum:
+              - cancel
+              - closeByLimit
+              - closeByMarket
+            type: string
+            default: cancel
+        - in: query
+          name: paperContext
+          description: Check if bot created in paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Bot scheduled to start
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+  /api/archiveBot:
+    delete:
+      summary: Archive bot
+      description: Requires write permission of API keys.
+      tags:
+        - Bots
+      parameters:
+        - in: query
+          name: botId
+          required: true
+          description: Id of the bot
+          schema:
+            type: string
+        - in: query
+          name: botType
+          description: Bot type
+          required: true
+          schema:
+            enum:
+              - dca
+              - combo
+              - grid
+            type: string
+            default: grid
+        - in: query
+          name: paperContext
+          required: false
+          description: Use paper context
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: A list of user bots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - execution of query is successful, NOTOK - execution of query failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain failed reason, otherwise - null
+                    example: null
+                  data:
+                    type: string
+                    nullable: true
+                    description: If status NOTOK - null, otherwise - message
+                    example: Bot scheduled to start
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    description: status or request
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Wrong params
+        "401":
+          description: Token or signature or time headers not provided. Or signature not valid
+        "403":
+          description: User not found or not enough permission
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Request
+tags:
+  - name: Bots
+    description: Bot management endpoints (DCA, Combo, Grid)
+  - name: Deals
+    description: Deal management and monitoring
+  - name: User
+    description: User account information (balances, exchanges)
+  - name: Screener
+    description: Crypto market screening and analysis

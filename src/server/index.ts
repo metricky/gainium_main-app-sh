@@ -1,6 +1,7 @@
 import fs from 'fs'
+import path from 'path'
 import express from 'express'
-import rateLimit from 'express-rate-limit'
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit'
 import bodyParser from 'body-parser'
 import { ApolloServer } from '@apollo/server'
 import { expressMiddleware } from '@as-integrations/express5'
@@ -13,7 +14,9 @@ import userUtils from '../utils/user'
 import { liveupdate, StatusEnum } from '../../types'
 import methods from '../exchange/additionalAPIs'
 import _API, { middleware as _middleware, bodyMiddleware } from './api'
+import { v2API } from './v2'
 import swaggerUi from 'swagger-ui-express'
+import { apiReference } from '@scalar/express-api-reference'
 import cookieParser from 'cookie-parser'
 import logger from '../utils/logger'
 import saveFileHelper from '../utils/files'
@@ -49,6 +52,14 @@ const apiLimiter = rateLimit({
   max: 50,
   standardHeaders: false,
   legacyHeaders: true,
+  keyGenerator: (req) => {
+    return ipKeyGenerator(
+      (req.headers['x-forwarded-for'] as string) ||
+        req.socket.remoteAddress ||
+        req.ip ||
+        'unknown',
+    )
+  },
 })
 
 type ApolloContext = {
@@ -68,6 +79,110 @@ async function start() {
   if (!SERVER_HOST) {
     throw 'Missed server host'
   }
+
+  app.use(
+    '/api/docs/v2',
+    apiReference({
+      spec: {
+        url: '/api/v2/openapi.yaml',
+      },
+      persistAuth: true,
+      defaultOpenAllTags: true,
+      expandAllResponses: true,
+      favicon: 'https://app.gainium.io/gainium-icon-192x192.png',
+      onLoaded: () => {
+        // Load crypto-js from CDN
+        if (typeof window !== 'undefined' && !window.CryptoJS) {
+          const script = document.createElement('script')
+          script.src =
+            'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js'
+          script.async = false
+          script.onload = () => {
+            console.log('✅ CryptoJS loaded successfully')
+          }
+          script.onerror = () => {
+            console.error('❌ Failed to load CryptoJS')
+          }
+          document.head.appendChild(script)
+        }
+      },
+      onBeforeRequest: ({ request }: { request: Request }) => {
+        const token = request.headers.get('token') ?? ''
+        const secret = request.headers.get('secret') ?? ''
+        if (
+          token &&
+          secret &&
+          typeof window !== 'undefined' &&
+          window.CryptoJS
+        ) {
+          const time = Date.now().toString()
+          const url = new URL(request.url)
+          const endpoint = url.pathname + url.search
+          const method = request.method || 'GET'
+
+          // Get request body
+          let body = ''
+          if (request.body) {
+            if (typeof request.body === 'string') {
+              body = request.body
+            } else {
+              try {
+                body = JSON.stringify(request.body)
+                if (body === '{}') body = ''
+              } catch {
+                body = ''
+              }
+            }
+          }
+
+          // Generate signature using crypto-js
+          const signatureData = body + method + endpoint + time
+          const signature = window.CryptoJS.HmacSHA256(
+            signatureData,
+            secret,
+          ).toString(window.CryptoJS.enc.Base64)
+          request.headers.delete('secret') // Remove secret from headers
+          // Add time and signature headers (token already exists from auth)
+          request.headers.set('time', time)
+          request.headers.set('signature', signature)
+        }
+      },
+      metaData: {
+        title: 'Gainium API v2.0 Documentation',
+        description:
+          'Modern API documentation. Enter token and secret for automatic signature generation.',
+      },
+      configuration: {
+        theme: 'default',
+        layout: 'classic',
+        defaultHttpClient: {
+          targetKey: 'javascript',
+          clientKey: 'fetch',
+        },
+        customCss: `
+          .scalar-api-reference {
+            --scalar-color-accent: #0066cc;
+          }
+        `,
+        authentication: {
+          // Show ApiKeyAuth and SecretAuth panels; suppress the auto-generated ones
+          preferredSecurityScheme: ['ApiKeyAuth', 'SecretAuth'],
+          securitySchemes: {
+            ApiKeyAuth: {
+              name: 'token',
+              in: 'header',
+              value: '', // user fills this in
+            },
+            SecretAuth: {
+              name: 'secret',
+              in: 'header',
+              value: '', // user fills this in — intercepted before send
+            },
+          },
+        },
+      },
+    }),
+  )
 
   app.use(
     '/api/docs',
@@ -107,6 +222,35 @@ async function start() {
     }),
   )
 
+  // Serve OpenAPI v2.0 YAML spec
+  app.get('/api/v2/openapi.yaml', (req, res) => {
+    const viewInBrowser = req.query.view === 'true'
+
+    if (viewInBrowser) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+    } else {
+      res.setHeader('Content-Type', 'application/yaml')
+    }
+
+    try {
+      const specPath = path.join(
+        __dirname,
+        '../../../src/server/v2/openapi-v2.yaml',
+      )
+      const spec = fs.readFileSync(specPath, 'utf8')
+      res.send(spec)
+    } catch (error) {
+      console.error('Failed to load OpenAPI spec:', error)
+      res.status(404).json({
+        error: 'OpenAPI spec not found',
+        attempted_path: path.join(
+          __dirname,
+          '../../../src/server/v2/openapi-v2.yaml',
+        ),
+      })
+    }
+  })
+
   app.use(cors({ origin: cors_origin, credentials: true }))
 
   app.use('/api/serverSideBacktestSaveFile', bodyParser.json({ limit: '2gb' }))
@@ -135,6 +279,56 @@ async function start() {
 
   API.delete.forEach((fn, r) =>
     app.delete(r, apiLimiter, bodyMiddleware, middleware, fn),
+  )
+
+  const v2 = v2API()
+
+  v2.get.forEach((fn, r) =>
+    app.get(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.post.forEach((fn, r) =>
+    app.post(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.put.forEach((fn, r) =>
+    app.put(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.delete.forEach((fn, r) =>
+    app.delete(
+      r,
+      apiLimiter,
+      bodyMiddleware,
+      middleware,
+      ...fn.middlewares,
+      fn.handler,
+    ),
+  )
+
+  v2.getPublic.forEach((fn, r) =>
+    app.get(r, apiLimiter, bodyMiddleware, ...fn.middlewares, fn.handler),
   )
 
   app.get('/datafeed_ws', async (_req, res) => {
