@@ -95,6 +95,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         BotStatusEnum.open,
         BotStatusEnum.archive,
         BotStatusEnum.range,
+        BotStatusEnum.monitoring,
       ]
       if (status && !validStatuses.includes(status)) {
         res.status(400).send({
@@ -208,6 +209,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         BotStatusEnum.open,
         BotStatusEnum.archive,
         BotStatusEnum.range,
+        BotStatusEnum.monitoring,
       ]
       if (status && !validStatuses.includes(status)) {
         res.status(400).send({

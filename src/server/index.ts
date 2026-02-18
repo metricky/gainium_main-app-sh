@@ -81,6 +81,110 @@ async function start() {
   }
 
   app.use(
+    '/api/docs/v2',
+    apiReference({
+      spec: {
+        url: '/api/v2/openapi.yaml',
+      },
+      persistAuth: true,
+      defaultOpenAllTags: true,
+      expandAllResponses: true,
+      favicon: 'https://app.gainium.io/gainium-icon-192x192.png',
+      onLoaded: () => {
+        // Load crypto-js from CDN
+        if (typeof window !== 'undefined' && !window.CryptoJS) {
+          const script = document.createElement('script')
+          script.src =
+            'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js'
+          script.async = false
+          script.onload = () => {
+            console.log('✅ CryptoJS loaded successfully')
+          }
+          script.onerror = () => {
+            console.error('❌ Failed to load CryptoJS')
+          }
+          document.head.appendChild(script)
+        }
+      },
+      onBeforeRequest: ({ request }: { request: Request }) => {
+        const token = request.headers.get('token') ?? ''
+        const secret = request.headers.get('secret') ?? ''
+        if (
+          token &&
+          secret &&
+          typeof window !== 'undefined' &&
+          window.CryptoJS
+        ) {
+          const time = Date.now().toString()
+          const url = new URL(request.url)
+          const endpoint = url.pathname + url.search
+          const method = request.method || 'GET'
+
+          // Get request body
+          let body = ''
+          if (request.body) {
+            if (typeof request.body === 'string') {
+              body = request.body
+            } else {
+              try {
+                body = JSON.stringify(request.body)
+                if (body === '{}') body = ''
+              } catch {
+                body = ''
+              }
+            }
+          }
+
+          // Generate signature using crypto-js
+          const signatureData = body + method + endpoint + time
+          const signature = window.CryptoJS.HmacSHA256(
+            signatureData,
+            secret,
+          ).toString(window.CryptoJS.enc.Base64)
+          request.headers.delete('secret') // Remove secret from headers
+          // Add time and signature headers (token already exists from auth)
+          request.headers.set('time', time)
+          request.headers.set('signature', signature)
+        }
+      },
+      metaData: {
+        title: 'Gainium API v2.0 Documentation',
+        description:
+          'Modern API documentation. Enter token and secret for automatic signature generation.',
+      },
+      configuration: {
+        theme: 'default',
+        layout: 'classic',
+        defaultHttpClient: {
+          targetKey: 'javascript',
+          clientKey: 'fetch',
+        },
+        customCss: `
+          .scalar-api-reference {
+            --scalar-color-accent: #0066cc;
+          }
+        `,
+        authentication: {
+          // Show ApiKeyAuth and SecretAuth panels; suppress the auto-generated ones
+          preferredSecurityScheme: ['ApiKeyAuth', 'SecretAuth'],
+          securitySchemes: {
+            ApiKeyAuth: {
+              name: 'token',
+              in: 'header',
+              value: '', // user fills this in
+            },
+            SecretAuth: {
+              name: 'secret',
+              in: 'header',
+              value: '', // user fills this in — intercepted before send
+            },
+          },
+        },
+      },
+    }),
+  )
+
+  app.use(
     '/api/docs',
     //@ts-ignore
     swaggerUi.serve,
@@ -118,38 +222,32 @@ async function start() {
     }),
   )
 
-  // Scalar API Documentation v2.0
-  app.use(
-    '/api/docs/v2',
-    apiReference({
-      spec: {
-        url: '/api/v2/openapi.yaml',
-      },
-      configuration: {
-        theme: 'default',
-        layout: 'classic',
-        defaultHttpClient: {
-          targetKey: 'javascript',
-          clientKey: 'fetch',
-        },
-        metaData: {
-          title: 'Gainium API v2.0 Documentation',
-          description:
-            'Modern API documentation with field selection capabilities',
-        },
-      },
-    }),
-  )
-
   // Serve OpenAPI v2.0 YAML spec
-  app.get('/api/v2/openapi.yaml', (_req, res) => {
-    res.setHeader('Content-Type', 'application/yaml')
+  app.get('/api/v2/openapi.yaml', (req, res) => {
+    const viewInBrowser = req.query.view === 'true'
+
+    if (viewInBrowser) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+    } else {
+      res.setHeader('Content-Type', 'application/yaml')
+    }
+
     try {
-      const specPath = path.join(__dirname, 'v2/openapi-v2.yaml')
+      const specPath = path.join(
+        __dirname,
+        '../../../src/server/v2/openapi-v2.yaml',
+      )
       const spec = fs.readFileSync(specPath, 'utf8')
       res.send(spec)
     } catch (error) {
-      res.status(404).json({ error: 'OpenAPI spec not found' })
+      console.error('Failed to load OpenAPI spec:', error)
+      res.status(404).json({
+        error: 'OpenAPI spec not found',
+        attempted_path: path.join(
+          __dirname,
+          '../../../src/server/v2/openapi-v2.yaml',
+        ),
+      })
     }
   })
 

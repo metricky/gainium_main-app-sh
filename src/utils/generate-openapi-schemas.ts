@@ -1110,23 +1110,20 @@ class SchemaGenerator {
       return null
     }
 
-    const schema: any = {
-      type: 'object',
-      description: typeInfo.description || `${typeName} configuration`,
-      properties: {},
-    }
-
     // Handle inheritance
     if (typeInfo.extends) {
       const baseSchema = this.generateOpenAPISchema(typeInfo.extends)
       if (baseSchema) {
-        schema.allOf = [
-          { $ref: `#/components/schemas/${typeInfo.extends}` },
-          {
-            type: 'object',
-            properties: {},
-          },
-        ]
+        const schema: any = {
+          description: typeInfo.description || `${typeName} configuration`,
+          allOf: [
+            { $ref: `#/components/schemas/${typeInfo.extends}` },
+            {
+              type: 'object',
+              properties: {},
+            },
+          ],
+        }
         // Add properties to the second object in allOf
         typeInfo.properties.forEach((prop) => {
           const propSchema = this.propertyToOpenAPI(prop)
@@ -1134,6 +1131,18 @@ class SchemaGenerator {
         })
         return schema
       }
+    }
+
+    // Non-inherited schema
+    const schema: any = {
+      type: 'object',
+      properties: {},
+    }
+
+    // Only add description for non-base schemas
+    // BaseSettings is used only as a base and shouldn't have its own description
+    if (typeName !== 'BaseSettings') {
+      schema.description = typeInfo.description || `${typeName} configuration`
     }
 
     typeInfo.properties.forEach((prop) => {
@@ -1226,7 +1235,8 @@ class SchemaGenerator {
 // Main execution
 async function main() {
   const typesPath = path.join(__dirname, '../../types.ts')
-  const outputPath = path.join(__dirname, '../server/v2/generated-schemas.yaml')
+  const openApiPath = path.join(__dirname, '../server/v2/openapi-v2.yaml')
+  const backupPath = path.join(__dirname, '../server/v2/openapi-v2.yaml.backup')
 
   console.log('Parsing TypeScript types from:', typesPath)
 
@@ -1234,23 +1244,59 @@ async function main() {
   generator.parse()
 
   console.log('\nGenerating OpenAPI schemas...\n')
-  const schemas = generator.generateAllSchemas()
+  const generatedSchemas = generator.generateAllSchemas()
 
-  // Output as YAML
-  const yamlOutput = yaml.dump(
-    { components: { schemas } },
-    { indent: 2, lineWidth: -1, noRefs: true },
-  )
+  // Read existing OpenAPI spec
+  console.log('Reading existing OpenAPI spec:', openApiPath)
+  const existingYaml = fs.readFileSync(openApiPath, 'utf-8')
+  const openApiSpec: any = yaml.load(existingYaml)
 
-  fs.writeFileSync(outputPath, yamlOutput, 'utf-8')
-  console.log(`\n✅ Schemas generated successfully!`)
-  console.log(`📝 Output written to: ${outputPath}`)
-  console.log(
-    '\n🔗 Schemas are referenced in openapi-v2.yaml via $ref directives.',
-  )
-  console.log(
-    '   No manual copying needed - OpenAPI will resolve them automatically.',
-  )
+  // Create backup
+  fs.writeFileSync(backupPath, existingYaml, 'utf-8')
+  console.log('✓ Created backup:', backupPath)
+
+  // Ensure components.schemas exists
+  if (!openApiSpec.components) {
+    openApiSpec.components = {}
+  }
+  if (!openApiSpec.components.schemas) {
+    openApiSpec.components.schemas = {}
+  }
+
+  // Update/merge generated schemas into OpenAPI spec
+  const schemasToUpdate = [
+    'BaseSettings',
+    'BotSettings',
+    'DCABotSettings',
+    'ComboBotSettings',
+    'SettingsIndicators',
+    'SettingsIndicatorGroup',
+    'MultiTP',
+    'DCACustom',
+  ]
+
+  schemasToUpdate.forEach((schemaName) => {
+    if (generatedSchemas[schemaName]) {
+      openApiSpec.components.schemas[schemaName] = generatedSchemas[schemaName]
+      console.log(`✓ Updated schema: ${schemaName}`)
+    }
+  })
+
+  // Write back to openapi-v2.yaml
+  const yamlOutput = yaml.dump(openApiSpec, {
+    indent: 2,
+    lineWidth: -1,
+    noRefs: true,
+    quotingType: '"',
+    forceQuotes: false,
+  })
+
+  fs.writeFileSync(openApiPath, yamlOutput, 'utf-8')
+  console.log(`\n✅ Schemas updated successfully in OpenAPI spec!`)
+  console.log(`📝 Updated: ${openApiPath}`)
+  console.log(`💾 Backup: ${backupPath}`)
+  console.log('\n🎯 Generated schemas are now inlined in openapi-v2.yaml')
+  console.log('   No external references needed!')
 }
 
 main().catch((error) => {

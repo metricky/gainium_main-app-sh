@@ -25,7 +25,7 @@ All API requests require three headers:
 | Header | Description | Example |
 |--------|-------------|---------|
 | `token` | Public API key | `your-public-key` |
-| `time` | Request timestamp (ms) | `1771335612150` |
+| `time` | Request timestamp (ms) | `1771427053665` |
 | `signature` | HMAC-SHA256 signature | `calculated-signature` |
 
 ### Signature Calculation
@@ -322,15 +322,142 @@ curl -X GET "https://api.gainium.io/api/v2/bots/grid?status=example-value&paperC
 
 ---
 
-#### POST /api/v2/bots/start
-**Start Bot**
+#### POST /api/updateDCABot
+**Update DCA bot settings**
 
-Start a specific bot
+Requires write permission of API keys.
+
+**Python:**
+```python
+payload = {
+    "exampleField": "exampleValue"
+}
+
+response = requests.post(
+    "https://api.gainium.io/api/updateDCABot",
+    params={"botId": "example-value", "paperContext": "example-value"},
+    json=payload,
+    headers=headers
+)
+result = response.json()```
+
+**JavaScript/TypeScript:**
+```javascript
+const payload = {
+    exampleField: 'exampleValue'
+};
+
+const response = await fetch('https://api.gainium.io/api/updateDCABot', {
+    method: 'POST',
+    headers: {
+        ...headers,
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+});
+const result = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/updateDCABot?botId=example-value&paperContext=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE" \
+  -H "Content-Type: application/json" \
+  -d '{"exampleField": "exampleValue"}'```
+
+---
+
+#### POST /api/updateComboBot
+**Update Combo bot settings**
+
+Requires write permission of API keys.
+
+**Python:**
+```python
+payload = {
+    "exampleField": "exampleValue"
+}
+
+response = requests.post(
+    "https://api.gainium.io/api/updateComboBot",
+    params={"botId": "example-value", "paperContext": "example-value"},
+    json=payload,
+    headers=headers
+)
+result = response.json()```
+
+**JavaScript/TypeScript:**
+```javascript
+const payload = {
+    exampleField: 'exampleValue'
+};
+
+const response = await fetch('https://api.gainium.io/api/updateComboBot', {
+    method: 'POST',
+    headers: {
+        ...headers,
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+});
+const result = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/updateComboBot?botId=example-value&paperContext=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE" \
+  -H "Content-Type: application/json" \
+  -d '{"exampleField": "exampleValue"}'```
+
+---
+
+#### POST /api/changeBotPairs
+**Change bot pairs**
+
+Requires write permission of API keys. Format of the pair is {base}_{quote}, example BTC_USDT
 
 **Python:**
 ```python
 response = requests.get(
-    "https://api.gainium.io/api/v2/bots/start",
+    "https://api.gainium.io/api/changeBotPairs",
+    params={"botId": "example-value", "botName": "example-value", "fields": "standard"},
+    headers=headers
+)
+data = response.json()["data"]```
+
+**JavaScript/TypeScript:**
+```javascript
+const params = new URLSearchParams({
+    botId: 'example-value', botName: 'example-value', fields: 'standard'
+});
+
+const response = await fetch(`'https://api.gainium.io/api/changeBotPairs'?${params}`, {
+    method: 'GET',
+    headers
+});
+const data = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/changeBotPairs?botId=example-value&botName=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE"```
+
+---
+
+#### POST /api/startBot
+**Start bot**
+
+Requires write permission of API keys.
+
+**Python:**
+```python
+response = requests.get(
+    "https://api.gainium.io/api/startBot",
     params={"botId": "example-value", "type": "example-value", "fields": "standard"},
     headers=headers
 )
@@ -342,7 +469,7 @@ const params = new URLSearchParams({
     botId: 'example-value', type: 'example-value', fields: 'standard'
 });
 
-const response = await fetch(`'https://api.gainium.io/api/v2/bots/start'?${params}`, {
+const response = await fetch(`'https://api.gainium.io/api/startBot'?${params}`, {
     method: 'GET',
     headers
 });
@@ -350,22 +477,22 @@ const data = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/start?botId=example-value&type=example-value&fields=standard" \
+curl -X POST "https://api.gainium.io/api/startBot?botId=example-value&type=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE"```
 
 ---
 
-#### POST /api/v2/bots/restore
-**Restore Bot**
+#### POST /api/restoreBot
+**Restore bot from archive**
 
-Restore a bot from archive
+Requires write permission of API keys.
 
 **Python:**
 ```python
 response = requests.get(
-    "https://api.gainium.io/api/v2/bots/restore",
+    "https://api.gainium.io/api/restoreBot",
     params={"botId": "example-value", "type": "example-value", "fields": "standard"},
     headers=headers
 )
@@ -377,7 +504,7 @@ const params = new URLSearchParams({
     botId: 'example-value', type: 'example-value', fields: 'standard'
 });
 
-const response = await fetch(`'https://api.gainium.io/api/v2/bots/restore'?${params}`, {
+const response = await fetch(`'https://api.gainium.io/api/restoreBot'?${params}`, {
     method: 'GET',
     headers
 });
@@ -385,17 +512,17 @@ const data = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/restore?botId=example-value&type=example-value&fields=standard" \
+curl -X POST "https://api.gainium.io/api/restoreBot?botId=example-value&type=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE"```
 
 ---
 
-#### POST /api/v2/bots/dca/update
-**Update DCA Bot**
+#### PUT /api/cloneComboBot
+**Clone Combo bot settings**
 
-Update DCA bot settings
+Requires write permission of API keys.
 
 **Python:**
 ```python
@@ -404,7 +531,8 @@ payload = {
 }
 
 response = requests.post(
-    "https://api.gainium.io/api/v2/bots/dca/update",
+    "https://api.gainium.io/api/cloneComboBot",
+    params={"botId": "example-value", "paperContext": "example-value"},
     json=payload,
     headers=headers
 )
@@ -416,8 +544,8 @@ const payload = {
     exampleField: 'exampleValue'
 };
 
-const response = await fetch('https://api.gainium.io/api/v2/bots/dca/update', {
-    method: 'POST',
+const response = await fetch('https://api.gainium.io/api/cloneComboBot', {
+    method: 'PUT',
     headers: {
         ...headers,
         'Content-Type': 'application/json'
@@ -428,7 +556,7 @@ const result = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/dca/update?fields=standard" \
+curl -X PUT "https://api.gainium.io/api/cloneComboBot?botId=example-value&paperContext=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE" \
@@ -437,10 +565,10 @@ curl -X POST "https://api.gainium.io/api/v2/bots/dca/update?fields=standard" \
 
 ---
 
-#### POST /api/v2/bots/combo/update
-**Update Combo Bot**
+#### PUT /api/cloneDCABot
+**Clone DCA bot**
 
-Update Combo bot settings
+Requires write permission of API keys.
 
 **Python:**
 ```python
@@ -449,7 +577,8 @@ payload = {
 }
 
 response = requests.post(
-    "https://api.gainium.io/api/v2/bots/combo/update",
+    "https://api.gainium.io/api/cloneDCABot",
+    params={"botId": "example-value", "paperContext": "example-value"},
     json=payload,
     headers=headers
 )
@@ -461,8 +590,8 @@ const payload = {
     exampleField: 'exampleValue'
 };
 
-const response = await fetch('https://api.gainium.io/api/v2/bots/combo/update', {
-    method: 'POST',
+const response = await fetch('https://api.gainium.io/api/cloneDCABot', {
+    method: 'PUT',
     headers: {
         ...headers,
         'Content-Type': 'application/json'
@@ -473,7 +602,7 @@ const result = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/combo/update?fields=standard" \
+curl -X PUT "https://api.gainium.io/api/cloneDCABot?botId=example-value&paperContext=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE" \
@@ -482,16 +611,16 @@ curl -X POST "https://api.gainium.io/api/v2/bots/combo/update?fields=standard" \
 
 ---
 
-#### POST /api/v2/bots/dca/clone
-**Clone DCA Bot**
+#### DELETE /api/stopBot
+**Stop bot**
 
-Create a copy of an existing DCA bot
+Requires write permission of API keys.
 
 **Python:**
 ```python
 response = requests.get(
-    "https://api.gainium.io/api/v2/bots/dca/clone",
-    params={"botId": "example-value", "paperContext": "example-value", "fields": "standard"},
+    "https://api.gainium.io/api/stopBot",
+    params={"botId": "example-value", "botType": "example-value", "fields": "standard"},
     headers=headers
 )
 data = response.json()["data"]```
@@ -499,10 +628,10 @@ data = response.json()["data"]```
 **JavaScript/TypeScript:**
 ```javascript
 const params = new URLSearchParams({
-    botId: 'example-value', paperContext: 'example-value', fields: 'standard'
+    botId: 'example-value', botType: 'example-value', fields: 'standard'
 });
 
-const response = await fetch(`'https://api.gainium.io/api/v2/bots/dca/clone'?${params}`, {
+const response = await fetch(`'https://api.gainium.io/api/stopBot'?${params}`, {
     method: 'GET',
     headers
 });
@@ -510,23 +639,23 @@ const data = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/dca/clone?botId=example-value&paperContext=example-value&fields=standard" \
+curl -X DELETE "https://api.gainium.io/api/stopBot?botId=example-value&botType=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE"```
 
 ---
 
-#### POST /api/v2/bots/combo/clone
-**Clone Combo Bot**
+#### DELETE /api/archiveBot
+**Archive bot**
 
-Create a copy of an existing Combo bot
+Requires write permission of API keys.
 
 **Python:**
 ```python
 response = requests.get(
-    "https://api.gainium.io/api/v2/bots/combo/clone",
-    params={"botId": "example-value", "paperContext": "example-value", "fields": "standard"},
+    "https://api.gainium.io/api/archiveBot",
+    params={"botId": "example-value", "botType": "example-value", "fields": "standard"},
     headers=headers
 )
 data = response.json()["data"]```
@@ -534,10 +663,10 @@ data = response.json()["data"]```
 **JavaScript/TypeScript:**
 ```javascript
 const params = new URLSearchParams({
-    botId: 'example-value', paperContext: 'example-value', fields: 'standard'
+    botId: 'example-value', botType: 'example-value', fields: 'standard'
 });
 
-const response = await fetch(`'https://api.gainium.io/api/v2/bots/combo/clone'?${params}`, {
+const response = await fetch(`'https://api.gainium.io/api/archiveBot'?${params}`, {
     method: 'GET',
     headers
 });
@@ -545,100 +674,10 @@ const data = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/combo/clone?botId=example-value&paperContext=example-value&fields=standard" \
+curl -X DELETE "https://api.gainium.io/api/archiveBot?botId=example-value&botType=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE"```
-
----
-
-#### POST /api/v2/bots/funds/add
-**Add Funds to Bot**
-
-Add additional funds to a bot
-
-**Python:**
-```python
-payload = {
-    "exampleField": "exampleValue"
-}
-
-response = requests.post(
-    "https://api.gainium.io/api/v2/bots/funds/add",
-    json=payload,
-    headers=headers
-)
-result = response.json()```
-
-**JavaScript/TypeScript:**
-```javascript
-const payload = {
-    exampleField: 'exampleValue'
-};
-
-const response = await fetch('https://api.gainium.io/api/v2/bots/funds/add', {
-    method: 'POST',
-    headers: {
-        ...headers,
-        'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-});
-const result = await response.json();```
-
-**CLI (curl):**
-```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/funds/add?fields=standard" \
-  -H "token: $TOKEN" \
-  -H "time: $TIMESTAMP" \
-  -H "signature: $SIGNATURE" \
-  -H "Content-Type: application/json" \
-  -d '{"exampleField": "exampleValue"}'```
-
----
-
-#### POST /api/v2/bots/funds/reduce
-**Reduce Bot Funds**
-
-Reduce funds from a bot
-
-**Python:**
-```python
-payload = {
-    "exampleField": "exampleValue"
-}
-
-response = requests.post(
-    "https://api.gainium.io/api/v2/bots/funds/reduce",
-    json=payload,
-    headers=headers
-)
-result = response.json()```
-
-**JavaScript/TypeScript:**
-```javascript
-const payload = {
-    exampleField: 'exampleValue'
-};
-
-const response = await fetch('https://api.gainium.io/api/v2/bots/funds/reduce', {
-    method: 'POST',
-    headers: {
-        ...headers,
-        'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-});
-const result = await response.json();```
-
-**CLI (curl):**
-```bash
-curl -X POST "https://api.gainium.io/api/v2/bots/funds/reduce?fields=standard" \
-  -H "token: $TOKEN" \
-  -H "time: $TIMESTAMP" \
-  -H "signature: $SIGNATURE" \
-  -H "Content-Type: application/json" \
-  -d '{"exampleField": "exampleValue"}'```
 
 ---
 
@@ -693,115 +732,10 @@ curl -X GET "https://api.gainium.io/api/v2/deals?type=example-value&status=examp
 
 ---
 
-#### POST /api/v2/deals/start
-**Start Deal**
+#### POST /api/updateDCADeal
+**Update DCA deal settings**
 
-Manually start a new deal
-
-**Python:**
-```python
-response = requests.get(
-    "https://api.gainium.io/api/v2/deals/start",
-    params={"botId": "example-value", "type": "example-value", "fields": "standard"},
-    headers=headers
-)
-data = response.json()["data"]```
-
-**JavaScript/TypeScript:**
-```javascript
-const params = new URLSearchParams({
-    botId: 'example-value', type: 'example-value', fields: 'standard'
-});
-
-const response = await fetch(`'https://api.gainium.io/api/v2/deals/start'?${params}`, {
-    method: 'GET',
-    headers
-});
-const data = await response.json();```
-
-**CLI (curl):**
-```bash
-curl -X POST "https://api.gainium.io/api/v2/deals/start?botId=example-value&type=example-value&fields=standard" \
-  -H "token: $TOKEN" \
-  -H "time: $TIMESTAMP" \
-  -H "signature: $SIGNATURE"```
-
----
-
-#### POST /api/v2/deals/{dealId}/close
-**Close Deal**
-
-Manually close a specific deal
-
-**Python:**
-```python
-response = requests.get(
-    "https://api.gainium.io/api/v2/deals/{dealId}/close",
-    params={"paperContext": "example-value", "fields": "standard"},
-    headers=headers
-)
-data = response.json()["data"]```
-
-**JavaScript/TypeScript:**
-```javascript
-const params = new URLSearchParams({
-    paperContext: 'example-value', fields: 'standard'
-});
-
-const response = await fetch(`'https://api.gainium.io/api/v2/deals/{dealId}/close'?${params}`, {
-    method: 'GET',
-    headers
-});
-const data = await response.json();```
-
-**CLI (curl):**
-```bash
-curl -X POST "https://api.gainium.io/api/v2/deals/{dealId}/close?paperContext=example-value&fields=standard" \
-  -H "token: $TOKEN" \
-  -H "time: $TIMESTAMP" \
-  -H "signature: $SIGNATURE"```
-
----
-
-#### POST /api/v2/deals/{dealId}/cancel
-**Cancel Deal**
-
-Cancel a specific deal
-
-**Python:**
-```python
-response = requests.get(
-    "https://api.gainium.io/api/v2/deals/{dealId}/cancel",
-    params={"paperContext": "example-value", "fields": "standard"},
-    headers=headers
-)
-data = response.json()["data"]```
-
-**JavaScript/TypeScript:**
-```javascript
-const params = new URLSearchParams({
-    paperContext: 'example-value', fields: 'standard'
-});
-
-const response = await fetch(`'https://api.gainium.io/api/v2/deals/{dealId}/cancel'?${params}`, {
-    method: 'GET',
-    headers
-});
-const data = await response.json();```
-
-**CLI (curl):**
-```bash
-curl -X POST "https://api.gainium.io/api/v2/deals/{dealId}/cancel?paperContext=example-value&fields=standard" \
-  -H "token: $TOKEN" \
-  -H "time: $TIMESTAMP" \
-  -H "signature: $SIGNATURE"```
-
----
-
-#### PATCH /api/v2/deals/dca/update
-**Update DCA Deal**
-
-Update DCA deal settings and parameters
+Requires write permission of API keys.
 
 **Python:**
 ```python
@@ -810,7 +744,8 @@ payload = {
 }
 
 response = requests.post(
-    "https://api.gainium.io/api/v2/deals/dca/update",
+    "https://api.gainium.io/api/updateDCADeal",
+    params={"dealId": "example-value", "paperContext": "example-value"},
     json=payload,
     headers=headers
 )
@@ -822,8 +757,8 @@ const payload = {
     exampleField: 'exampleValue'
 };
 
-const response = await fetch('https://api.gainium.io/api/v2/deals/dca/update', {
-    method: 'PATCH',
+const response = await fetch('https://api.gainium.io/api/updateDCADeal', {
+    method: 'POST',
     headers: {
         ...headers,
         'Content-Type': 'application/json'
@@ -834,7 +769,7 @@ const result = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X PATCH "https://api.gainium.io/api/v2/deals/dca/update?fields=standard" \
+curl -X POST "https://api.gainium.io/api/updateDCADeal?dealId=example-value&paperContext=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE" \
@@ -843,10 +778,10 @@ curl -X PATCH "https://api.gainium.io/api/v2/deals/dca/update?fields=standard" \
 
 ---
 
-#### PATCH /api/v2/deals/combo/update
-**Update Combo Deal**
+#### POST /api/updateComboDeal
+**Update deal settings**
 
-Update Combo deal settings and parameters
+Requires write permission of API keys.
 
 **Python:**
 ```python
@@ -855,7 +790,8 @@ payload = {
 }
 
 response = requests.post(
-    "https://api.gainium.io/api/v2/deals/combo/update",
+    "https://api.gainium.io/api/updateComboDeal",
+    params={"dealId": "example-value", "paperContext": "example-value"},
     json=payload,
     headers=headers
 )
@@ -867,8 +803,8 @@ const payload = {
     exampleField: 'exampleValue'
 };
 
-const response = await fetch('https://api.gainium.io/api/v2/deals/combo/update', {
-    method: 'PATCH',
+const response = await fetch('https://api.gainium.io/api/updateComboDeal', {
+    method: 'POST',
     headers: {
         ...headers,
         'Content-Type': 'application/json'
@@ -879,12 +815,187 @@ const result = await response.json();```
 
 **CLI (curl):**
 ```bash
-curl -X PATCH "https://api.gainium.io/api/v2/deals/combo/update?fields=standard" \
+curl -X POST "https://api.gainium.io/api/updateComboDeal?dealId=example-value&paperContext=example-value&fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE" \
   -H "Content-Type: application/json" \
   -d '{"exampleField": "exampleValue"}'```
+
+---
+
+#### POST /api/addFunds
+**Add funds to deal**
+
+Requires write permission of API keys.
+
+**Python:**
+```python
+response = requests.get(
+    "https://api.gainium.io/api/addFunds",
+    params={"dealId": "example-value", "botId": "example-value", "fields": "standard"},
+    headers=headers
+)
+data = response.json()["data"]```
+
+**JavaScript/TypeScript:**
+```javascript
+const params = new URLSearchParams({
+    dealId: 'example-value', botId: 'example-value', fields: 'standard'
+});
+
+const response = await fetch(`'https://api.gainium.io/api/addFunds'?${params}`, {
+    method: 'GET',
+    headers
+});
+const data = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/addFunds?dealId=example-value&botId=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE"```
+
+---
+
+#### POST /api/reduceFunds
+**Reduce funds from deal**
+
+Requires write permission of API keys.
+
+**Python:**
+```python
+response = requests.get(
+    "https://api.gainium.io/api/reduceFunds",
+    params={"dealId": "example-value", "botId": "example-value", "fields": "standard"},
+    headers=headers
+)
+data = response.json()["data"]```
+
+**JavaScript/TypeScript:**
+```javascript
+const params = new URLSearchParams({
+    dealId: 'example-value', botId: 'example-value', fields: 'standard'
+});
+
+const response = await fetch(`'https://api.gainium.io/api/reduceFunds'?${params}`, {
+    method: 'GET',
+    headers
+});
+const data = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/reduceFunds?dealId=example-value&botId=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE"```
+
+---
+
+#### POST /api/startDeal
+**Start bot deal**
+
+Requires write permission of API keys.
+
+**Python:**
+```python
+response = requests.get(
+    "https://api.gainium.io/api/startDeal",
+    params={"botId": "example-value", "symbol": "example-value", "fields": "standard"},
+    headers=headers
+)
+data = response.json()["data"]```
+
+**JavaScript/TypeScript:**
+```javascript
+const params = new URLSearchParams({
+    botId: 'example-value', symbol: 'example-value', fields: 'standard'
+});
+
+const response = await fetch(`'https://api.gainium.io/api/startDeal'?${params}`, {
+    method: 'GET',
+    headers
+});
+const data = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/startDeal?botId=example-value&symbol=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE"```
+
+---
+
+#### DELETE /api/closeDeal/{dealId}
+**Close deal**
+
+Requires write permission of API keys.
+
+**Python:**
+```python
+response = requests.get(
+    "https://api.gainium.io/api/closeDeal/{dealId}",
+    params={"type": "example-value", "botType": "example-value", "fields": "standard"},
+    headers=headers
+)
+data = response.json()["data"]```
+
+**JavaScript/TypeScript:**
+```javascript
+const params = new URLSearchParams({
+    type: 'example-value', botType: 'example-value', fields: 'standard'
+});
+
+const response = await fetch(`'https://api.gainium.io/api/closeDeal/{dealId}'?${params}`, {
+    method: 'GET',
+    headers
+});
+const data = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X DELETE "https://api.gainium.io/api/closeDeal/{dealId}?type=example-value&botType=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE"```
+
+---
+
+#### DELETE /api/cancelDeal/{dealId}
+**Cancel deal**
+
+Requires write permission of API keys.
+
+**Python:**
+```python
+response = requests.get(
+    "https://api.gainium.io/api/cancelDeal/{dealId}",
+    params={"botType": "example-value", "paperContext": "example-value", "fields": "standard"},
+    headers=headers
+)
+data = response.json()["data"]```
+
+**JavaScript/TypeScript:**
+```javascript
+const params = new URLSearchParams({
+    botType: 'example-value', paperContext: 'example-value', fields: 'standard'
+});
+
+const response = await fetch(`'https://api.gainium.io/api/cancelDeal/{dealId}'?${params}`, {
+    method: 'GET',
+    headers
+});
+const data = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X DELETE "https://api.gainium.io/api/cancelDeal/{dealId}?botType=example-value&paperContext=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE"```
 
 ---
 
@@ -1224,4 +1335,4 @@ def get_all_bots():
 ---
 
 *This documentation is automatically generated from the OpenAPI specification.*
-*Last updated: 2026-02-17T13:40:12.151Z*
+*Last updated: 2026-02-18T15:04:13.665Z*

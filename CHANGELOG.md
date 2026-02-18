@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.11.0] - 2026-02-18
+### Added 
+- API v2
+
 ## [1.10.12] - 2026-02-18
 ### Changed 
 - Increased max number of bots to return in related bots query
