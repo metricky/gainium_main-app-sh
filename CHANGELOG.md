@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.12] - 2026-02-18
+### Changed 
+- Increased max number of bots to return in related bots query
+
 ## [1.10.11] - 2026-02-17
 ### Changed 
 - Added paperContext and bot status to related bots query

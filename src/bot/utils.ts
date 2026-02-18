@@ -687,7 +687,7 @@ export const getBotsByGlobalVar: getBotsByGlobalVarOverload = (async (
       status: 1,
       paperContext: 1,
     }
-    const options = { limit: 30 }
+    const options = { limit: 500 }
     const findDca = await dcaBotDb.readData<ResponseBot>(
       filter,
       fields,
