@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.11.1] - 2026-02-18
+### Added 
+- API v2 added createDCABot request, get global variables request
+
 ## [1.11.0] - 2026-02-18
 ### Added 
 - API v2

@@ -49,6 +49,7 @@ import {
   MainBot,
   BybitHost,
   LogLevel,
+  CreateDCABotInput,
 } from '../../types'
 import {
   BaseReturn,
@@ -3418,14 +3419,7 @@ class Bot<T extends UserSchema = UserSchema> {
 
   public async createDCABot(
     userId: string,
-    _settings: DCABotSettings & {
-      baseAsset?: string[]
-      quoteAsset?: string[]
-      exchange: ExchangeEnum
-      exchangeUUID: string
-      uuid?: string
-      vars?: BotVars | null
-    },
+    _settings: CreateDCABotInput,
     paperContext: boolean,
     cb?: () => Promise<unknown>,
   ) {

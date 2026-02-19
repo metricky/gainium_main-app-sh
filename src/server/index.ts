@@ -106,7 +106,7 @@ async function start() {
           document.head.appendChild(script)
         }
       },
-      onBeforeRequest: ({ request }: { request: Request }) => {
+      onBeforeRequest: async ({ request }: { request: Request }) => {
         const token = request.headers.get('token') ?? ''
         const secret = request.headers.get('secret') ?? ''
         if (
@@ -120,23 +120,22 @@ async function start() {
           const endpoint = url.pathname + url.search
           const method = request.method || 'GET'
 
-          // Get request body
-          let body = ''
+          // Get request body text
+          let bodyText = ''
           if (request.body) {
-            if (typeof request.body === 'string') {
-              body = request.body
-            } else {
-              try {
-                body = JSON.stringify(request.body)
-                if (body === '{}') body = ''
-              } catch {
-                body = ''
-              }
+            try {
+              // Clone the request to read body without consuming the original
+              const clonedRequest = request.clone()
+              bodyText = await clonedRequest.text()
+              bodyText = JSON.stringify(JSON.parse(bodyText)) // Normalize JSON body to remove whitespace
+              if (bodyText === '{}' || bodyText === '') bodyText = ''
+            } catch {
+              bodyText = ''
             }
           }
 
           // Generate signature using crypto-js
-          const signatureData = body + method + endpoint + time
+          const signatureData = bodyText + method + endpoint + time
           const signature = window.CryptoJS.HmacSHA256(
             signatureData,
             secret,

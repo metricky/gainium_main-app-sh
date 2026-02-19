@@ -17,6 +17,9 @@ import {
   DCADealStatusEnum,
   BotType,
   UserSchema,
+  BotVars,
+  CreateDCABotInput,
+  DCATypeEnum,
 } from '../../../types'
 import BotInstance from '../../bot'
 import allAPI from '../api'
@@ -28,12 +31,17 @@ import {
   balanceDb,
   botDb,
   userDb as _userDb,
+  globalVarsDb,
 } from '../../db/dbInit'
 import DB from '../../db'
 import { buildProjection } from './fieldUtils'
 import { fieldSelectionMiddlewares } from './middleware'
-import { isFutures, isCoinm } from '../../utils'
+import { isFutures, isCoinm, isPaper } from '../../utils'
+import { DCA_FORM_DEFAULTS, indicatorConfigDefaults } from './botDefaults'
 import type { ResponseMeta } from './types'
+import { DCABotSettings } from '../../../types'
+import { validateCreateDCABotInput } from './validators'
+import { Types } from 'mongoose'
 
 type APIMap = Map<
   string,
@@ -47,6 +55,38 @@ const defaultPaginations = {
   bots: 10,
   deals: 20,
   balances: 100,
+  globalVars: 100,
+}
+
+export type CreateDCABotInputRaw = Partial<DCABotSettings> & {
+  exchangeUUID?: string
+  paperContext?: boolean
+  vars?: { path: string; variable: string }[]
+}
+
+const sortFields = <T extends Record<string, any>>(obj: T): T => {
+  const sortedObj: Record<string, any> = {}
+  Object.keys(obj)
+    .sort()
+    .forEach((key) => {
+      if (
+        typeof obj[key] === 'object' &&
+        obj[key] !== null &&
+        !Array.isArray(obj[key])
+      ) {
+        sortedObj[key] = sortFields(obj[key])
+      }
+      if (Array.isArray(obj[key])) {
+        sortedObj[key] = obj[key].map((item: any) => {
+          if (typeof item === 'object' && item !== null) {
+            return sortFields(item)
+          }
+          return item
+        })
+      }
+      sortedObj[key] = obj[key]
+    })
+  return sortedObj as T
 }
 
 const v2API = <R extends UserSchema = UserSchema>(
@@ -564,6 +604,66 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
+   * GET /api/v2/user/globalVars
+   *
+   * List global variables
+   *
+   * Query params:
+   * - page: Page number (default: 1)
+   */
+  get.set('/api/v2/user/globalVars', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const { page: _page }: { page?: string } = req.query
+      const user = req.userData
+
+      const page = _page && !isNaN(+_page) ? +_page : 1
+
+      const filter: Record<string, any> = {
+        userId: user.id,
+      }
+
+      const limit = defaultPaginations.globalVars
+      const skip = (page - 1) * limit
+
+      try {
+        const result = await globalVarsDb.readData(
+          filter,
+          {},
+          { sort: { createdAt: -1 }, skip, limit },
+          true,
+          true,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          res.status(500).send(result)
+          return
+        }
+
+        const meta: ResponseMeta = {
+          page,
+          total: Math.ceil(result.data.count / limit),
+          count: result.data.count,
+          onPage: result.data.result.length,
+        }
+
+        res.send({
+          status: StatusEnum.ok,
+          reason: null,
+          data: result.data.result,
+          meta,
+        })
+      } catch (error) {
+        res.status(500).send({
+          status: StatusEnum.notok,
+          reason: 'Internal server error',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
    * GET /api/v2/bots/grid
    *
    * List Grid bots with field selection
@@ -678,12 +778,212 @@ const v2API = <R extends UserSchema = UserSchema>(
     },
   })
 
+  // POST endpoints
+  const post: APIMap = new Map()
+
+  /**
+   * POST /api/v2/createDCABot
+   *
+   * Create a new DCA bot
+   *
+   * Body: CreateDCABotInput (DCABotSettings + exchangeUUID + vars)
+   * Query: ?paperContext=true|false (optional, defaults to false for real trading)
+   *
+   * Response:
+   * - 200: Bot created successfully with botId and uuid
+   * - 400: Validation error (missing exchangeUUID, exchange not found, etc.)
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/createDCABot', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const input = req.body as CreateDCABotInputRaw
+      const paperContext = input.paperContext === true
+
+      // 1. Validate exchangeUUID is provided FIRST (before fetching user)
+      if (!input.exchangeUUID) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'exchangeUUID is required',
+        })
+      }
+
+      // 2. Get user document
+      const userResult = await userDb.readData({ _id: user.id })
+      if (userResult.status !== StatusEnum.ok || !userResult.data?.result) {
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason: 'Failed to fetch user data',
+        })
+      }
+
+      const userData = userResult.data.result
+
+      // 3. Find exchange in user's exchanges
+      const exchange = userData.exchanges?.find(
+        (ex: any) => ex.uuid === input.exchangeUUID,
+      )
+
+      if (!exchange) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Exchange not found',
+        })
+      }
+
+      // 4. Verify exchange matches paper/real context using isPaper() helper
+      const isExchangePaper = isPaper(exchange.provider)
+      if (isExchangePaper !== paperContext) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: paperContext
+            ? 'Exchange is not a paper trading exchange'
+            : 'Exchange is a paper trading exchange, use paper context',
+        })
+      }
+
+      // 5. Merge defaults with user input, then override exchange-specific fields
+      const settings: CreateDCABotInput = {
+        ...DCA_FORM_DEFAULTS,
+        ...input,
+        type: DCATypeEnum.regular,
+        // Override futures/coinm based on exchange provider (not user input!)
+        futures: isFutures(exchange.provider),
+        coinm: isCoinm(exchange.provider),
+        exchange: exchange.provider,
+        exchangeUUID: exchange.uuid,
+        vars: (input.vars || []).reduce(
+          (acc, { path, variable }) => {
+            if (!acc.list.includes(variable)) {
+              acc.list.push(variable)
+            }
+            acc.paths.push({ path, variable })
+            return acc
+          },
+          {
+            list: [],
+            paths: [],
+          } as BotVars,
+        ),
+      }
+
+      if (settings.indicators.length) {
+        settings.indicators = settings.indicators.map((indicator) => ({
+          ...(indicatorConfigDefaults[indicator.type] ?? {}),
+          ...indicator,
+        }))
+      }
+
+      delete (settings as any).paperContext
+
+      try {
+        if (settings.vars?.paths.length) {
+          const readVars = await globalVarsDb.readData(
+            {
+              userId: userData._id,
+              _id: {
+                $in: settings.vars.list.map((p) => {
+                  try {
+                    return new Types.ObjectId(p)
+                  } catch {
+                    return null
+                  }
+                }),
+              },
+            },
+            { name: 1, value: 1 },
+            {},
+            true,
+          )
+          if (readVars.status === StatusEnum.ok && readVars.data?.result) {
+            for (const path of settings.vars.paths) {
+              const found = readVars.data.result.find(
+                (v) => v._id.toString() === path.variable,
+              )
+              if (found) {
+                if (path.path in settings) {
+                  ;(settings as any)[path.path] = found.value
+                }
+                const split = path.path.split('.')
+                if (split.length === 3) {
+                  const [parent, uuid, subChild] = split
+                  if (parent in settings) {
+                    const child = (settings as any)[parent].find(
+                      (c: any) => c.uuid === uuid,
+                    )
+                    if (child && subChild in child) {
+                      child[subChild] = found.value
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore errors related to vars fetching/parsing, we will validate vars properly in the validator function
+      }
+
+      const validate = await validateCreateDCABotInput(
+        settings,
+        input,
+        userData._id,
+      )
+      if (!validate.valid) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Validation error',
+          errors: validate.errors,
+        })
+      }
+      // 7. Call Bot.createDCABot
+      try {
+        const bot = await Bot.createDCABot(
+          userData._id.toString(),
+          validate.data,
+          paperContext,
+        )
+
+        // Check if bot creation was successful
+        if (bot.status === StatusEnum.notok) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: bot.reason || 'Failed to create DCA bot',
+          })
+        }
+
+        // Extract bot data from response
+        const botData = bot.data
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: {
+            botId: botData._id.toString(),
+            uuid: botData.uuid,
+            message: 'DCA bot created successfully',
+            settings: sortFields(botData.settings),
+          },
+        })
+      } catch (error: unknown) {
+        console.error('Error creating DCA bot:', error)
+
+        // Return error message directly in reason
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error ? error.message : 'Failed to create DCA bot',
+        })
+      }
+    },
+  })
+
   // Import v1 API for POST, PUT, DELETE operations
   // These operations don't use field selection, so we map them 1:1
   const v1API = allAPI(userDb, Bot)
 
   // Map v1 POST endpoints to v2 with /v2 prefix
-  const post: APIMap = new Map()
   v1API.post.forEach((handler, route) => {
     const v2Route = route.replace('/api/', '/api/v2/')
     post.set(v2Route, { handler, middlewares: [] })
@@ -707,6 +1007,16 @@ const v2API = <R extends UserSchema = UserSchema>(
   v1API.getPublic.forEach((handler, route) => {
     const v2Route = route.replace('/api/', '/api/v2/')
     getPublic.set(v2Route, { handler, middlewares: [] })
+  })
+
+  v1API.get.forEach((handler, route) => {
+    if (route === '/api/user/exchanges') {
+      const v2Route = route.replace('/api/', '/api/v2/')
+      get.set(v2Route, {
+        handler,
+        middlewares: [],
+      })
+    }
   })
 
   return { get, post, put, delete: deleteMap, getPublic }

@@ -269,6 +269,20 @@ components:
                 $ref: "#/components/schemas/BalanceStandard"
             meta:
               $ref: "#/components/schemas/ResponseMeta"
+    GlobalVariableListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of global variables
+              items:
+                $ref: "#/components/schemas/GlobalVariable"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
     ExchangeListResponse:
       allOf:
         - $ref: "#/components/schemas/APIResponse"
@@ -281,8 +295,31 @@ components:
               description: Array of exchanges
               items:
                 $ref: "#/components/schemas/ExchangeStandard"
-            meta:
-              $ref: "#/components/schemas/ResponseMeta"
+    ExchangeGeneralListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of exchanges
+              items:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    description: Exchange code
+                    example: binance
+                  market:
+                    type: string
+                    description: Exchange market
+                    example: spot
+                  type:
+                    type: string
+                    description: Futures type
+                    example: linear
     ScreenerListResponse:
       allOf:
         - $ref: "#/components/schemas/APIResponse"
@@ -2720,6 +2757,54 @@ components:
               nullable: true
               description: Whether this is a paper trading context
               example: false
+    GlobalVariable:
+      type: object
+      description: Global variable
+      required:
+        - _id
+        - name
+        - type
+        - value
+        - userId
+      properties:
+        _id:
+          type: string
+          description: Global variable ID
+          example: 650e8400-e29b-41d4-a716-446655440001
+        name:
+          type: string
+          description: Variable name
+          example: myVariable
+        type:
+          type: string
+          description: Variable type
+          enum:
+            - text
+            - int
+            - float
+          example: text
+        value:
+          type: string
+          description: Variable value
+          example: "100"
+        userId:
+          type: string
+          description: User ID who owns this variable
+          example: 650e8400-e29b-41d4-a716-446655440002
+        botAmount:
+          type: number
+          description: Number of bots using this variable
+          example: 5
+        createdAt:
+          type: string
+          format: date-time
+          description: Creation timestamp
+          example: "2024-01-01T00:00:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last update timestamp
+          example: "2024-01-01T00:00:00Z"
     ExchangeMinimal:
       type: object
       description: Minimal exchange representation
@@ -3344,6 +3429,56 @@ components:
           enum:
             - full
             - filled
+    CreateDCABotInput:
+      type: object
+      description: |
+        Input schema for creating a new DCA bot. Inherits all DCABotSettings properties plus additional required fields for creation.
+        
+        Note: The following properties are auto-generated and should NOT be provided in the request:
+        - `futures` (auto-detected from exchange configuration)
+        - `coinm` (auto-detected from exchange configuration)
+      required:
+        - exchangeUUID
+        - paperContext
+      allOf:
+        - $ref: "#/components/schemas/DCABotSettings"
+        - type: object
+          properties:
+            paperContext:
+              type: boolean
+              description: Whether to create the bot in paper trading context. 
+              example: false
+            exchangeUUID:
+              type: string
+              description: UUID of the exchange configuration
+              example: 650e8400-e29b-41d4-a716-446655440001
+            vars:
+              type: array
+              description: Bot variables configuration
+              items:
+                type: object
+                description: Bot variable object
+                properties:
+                  path:
+                    type: string
+                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
+                    example: "orderSize"
+                  variable:
+                    type: string
+                    description: Variable id
+                    example: "var1"
+            futures:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            coinm:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            pair:
+              type: array
+              description: Trading pairs. In the format {base}_{quote}
+              items:
+                type: string
+                example: BTC_USDT
   responses:
     BadRequest:
       description: Bad request - invalid parameters
@@ -3886,56 +4021,91 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
-  /api/v2/exchanges:
+  /api/v2/user/globalVars:
     get:
-      summary: Get User Exchanges
+      summary: Get Global Variables
       description: |
-        Retrieve user's connected exchanges with optional field selection.
+        Retrieve user's global variables with pagination.
 
-        **Field Presets:**
-        - `minimal`: code, market, id, name
-        - `standard`: minimal + type
-        - `full`: All available fields (same as standard for exchanges)
+        **Query Parameters:**
+        - `page`: Page number (default: 1)
+
+        Global variables are user-defined values that can be referenced in bot configurations.
       tags:
         - User
-      operationId: getUserExchanges
+      operationId: getUserGlobalVariables
       parameters:
-        - $ref: "#/components/parameters/FieldsParam"
+        - name: page
+          in: query
+          required: false
+          description: Page number for pagination
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+            example: 1
+      responses:
+        "200":
+          description: Successful response with global variables
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GlobalVariableListResponse"
+              example:
+                status: OK
+                reason: null
+                data:
+                  - _id: 650e8400-e29b-41d4-a716-446655440001
+                    name: myVariable
+                    type: text
+                    value: "100"
+                    userId: 650e8400-e29b-41d4-a716-446655440002
+                    botAmount: 5
+                    createdAt: "2024-01-01T00:00:00Z"
+                    updatedAt: "2024-01-01T00:00:00Z"
+                  - _id: 650e8400-e29b-41d4-a716-446655440003
+                    name: stopLossPercent
+                    type: float
+                    value: "5.5"
+                    userId: 650e8400-e29b-41d4-a716-446655440002
+                    botAmount: 12
+                    createdAt: "2024-01-01T00:00:00Z"
+                    updatedAt: "2024-01-01T00:00:00Z"
+                meta:
+                  page: 1
+                  total: 1
+                  count: 2
+                  onPage: 2
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/exchanges:
+    get:
+      summary: Get supported exchanges
+      description: |
+        A list of supported exchanges
+      tags:
+        - General
+      operationId: getUserExchanges
       responses:
         "200":
           description: Successful response with user exchanges
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ExchangeListResponse"
-              examples:
-                standard:
-                  summary: Standard preset for exchanges
-                  value:
-                    status: OK
-                    reason: null
-                    data:
-                      - code: binance
-                        market: spot
-                        id: 650e8400-e29b-41d4-a716-446655440001
-                        name: Binance Main
-                        type: real
-                      - code: binance
-                        market: futures
-                        id: 650e8400-e29b-41d4-a716-446655440002
-                        name: Binance Futures
-                        type: real
-                    meta:
-                      page: 1
-                      total: 3
-                      count: 3
-                      onPage: 2
-                      fields:
-                        - code
-                        - market
-                        - id
-                        - name
-                        - type
+                $ref: "#/components/schemas/ExchangeGeneralListResponse"
+              example:
+                status: OK
+                reason: null
+                data:
+                 - code: binance
+                   market: spot
+                 - code: binanceUsdm
+                   market: futures
+                   type: linear
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -3962,7 +4132,7 @@ paths:
 
         **Note:** Requires active subscription with screener access.
       tags:
-        - Screener
+        - General
       operationId: getScreenerData
       parameters:
         - $ref: "#/components/parameters/FieldsParam"
@@ -4119,7 +4289,6 @@ paths:
         - User
       operationId: getUserExchanges
       parameters:
-        - $ref: "#/components/parameters/FieldsParam"
         - name: paperContext
           in: query
           required: false
@@ -4138,7 +4307,7 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
-  /api/updateDCADeal:
+  /api/v2/updateDCADeal:
     post:
       summary: Update DCA deal settings
       tags:
@@ -4376,7 +4545,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/updateComboDeal:
+  /api/v2/updateComboDeal:
     post:
       summary: Update deal settings
       tags:
@@ -4500,7 +4669,181 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/updateDCABot:
+  /api/v2/createDCABot:
+    post:
+      summary: Create a new DCA bot
+      tags:
+        - Bots
+      description: |
+        Create a new DCA (Dollar Cost Averaging) bot with specified settings.
+        
+        Requires write permission of API keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDCABotInput"
+            example:
+              paperContext: false
+              # Required fields
+              pair:
+                - BTC_USDT
+              exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+              vars: []              
+              # Bot configuration
+              name: New Bot
+              strategy: LONG
+              profitCurrency: quote
+              orderFixedIn: quote
+              
+              # Order settings
+              baseOrderSize: "10"
+              orderSize: "10"
+              orderSizeType: quote
+              startOrderType: limit
+              startCondition: ASAP
+              
+              # DCA settings
+              useDca: true
+              step: "1"
+              ordersCount: 5
+              activeOrdersCount: 1
+              volumeScale: "1"
+              stepScale: "1"
+              minimumDeviation: "1"
+              dcaCondition: percentage
+              dcaCustom: []
+              
+              # Take Profit settings
+              useTp: true
+              tpPerc: "1"
+              useMultiTp: false
+              multiTp: []
+              trailingTp: false
+              trailingTpPerc: "0.3"
+              
+              # Stop Loss settings
+              useSl: false
+              slPerc: "-10"
+              baseSlOn: avg
+              useMultiSl: false
+              multiSl: []
+              trailingSl: false
+              moveSL: false
+              moveSLTrigger: "0.5"
+              moveSLValue: "0.2"
+              
+              # Deal management
+              maxNumberOfOpenDeals: "1"
+              dealCloseCondition: tp
+              dealCloseConditionSL: tp
+              closeByTimer: false
+              closeByTimerValue: 10
+              closeByTimerUnits: minutes
+              
+              # Price filters
+              useStaticPriceFilter: false
+              minOpenDeal: ""
+              maxOpenDeal: ""
+              useDynamicPriceFilter: false
+              dynamicPriceFilterDirection: under
+              dynamicPriceFilterOverValue: "5"
+              dynamicPriceFilterUnderValue: "5"
+              dynamicPriceFilterPriceType: entry
+              
+              # Cooldown settings
+              useCooldown: false
+              cooldownAfterDealStart: false
+              cooldownAfterDealStartInterval: 1
+              cooldownAfterDealStartUnits: minutes
+              cooldownAfterDealStop: false
+              cooldownAfterDealStopInterval: 1
+              cooldownAfterDealStopUnits: minutes
+              
+              # Advanced settings
+              useSmartOrders: false
+              skipBalanceCheck: false
+              limitTimeout: "20"
+              useLimitTimeout: false
+              
+              # Margin settings (for futures)
+              marginType: isolated
+              leverage: 1
+              
+              # Indicators
+              indicators: []
+              indicatorGroups: []
+      responses:
+        "200":
+          description: Bot created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - bot created successfully, NOTOK - creation failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain error message, otherwise - null
+                    example: null
+                  errors:
+                    type: array
+                    description: If status - NOTOK, errors will contain list of validation errors, otherwise - null
+                    items:
+                      type: array
+                      description: List of validation errors for a specific field. First element - field name, second element - error message
+                      items:
+                        type: string
+                    nullable: true
+                    example: null
+                  data:
+                    type: object
+                    nullable: true
+                    description: Created bot data including bot ID
+                    properties:
+                      botId:
+                        type: string
+                        description: ID of the created bot
+                        example: 507f1f77bcf86cd799439011
+                      uuid:
+                        type: string
+                        description: UUID of the created bot
+                        example: 550e8400-e29b-41d4-a716-446655440000
+                      settings:
+                        $ref: "#/components/schemas/DCABotSettings"
+        "400":
+          description: Bad request - invalid parameters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Invalid exchange UUID
+        "401":
+          description: Token or signature or time headers not provided, or signature not valid
+        "403":
+          description: User not found or insufficient permissions
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Requests
+  /api/v2/updateDCABot:
     post:
       summary: Update DCA bot settings
       tags:
@@ -4576,7 +4919,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/updateComboBot:
+  /api/v2/updateComboBot:
     post:
       summary: Update Combo bot settings
       tags:
@@ -4652,7 +4995,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/changeBotPairs:
+  /api/v2/changeBotPairs:
     post:
       summary: Change bot pairs
       description: Requires write permission of API keys. Format of the pair is {base}_{quote}, example BTC_USDT
@@ -4788,7 +5131,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/addFunds:
+  /api/v2/addFunds:
     post:
       summary: Add funds to deal
       tags:
@@ -4894,7 +5237,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/reduceFunds:
+  /api/v2/reduceFunds:
     post:
       summary: Reduce funds from deal
       description: Requires write permission of API keys.
@@ -5000,7 +5343,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/startDeal:
+  /api/v2/startDeal:
     post:
       summary: Start bot deal
       description: Requires write permission of API keys.
@@ -5087,7 +5430,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/startBot:
+  /api/v2/startBot:
     post:
       summary: Start bot
       description: Requires write permission of API keys.
@@ -5168,7 +5511,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/restoreBot:
+  /api/v2/restoreBot:
     post:
       summary: Restore bot from archive
       description: Requires write permission of API keys.
@@ -5249,7 +5592,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/closeDeal/{dealId}:
+  /api/v2/closeDeal/{dealId}:
     delete:
       summary: Close deal
       description: Requires write permission of API keys.
@@ -5341,7 +5684,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/cancelDeal/{dealId}:
+  /api/v2/cancelDeal/{dealId}:
     delete:
       deprecated: true
       summary: Cancel deal
@@ -5422,7 +5765,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/cloneComboBot:
+  /api/v2/cloneComboBot:
     put:
       summary: Clone Combo bot settings
       tags:
@@ -5507,7 +5850,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/cloneDCABot:
+  /api/v2/cloneDCABot:
     put:
       summary: Clone DCA bot
       tags:
@@ -5582,7 +5925,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/stopBot:
+  /api/v2/stopBot:
     delete:
       summary: Stop bot
       description: Requires write permission of API keys.
@@ -5689,7 +6032,7 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Request
-  /api/archiveBot:
+  /api/v2/archiveBot:
     delete:
       summary: Archive bot
       description: Requires write permission of API keys.
@@ -5777,5 +6120,5 @@ tags:
     description: Deal management and monitoring
   - name: User
     description: User account information (balances, exchanges)
-  - name: Screener
-    description: Crypto market screening and analysis
+  - name: General
+    description: General endpoints (supported exchanges, screener data)

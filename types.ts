@@ -3289,7 +3289,7 @@ export enum TrendFilterOperatorEnum {
   between = 'between',
 }
 
-type DivergenceOscillators =
+export type DivergenceOscillators =
   | IndicatorEnum.adx
   | IndicatorEnum.cci
   | IndicatorEnum.mfi
@@ -4796,3 +4796,12 @@ export enum BybitHost {
 }
 
 export type LogLevel = 'error' | 'info' | 'warn' | 'debug'
+
+export type CreateDCABotInput = DCABotSettings & {
+  baseAsset?: string[]
+  quoteAsset?: string[]
+  exchange: ExchangeEnum
+  exchangeUUID: string
+  uuid?: string
+  vars?: BotVars | null
+}
