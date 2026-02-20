@@ -25,7 +25,7 @@ All API requests require three headers:
 | Header | Description | Example |
 |--------|-------------|---------|
 | `token` | Public API key | `your-public-key` |
-| `time` | Request timestamp (ms) | `1771513334744` |
+| `time` | Request timestamp (ms) | `1771596262299` |
 | `signature` | HMAC-SHA256 signature | `calculated-signature` |
 
 ### Signature Calculation
@@ -362,6 +362,102 @@ const result = await response.json();```
 **CLI (curl):**
 ```bash
 curl -X POST "https://api.gainium.io/api/v2/createDCABot?fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE" \
+  -H "Content-Type: application/json" \
+  -d '{"exampleField": "exampleValue"}'```
+
+---
+
+#### POST /api/v2/createComboBot
+**Create a new Combo bot**
+
+Create a new Combo bot with specified settings. Combo bots extend DCA bots with grid-level functionality.
+
+Requires write permission of API keys.
+
+
+**Python:**
+```python
+payload = {
+    "exampleField": "exampleValue"
+}
+
+response = requests.post(
+    "https://api.gainium.io/api/v2/createComboBot",
+    json=payload,
+    headers=headers
+)
+result = response.json()```
+
+**JavaScript/TypeScript:**
+```javascript
+const payload = {
+    exampleField: 'exampleValue'
+};
+
+const response = await fetch('https://api.gainium.io/api/v2/createComboBot', {
+    method: 'POST',
+    headers: {
+        ...headers,
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+});
+const result = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/v2/createComboBot?fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE" \
+  -H "Content-Type: application/json" \
+  -d '{"exampleField": "exampleValue"}'```
+
+---
+
+#### POST /api/v2/createGridBot
+**Create a new Grid bot**
+
+Create a new Grid bot that automatically buys and sells assets within a configured price range.
+
+Requires write permission of API keys.
+
+
+**Python:**
+```python
+payload = {
+    "exampleField": "exampleValue"
+}
+
+response = requests.post(
+    "https://api.gainium.io/api/v2/createGridBot",
+    json=payload,
+    headers=headers
+)
+result = response.json()```
+
+**JavaScript/TypeScript:**
+```javascript
+const payload = {
+    exampleField: 'exampleValue'
+};
+
+const response = await fetch('https://api.gainium.io/api/v2/createGridBot', {
+    method: 'POST',
+    headers: {
+        ...headers,
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+});
+const result = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/v2/createGridBot?fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE" \
@@ -872,6 +968,54 @@ curl -X POST "https://api.gainium.io/api/v2/updateComboDeal?dealId=example-value
 
 ---
 
+#### POST /api/v2/createTerminalDeal
+**Create a new Terminal Deal (one-time trade)**
+
+Create a new Terminal Deal for immediate execution. Terminal deals are one-time trades that execute and close, unlike regular bots that continue running.
+
+Requires write permission of API keys.
+
+
+**Python:**
+```python
+payload = {
+    "exampleField": "exampleValue"
+}
+
+response = requests.post(
+    "https://api.gainium.io/api/v2/createTerminalDeal",
+    json=payload,
+    headers=headers
+)
+result = response.json()```
+
+**JavaScript/TypeScript:**
+```javascript
+const payload = {
+    exampleField: 'exampleValue'
+};
+
+const response = await fetch('https://api.gainium.io/api/v2/createTerminalDeal', {
+    method: 'POST',
+    headers: {
+        ...headers,
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+});
+const result = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/v2/createTerminalDeal?fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE" \
+  -H "Content-Type: application/json" \
+  -d '{"exampleField": "exampleValue"}'```
+
+---
+
 #### POST /api/v2/addFunds
 **Add funds to deal**
 
@@ -1131,6 +1275,144 @@ const data = await response.json();```
 **CLI (curl):**
 ```bash
 curl -X GET "https://api.gainium.io/api/v2/user/globalVars?page=example-value&fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE"```
+
+---
+
+#### POST /api/v2/user/globalVars
+**Create Global Variable**
+
+Create a new global variable. The value type must match the specified type:
+- `int`: Value must be a valid integer
+- `float`: Value must be a valid float number
+- `text`: Value can be any string
+
+Requires write permission of API keys.
+
+
+**Python:**
+```python
+payload = {
+    "exampleField": "exampleValue"
+}
+
+response = requests.post(
+    "https://api.gainium.io/api/v2/user/globalVars",
+    json=payload,
+    headers=headers
+)
+result = response.json()```
+
+**JavaScript/TypeScript:**
+```javascript
+const payload = {
+    exampleField: 'exampleValue'
+};
+
+const response = await fetch('https://api.gainium.io/api/v2/user/globalVars', {
+    method: 'POST',
+    headers: {
+        ...headers,
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+});
+const result = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X POST "https://api.gainium.io/api/v2/user/globalVars?fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE" \
+  -H "Content-Type: application/json" \
+  -d '{"exampleField": "exampleValue"}'```
+
+---
+
+#### PUT /api/v2/user/globalVars/{id}
+**Update Global Variable**
+
+Update an existing global variable. You can update name, type, and/or value.
+When changing the value, it must match the type (either existing or new if type is also being updated).
+
+Requires write permission of API keys.
+
+
+**Python:**
+```python
+payload = {
+    "exampleField": "exampleValue"
+}
+
+response = requests.post(
+    "https://api.gainium.io/api/v2/user/globalVars/{id}",
+    json=payload,
+    headers=headers
+)
+result = response.json()```
+
+**JavaScript/TypeScript:**
+```javascript
+const payload = {
+    exampleField: 'exampleValue'
+};
+
+const response = await fetch('https://api.gainium.io/api/v2/user/globalVars/{id}', {
+    method: 'PUT',
+    headers: {
+        ...headers,
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+});
+const result = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X PUT "https://api.gainium.io/api/v2/user/globalVars/{id}?fields=standard" \
+  -H "token: $TOKEN" \
+  -H "time: $TIMESTAMP" \
+  -H "signature: $SIGNATURE" \
+  -H "Content-Type: application/json" \
+  -d '{"exampleField": "exampleValue"}'```
+
+---
+
+#### DELETE /api/v2/user/globalVars/{id}
+**Delete Global Variable**
+
+Delete a global variable. The variable must not be used by any bots (botAmount must be 0).
+
+Requires write permission of API keys.
+
+
+**Python:**
+```python
+response = requests.get(
+    "https://api.gainium.io/api/v2/user/globalVars/{id}",
+    params={"fields": "standard"},
+    headers=headers
+)
+data = response.json()["data"]```
+
+**JavaScript/TypeScript:**
+```javascript
+const params = new URLSearchParams({
+    fields: 'standard'
+});
+
+const response = await fetch(`'https://api.gainium.io/api/v2/user/globalVars/{id}'?${params}`, {
+    method: 'GET',
+    headers
+});
+const data = await response.json();```
+
+**CLI (curl):**
+```bash
+curl -X DELETE "https://api.gainium.io/api/v2/user/globalVars/{id}?fields=standard" \
   -H "token: $TOKEN" \
   -H "time: $TIMESTAMP" \
   -H "signature: $SIGNATURE"```
@@ -1419,4 +1701,4 @@ def get_all_bots():
 ---
 
 *This documentation is automatically generated from the OpenAPI specification.*
-*Last updated: 2026-02-19T15:02:14.745Z*
+*Last updated: 2026-02-20T14:04:22.299Z*

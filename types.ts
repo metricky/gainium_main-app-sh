@@ -4708,6 +4708,13 @@ export type CreateComboBotInput = ComboBotSettings & {
   exchangeUUID: string
   vars?: BotVars | null
 }
+
+export type CreateGridBotInput = BotSettings & {
+  exchange: ExchangeEnum
+  exchangeUUID: string
+  vars?: BotVars | null
+}
+
 export type HedgeBotSettings = Pick<
   ComboBotSettings,
   | 'useTp'

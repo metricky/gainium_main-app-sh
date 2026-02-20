@@ -283,28 +283,33 @@ class MongoCrud<T = any> {
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: false,
     countNeed?: false,
-  ): Promise<ErrorResponse | DataResponse<{ result: R }>>
+  ): Promise<ErrorResponse | DataResponse<{ result: R & { _id: string } }>>
   async readData<R = ExcludeDoc<T>>(
     search?: QueryFilter<ExcludeDoc<T>>,
     fields?: ProjectionType<ExcludeDoc<T>>,
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: true,
     countNeed?: false,
-  ): Promise<ErrorResponse | DataResponse<{ result: R[] }>>
+  ): Promise<ErrorResponse | DataResponse<{ result: (R & { _id: string })[] }>>
   async readData<R = ExcludeDoc<T>>(
     search?: QueryFilter<ExcludeDoc<T>>,
     fields?: ProjectionType<ExcludeDoc<T>>,
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: true,
     countNeed?: true,
-  ): Promise<ErrorResponse | DataResponse<{ result: R[]; count: number }>>
+  ): Promise<
+    | ErrorResponse
+    | DataResponse<{ result: (R & { _id: string })[]; count: number }>
+  >
   async readData<R = ExcludeDoc<T>>(
     search?: QueryFilter<ExcludeDoc<T>>,
     fields?: ProjectionType<ExcludeDoc<T>>,
     options?: QueryOptions<ExcludeDoc<T>>,
     isArray?: false,
     countNeed?: true,
-  ): Promise<ErrorResponse | DataResponse<{ result: R; count: number }>>
+  ): Promise<
+    ErrorResponse | DataResponse<{ result: R & { _id: string }; count: number }>
+  >
 
   async readData<R = ExcludeDoc<T>>(
     search: QueryFilter<ExcludeDoc<T>> = {},

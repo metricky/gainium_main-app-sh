@@ -1,4 +1,4 @@
-import { globalVarsDb, pairDb } from '../../../db/dbInit'
+import { globalVarsDb, pairDb } from '../../../../db/dbInit'
 import {
   BotStartTypeEnum,
   CloseConditionEnum,
@@ -15,10 +15,10 @@ import {
   StatusEnum,
   StrategyEnum,
   TerminalDealTypeEnum,
-} from '../../../../types'
-import { ValidationResult } from './bots/config'
-import { CreateDCABotInputRaw } from '../api'
-import { DCA_FORM_DEFAULTS } from '../botDefaults'
+} from '../../../../../types'
+import { ValidationResult } from './config'
+import { CreateDCABotInputRaw } from '../../api'
+import { DCA_FORM_DEFAULTS } from '../../botDefaults'
 import { Types } from 'mongoose'
 
 const indicatorsCheck: {

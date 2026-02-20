@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.11.2] - 2026-02-20
+### Added 
+- API v2 added createComboBot, createTerminalDeal, createGridBot requests, CRUD operations on global variables.  
+
 ## [1.11.1] - 2026-02-18
 ### Added 
 - API v2 added createDCABot request, get global variables request

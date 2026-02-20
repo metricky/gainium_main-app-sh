@@ -3479,6 +3479,135 @@ components:
               items:
                 type: string
                 example: BTC_USDT
+    CreateComboBotInput:
+      type: object
+      description: |
+        Input schema for creating a new Combo bot. Inherits all ComboBotSettings properties plus additional required fields for creation.
+        
+        Combo bots extend DCA bots with additional grid-level functionality. Some settings in ComboBotSettings type are not used - refer to API documentation for excluded fields list.
+        
+        Note: The following properties are auto-generated and should NOT be provided in the request:
+        - `futures` (auto-detected from exchange configuration)
+        - `coinm` (auto-detected from exchange configuration)
+      required:
+        - exchangeUUID
+        - paperContext
+      allOf:
+        - $ref: "#/components/schemas/ComboBotSettings"
+        - type: object
+          properties:
+            paperContext:
+              type: boolean
+              description: Whether to create the bot in paper trading context. 
+              example: false
+            exchangeUUID:
+              type: string
+              description: UUID of the exchange configuration
+              example: 650e8400-e29b-41d4-a716-446655440001
+            vars:
+              type: array
+              description: Bot variables configuration
+              items:
+                type: object
+                description: Bot variable object
+                properties:
+                  path:
+                    type: string
+                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
+                    example: "orderSize"
+                  variable:
+                    type: string
+                    description: Variable id
+                    example: "var1"
+            futures:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            coinm:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            pair:
+              type: array
+              description: Trading pairs. In the format {base}_{quote}
+              items:
+                type: string
+                example: BTC_USDT
+    CreateGridBotInput:
+      type: object
+      description: |
+        Input schema for creating a new Grid bot. Grid bots automatically buy and sell assets within a configured price range.
+        
+        Note: The following properties are auto-generated and should NOT be provided in the request:
+        - `futures` (auto-detected from exchange configuration)
+        - `coinm` (auto-detected from exchange configuration)
+      required:
+        - exchangeUUID
+        - paperContext
+        - pair
+        - topPrice
+        - lowPrice
+        - budget
+      allOf:
+        - $ref: "#/components/schemas/BotSettings"
+        - type: object
+          properties:
+            paperContext:
+              type: boolean
+              description: Whether to create the bot in paper trading context. 
+              example: false
+            exchangeUUID:
+              type: string
+              description: UUID of the exchange configuration
+              example: 650e8400-e29b-41d4-a716-446655440001
+            futures:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            coinm:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            pair:
+              type: string
+              description: Trading pair in the format {base}_{quote}
+              example: BTC_USDT
+    CreateTerminalDealInput:
+      type: object
+      description: |
+        Input schema for creating a new Terminal Deal (one-time trade). Inherits all DCABotSettings properties plus additional required fields.
+        
+        Terminal deals are one-time trades that execute immediately and don't continue running like regular bots.
+        The type field will be automatically set to 'terminal'.
+        
+        Note: The following properties are auto-generated and should NOT be provided in the request:
+        - `futures` (auto-detected from exchange configuration)
+        - `coinm` (auto-detected from exchange configuration)
+        - `type` (automatically set to 'terminal')
+      required:
+        - exchangeUUID
+        - paperContext
+        - terminalDealType
+      allOf:
+        - $ref: "#/components/schemas/DCABotSettings"
+        - type: object
+          properties:
+            paperContext:
+              type: boolean
+              description: Whether to create the terminal deal in paper trading context. 
+              example: false
+            exchangeUUID:
+              type: string
+              description: UUID of the exchange configuration
+              example: 650e8400-e29b-41d4-a716-446655440001
+            futures:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            coinm:
+              readOnly: true
+              description: Auto-generated - do not provide. Detected from exchange configuration.
+            pair:
+              type: array
+              description: Trading pairs. In the format {base}_{quote}
+              items:
+                type: string
+                example: BTC_USDT
   responses:
     BadRequest:
       description: Bad request - invalid parameters
@@ -4076,6 +4205,272 @@ paths:
                   total: 1
                   count: 2
                   onPage: 2
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      summary: Create Global Variable
+      description: |
+        Create a new global variable. The value type must match the specified type:
+        - `int`: Value must be a valid integer
+        - `float`: Value must be a valid float number
+        - `text`: Value can be any string
+
+        Requires write permission of API keys.
+      tags:
+        - User
+      operationId: createGlobalVariable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - type
+                - value
+              properties:
+                name:
+                  type: string
+                  description: Variable name
+                  example: myStopLoss
+                type:
+                  type: string
+                  enum:
+                    - text
+                    - int
+                    - float
+                  description: Variable type
+                  example: float
+                value:
+                  type: string
+                  description: Variable value (always sent as string, validated based on type)
+                  example: "5.5"
+      responses:
+        "200":
+          description: Global variable created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        description: ID of the created variable
+                        example: 650e8400-e29b-41d4-a716-446655440001
+                      name:
+                        type: string
+                        example: myStopLoss
+                      type:
+                        type: string
+                        enum:
+                          - text
+                          - int
+                          - float
+                        example: float
+                      value:
+                        type: string
+                        example: "5.5"
+                      botAmount:
+                        type: integer
+                        description: Number of bots using this variable
+                        example: 0
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    example: Value must be a valid float number
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/user/globalVars/{id}:
+    put:
+      summary: Update Global Variable
+      description: |
+        Update an existing global variable. You can update name, type, and/or value.
+        When changing the value, it must match the type (either existing or new if type is also being updated).
+
+        Requires write permission of API keys.
+      tags:
+        - User
+      operationId: updateGlobalVariable
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Variable ID
+          schema:
+            type: string
+            example: 650e8400-e29b-41d4-a716-446655440001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: New variable name (optional)
+                  example: updatedName
+                type:
+                  type: string
+                  enum:
+                    - text
+                    - int
+                    - float
+                  description: New variable type (optional)
+                  example: int
+                value:
+                  type: string
+                  description: New variable value (optional, must match type)
+                  example: "10"
+      responses:
+        "200":
+          description: Global variable updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    example: Value must be a valid integer
+        "404":
+          description: Variable not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    example: Variable not found
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      summary: Delete Global Variable
+      description: |
+        Delete a global variable. The variable must not be used by any bots (botAmount must be 0).
+
+        Requires write permission of API keys.
+      tags:
+        - User
+      operationId: deleteGlobalVariable
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Variable ID
+          schema:
+            type: string
+            example: 650e8400-e29b-41d4-a716-446655440001
+      responses:
+        "200":
+          description: Global variable deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          description: Variable is used by bots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    example: Variable is used in 5 bot(s). Please remove it from all bots before deleting.
+        "404":
+          description: Variable not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    example: Variable not found
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -4796,7 +5191,7 @@ paths:
                     example: null
                   errors:
                     type: array
-                    description: If status - NOTOK, errors will contain list of validation errors, otherwise - null
+                    description: If status - NOTOK and reason - Validation error, errors will contain list of validation errors, otherwise - null
                     items:
                       type: array
                       description: List of validation errors for a specific field. First element - field name, second element - error message
@@ -4843,6 +5238,446 @@ paths:
           description: Unsupported Media Type
         "429":
           description: Too Many Requests
+  /api/v2/createComboBot:
+    post:
+      summary: Create a new Combo bot
+      tags:
+        - Bots
+      description: |
+        Create a new Combo bot with specified settings. Combo bots extend DCA bots with grid-level functionality.
+        
+        Requires write permission of API keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateComboBotInput"
+            example:
+              paperContext: false
+              # Required fields
+              pair:
+                - BTC_USDT
+              exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+              vars: []              
+              # Bot configuration
+              name: New Combo Bot
+              strategy: LONG
+              
+              # Order settings
+              baseOrderSize: "500"
+              orderSize: "500"
+              orderSizeType: quote
+              startOrderType: market
+              startCondition: ASAP
+              
+              # DCA settings
+              useDca: true
+              step: "5"
+              ordersCount: 5
+              activeOrdersCount: 1
+              volumeScale: "1"
+              stepScale: "1"
+              minimumDeviation: "1"
+              dcaCondition: percentage
+              dcaCustom: []
+              
+              # Combo-specific settings
+              gridLevel: "5"
+              newBalance: false
+              feeOrder: true
+              
+              # Take Profit settings
+              useTp: false
+              tpPerc: "5"
+              
+              # Stop Loss settings
+              useSl: false
+              slPerc: "-25"
+              
+              # Deal management
+              maxNumberOfOpenDeals: "1"
+              
+              # Price filters
+              useStaticPriceFilter: false
+              minOpenDeal: ""
+              maxOpenDeal: ""
+              useDynamicPriceFilter: false
+              dynamicPriceFilterDirection: under
+              dynamicPriceFilterOverValue: "5"
+              dynamicPriceFilterUnderValue: "5"
+              dynamicPriceFilterPriceType: entry
+              
+              # Cooldown settings
+              useCooldown: false
+              cooldownAfterDealStart: false
+              cooldownAfterDealStartInterval: 1
+              cooldownAfterDealStartUnits: minutes
+              cooldownAfterDealStop: false
+              cooldownAfterDealStopInterval: 1
+              cooldownAfterDealStopUnits: minutes
+              
+              # Advanced settings
+              useSmartOrders: false
+              skipBalanceCheck: false
+              limitTimeout: "20"
+              useLimitTimeout: false
+              
+              # Margin settings (for futures)
+              marginType: isolated
+              leverage: 1
+              
+              # Indicators
+              indicators: []
+              indicatorGroups: []
+      responses:
+        "200":
+          description: Bot created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - bot created successfully, NOTOK - creation failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain error message, otherwise - null
+                    example: null
+                  errors:
+                    type: array
+                    description: If status - NOTOK and reason - Validation error, errors will contain list of validation errors, otherwise - null
+                    items:
+                      type: array
+                      description: List of validation errors for a specific field. First element - field name, second element - error message
+                      items:
+                        type: string
+                    nullable: true
+                    example: null
+                  data:
+                    type: object
+                    nullable: true
+                    description: Created bot data including bot ID
+                    properties:
+                      botId:
+                        type: string
+                        description: ID of the created bot
+                        example: 507f1f77bcf86cd799439011
+                      uuid:
+                        type: string
+                        description: UUID of the created bot
+                        example: 550e8400-e29b-41d4-a716-446655440000
+                      settings:
+                        $ref: "#/components/schemas/ComboBotSettings"
+        "400":
+          description: Bad request - invalid parameters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Invalid exchange UUID
+        "401":
+          description: Token or signature or time headers not provided, or signature not valid
+        "403":
+          description: User not found or insufficient permissions
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Requests
+  /api/v2/createTerminalDeal:
+    post:
+      summary: Create a new Terminal Deal (one-time trade)
+      tags:
+        - Deals
+      description: |
+        Create a new Terminal Deal for immediate execution. Terminal deals are one-time trades that execute and close, unlike regular bots that continue running.
+        
+        Requires write permission of API keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTerminalDealInput"
+            example:
+              paperContext: false
+              # Required fields
+              pair:
+                - BTC_USDT
+              exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+              terminalDealType: simple       
+              # Bot configuration
+              strategy: LONG
+              
+              # Order settings
+              baseOrderSize: "1000"
+              orderSize: "1000"
+              orderSizeType: quote
+              startOrderType: market
+              
+              # DCA settings (if needed)
+              useDca: true
+              step: "2"
+              ordersCount: 1
+              activeOrdersCount: 1
+              volumeScale: "1"
+              stepScale: "1"
+              minimumDeviation: "0"
+              
+              # Take Profit settings
+              useTp: true
+              tpPerc: "3"
+              
+              # Stop Loss settings
+              useSl: true
+              slPerc: "-2"
+              
+              # Advanced settings
+              useSmartOrders: false
+              skipBalanceCheck: false
+              limitTimeout: "20"
+              useLimitTimeout: false
+              
+              # Margin settings (for futures)
+              marginType: isolated
+              leverage: 1
+              
+              # Indicators
+              indicators: []
+              indicatorGroups: []
+      responses:
+        "200":
+          description: Terminal deal created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - deal created successfully, NOTOK - creation failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain error message, otherwise - null
+                    example: null
+                  data:
+                    type: object
+                    nullable: true
+                    description: Created terminal deal data
+                    properties:
+                      botId:
+                        type: string
+                        description: ID of the created terminal bot. Use it to get terminal deal details and status. Terminal bot will be automatically deleted after deal is closed.
+                        example: 507f1f77bcf86cd799439011
+                      uuid:
+                        type: string
+                        description: UUID of the created terminal bot
+                        example: 550e8400-e29b-41d4-a716-446655440000
+                      message:
+                        type: string
+                        description: Success message
+                        example: Terminal deal created successfully and scheduled for execution
+        "400":
+          description: Bad request - invalid parameters or validation error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Validation error
+                  errors:
+                    type: array
+                    nullable: true
+                    description: List of validation errors (only present when reason is "Validation error")
+                    items:
+                      type: array
+                      items:
+                        type: string
+                    example: [["pair", "Trading pair is required"]]
+        "401":
+          description: Token or signature or time headers not provided, or signature not valid
+        "403":
+          description: User not found or insufficient permissions
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Requests
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Error message
+                    example: Failed to create Terminal deal
+  /api/v2/createGridBot:
+    post:
+      summary: Create a new Grid bot
+      tags:
+        - Bots
+      description: |
+        Create a new Grid bot that automatically buys and sells assets within a configured price range.
+        
+        Requires write permission of API keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGridBotInput"
+            example:
+              paperContext: false
+              # Required fields
+              pair: BTC_USDT
+              exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
+              topPrice: 50000
+              lowPrice: 40000
+              budget: 10000
+              
+              # Grid configuration
+              levels: 10
+              gridStep: 1
+              gridType: geometric
+              ordersInAdvance: 6
+              useOrderInAdvance: true
+              sellDisplacement: 0
+              
+              
+              # Bot configuration
+              name: Grid Bot - BTC
+              profitCurrency: quote
+              orderFixedIn: quote
+              feeOrder: true
+              
+              # Price settings
+              useStartPrice: false
+              
+              # Margin settings (for futures)
+              marginType: isolated
+              leverage: 1
+              
+              # Advanced settings
+              skipBalanceCheck: false
+      responses:
+        "200":
+          description: Grid bot created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                      - NOTOK
+                    description: OK - bot created successfully, NOTOK - creation failed
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    description: If status - NOTOK, reason will contain error message, otherwise - null
+                    example: null
+                  data:
+                    type: object
+                    nullable: true
+                    description: Created grid bot data
+                    properties:
+                      botId:
+                        type: string
+                        description: ID of the created grid bot
+                        example: 507f1f77bcf86cd799439011
+                      message:
+                        type: string
+                        description: Success message
+                        example: Grid bot created successfully
+                      settings:
+                        $ref: "#/components/schemas/GridBotSettings"
+        "400":
+          description: Bad request - invalid parameters or validation error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Explanation of error
+                    example: Validation error
+                  errors:
+                    type: array
+                    nullable: true
+                    description: List of validation errors (only present when reason is "Validation error")
+                    items:
+                      type: array
+                      items:
+                        type: string
+                    example: [["topPrice", "Top price must be greater than low price"]]
+        "401":
+          description: Token or signature or time headers not provided, or signature not valid
+        "403":
+          description: User not found or insufficient permissions
+        "415":
+          description: Unsupported Media Type
+        "429":
+          description: Too Many Requests
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - NOTOK
+                    example: NOTOK
+                  reason:
+                    type: string
+                    description: Error message
+                    example: Failed to create grid bot
   /api/v2/updateDCABot:
     post:
       summary: Update DCA bot settings

@@ -6,13 +6,13 @@ import {
   CreateGridBotInput,
   DCABotSettings,
   StartConditionEnum,
-} from '../../../../types'
-import { CreateDCABotInputRaw, CreateGridBotInputRaw } from '../api'
+} from '../../../../../types'
+import { CreateDCABotInputRaw, CreateGridBotInputRaw } from '../../api'
 import {
   COMBO_FORM_DEFAULTS,
   DCA_FORM_DEFAULTS,
   GRID_FORM_DEFAULTS,
-} from '../botDefaults'
+} from '../../botDefaults'
 import {
   comboBotSchemaConfig,
   DCA_EXCLUDED_FIELDS,
@@ -32,7 +32,7 @@ import {
   maxStringLength,
   maxPrecision,
   TERMINAL_DEAL_EXCLUDED_FIELDS,
-} from './bots/config'
+} from './config'
 
 const validateCommonSchema = <
   T extends CreateDCABotInput | CreateComboBotInput | CreateGridBotInput,

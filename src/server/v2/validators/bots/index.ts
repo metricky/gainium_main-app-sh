@@ -2,21 +2,21 @@ import {
   CreateDCABotInput,
   CreateComboBotInput,
   CreateGridBotInput,
-} from '../../../../types'
-import { ValidationResult } from './bots/config'
+} from '../../../../../types'
+import { ValidationResult } from './config'
 import {
   validateCreateDCABotInputSchema,
   validateCreateComboBotInputSchema,
   validateCreateTerminalDealInputSchema,
   validateCreateGridBotInputSchema,
-} from './schema'
+} from '../schema'
 import {
   validateCreateComboBotInputLogic,
   validateCreateDCABotInputLogic,
   validateCreateTerminalDealInputLogic,
   validateCreateGridBotInputLogic,
-} from './logic'
-import { CreateDCABotInputRaw, CreateGridBotInputRaw } from '../api'
+} from '../logic'
+import { CreateDCABotInputRaw, CreateGridBotInputRaw } from '../../api'
 
 export const validateCreateDCABotInput = async (
   input: CreateDCABotInput,
