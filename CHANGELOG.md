@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0] - 2026-02-24
+### Changed 
+- Refactored API v2 endpoints.
+- Split endpoint per bot type and deal type. Separate endpoints for terminal
+- Refactored .MD docs, extract schemas to a separate file
+- Moved paper context to a header  
+
 ## [1.11.2] - 2026-02-20
 ### Added 
 - API v2 added createComboBot, createTerminalDeal, createGridBot requests, CRUD operations on global variables.  

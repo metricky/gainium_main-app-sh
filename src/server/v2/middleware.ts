@@ -16,15 +16,32 @@ import type { EndpointType } from './fieldConfig'
 import { getFieldConfig } from './fieldConfig'
 import { StatusEnum } from '../../../types'
 
-// Extend Express Request type to include field selection
+// Extend Express Request type to include field selection and paperContext
 declare global {
   // eslint-disable-next-line
   namespace Express {
     interface Request {
       fieldSelection?: FieldSelection
       endpointType?: EndpointType
+      paperContext?: boolean
     }
   }
+}
+
+/**
+ * Paper Context Middleware
+ *
+ * Parses the `paper-context` header and adds it to req.paperContext
+ * Defaults to false if header is not present or invalid
+ */
+export function paperContextMiddleware(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+) {
+  const paperContextHeader = req.get('paper-context')
+  req.paperContext = paperContextHeader === 'true'
+  next()
 }
 
 /**

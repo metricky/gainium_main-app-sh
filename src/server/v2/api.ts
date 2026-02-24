@@ -11,11 +11,11 @@
  */
 
 import type { Request, Response } from 'express'
+import { Types } from 'mongoose'
 import {
   StatusEnum,
   BotStatusEnum,
   DCADealStatusEnum,
-  BotType,
   UserSchema,
   CreateDCABotInput,
   CreateComboBotInput,
@@ -27,10 +27,21 @@ import {
   StartConditionEnum,
   TerminalDealTypeEnum,
   GlobalVariablesTypeEnum,
+  OrderSizeTypeEnum,
+  AddFundsTypeEnum,
+  CloseDCATypeEnum,
+  DCACloseTriggerEnum,
+  CloseGRIDTypeEnum,
+  PairsToSetMode,
 } from '../../../types'
 import BotInstance from '../../bot'
 import allAPI from '../api'
-import { getBotsByGlobalVar } from '../../bot/utils'
+import {
+  getBotsByGlobalVar,
+  checkDCADealSettings,
+  checkDCABotSettings,
+  checkPairs,
+} from '../../bot/utils'
 import {
   dcaBotDb,
   dcaDealsDb,
@@ -43,7 +54,7 @@ import {
 } from '../../db/dbInit'
 import DB from '../../db'
 import { buildProjection } from './fieldUtils'
-import { fieldSelectionMiddlewares } from './middleware'
+import { fieldSelectionMiddlewares, paperContextMiddleware } from './middleware'
 import { isFutures, isCoinm } from '../../utils'
 import {
   DCA_FORM_DEFAULTS,
@@ -84,14 +95,33 @@ const defaultPaginations = {
 
 export type CreateDCABotInputRaw = Partial<DCABotSettings> & {
   exchangeUUID?: string
-  paperContext?: boolean
   vars?: { path: string; variable: string }[]
 }
 
 export type CreateGridBotInputRaw = Partial<CreateGridBotInput> & {
   exchangeUUID?: string
-  paperContext?: boolean
   vars?: { path: string; variable: string }[]
+}
+
+/**
+ * Convert camelCase to kebab-case for URL paths
+ */
+const camelToKebab = (str: string): string => {
+  return str.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
+}
+
+/**
+ * Transform v1 API route to v2 with kebab-case
+ */
+const transformV1RouteToV2 = (route: string): string => {
+  // Replace /api/ with /api/v2/
+  const v2Route = route.replace('/api/', '/api/v2/')
+
+  // Split by / and convert each segment to kebab-case
+  return v2Route
+    .split('/')
+    .map((segment) => camelToKebab(segment))
+    .join('/')
 }
 
 /**
@@ -133,6 +163,9 @@ const v2API = <R extends UserSchema = UserSchema>(
   Bot: BotInstance = BotInstance.getInstance(),
 ) => {
   const get: APIMap = new Map()
+  const post: APIMap = new Map()
+  const put: APIMap = new Map()
+  const deleteMap: APIMap = new Map()
 
   /**
    * GET /api/v2/bots/dca
@@ -142,8 +175,10 @@ const v2API = <R extends UserSchema = UserSchema>(
    * Query params:
    * - fields: Field selection (minimal|standard|extended|full|custom list)
    * - status: Filter by status
-   * - paperContext: Filter by paper context (true|false)
    * - page: Page number (default: 1)
+   *
+   * Headers:
+   * - paper-context: true|false (optional, defaults to false)
    *
    * Examples:
    * - ?fields=minimal (default)
@@ -152,20 +187,22 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - ?fields=full
    */
   get.set('/api/v2/bots/dca', {
-    middlewares: fieldSelectionMiddlewares('bots.dca'),
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('bots.dca'),
+    ],
     handler: async (req, res) => {
       const {
         status,
-        paperContext,
         page: _page,
       }: {
         status?: BotStatusEnum
-        paperContext?: string
         page?: string
       } = req.query
 
       const user = req.userData
       const fields = req.fieldSelection
+      const paperContext = req.paperContext || false
 
       // Validate status
       const validStatuses = [
@@ -185,20 +222,6 @@ const v2API = <R extends UserSchema = UserSchema>(
         return
       }
 
-      // Validate paperContext
-      if (
-        typeof paperContext !== 'undefined' &&
-        paperContext !== 'false' &&
-        paperContext !== 'true'
-      ) {
-        res.status(400).send({
-          status: StatusEnum.notok,
-          reason: 'Invalid paperContext parameter',
-          data: null,
-        })
-        return
-      }
-
       // Validate and parse page
       const page = _page && !isNaN(+_page) ? +_page : 1
 
@@ -213,8 +236,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         filter.status = status
       }
 
-      filter.paperContext =
-        paperContext === 'true' ? { $eq: true } : { $ne: true }
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
 
       // Build MongoDB projection from selected fields
       const projection = buildProjection(fields || null)
@@ -267,20 +289,22 @@ const v2API = <R extends UserSchema = UserSchema>(
    * List Combo bots with field selection
    */
   get.set('/api/v2/bots/combo', {
-    middlewares: fieldSelectionMiddlewares('bots.combo'),
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('bots.combo'),
+    ],
     handler: async (req, res) => {
       const {
         status,
-        paperContext,
         page: _page,
       }: {
         status?: BotStatusEnum
-        paperContext?: string
         page?: string
       } = req.query
 
       const user = req.userData
       const fields = req.fieldSelection
+      const paperContext = req.paperContext || false
 
       const validStatuses = [
         BotStatusEnum.closed,
@@ -299,19 +323,6 @@ const v2API = <R extends UserSchema = UserSchema>(
         return
       }
 
-      if (
-        typeof paperContext !== 'undefined' &&
-        paperContext !== 'false' &&
-        paperContext !== 'true'
-      ) {
-        res.status(400).send({
-          status: StatusEnum.notok,
-          reason: 'Invalid paperContext parameter',
-          data: null,
-        })
-        return
-      }
-
       const page = _page && !isNaN(+_page) ? +_page : 1
 
       const filter: Record<string, any> = {
@@ -324,10 +335,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         filter.status = status
       }
 
-      if (typeof paperContext !== 'undefined') {
-        filter.paperContext =
-          paperContext === 'true' ? { $eq: true } : { $ne: true }
-      }
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
 
       const projection = buildProjection(fields || null)
       const limit = defaultPaginations.bots
@@ -371,9 +379,12 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
-   * GET /api/v2/deals
+   * GET /api/v2/deals/:dealType
    *
-   * List deals (DCA or Combo) with field selection
+   * List deals with field selection (DCA, Combo, or Terminal)
+   *
+   * URL params:
+   * - dealType: Type of deals to retrieve (dca, combo, terminal)
    *
    * Query params:
    * - fields: Field selection
@@ -381,27 +392,37 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - paperContext: Filter by paper context
    * - page: Page number
    * - botId: Filter by bot ID
-   * - botType: dca or combo (default: dca)
    */
-  get.set('/api/v2/deals', {
-    middlewares: fieldSelectionMiddlewares('deals.dca'),
+  get.set('/api/v2/deals/:dealType', {
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('deals.dca'),
+    ],
     handler: async (req, res) => {
+      const { dealType } = req.params
       const {
         status,
-        paperContext,
         page: _page,
         botId,
-        botType,
       }: {
         status?: DCADealStatusEnum
-        paperContext?: string
         page?: string
         botId?: string
-        botType?: BotType
       } = req.query
 
       const user = req.userData
       const fields = req.fieldSelection
+      const paperContext = req.paperContext || false
+
+      // Validate dealType
+      if (!['dca', 'combo', 'terminal'].includes(dealType)) {
+        res.status(400).send({
+          status: StatusEnum.notok,
+          reason: 'Invalid deal type. Must be one of: dca, combo, terminal',
+          data: null,
+        })
+        return
+      }
 
       const validStatuses = [
         DCADealStatusEnum.closed,
@@ -420,36 +441,20 @@ const v2API = <R extends UserSchema = UserSchema>(
         return
       }
 
-      if (
-        typeof paperContext !== 'undefined' &&
-        paperContext !== 'false' &&
-        paperContext !== 'true'
-      ) {
-        res.status(400).send({
-          status: StatusEnum.notok,
-          reason: 'Invalid paperContext parameter',
-          data: null,
-        })
-        return
-      }
-
-      const validBotTypes = [BotType.dca, BotType.combo]
-      const type = botType || BotType.dca
-      if (!validBotTypes.includes(type)) {
-        res.status(400).send({
-          status: StatusEnum.notok,
-          reason: 'Invalid botType parameter',
-          data: null,
-        })
-        return
-      }
-
       const page = _page && !isNaN(+_page) ? +_page : 1
 
       const filter: Record<string, any> = {
         userId: user.id,
         isDeleted: { $ne: true },
       }
+
+      // Apply deal type specific filters
+      if (dealType === 'dca') {
+        filter.terminal = { $ne: true }
+      } else if (dealType === 'terminal') {
+        filter.terminal = { $eq: true }
+      }
+      // combo has no terminal filter
 
       if (status) {
         filter.status = status
@@ -459,18 +464,16 @@ const v2API = <R extends UserSchema = UserSchema>(
         filter.botId = botId
       }
 
-      if (typeof paperContext !== 'undefined') {
-        filter.paperContext =
-          paperContext === 'true' ? { $eq: true } : { $ne: true }
-      }
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
 
       const projection = buildProjection(fields || null)
       const limit = defaultPaginations.deals
       const skip = (page - 1) * limit
 
       try {
+        // Select appropriate database based on deal type
         const result =
-          type === BotType.combo
+          dealType === 'combo'
             ? await comboDealsDb.readData(
                 filter,
                 projection,
@@ -527,15 +530,16 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - assets: Comma-separated list of assets to filter
    */
   get.set('/api/v2/user/balances', {
-    middlewares: fieldSelectionMiddlewares('balances'),
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('balances'),
+    ],
     handler: async (req, res) => {
       const {
-        paperContext: _paperContext,
         page: _page,
         exchangeId: _exchangeId,
         assets: _assets,
       }: {
-        paperContext?: string
         page?: string
         exchangeId?: string
         assets?: string
@@ -543,6 +547,7 @@ const v2API = <R extends UserSchema = UserSchema>(
 
       const user = req.userData
       const fields = req.fieldSelection
+      const paperContext = req.paperContext || false
 
       // Parse assets filter
       let assets: string[] = []
@@ -566,13 +571,6 @@ const v2API = <R extends UserSchema = UserSchema>(
         page = 1
       }
 
-      const paperContext =
-        _paperContext === 'true'
-          ? true
-          : _paperContext === 'false'
-            ? false
-            : null
-
       const limit = defaultPaginations.balances
 
       const filter: Record<string, unknown> = {
@@ -583,7 +581,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         filter.exchangeUUID = exchangeId
       }
 
-      if (paperContext !== null && !exchangeId) {
+      if (!exchangeId) {
         filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
       }
 
@@ -643,14 +641,14 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
-   * GET /api/v2/user/globalVars
+   * GET /api/v2/user/global-vars
    *
    * List global variables
    *
    * Query params:
    * - page: Page number (default: 1)
    */
-  get.set('/api/v2/user/globalVars', {
+  get.set('/api/v2/user/global-vars', {
     middlewares: [],
     handler: async (req, res) => {
       const { page: _page }: { page?: string } = req.query
@@ -714,20 +712,22 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - page: Page number (default: 1)
    */
   get.set('/api/v2/bots/grid', {
-    middlewares: fieldSelectionMiddlewares('bots.grid'),
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('bots.grid'),
+    ],
     handler: async (req, res) => {
       const {
         status,
-        paperContext,
         page: _page,
       }: {
         status?: BotStatusEnum
-        paperContext?: string
         page?: string
       } = req.query
 
       const user = req.userData
       const fields = req.fieldSelection
+      const paperContext = req.paperContext || false
 
       const validStatuses = [
         BotStatusEnum.closed,
@@ -746,19 +746,6 @@ const v2API = <R extends UserSchema = UserSchema>(
         return
       }
 
-      if (
-        typeof paperContext !== 'undefined' &&
-        paperContext !== 'false' &&
-        paperContext !== 'true'
-      ) {
-        res.status(400).send({
-          status: StatusEnum.notok,
-          reason: 'Invalid paperContext parameter',
-          data: null,
-        })
-        return
-      }
-
       const page = _page && !isNaN(+_page) ? +_page : 1
 
       const filter: Record<string, any> = {
@@ -771,10 +758,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         filter.status = status
       }
 
-      if (typeof paperContext !== 'undefined') {
-        filter.paperContext =
-          paperContext === 'true' ? { $eq: true } : { $ne: true }
-      }
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
 
       const projection = buildProjection(fields || null)
       const limit = defaultPaginations.bots
@@ -817,11 +801,8 @@ const v2API = <R extends UserSchema = UserSchema>(
     },
   })
 
-  // POST endpoints
-  const post: APIMap = new Map()
-
   /**
-   * POST /api/v2/user/globalVars
+   * POST /api/v2/user/global-vars
    *
    * Create a new global variable
    *
@@ -832,7 +813,7 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - 400: Validation error
    * - 500: Internal server error
    */
-  post.set('/api/v2/user/globalVars', {
+  post.set('/api/v2/user/global-vars', {
     middlewares: [],
     handler: async (req, res) => {
       const user = req.userData
@@ -914,7 +895,7 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
-   * POST /api/v2/createDCABot
+   * POST /api/v2/bots/dca
    *
    * Create a new DCA bot
    *
@@ -926,8 +907,8 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - 400: Validation error (missing exchangeUUID, exchange not found, etc.)
    * - 500: Internal server error
    */
-  post.set('/api/v2/createDCABot', {
-    middlewares: [],
+  post.set('/api/v2/bots/dca', {
+    middlewares: [paperContextMiddleware],
     handler: async (req, res) => {
       const user = req.userData
       const input = req.body as CreateDCABotInputRaw
@@ -938,6 +919,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         user.id,
         userDb,
         res,
+        req.paperContext || false,
       )
       if (!contextValidation.valid) return
 
@@ -953,8 +935,6 @@ const v2API = <R extends UserSchema = UserSchema>(
       }
 
       settings = addIndicatorsDefaults(settings)
-
-      delete (settings as any).paperContext
 
       settings = await replaceVarsInInput(settings, userData._id.toString())
 
@@ -1013,7 +993,7 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
-   * POST /api/v2/createComboBot
+   * POST /api/v2/bots/combo
    *
    * Create a new Combo bot
    *
@@ -1025,8 +1005,8 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - 400: Validation error (missing exchangeUUID, exchange not found, etc.)
    * - 500: Internal server error
    */
-  post.set('/api/v2/createComboBot', {
-    middlewares: [],
+  post.set('/api/v2/bots/combo', {
+    middlewares: [paperContextMiddleware],
     handler: async (req, res) => {
       const user = req.userData
       const input = req.body as CreateDCABotInputRaw
@@ -1037,6 +1017,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         user.id,
         userDb,
         res,
+        req.paperContext || false,
       )
       if (!contextValidation.valid) return
 
@@ -1056,8 +1037,6 @@ const v2API = <R extends UserSchema = UserSchema>(
       }
 
       settings = addIndicatorsDefaults(settings)
-
-      delete (settings as any).paperContext
 
       settings = await replaceVarsInInput(settings, userData._id.toString())
 
@@ -1118,7 +1097,7 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
-   * POST /api/v2/createTerminalDeal
+   * POST /api/v2/deals/terminal
    *
    * Create a new Terminal Deal (one-time trade)
    *
@@ -1130,8 +1109,8 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - 400: Validation error (missing exchangeUUID, exchange not found, etc.)
    * - 500: Internal server error
    */
-  post.set('/api/v2/createTerminalDeal', {
-    middlewares: [],
+  post.set('/api/v2/deals/terminal', {
+    middlewares: [paperContextMiddleware],
     handler: async (req, res) => {
       const user = req.userData
       const input = req.body as CreateDCABotInputRaw
@@ -1142,6 +1121,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         user.id,
         userDb,
         res,
+        req.paperContext || false,
       )
       if (!contextValidation.valid) return
 
@@ -1161,8 +1141,6 @@ const v2API = <R extends UserSchema = UserSchema>(
       }
 
       settings = addIndicatorsDefaults(settings)
-
-      delete (settings as any).paperContext
 
       const validate = await validateCreateTerminalDealInput(
         settings,
@@ -1221,7 +1199,7 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
-   * POST /api/v2/createGridBot
+   * POST /api/v2/bots/grid
    *
    * Create a new Grid bot
    *
@@ -1233,8 +1211,8 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - 400: Validation error (missing exchangeUUID, exchange not found, etc.)
    * - 500: Internal server error
    */
-  post.set('/api/v2/createGridBot', {
-    middlewares: [],
+  post.set('/api/v2/bots/grid', {
+    middlewares: [paperContextMiddleware],
     handler: async (req, res) => {
       const user = req.userData
       const input = req.body as CreateGridBotInputRaw
@@ -1245,6 +1223,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         user.id,
         userDb,
         res,
+        req.paperContext || false,
       )
       if (!contextValidation.valid) return
 
@@ -1258,7 +1237,6 @@ const v2API = <R extends UserSchema = UserSchema>(
         ...addAditionalFields(input, exchange),
       }
 
-      delete (settings as any).paperContext
       delete (settings as any).vars
 
       const validate = await validateCreateGridBotInput(
@@ -1337,21 +1315,1453 @@ const v2API = <R extends UserSchema = UserSchema>(
     },
   })
 
+  /**
+   * POST /api/v2/deals/terminal/:dealId/add-funds
+   *
+   * Add funds to a terminal deal
+   *
+   * Body: { qty: string, asset?: OrderSizeTypeEnum, symbol?: string, type?: AddFundsTypeEnum }
+   *
+   * Response:
+   * - 200: Funds added successfully
+   * - 400: Validation error or deal not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/deals/terminal/:dealId/add-funds', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { dealId } = req.params
+      const { qty, asset, symbol, type } = req.body as {
+        qty?: string
+        asset?: OrderSizeTypeEnum
+        symbol?: string
+        type?: AddFundsTypeEnum
+      }
+
+      if (!dealId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Deal ID is required',
+        })
+      }
+
+      const fundsType = type || AddFundsTypeEnum.fixed
+
+      if (!qty || (fundsType === AddFundsTypeEnum.fixed && !asset)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Missing required parameters',
+        })
+      }
+
+      if (
+        typeof qty !== 'string' ||
+        (asset &&
+          (typeof asset !== 'string' ||
+            ![OrderSizeTypeEnum.base, OrderSizeTypeEnum.quote].includes(
+              asset,
+            ))) ||
+        (symbol && typeof symbol !== 'string') ||
+        (type &&
+          ![AddFundsTypeEnum.fixed, AddFundsTypeEnum.perc].includes(type))
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid parameters',
+        })
+      }
+
+      try {
+        // Fetch the terminal deal to get botId
+        const deal = await dcaDealsDb.readData({
+          _id: dealId,
+          userId: user.id,
+          terminal: { $eq: true },
+          status: {
+            $nin: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
+          },
+        })
+
+        if (deal.status === StatusEnum.notok) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: deal.reason,
+          })
+        }
+
+        if (!deal.data.result) {
+          return res.status(404).json({
+            status: StatusEnum.notok,
+            reason: 'Terminal deal not found',
+          })
+        }
+
+        const botId = deal.data.result.botId
+
+        // Call the Bot method with botId
+        const result = await Bot.addDealFundsFromPublicApi(
+          user.id,
+          botId,
+          qty,
+          asset!,
+          symbol,
+          fundsType,
+          dealId,
+        )
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error('Error adding funds to terminal deal:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to add funds to terminal deal',
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/deals/terminal/:dealId/reduce-funds
+   *
+   * Reduce funds from a terminal deal
+   *
+   * Body: { qty: string, asset?: OrderSizeTypeEnum, symbol?: string, type?: AddFundsTypeEnum }
+   *
+   * Response:
+   * - 200: Funds reduced successfully
+   * - 400: Validation error or deal not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/deals/terminal/:dealId/reduce-funds', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { dealId } = req.params
+      const { qty, asset, symbol, type } = req.body as {
+        qty?: string
+        asset?: OrderSizeTypeEnum
+        symbol?: string
+        type?: AddFundsTypeEnum
+      }
+
+      if (!dealId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Deal ID is required',
+        })
+      }
+
+      const fundsType = type || AddFundsTypeEnum.fixed
+
+      if (!qty || (fundsType === AddFundsTypeEnum.fixed && !asset)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Missing required parameters',
+        })
+      }
+
+      if (
+        typeof qty !== 'string' ||
+        (asset &&
+          (typeof asset !== 'string' ||
+            ![OrderSizeTypeEnum.base, OrderSizeTypeEnum.quote].includes(
+              asset,
+            ))) ||
+        (symbol && typeof symbol !== 'string') ||
+        (type &&
+          ![AddFundsTypeEnum.fixed, AddFundsTypeEnum.perc].includes(type))
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid parameters',
+        })
+      }
+
+      try {
+        // Fetch the terminal deal to get botId
+        const deal = await dcaDealsDb.readData({
+          _id: dealId,
+          userId: user.id,
+          terminal: { $eq: true },
+          status: {
+            $nin: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
+          },
+        })
+
+        if (deal.status === StatusEnum.notok) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: deal.reason,
+          })
+        }
+
+        if (!deal.data.result) {
+          return res.status(404).json({
+            status: StatusEnum.notok,
+            reason: 'Terminal deal not found',
+          })
+        }
+
+        const botId = deal.data.result.botId
+
+        // Call the Bot method with botId
+        const result = await Bot.reduceDealFundsFromPublicApi(
+          user.id,
+          botId,
+          qty,
+          asset!,
+          symbol,
+          fundsType,
+          dealId,
+        )
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error('Error reducing funds from terminal deal:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to reduce funds from terminal deal',
+        })
+      }
+    },
+  })
+
+  /**
+   * PUT /api/v2/bots/:botType/:botId
+   *
+   * Update bot settings (DCA or Combo)
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo)
+   * - botId: ID of the bot to update
+   *
+   * Body: Partial bot settings to update
+   *
+   * Response:
+   * - 200: Bot updated successfully
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  put.set('/api/v2/bots/:botType/:botId', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botId, botType } = req.params
+      const settings = req.body
+
+      // Validate botType
+      if (!['dca', 'combo'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo',
+        })
+      }
+
+      if (!botId || !settings) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Missing required parameters',
+        })
+      }
+
+      if (typeof botId !== 'string' || typeof settings !== 'object') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid parameters',
+        })
+      }
+
+      try {
+        //  Fetch bot based on type
+        const bot =
+          botType === 'combo'
+            ? await comboBotDb.readData({ _id: botId, userId: user.id })
+            : await dcaBotDb.readData({ _id: botId, userId: user.id })
+
+        if (bot.status === StatusEnum.notok) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: bot.reason,
+          })
+        }
+
+        if (!bot.data.result) {
+          return res.status(404).json({
+            status: StatusEnum.notok,
+            reason: 'Bot not found',
+          })
+        }
+
+        const check = checkDCABotSettings(
+          bot.data.result.settings,
+          settings,
+          botType === 'combo',
+        )
+        if (check.status === StatusEnum.notok) {
+          return res.status(400).json(check)
+        }
+
+        const { pair, ...rest } = settings
+        let pairToUse = pair
+
+        if (pair?.length) {
+          const updatePairs = await Bot.changeDCABotPairs(
+            user.id,
+            botId,
+            '',
+            undefined,
+            pair,
+            PairsToSetMode.replace,
+            true,
+          )
+          if (updatePairs.status === StatusEnum.notok) {
+            if (updatePairs.reason === 'Nothing changed') {
+              pairToUse = undefined
+            } else {
+              return res.status(400).json(updatePairs)
+            }
+          } else {
+            pairToUse = updatePairs.data.current
+          }
+        }
+
+        const updateMethod =
+          botType === 'combo' ? Bot.changeComboBot : Bot.changeDCABot
+        const result = await updateMethod(
+          {
+            ...rest,
+            pair: pairToUse,
+            id: botId,
+            vars: bot.data.result.vars,
+          },
+          user.id,
+          !!bot.data.result.paperContext,
+        )
+
+        if (result && result.status === StatusEnum.notok) {
+          return res.status(400).json(result)
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: 'Settings updated',
+        })
+      } catch (error) {
+        console.error(`Error updating ${botType} bot:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to update ${botType} bot`,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/bots/:botType/:botId/start
+   *
+   * Start a bot (DCA, Combo, or Grid)
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo, grid)
+   * - botId: ID of the bot to start
+   *
+   * Query: ?paperContext=true|false (optional)
+   *
+   * Response:
+   * - 200: Bot scheduled to start
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/bots/:botType/:botId/start', {
+    middlewares: [paperContextMiddleware],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botId, botType } = req.params
+      const paperContext = req.paperContext || false
+
+      // Validate botType
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+          data: null,
+        })
+      }
+
+      if (!botId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID is required',
+          data: null,
+        })
+      }
+
+      if (typeof botId !== 'string') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot ID',
+          data: null,
+        })
+      }
+
+      try {
+        const result = await Bot.changeStatus(
+          user.id,
+          {
+            status: BotStatusEnum.open,
+            id: botId,
+            type: botType as any,
+          },
+          paperContext,
+        )
+
+        if (result && result.status === StatusEnum.notok) {
+          return res.status(400).json(result)
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: 'Bot scheduled to start',
+        })
+      } catch (error) {
+        console.error(`Error starting ${botType} bot:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to start ${botType} bot`,
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/bots/:botType/:botId/stop
+   *
+   * Stop a bot (DCA, Combo, or Grid)
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo, grid)
+   * - botId: ID of the bot to stop
+   *
+   * Query params:
+   * - paperContext: true|false (optional)
+   * - cancelPartiallyFilled: true|false (optional)
+   * - closeType: cancel|closeByLimit|closeByMarket|leave (for DCA/Combo)
+   * - closeGridType: cancel|closeByLimit|closeByMarket (for Grid)
+   *
+   * Response:
+   * - 200: Bot scheduled to stop
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/bots/:botType/:botId/stop', {
+    middlewares: [paperContextMiddleware],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botId, botType } = req.params
+      const paperContext = req.paperContext || false
+      const { cancelPartiallyFilled, closeType, closeGridType } = req.query as {
+        cancelPartiallyFilled?: string
+        closeType?: CloseDCATypeEnum
+        closeGridType?: CloseGRIDTypeEnum
+      }
+
+      // Validate botType
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+          data: null,
+        })
+      }
+
+      if (!botId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID is required',
+          data: null,
+        })
+      }
+
+      if (typeof botId !== 'string') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot ID',
+          data: null,
+        })
+      }
+
+      try {
+        const result = await Bot.changeStatus(
+          user.id,
+          {
+            status: BotStatusEnum.closed,
+            id: botId,
+            type: botType as any,
+            cancelPartiallyFilled: cancelPartiallyFilled === 'true',
+            closeType: closeType ?? CloseDCATypeEnum.leave,
+            closeGridType,
+          },
+          paperContext,
+        )
+
+        if (result && result.status === StatusEnum.notok) {
+          return res.status(400).json(result)
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: 'Bot scheduled to stop',
+        })
+      } catch (error) {
+        console.error(`Error stopping ${botType} bot:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to stop ${botType} bot`,
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/bots/:botType/:botId/restore
+   *
+   * Restore an archived bot
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo, grid)
+   * - botId: ID of the bot to restore
+   *
+   * Response:
+   * - 200: Bot restored successfully
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/bots/:botType/:botId/restore', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botId, botType } = req.params
+
+      // Validate botType
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+          data: null,
+        })
+      }
+
+      if (!botId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID is required',
+          data: null,
+        })
+      }
+
+      if (typeof botId !== 'string') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot ID',
+          data: null,
+        })
+      }
+
+      try {
+        const result = await Bot.setArchiveStatus(
+          user.id,
+          botType as any,
+          [botId],
+          false,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          return res.status(400).json(result)
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: 'Bot restored',
+        })
+      } catch (error) {
+        console.error(`Error restoring ${botType} bot:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to restore ${botType} bot`,
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * DELETE /api/v2/bots/:botType/:botId
+   *
+   * Archive a bot
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo, grid)
+   * - botId: ID of the bot to archive
+   *
+   * Response:
+   * - 200: Bot archived successfully
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  deleteMap.set('/api/v2/bots/:botType/:botId', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botId, botType } = req.params
+
+      // Validate botType
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+          data: null,
+        })
+      }
+
+      if (!botId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID is required',
+          data: null,
+        })
+      }
+
+      if (typeof botId !== 'string') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot ID',
+          data: null,
+        })
+      }
+
+      try {
+        const result = await Bot.setArchiveStatus(
+          user.id,
+          botType as any,
+          [botId],
+          true,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          return res.status(400).json(result)
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: 'Bot archived',
+        })
+      } catch (error) {
+        console.error(`Error archiving ${botType} bot:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to archive ${botType} bot`,
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * PUT /api/v2/bots/:botType/:botId/pairs
+   *
+   * Change bot trading pairs
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo, grid)
+   * - botId: ID of the bot
+   *
+   * Body: { pairsToChange?: { add?: string[], remove?: string[] }, pairsToSet?: string[], pairsToSetMode?: PairsToSetMode }
+   *
+   * Response:
+   * - 200: Pairs updated successfully
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  put.set('/api/v2/bots/:botType/:botId/pairs', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botId, botType } = req.params
+      const { pairsToChange, pairsToSet, pairsToSetMode } = req.body as {
+        pairsToChange?: { add?: string[]; remove?: string[] }
+        pairsToSet?: string[]
+        pairsToSetMode?: PairsToSetMode
+      }
+
+      // Validate botType
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+        })
+      }
+
+      if (!botId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID is required',
+        })
+      }
+
+      if (!pairsToChange && !pairsToSet) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Either pairsToChange or pairsToSet must be provided',
+        })
+      }
+
+      if (
+        typeof botId !== 'string' ||
+        (pairsToChange && typeof pairsToChange !== 'object') ||
+        (pairsToSet && typeof pairsToSet !== 'object') ||
+        (pairsToSetMode &&
+          (typeof pairsToSetMode !== 'string' ||
+            !Object.values(PairsToSetMode)
+              .filter((v) => isNaN(+v))
+              .includes(pairsToSetMode)))
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid parameters',
+        })
+      }
+
+      if (pairsToSet && !pairsToSet.length) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Pairs cannot be empty',
+        })
+      }
+
+      if (
+        pairsToChange &&
+        ((!pairsToChange.add && !pairsToChange.remove) ||
+          (!(pairsToChange.add ?? []).length &&
+            !(pairsToChange.remove ?? []).length))
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Pairs cannot be empty',
+        })
+      }
+
+      try {
+        const result = await Bot.changeDCABotPairs(
+          user.id,
+          botId,
+          '',
+          pairsToChange,
+          pairsToSet,
+          pairsToSetMode,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          return res.status(400).json(result)
+        }
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error(`Error changing ${botType} bot pairs:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to change ${botType} bot pairs`,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/bots/:botType/:botId/clone
+   *
+   * Clone a bot with optional setting overrides
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo, grid)
+   * - botId: ID of the bot to clone
+   *
+   * Query: ?paperContext=true|false (optional)
+   * Body: Partial bot settings to override (all optional)
+   *
+   * Response:
+   * - 200: Bot cloned successfully with botId
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/bots/:botType/:botId/clone', {
+    middlewares: [paperContextMiddleware],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botId, botType } = req.params
+      const paperContext = req.paperContext || false
+      const settingsOverrides = req.body
+
+      // Validate botType
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+        })
+      }
+
+      if (!botId || typeof botId !== 'string') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Missing or invalid botId parameter',
+        })
+      }
+
+      try {
+        // Fetch the existing bot based on bot type
+        const existingBot =
+          botType === 'grid'
+            ? await botDb.readData({
+                _id: botId,
+                userId: user.id,
+                paperContext: paperContext ? { $eq: true } : { $ne: true },
+                isDeleted: { $ne: true },
+                exchangeUnassigned: { $ne: true },
+              })
+            : botType === 'combo'
+              ? await comboBotDb.readData({
+                  _id: botId,
+                  userId: user.id,
+                  paperContext: paperContext ? { $eq: true } : { $ne: true },
+                  isDeleted: { $ne: true },
+                  exchangeUnassigned: { $ne: true },
+                })
+              : await dcaBotDb.readData({
+                  _id: botId,
+                  userId: user.id,
+                  paperContext: paperContext ? { $eq: true } : { $ne: true },
+                  isDeleted: { $ne: true },
+                  exchangeUnassigned: { $ne: true },
+                })
+
+        if (
+          existingBot.status === StatusEnum.notok ||
+          !existingBot.data.result
+        ) {
+          return res.status(404).json({
+            status: StatusEnum.notok,
+            reason: `${botType.toUpperCase()} bot not found`,
+          })
+        }
+
+        const sourceBot = existingBot.data.result
+
+        // Get user data for validation
+        const userData = await userDb.readData({
+          _id: new Types.ObjectId(user.id),
+        })
+
+        if (userData.status === StatusEnum.notok || !userData.data.result) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: 'User not found',
+          })
+        }
+
+        // Find the exchange
+        const exchange = userData.data.result.exchanges.find(
+          (ex) => ex.uuid === sourceBot.exchangeUUID,
+        )
+
+        if (!exchange) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: 'Exchange not found',
+          })
+        }
+
+        const { pair: _pair, ...rest } = settingsOverrides ?? {}
+        let pair = _pair
+
+        // Validate pair if provided (skip for grid bots as they have different settings type)
+        const check =
+          Object.keys(rest ?? {}).length > 0 && botType !== 'grid'
+            ? checkDCABotSettings(
+                sourceBot.settings as any,
+                rest ?? {},
+                botType === 'combo',
+              )
+            : { status: StatusEnum.ok }
+
+        if (check.status === StatusEnum.notok) {
+          return res.status(400).json(check)
+        }
+
+        if (pair?.length) {
+          const pairsValidation = await Bot.checkPairs(sourceBot.exchange, pair)
+          if (pairsValidation.status === StatusEnum.notok) {
+            return res.status(400).json({
+              status: StatusEnum.notok,
+              reason: `Invalid pair: ${pair}`,
+            })
+          }
+          pair =
+            botType === 'grid'
+              ? pair
+              : (pairsValidation.data?.map((p) => p.pair) ?? [])
+        }
+
+        // Combine settings: source bot + overrides
+        const symbol = sourceBot.symbol as any
+        const combinedSettings = {
+          ...sourceBot.settings,
+          ...(settingsOverrides ?? {}),
+          pair: pair?.length
+            ? pair
+            : botType === 'grid'
+              ? `${symbol.baseAsset}_${symbol.quoteAsset}`
+              : sourceBot.settings.pair,
+        }
+
+        // Auto-append (clone) to name if not overridden
+        if (sourceBot.settings.name && !settingsOverrides?.name) {
+          combinedSettings.name = `${sourceBot.settings.name} (clone)`
+        }
+
+        const vars = sourceBot.vars
+        if (rest && vars) {
+          vars.paths = vars.paths.filter((p: any) => !(p.path in rest))
+          const v = vars.paths.map((p: any) => p.variable)
+          vars.list = vars.list.filter((l: any) => v.includes(l))
+        }
+
+        // Create the cloned bot using appropriate method
+        let result
+
+        if (botType === 'grid') {
+          delete (combinedSettings as any).vars
+          delete combinedSettings.updatedBudget
+          delete combinedSettings.newProfit
+          delete combinedSettings.newBalance
+          delete (combinedSettings as any)._id
+
+          const finalSettings = {
+            ...combinedSettings,
+            ...addAditionalFields(combinedSettings, exchange),
+          }
+
+          result = await Bot.createBot(
+            userData.data.result._id.toString(),
+            finalSettings as any,
+            paperContext,
+          )
+        } else {
+          const createMethod =
+            botType === 'combo' ? Bot.createComboBot : Bot.createDCABot
+
+          result = await createMethod(
+            userData.data.result._id.toString(),
+            {
+              ...Bot.removeNullableValuesFromSettings(combinedSettings),
+              exchange: sourceBot.exchange,
+              exchangeUUID: sourceBot.exchangeUUID,
+              vars,
+            } as any,
+            paperContext,
+          )
+        }
+
+        if (result.status === StatusEnum.notok) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: result.reason || `Failed to clone ${botType} bot`,
+          })
+        }
+
+        if (!result.data) {
+          return res.status(500).json({
+            status: StatusEnum.notok,
+            reason: 'Failed to retrieve cloned bot data',
+          })
+        }
+
+        const clonedBotId =
+          botType === 'grid'
+            ? (result.data as any).botId?.toString()
+            : (result.data as any)._id.toString()
+
+        if (!clonedBotId) {
+          return res.status(500).json({
+            status: StatusEnum.notok,
+            reason: 'Failed to retrieve cloned bot ID',
+          })
+        }
+
+        // For grid bots, fetch the created bot details
+        if (botType === 'grid') {
+          const findBot = await botDb.readData({
+            _id: clonedBotId,
+            userId: userData.data.result._id.toString(),
+          })
+
+          if (findBot.status === StatusEnum.notok || !findBot.data) {
+            return res.status(500).json({
+              status: StatusEnum.notok,
+              reason: 'Failed to retrieve cloned bot from database',
+            })
+          }
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: {
+            botId: clonedBotId,
+            message: `${botType.toUpperCase()} bot cloned successfully`,
+          },
+        })
+      } catch (error) {
+        console.error(`Error cloning ${botType} bot:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to clone ${botType} bot`,
+        })
+      }
+    },
+  })
+
+  /**
+   * PUT /api/v2/deals/:dealType/:dealId
+   *
+   * Update deal settings (DCA or Combo)
+   *
+   * URL params:
+   * - dealType: Type of deal (dca, combo, terminal)
+   * - dealId: ID of the deal to update
+   *
+   * Body: Partial deal settings to update
+   *
+   * Response:
+   * - 200: Deal updated successfully
+   * - 400: Validation error or deal not found
+   * - 500: Internal server error
+   */
+  put.set('/api/v2/deals/:dealType/:dealId', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { dealId, dealType } = req.params
+      const settings = req.body
+
+      // Validate dealType
+      if (!['dca', 'combo', 'terminal'].includes(dealType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid deal type. Must be one of: dca, combo, terminal',
+        })
+      }
+
+      if (!dealId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Deal ID is required',
+        })
+      }
+
+      if (!settings || typeof settings !== 'object') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Settings must be provided as an object',
+        })
+      }
+
+      try {
+        // Check if deal exists, belongs to user, and is not closed/canceled
+        const deal =
+          dealType === 'combo'
+            ? await comboDealsDb.readData({
+                _id: dealId,
+                userId: user.id,
+                status: {
+                  $nin: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
+                },
+              })
+            : await dcaDealsDb.readData({
+                _id: dealId,
+                userId: user.id,
+                ...(dealType === 'terminal' ? { terminal: { $eq: true } } : {}),
+                status: {
+                  $nin: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
+                },
+              })
+
+        if (deal.status === StatusEnum.notok) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: deal.reason,
+          })
+        }
+
+        if (!deal.data.result) {
+          return res.status(404).json({
+            status: StatusEnum.notok,
+            reason: `${dealType} deal not found`,
+          })
+        }
+
+        // Validate settings
+        const check = checkDCADealSettings(
+          deal.data.result.settings,
+          settings,
+          dealType === 'combo',
+        )
+
+        if (check.status === StatusEnum.notok) {
+          return res.status(400).json(check)
+        }
+
+        // Update deal settings
+        const updateMethod =
+          dealType === 'combo'
+            ? Bot.updateComboDealSettings
+            : Bot.updateDCADealSettings
+
+        const result = await updateMethod(user.id, '', dealId, settings)
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error(`Error updating ${dealType} deal settings:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to update ${dealType} deal settings`,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/deals/:dealType/:dealId/start
+   *
+   * Start a new deal (for DCA or Combo bots)
+   *
+   * URL params:
+   * - dealType: Type of deal (dca, combo)
+   * - dealId: Bot ID to start deal for
+   *
+   * Body: { symbol?: string }
+   *
+   * Response:
+   * - 200: Deal started successfully
+   * - 400: Validation error or bot not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/deals/:dealType/:dealId/start', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { dealId: botId, dealType } = req.params
+      const { symbol } = req.body as { symbol?: string }
+
+      // Validate dealType
+      if (!['dca', 'combo'].includes(dealType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid deal type. Must be one of: dca, combo',
+          data: null,
+        })
+      }
+
+      if (!botId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID is required',
+          data: null,
+        })
+      }
+
+      if (typeof botId !== 'string') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot ID',
+          data: null,
+        })
+      }
+
+      try {
+        let convertedSymbol = symbol
+
+        if (typeof symbol !== 'undefined') {
+          const convertedPairs = await checkPairs(
+            botId,
+            user.id,
+            dealType as any,
+            symbol,
+          )
+          if (convertedPairs.status === StatusEnum.notok) {
+            return res.status(400).json(convertedPairs)
+          }
+          convertedSymbol = convertedPairs.data
+        }
+
+        const result =
+          dealType === 'combo'
+            ? await Bot.openComboDeal(user.id, botId, convertedSymbol)
+            : await Bot.openDCADeal(user.id, botId, convertedSymbol)
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error(`Error starting ${dealType} deal:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to start ${dealType} deal`,
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/deals/dca/add-funds
+   *
+   * Add funds to a deal (works for all deal types)
+   *
+   *
+   * Body: { qty: string, asset?: OrderSizeTypeEnum, symbol?: string, type?: AddFundsTypeEnum, }
+   *
+   * Response:
+   * - 200: Funds added successfully
+   * - 400: Validation error or deal not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/deals/dca/add-funds', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { qty, asset, symbol, type } = req.body as {
+        qty?: string
+        asset?: OrderSizeTypeEnum
+        symbol?: string
+        type?: AddFundsTypeEnum
+      }
+
+      const { botId, dealId } = req.query as { botId?: string; dealId?: string }
+
+      if (!botId && !dealId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID or Deal ID required',
+        })
+      }
+
+      const fundsType = type || AddFundsTypeEnum.fixed
+
+      if (!qty || (fundsType === AddFundsTypeEnum.fixed && !asset)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Missing required parameters',
+        })
+      }
+
+      if (
+        (typeof botId !== 'undefined' && typeof botId !== 'string') ||
+        (typeof dealId !== 'undefined' && typeof dealId !== 'string') ||
+        typeof qty !== 'string' ||
+        (asset &&
+          (typeof asset !== 'string' ||
+            ![OrderSizeTypeEnum.base, OrderSizeTypeEnum.quote].includes(
+              asset,
+            ))) ||
+        (symbol && typeof symbol !== 'string') ||
+        (type &&
+          ![AddFundsTypeEnum.fixed, AddFundsTypeEnum.perc].includes(type))
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid parameters',
+        })
+      }
+
+      try {
+        const result = await Bot.addDealFundsFromPublicApi(
+          user.id,
+          botId,
+          qty,
+          asset!,
+          symbol,
+          fundsType,
+          dealId,
+        )
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error('Error adding funds to deal:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to add funds to deal',
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/deals/dca/reduce-funds
+   *
+   * Reduce funds from a deal (works for all deal types)
+   *
+   * Body: { qty: string, asset?: OrderSizeTypeEnum, symbol?: string, type?: AddFundsTypeEnum }
+   *
+   * Response:
+   * - 200: Funds reduced successfully
+   * - 400: Validation error or deal not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/deals/dca/reduce-funds', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { qty, asset, symbol, type } = req.body as {
+        qty?: string
+        asset?: OrderSizeTypeEnum
+        symbol?: string
+        type?: AddFundsTypeEnum
+      }
+
+      const { botId, dealId } = req.query as { botId?: string; dealId?: string }
+
+      if (!botId && !dealId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Bot ID of deal ID required',
+        })
+      }
+
+      const fundsType = type || AddFundsTypeEnum.fixed
+
+      if (!qty || (fundsType === AddFundsTypeEnum.fixed && !asset)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Missing required parameters',
+        })
+      }
+
+      if (
+        (typeof botId !== 'undefined' && typeof botId !== 'string') ||
+        (typeof dealId !== 'undefined' && typeof dealId !== 'string') ||
+        typeof qty !== 'string' ||
+        (asset &&
+          (typeof asset !== 'string' ||
+            ![OrderSizeTypeEnum.base, OrderSizeTypeEnum.quote].includes(
+              asset,
+            ))) ||
+        (symbol && typeof symbol !== 'string') ||
+        (type &&
+          ![AddFundsTypeEnum.fixed, AddFundsTypeEnum.perc].includes(type))
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid parameters',
+        })
+      }
+
+      try {
+        const result = await Bot.reduceDealFundsFromPublicApi(
+          user.id,
+          botId,
+          qty,
+          asset!,
+          symbol,
+          fundsType,
+          dealId,
+        )
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error('Error reducing funds from deal:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to reduce funds from deal',
+        })
+      }
+    },
+  })
+
   // Import v1 API for POST, PUT, DELETE operations
   // These operations don't use field selection, so we map them 1:1
   const v1API = allAPI(userDb, Bot)
 
-  // Map v1 POST endpoints to v2 with /v2 prefix
+  // DO NOT auto-map v1 endpoints that we've explicitly defined as REST above
+  const excludedV1Routes = [
+    '/api/updateDCABot',
+    '/api/updateComboBot',
+    '/api/startBot',
+    '/api/stopBot',
+    '/api/restoreBot',
+    '/api/archiveBot',
+    '/api/changeBotPairs',
+    '/api/cloneDCABot',
+    '/api/cloneComboBot',
+    '/api/updateDCADeal',
+    '/api/updateComboDeal',
+    '/api/startDeal',
+    '/api/addFunds',
+    '/api/reduceFunds',
+  ]
+
+  // Map v1 POST endpoints to v2 with /v2 prefix and kebab-case (excluding REST endpoints)
   v1API.post.forEach((handler, route) => {
-    const v2Route = route.replace('/api/', '/api/v2/')
-    post.set(v2Route, { handler, middlewares: [] })
+    if (!excludedV1Routes.includes(route)) {
+      const v2Route = transformV1RouteToV2(route)
+      post.set(v2Route, { handler, middlewares: [] })
+    }
   })
 
-  // Map v1 PUT endpoints to v2 with /v2 prefix
-  const put: APIMap = new Map()
-
   /**
-   * PUT /api/v2/user/globalVars/:id
+   * PUT /api/v2/user/global-vars/:id
    *
    * Update an existing global variable
    *
@@ -1363,7 +2773,7 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - 404: Global variable not found
    * - 500: Internal server error
    */
-  put.set('/api/v2/user/globalVars/:id', {
+  put.set('/api/v2/user/global-vars/:id', {
     middlewares: [],
     handler: async (req, res) => {
       const user = req.userData
@@ -1475,15 +2885,14 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   v1API.put.forEach((handler, route) => {
-    const v2Route = route.replace('/api/', '/api/v2/')
-    put.set(v2Route, { handler, middlewares: [] })
+    if (!excludedV1Routes.includes(route)) {
+      const v2Route = transformV1RouteToV2(route)
+      put.set(v2Route, { handler, middlewares: [] })
+    }
   })
 
-  // Map v1 DELETE endpoints to v2 with /v2 prefix
-  const deleteMap: APIMap = new Map()
-
   /**
-   * DELETE /api/v2/user/globalVars/:id
+   * DELETE /api/v2/user/global-vars/:id
    *
    * Delete a global variable
    *
@@ -1493,7 +2902,7 @@ const v2API = <R extends UserSchema = UserSchema>(
    * - 404: Global variable not found
    * - 500: Internal server error
    */
-  deleteMap.set('/api/v2/user/globalVars/:id', {
+  deleteMap.set('/api/v2/user/global-vars/:id', {
     middlewares: [],
     handler: async (req, res) => {
       const user = req.userData
@@ -1555,14 +2964,116 @@ const v2API = <R extends UserSchema = UserSchema>(
     },
   })
 
+  /**
+   * DELETE /api/v2/deals/:dealType/:dealId
+   *
+   * Close a deal (DCA, Combo, or Terminal)
+   *
+   * URL params:
+   * - dealType: Type of deal (dca, combo, terminal)
+   * - dealId: ID of the deal to close
+   *
+   * Query params:
+   * - type: Close type (cancel, closeByLimit, closeByMarket, leave)
+   *
+   * Response:
+   * - 200: Deal closed successfully
+   * - 400: Validation error or deal not found
+   * - 500: Internal server error
+   */
+  deleteMap.set('/api/v2/deals/:dealType/:dealId', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { dealId, dealType } = req.params
+      const { type } = req.query as { type?: CloseDCATypeEnum }
+
+      // Validate dealType
+      if (!['dca', 'combo', 'terminal'].includes(dealType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid deal type. Must be one of: dca, combo, terminal',
+          data: null,
+        })
+      }
+
+      if (!dealId) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Deal ID is required',
+          data: null,
+        })
+      }
+
+      if (!type) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Close type is required',
+          data: null,
+        })
+      }
+
+      const validTypes = [
+        CloseDCATypeEnum.cancel,
+        CloseDCATypeEnum.closeByLimit,
+        CloseDCATypeEnum.closeByMarket,
+        CloseDCATypeEnum.leave,
+      ]
+
+      if (!validTypes.includes(type)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid close type',
+          data: null,
+        })
+      }
+
+      try {
+        // Select appropriate close method based on deal type
+        const result =
+          dealType === 'combo'
+            ? await Bot.closeComboDeal(
+                user.id,
+                '',
+                dealId,
+                type,
+                undefined,
+                undefined,
+                DCACloseTriggerEnum.api,
+              )
+            : await Bot.closeDCADeal(
+                user.id,
+                '',
+                dealId,
+                type,
+                undefined,
+                undefined,
+                DCACloseTriggerEnum.api,
+              )
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error(`Error closing ${dealType} deal:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : `Failed to close ${dealType} deal`,
+          data: null,
+        })
+      }
+    },
+  })
+
   v1API.delete.forEach((handler, route) => {
-    const v2Route = route.replace('/api/', '/api/v2/')
+    const v2Route = transformV1RouteToV2(route)
     deleteMap.set(v2Route, { handler, middlewares: [] })
   })
 
   const getPublic: APIMap = new Map()
   v1API.getPublic.forEach((handler, route) => {
-    const v2Route = route.replace('/api/', '/api/v2/')
+    const v2Route = transformV1RouteToV2(route)
     getPublic.set(v2Route, { handler, middlewares: [] })
   })
 

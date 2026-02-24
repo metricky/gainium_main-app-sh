@@ -213,10 +213,7 @@ const validateCommonSchema = <
   excludedFields.forEach((field) => {
     if (field in originalInput) {
       response.errors = response.errors.filter((e) => e[0] !== field)
-      response.errors.push([
-        field,
-        `Field ${field} is not supported for DCA bots`,
-      ])
+      response.errors.push([field, `Field ${field} is not supported`])
     }
   })
   response.valid = response.errors.length === 0

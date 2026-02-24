@@ -8576,7 +8576,7 @@ class Bot<T extends UserSchema = UserSchema> {
 
   public async addDealFundsFromPublicApi(
     userId: string,
-    botId: string,
+    botId: string | undefined,
     qty: string,
     asset: OrderSizeTypeEnum,
     symbol?: string,
@@ -8597,20 +8597,36 @@ class Bot<T extends UserSchema = UserSchema> {
         dealId,
       )
     }
-    const bot = await this.dcaBotDb.readData(
-      { userId, _id: botId },
-      undefined,
-      {},
-      false,
-      false,
-    )
-    if (bot.reason === StatusEnum.notok) {
-      return bot
+    let botIdToUse = botId
+    if (!botIdToUse && dealId) {
+      const findDeal = await this.dcaDealsDb.readData({
+        _id: dealId,
+        userId,
+      })
+      if (findDeal.status === StatusEnum.notok) {
+        return findDeal
+      }
+      if (!findDeal.data?.result) {
+        return this.entityNotFound('Deal')
+      }
+      botIdToUse = findDeal.data.result.botId
     }
-    if (!bot.data?.result) {
-      return this.entityNotFound('Bot')
+    if (botId) {
+      const bot = await this.dcaBotDb.readData(
+        { userId, _id: botId },
+        undefined,
+        {},
+        false,
+        false,
+      )
+      if (bot.reason === StatusEnum.notok) {
+        return bot
+      }
+      if (!bot.data?.result) {
+        return this.entityNotFound('Bot')
+      }
     }
-    const findBot = this.dcaBots.find((b) => b.id === botId)
+    const findBot = this.dcaBots.find((b) => b.id === botIdToUse)
     if (findBot) {
       this.getWorkerById(findBot.worker)?.postMessage({
         do: 'method',
@@ -8645,7 +8661,7 @@ class Bot<T extends UserSchema = UserSchema> {
 
   public async reduceDealFundsFromPublicApi(
     userId: string,
-    botId: string,
+    botId: string | undefined,
     qty: string,
     asset: OrderSizeTypeEnum,
     symbol?: string,
@@ -8666,20 +8682,36 @@ class Bot<T extends UserSchema = UserSchema> {
         dealId,
       )
     }
-    const bot = await this.dcaBotDb.readData(
-      { userId, _id: botId },
-      undefined,
-      {},
-      false,
-      false,
-    )
-    if (bot.reason === StatusEnum.notok) {
-      return bot
+    let botIdToUse = botId
+    if (!botIdToUse && dealId) {
+      const findDeal = await this.dcaDealsDb.readData({
+        _id: dealId,
+        userId,
+      })
+      if (findDeal.status === StatusEnum.notok) {
+        return findDeal
+      }
+      if (!findDeal.data?.result) {
+        return this.entityNotFound('Deal')
+      }
+      botIdToUse = findDeal.data.result.botId
     }
-    if (!bot.data?.result) {
-      return this.entityNotFound('Bot')
+    if (botId) {
+      const bot = await this.dcaBotDb.readData(
+        { userId, _id: botId },
+        undefined,
+        {},
+        false,
+        false,
+      )
+      if (bot.reason === StatusEnum.notok) {
+        return bot
+      }
+      if (!bot.data?.result) {
+        return this.entityNotFound('Bot')
+      }
     }
-    const findBot = this.dcaBots.find((b) => b.id === botId)
+    const findBot = this.dcaBots.find((b) => b.id === botIdToUse)
     if (findBot) {
       this.getWorkerById(findBot.worker)?.postMessage({
         do: 'method',

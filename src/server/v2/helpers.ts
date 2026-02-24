@@ -23,6 +23,7 @@ export const validateBotCreationContext = async <
   userId: string,
   userDb: DB<R>,
   res: Response,
+  paperContext: boolean = false,
 ): Promise<
   | { valid: false }
   | { valid: true; userData: any; exchange: any; paperContext: boolean }
@@ -52,7 +53,6 @@ export const validateBotCreationContext = async <
       reason: 'Invalid input format',
     })
   }
-  const paperContext = input.paperContext === true
 
   // 1. Validate exchangeUUID is provided FIRST
   if (!input.exchangeUUID) {

@@ -50,17 +50,25 @@ interface EndpointInfo {
 class AIDocGenerator {
   private spec: OpenAPISpec
   private outputPath: string
+  private schemasPath: string
 
   constructor(specPath: string, outputPath: string) {
     const specContent = fs.readFileSync(specPath, 'utf8')
     this.spec = yaml.load(specContent) as OpenAPISpec
     this.outputPath = outputPath
+    this.schemasPath = outputPath.replace('AI_API_GUIDE.md', 'SCHEMAS.md')
   }
 
   generate() {
-    const content = this.buildDocumentation()
-    fs.writeFileSync(this.outputPath, content)
+    // Generate main lightweight guide
+    const mainContent = this.buildDocumentation()
+    fs.writeFileSync(this.outputPath, mainContent)
     console.log(`✅ AI documentation generated: ${this.outputPath}`)
+
+    // Generate detailed schemas file
+    const schemasContent = this.buildSchemasDocument()
+    fs.writeFileSync(this.schemasPath, schemasContent)
+    console.log(`✅ Schemas documentation generated: ${this.schemasPath}`)
   }
 
   private buildDocumentation(): string {
@@ -69,10 +77,19 @@ class AIDocGenerator {
       this.generateAuthenticationSection(),
       this.generateFieldSelectionSection(),
       this.generateCommonExamples(),
-      this.generateEndpointsSection(),
-      this.generateSchemasSection(),
+      this.generateEndpointsTable(),
       this.generateErrorHandlingSection(),
       this.generatePaginationSection(),
+      this.generateSchemasReference(),
+    ]
+
+    return sections.join('\n\n')
+  }
+
+  private buildSchemasDocument(): string {
+    const sections = [
+      this.generateSchemasHeader(),
+      this.generateDetailedSchemas(),
     ]
 
     return sections.join('\n\n')
@@ -278,8 +295,14 @@ response = requests.post(
 \`\`\``
   }
 
-  private generateEndpointsSection(): string {
-    let content = `## API Endpoints\n\n`
+  private generateEndpointsTable(): string {
+    let content = `## API Endpoints
+
+All endpoints support field selection via \`?fields=minimal|standard|extended|full\` parameter.
+
+For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
+
+`
 
     // Group endpoints by tag
     const endpointsByTag: Record<string, EndpointInfo[]> = {}
@@ -313,201 +336,235 @@ response = requests.post(
 
     for (const [tag, endpoints] of Object.entries(endpointsByTag)) {
       content += `### ${tag}\n\n`
+      content += `| Method | URL | Input Schema | Response | Description |\n`
+      content += `|--------|-----|--------------|----------|-------------|\n`
 
       for (const endpoint of endpoints) {
-        content += this.generateEndpointExample(endpoint)
+        const inputSchema = this.getInputSchemaReference(endpoint)
+        const responseSchema = this.getResponseSchemaReference(endpoint)
+
+        content += `| ${endpoint.method} | \`${endpoint.path}\` | ${inputSchema} | ${responseSchema} | ${endpoint.summary} |\n`
       }
+
+      content += '\n'
     }
 
     return content
   }
 
-  private generateEndpointExample(endpoint: EndpointInfo): string {
-    const hasBody = endpoint.requestBody !== undefined
-
-    let example = `#### ${endpoint.method} ${endpoint.path}\n`
-    example += `**${endpoint.summary}**\n\n`
-
-    if (endpoint.description) {
-      example += `${endpoint.description}\n\n`
+  private getInputSchemaReference(endpoint: EndpointInfo): string {
+    if (!endpoint.requestBody) {
+      const queryParams = endpoint.parameters.filter(
+        (p) => p.in === 'query' && p.name !== 'fields',
+      )
+      if (queryParams.length === 0) return 'Query params only'
+      return 'Query params'
     }
 
-    // Python example
-    example += `**Python:**\n\`\`\`python\n`
+    // Try to extract schema reference from request body
+    const requestBody = endpoint.requestBody
+    const content = requestBody?.content?.['application/json']
 
-    if (hasBody) {
-      example += this.generatePythonPostExample(endpoint)
-    } else {
-      example += this.generatePythonGetExample(endpoint)
+    if (!content?.schema) return 'Request body'
+
+    const schema = content.schema
+
+    // Handle direct $ref
+    if (schema.$ref) {
+      const schemaName = schema.$ref.split('/').pop()
+      return `[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})`
     }
 
-    example += `\`\`\`\n\n`
-
-    // JavaScript example
-    example += `**JavaScript/TypeScript:**\n\`\`\`javascript\n`
-
-    if (hasBody) {
-      example += this.generateJsPostExample(endpoint)
-    } else {
-      example += this.generateJsGetExample(endpoint)
-    }
-
-    example += `\`\`\`\n\n`
-
-    // CLI example
-    example += `**CLI (curl):**\n\`\`\`bash\n`
-    example += this.generateCurlExample(endpoint)
-    example += `\`\`\`\n\n---\n\n`
-
-    return example
-  }
-
-  private generatePythonGetExample(endpoint: EndpointInfo): string {
-    const url = `"https://api.gainium.io${endpoint.path}"`
-    const params = endpoint.parameters
-      .filter((p) => p.in === 'query' && p.name !== 'fields')
-      .slice(0, 2) // Limit examples
-      .map((p) => `"${p.name}": "example-value"`)
-      .join(', ')
-
-    if (params) {
-      return `response = requests.get(
-    ${url},
-    params={${params.length > 0 ? params + ', ' : ''}"fields": "standard"},
-    headers=headers
-)
-data = response.json()["data"]`
-    } else {
-      return `response = requests.get(
-    ${url},
-    params={"fields": "standard"},
-    headers=headers
-)
-data = response.json()["data"]`
-    }
-  }
-
-  private generatePythonPostExample(endpoint: EndpointInfo): string {
-    const url = `"https://api.gainium.io${endpoint.path}"`
-    const queryParams = endpoint.parameters
-      .filter((p) => p.in === 'query')
-      .slice(0, 2)
-      .map((p) => `"${p.name}": "example-value"`)
-      .join(', ')
-
-    let example = `payload = {
-    "exampleField": "exampleValue"
-}
-
-response = requests.post(
-    ${url},`
-
-    if (queryParams) {
-      example += `\n    params={${queryParams}},`
-    }
-
-    example += `
-    json=payload,
-    headers=headers
-)
-result = response.json()`
-
-    return example
-  }
-
-  private generateJsGetExample(endpoint: EndpointInfo): string {
-    const url = `'https://api.gainium.io${endpoint.path}'`
-    const params = endpoint.parameters
-      .filter((p) => p.in === 'query' && p.name !== 'fields')
-      .slice(0, 2)
-      .map((p) => `${p.name}: 'example-value'`)
-      .join(', ')
-
-    return `const params = new URLSearchParams({
-    ${params}${params ? ', ' : ''}fields: 'standard'
-});
-
-const response = await fetch(\`${url}?\${params}\`, {
-    method: 'GET',
-    headers
-});
-const data = await response.json();`
-  }
-
-  private generateJsPostExample(endpoint: EndpointInfo): string {
-    const url = `'https://api.gainium.io${endpoint.path}'`
-
-    return `const payload = {
-    exampleField: 'exampleValue'
-};
-
-const response = await fetch(${url}, {
-    method: '${endpoint.method}',
-    headers: {
-        ...headers,
-        'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-});
-const result = await response.json();`
-  }
-
-  private generateCurlExample(endpoint: EndpointInfo): string {
-    let curl = `curl -X ${endpoint.method} "https://api.gainium.io${endpoint.path}`
-
-    const queryParams = endpoint.parameters
-      .filter((p) => p.in === 'query')
-      .slice(0, 2)
-      .map((p) => `${p.name}=example-value`)
-      .join('&')
-
-    if (queryParams) {
-      curl += `?${queryParams}&fields=standard"`
-    } else {
-      curl += `?fields=standard"`
-    }
-
-    curl += ` \\
-  -H "token: $TOKEN" \\
-  -H "time: $TIMESTAMP" \\
-  -H "signature: $SIGNATURE"`
-
-    if (endpoint.requestBody) {
-      curl += ` \\
-  -H "Content-Type: application/json" \\
-  -d '{"exampleField": "exampleValue"}'`
-    }
-
-    return curl
-  }
-
-  private generateSchemasSection(): string {
-    let content = `## Key Data Schemas\n\n`
-
-    // Get important schemas
-    const importantSchemas = [
-      'DCABotSettings',
-      'ComboBotSettings',
-      'BotSettings',
-      'SettingsIndicators',
-      'MultiTP',
-      'DCACustom',
-    ]
-
-    for (const schemaName of importantSchemas) {
-      const schema = this.spec.components.schemas[schemaName]
-      if (schema) {
-        content += this.generateSchemaExample(schemaName, schema)
+    // Handle allOf constructions
+    if (schema.allOf) {
+      for (const item of schema.allOf) {
+        if (item.$ref) {
+          const schemaName = item.$ref.split('/').pop()
+          return `[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})`
+        }
       }
+    }
+
+    // Handle oneOf constructions
+    if (schema.oneOf) {
+      const refs = schema.oneOf
+        .filter((item: any) => item.$ref)
+        .map((item: any) => {
+          const schemaName = item.$ref.split('/').pop()
+          return `[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})`
+        })
+
+      if (refs.length > 0) {
+        return refs.join(' | ')
+      }
+    }
+
+    return 'Request body'
+  }
+
+  private getResponseSchemaReference(endpoint: EndpointInfo): string {
+    const ok200 = endpoint.responses['200']
+    if (!ok200?.content?.['application/json']?.schema) return 'Success response'
+
+    const schema = ok200.content['application/json'].schema
+
+    // Handle direct schema reference
+    if (schema.$ref) {
+      const schemaName = schema.$ref.split('/').pop()
+      return `[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})`
+    }
+
+    // Handle schema with properties.data reference
+    if (schema.properties?.data) {
+      const dataSchema = schema.properties.data
+
+      // Handle array of items with $ref
+      if (dataSchema.type === 'array' && dataSchema.items?.$ref) {
+        const schemaName = dataSchema.items.$ref.split('/').pop()
+        return `Array<[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})>`
+      }
+
+      // Handle direct $ref on data property
+      if (dataSchema.$ref) {
+        const schemaName = dataSchema.$ref.split('/').pop()
+        return `[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})`
+      }
+    }
+
+    // Handle allOf constructions
+    if (schema.allOf) {
+      for (const item of schema.allOf) {
+        if (item.properties?.data) {
+          const dataSchema = item.properties.data
+
+          if (dataSchema.type === 'array' && dataSchema.items?.$ref) {
+            const schemaName = dataSchema.items.$ref.split('/').pop()
+            return `Array<[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})>`
+          }
+
+          if (dataSchema.$ref) {
+            const schemaName = dataSchema.$ref.split('/').pop()
+            return `[${schemaName}](./SCHEMAS.md#${schemaName.toLowerCase()})`
+          }
+        }
+      }
+    }
+
+    return 'Success response'
+  }
+
+  private generateSchemasReference(): string {
+    return `## Schemas
+
+For detailed schema definitions with field descriptions and examples, see [SCHEMAS.md](./SCHEMAS.md).
+
+### Quick Schema Reference
+
+| Schema | Purpose |
+|--------|---------|
+| DCABotSettings | DCA bot configuration |
+| ComboBotSettings | Combo bot configuration |
+| GridBotSettings | Grid bot configuration |
+| BotSettings | Base bot settings |
+| DealSettings | Deal configuration |
+| SettingsIndicators | Technical indicators |
+| MultiTP | Multiple take-profit settings |
+| DCACustom | Custom DCA configuration |`
+  }
+
+  private generateSchemasHeader(): string {
+    return `# Gainium API v2.0 - Schema Reference
+
+This document contains detailed schema definitions for all API endpoints.
+
+## Overview
+
+All schemas include field descriptions, types, validation rules, and examples.
+This documentation is automatically generated from the OpenAPI specification.
+
+**Last Updated:** ${new Date().toISOString()}
+
+---`
+  }
+
+  private generateDetailedSchemas(): string {
+    let content = ''
+
+    // Get all schemas from the OpenAPI spec
+    const schemas = this.spec.components.schemas || {}
+    const schemaNames = Object.keys(schemas).sort()
+
+    for (const schemaName of schemaNames) {
+      const schema = schemas[schemaName]
+      content += this.generateDetailedSchemaSection(schemaName, schema)
+      content += '\n---\n\n'
     }
 
     return content
   }
 
-  private generateSchemaExample(name: string, _schema: any): string {
-    // Since these are references to external generated schemas,
-    // we'll create representative examples
-    const examples: Record<string, any> = {
+  private generateDetailedSchemaSection(name: string, schema: any): string {
+    let section = `## ${name}\n\n`
+
+    if (schema.description) {
+      section += `${schema.description}\n\n`
+    }
+
+    if (schema.type === 'object' && schema.properties) {
+      section += '### Fields\n\n'
+      section += '| Field | Type | Required | Description |\n'
+      section += '|-------|------|----------|-------------|\n'
+
+      const required = schema.required || []
+
+      for (const [fieldName, fieldSchema] of Object.entries(
+        schema.properties,
+      )) {
+        const field = fieldSchema as any
+        const isRequired = required.includes(fieldName)
+        const type = this.getFieldType(field)
+        const description = field.description || ''
+
+        section += `| \`${fieldName}\` | ${type} | ${isRequired ? 'Yes' : 'No'} | ${description} |\n`
+      }
+      section += '\n'
+    }
+
+    // Add example if available
+    const example = this.generateSchemaExample(name, schema)
+    if (example) {
+      section += '### Example\n\n'
+      section += '```json\n'
+      section += JSON.stringify(example, null, 2)
+      section += '\n```\n\n'
+    }
+
+    return section
+  }
+
+  private getFieldType(field: any): string {
+    if (field.$ref) {
+      const refName = field.$ref.split('/').pop()
+      return `[${refName}](#${refName.toLowerCase()})`
+    }
+
+    if (field.type === 'array') {
+      const itemType = field.items?.$ref
+        ? `[${field.items.$ref.split('/').pop()}](#${field.items.$ref.split('/').pop().toLowerCase()})`
+        : field.items?.type || 'any'
+      return `Array<${itemType}>`
+    }
+
+    if (field.enum) {
+      return `enum: \`${field.enum.join('|')}\``
+    }
+
+    return field.type || 'any'
+  }
+
+  private generateSchemaExample(name: string, schema: any): any {
+    // First check for predefined examples
+    const predefinedExamples: Record<string, any> = {
       DCABotSettings: {
         name: 'BTC Long Strategy',
         pair: ['BTC/USDT'],
@@ -519,32 +576,218 @@ const result = await response.json();`
         useDca: true,
         useTp: true,
       },
-      ComboBotSettings: {
-        gridLevel: '5',
-        newBalance: false,
-        feeOrder: true,
+      APIResponse: {
+        status: 'OK',
+        reason: null,
       },
-      BotSettings: {
-        pair: 'BTC/USDT',
-        topPrice: 55000,
-        lowPrice: 45000,
-        levels: 10,
-        budget: 10000,
-      },
-      SettingsIndicators: {
-        type: 'RSI',
-        indicatorLength: 14,
-        indicatorValue: '70',
-        indicatorCondition: 'gt',
+      BalanceMinimal: {
+        asset: 'BTC',
+        free: '0.05123',
+        locked: '0.00000',
+        exchangeUUID: '550e8400-e29b-41d4-a716-446655440000',
       },
     }
 
-    const example = examples[name] || {
-      example: 'field',
-      value: 'sample-value',
+    if (predefinedExamples[name]) {
+      return predefinedExamples[name]
     }
 
-    return `### ${name}\n\`\`\`json\n${JSON.stringify(example, null, 2)}\n\`\`\`\n\n`
+    // Generate example from schema structure
+    return this.generateExampleFromSchema(schema)
+  }
+
+  private generateExampleFromSchema(schema: any): any {
+    if (!schema || typeof schema !== 'object')
+      return { exampleField: 'example-value' }
+
+    // Handle $ref - provide a meaningful example instead of just ref name
+    if (schema.$ref) {
+      const refName = schema.$ref.split('/').pop()
+      return this.getExampleForRefSchema(refName)
+    }
+
+    // Handle different schema types
+    switch (schema.type) {
+      case 'object':
+        if (schema.properties) {
+          const example: any = {}
+          for (const [propName, propSchema] of Object.entries(
+            schema.properties,
+          )) {
+            example[propName] = this.generateValueFromProperty(
+              propName,
+              propSchema as any,
+            )
+          }
+          return example
+        }
+        return {}
+
+      case 'array':
+        if (schema.items) {
+          const itemExample = this.generateExampleFromSchema(schema.items)
+          return [itemExample]
+        }
+        return []
+
+      case 'string':
+        if (schema.enum) return schema.enum[0]
+        if (schema.format === 'date-time') return '2024-01-15T10:30:00.000Z'
+        if (schema.format === 'uuid')
+          return '550e8400-e29b-41d4-a716-446655440000'
+        return this.getStringExample(schema.description || '')
+
+      case 'number':
+      case 'integer':
+        if (schema.enum) return schema.enum[0]
+        return schema.minimum || 0
+
+      case 'boolean':
+        return true
+
+      default:
+        return { exampleField: 'example-value' }
+    }
+  }
+
+  private getExampleForRefSchema(refName: string): any {
+    // Provide meaningful examples for common referenced schemas
+    const refExamples: Record<string, any> = {
+      DCABotExtended: {
+        _id: '550e8400-e29b-41d4-a716-446655440000',
+        uuid: '550e8400-e29b-41d4-a716-446655440000',
+        settings: {
+          name: 'BTC Long Strategy',
+          pair: ['BTC/USDT'],
+          strategy: 'LONG',
+          baseOrderSize: '100',
+          tpPerc: '2.5',
+        },
+        status: 'active',
+        exchange: 'binance',
+        profit: {
+          total: '125.50',
+          totalUsd: '125.50',
+        },
+        deals: {
+          active: 1,
+          total: 5,
+        },
+      },
+      DCABotStandard: {
+        _id: '550e8400-e29b-41d4-a716-446655440000',
+        uuid: '550e8400-e29b-41d4-a716-446655440000',
+        settings: {
+          name: 'BTC Long Strategy',
+          pair: ['BTC/USDT'],
+        },
+        status: 'active',
+        exchange: 'binance',
+      },
+      DCABotMinimal: {
+        _id: '550e8400-e29b-41d4-a716-446655440000',
+        uuid: '550e8400-e29b-41d4-a716-446655440000',
+        settings: {
+          name: 'BTC Long Strategy',
+        },
+        status: 'active',
+      },
+      DCADealExtended: {
+        _id: '550e8400-e29b-41d4-a716-446655440000',
+        botId: '550e8400-e29b-41d4-a716-446655440000',
+        status: 'open',
+        symbol: {
+          symbol: 'BTC/USDT',
+        },
+        profit: {
+          total: '25.50',
+          totalUsd: '25.50',
+          percentage: '2.5',
+        },
+        avgPrice: '45000.00',
+        cost: '1000.00',
+      },
+    }
+
+    if (refExamples[refName]) {
+      return refExamples[refName]
+    }
+
+    // Generate a generic example based on the schema name
+    if (refName.includes('Bot')) {
+      return {
+        _id: '550e8400-e29b-41d4-a716-446655440000',
+        uuid: '550e8400-e29b-41d4-a716-446655440000',
+        settings: {
+          name: 'Example Bot',
+        },
+        status: 'active',
+        exchange: 'binance',
+      }
+    }
+
+    if (refName.includes('Deal')) {
+      return {
+        _id: '550e8400-e29b-41d4-a716-446655440000',
+        botId: '550e8400-e29b-41d4-a716-446655440000',
+        status: 'open',
+        symbol: 'BTC/USDT',
+        profit: {
+          total: '25.50',
+        },
+      }
+    }
+
+    // Fallback
+    return {
+      _id: '550e8400-e29b-41d4-a716-446655440000',
+      exampleField: `Referenced ${refName} schema`,
+    }
+  }
+
+  private generateValueFromProperty(propName: string, propSchema: any): any {
+    // Handle specific property name patterns
+    const lowerName = propName.toLowerCase()
+
+    if (lowerName.includes('uuid') || lowerName.includes('id')) {
+      return '550e8400-e29b-41d4-a716-446655440000'
+    }
+    if (lowerName.includes('time') || lowerName.includes('date')) {
+      return '2024-01-15T10:30:00.000Z'
+    }
+    if (lowerName.includes('name') || lowerName === 'symbol') {
+      return 'BTC/USDT'
+    }
+    if (
+      lowerName.includes('price') ||
+      lowerName.includes('amount') ||
+      lowerName.includes('balance')
+    ) {
+      return '1234.56'
+    }
+    if (lowerName.includes('status')) {
+      return propSchema.enum ? propSchema.enum[0] : 'active'
+    }
+    if (lowerName.includes('perc') || lowerName.includes('percent')) {
+      return '2.5'
+    }
+
+    // Generate from schema
+    return this.generateExampleFromSchema(propSchema)
+  }
+
+  private getStringExample(description: string): string {
+    const desc = description.toLowerCase()
+    if (desc.includes('uuid') || desc.includes('identifier'))
+      return '550e8400-e29b-41d4-a716-446655440000'
+    if (desc.includes('timestamp') || desc.includes('time'))
+      return '2024-01-15T10:30:00.000Z'
+    if (desc.includes('symbol') || desc.includes('pair')) return 'BTC/USDT'
+    if (desc.includes('name')) return 'Example Name'
+    if (desc.includes('reason')) return 'Success'
+    if (desc.includes('asset')) return 'BTC'
+    if (desc.includes('exchange')) return 'binance'
+    return 'example-string'
   }
 
   private generateErrorHandlingSection(): string {
@@ -637,8 +880,9 @@ def get_all_bots():
 
 ---
 
-*This documentation is automatically generated from the OpenAPI specification.*
-*Last updated: ${new Date().toISOString()}*`
+*This documentation is automatically generated from the OpenAPI specification.*  
+*Last updated: ${new Date().toISOString()}*  
+*For detailed schemas, see [SCHEMAS.md](./SCHEMAS.md)*`
   }
 }
 
