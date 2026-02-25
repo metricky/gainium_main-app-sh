@@ -2,91 +2,57 @@ openapi: 3.1.0
 info:
   title: Gainium API v2.0
   version: 2.0.0
-  description: >
+  description: |
     # Gainium API v2.0 with Field Selection
-
 
     API v2.0 introduces efficient field selection to reduce payload size by 70-90%.
 
-
     ## Authentication
-
 
     All REST requests must contain the following headers:
 
-
     - **token**: Public key of the user  
-
     - **time**: Timestamp of the request in ms  
-
     - **signature**: The base64-encoded signature  
-
 
     ### To sign a request:
 
-
     1. Use API-Secret to encrypt the prehash string {body+method+endpoint+timestamp} with sha256 HMAC
-
     2. The request body is a JSON string and need to be the same with the parameters passed by the API
-
     3. After that, use base64-encode to encrypt the result in step 1 again
 
-
     **Example:**
-
     ```javascript
-
     crypto.createHmac('sha256', secret).update(body + method + endpoint + time).digest('base64')
-
     ```
-
 
     ## Field Selection
 
-
     All GET endpoints in v2 support field selection via the `fields` query parameter.
-
 
     ### Field Presets
 
-
     - **minimal**: Essential fields only (IDs, names, status)
-
     - **standard**: Commonly requested fields (default)
-
     - **extended**: Additional useful fields
-
     - **full**: All available fields
-
 
     ### Custom Fields
 
-
     Specify custom fields with comma-separated list:
-
     ```
-
     ?fields=_id,uuid,settings.name,profit.total
-
     ```
-
 
     Supports dot notation for nested fields:
-
     ```
-
     ?fields=settings.name,settings.pair,profit.total,profit.totalUsd
-
     ```
-
 
     ### Response Metadata
 
-
     All responses include metadata with selected fields:
-
     ```json
-
     {
       "status": "OK",
       "reason": null,
@@ -99,130 +65,75 @@ info:
         "fields": ["_id", "uuid", "settings.name", ...]
       }
     }
-
     ```
-
 
     ### Benefits
 
-
     - **70-90% smaller payloads** with minimal/standard presets
-
     - **Faster response times** via MongoDB projection
-
     - **Reduced network bandwidth** usage
-
     - **Better API performance** overall
-
 
     ## V1 to V2 Migration Guide
 
-
-    V2 introduces REST-compliant endpoints with proper HTTP methods and resource-oriented URLs. All v1 endpoints remain
-    available for backward compatibility.
-
+    V2 introduces REST-compliant endpoints with proper HTTP methods and resource-oriented URLs. All v1 endpoints remain available for backward compatibility.
 
     ### Paper Trading Context
 
-
     - **V1**: `paperContext` as query parameter or body field
-
     - **V2**: `paper-context` header (optional, defaults to `false`)
-
 
     ### Bot Operations
 
-
     #### Get Bots
-
     - **V1**: `GET /api/bots/dca` → **V2**: `GET /api/v2/bots/dca`
-
     - **V1**: `GET /api/bots/combo` → **V2**: `GET /api/v2/bots/combo`
-
     - **V1**: `GET /api/bots/grid` → **V2**: `GET /api/v2/bots/grid`
 
-
     #### Update Bots
-
     - **V1**: `POST /api/updateDCABot` → **V2**: `PUT /api/v2/bots/dca/{botId}`
-
     - **V1**: `POST /api/updateComboBot` → **V2**: `PUT /api/v2/bots/combo/{botId}`
 
-
     #### Bot Actions
-
     - **V1**: `POST /api/startBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/start`
-
     - **V1**: `POST /api/stopBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/stop`
-
     - **V1**: `POST /api/archiveBot` → **V2**: `DELETE /api/v2/bots/{dca|combo|grid}/{botId}`
-
     - **V1**: `POST /api/restoreBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/restore`
-
     - **V1**: `POST /api/cloneDCABot` → **V2**: `POST /api/v2/bots/dca/{botId}/clone`
-
     - **V1**: `POST /api/cloneComboBot` → **V2**: `POST /api/v2/bots/combo/{botId}/clone`
-
     - **V1**: not exist → **V2**: `POST /api/v2/bots/grid/{botId}/clone`
-
     - **V1**: `POST /api/changeBotPairs` → **V2**: `PUT /api/v2/bots/dca/{botId}/pairs`
-
 
     ### Deal Operations
 
-
     #### Get Deals
-
     - **V1**: `GET /api/deals` → **V2**: `GET /api/v2/deals/{dca|combo|terminal}`
 
-
     #### Update Deals
-
     - **V1**: `POST /api/updateDCADeal` → **V2**: `PUT /api/v2/deals/dca/{dealId}`
-
     - **V1**: `POST /api/updateComboDeal` → **V2**: `PUT /api/v2/deals/combo/{dealId}`
 
-
     #### Deal Actions
-
     - **V1**: `POST /api/startDeal` → **V2**: `POST /api/v2/deals/{dca|combo}/{dealId}/start`
-
     - **V1**: `POST /api/addFunds` → **V2**: `POST /api/v2/deals/add-funds`
-
     - **V1**: `POST /api/reduceFunds` → **V2**: `POST /api/v2/deals/reduce-funds`
-
-    - **V1**: `POST /api/closeDeal/{dealId}` → **V2**: `DELETE
-    /api/v2/deals/{dca|combo|terminal}/{dealId}?type=closeByMarket`
-
+    - **V1**: `POST /api/closeDeal/{dealId}` → **V2**: `DELETE /api/v2/deals/{dca|combo|terminal}/{dealId}?type=closeByMarket`
     - **V1**: `POST /api/cancelDeal/{dealId}` → **V2**: `DELETE /api/v2/deals/{dca|combo|terminal}/{dealId}?type=cancel`
-
 
     ### User Operations
 
-
     #### Get User Data
-
     - **V1**: `GET /api/user/exchanges` → **V2**: `GET /api/v2/user/exchanges`
-
     - **V1**: `GET /api/user/balances` → **V2**: `GET /api/v2/user/balances`
-
 
     ### Key Differences
 
-
     1. **HTTP Methods**: V2 uses proper REST methods (GET, POST, PUT, DELETE) instead of POST for everything
-
     2. **URL Structure**: Resource-oriented paths (`/bots/dca/{botId}`) instead of action verbs (`/updateDCABot`)
-
     3. **Bot Type in Path**: Bot type is now part of the URL path for better API documentation and clarity
-
     4. **Headers vs Parameters**: Cross-cutting concerns like `paperContext` moved to headers
-
     5. **Field Selection**: V2 supports efficient field selection on all GET endpoints
-
-    6. **Deal Type Specification**: V1 used a single `/api/deals` endpoint; V2 separates by type (`/deals/dca`,
-    `/deals/combo`, `/deals/terminal`)
-
+    6. **Deal Type Specification**: V1 used a single `/api/deals` endpoint; V2 separates by type (`/deals/dca`, `/deals/combo`, `/deals/terminal`)
     7. **Bot Creation**: V2 creates bots via `POST /api/v2/bots/{type}` (implemented in future version)
 servers:
   - url: http://localhost:7503
@@ -393,6 +304,234 @@ components:
             - perc
           description: Funds type (default is fixed)
           example: fixed
+    BacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          $ref: "#/components/schemas/ServerSideBacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
+    DcaBacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          type: object
+          description: DCA backtest payload without type field (specified in URL)
+          allOf:
+            - $ref: "#/components/schemas/BacktestPayload"
+            - type: object
+              properties:
+                data:
+                  $ref: "#/components/schemas/DCABacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
+    ComboBacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          type: object
+          description: Combo backtest payload without type field (specified in URL)
+          allOf:
+            - $ref: "#/components/schemas/BacktestPayload"
+            - type: object
+              properties:
+                data:
+                  $ref: "#/components/schemas/ComboBacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
+    GridBacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          type: object
+          description: Grid backtest payload without type field (specified in URL)
+          allOf:
+            - $ref: "#/components/schemas/BacktestPayload"
+            - type: object
+              properties:
+                data:
+                  $ref: "#/components/schemas/GridBacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
+    BacktestResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          properties:
+            data:
+              type: string
+              example: "Request sent"
+    BacktestSymbol:
+      type: object
+      required:
+        - pair
+        - baseAsset
+        - quoteAsset
+      properties:
+        pair:
+          type: string
+          description: Trading pair symbol
+          example: BTC/USDT
+        baseAsset:
+          type: string
+          description: Base asset symbol (e.g., BTC in BTC/USDT)
+          example: BTC
+        quoteAsset:
+          type: string
+          description: Quote asset symbol (e.g., USDT in BTC/USDT) 
+          example: USDT
+    BacktestCostEstimate:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          properties:
+            data:
+              type: integer
+              description: Estimated cost in credits for the backtest
+              example: 10
+    BacktestDCAConfig:
+      type: object
+      required:
+        - exchange
+        - exchangeUUID
+      properties:
+        exchange:
+          type: string
+          description: Exchange identifier
+          example: binance
+        exchangeUUID:
+          type: string
+          description: Unique exchange connection identifier
+          example: 550e8400-e29b-41d4-a716-446655440000
+        settings:
+          $ref: "#/components/schemas/DCABotSettings"
+        from:
+          type: integer
+          description: Backtest start timestamp (milliseconds)
+          example: 1640995200000
+        to:
+          type: integer
+          description: Backtest end timestamp (milliseconds)
+          example: 1672531199000
+        interval:
+          type: string
+          description: Chart interval for backtest
+          example: 1h
+        fromBacktest:
+          type: boolean
+          description: Import from previous backtest
+          example: false
+        trades:
+          type: boolean
+          description: Include trade details in results
+          example: true
+        paperContext:
+          type: boolean
+          description: Paper trading context
+          example: true
+    BacktestGridConfig:
+      type: object
+      required:
+        - exchange
+        - exchangeUUID
+      properties:
+        exchange:
+          type: string
+          description: Exchange identifier
+          example: binance
+        exchangeUUID:
+          type: string
+          description: Unique exchange connection identifier
+          example: 550e8400-e29b-41d4-a716-446655440000
+        settings:
+          $ref: "#/components/schemas/BotSettings"
+        from:
+          type: integer
+          description: Backtest start timestamp (milliseconds)
+          example: 1640995200000
+        to:
+          type: integer
+          description: Backtest end timestamp (milliseconds)
+          example: 1672531199000
+        interval:
+          type: string
+          description: Chart interval for backtest
+          example: 1h
+        fromBacktest:
+          type: boolean
+          description: Import from previous backtest
+          example: false
+        trades:
+          type: boolean
+          description: Include trade details in results
+          example: true
+        paperContext:
+          type: boolean
+          description: Paper trading context
+          example: true
+    ServerSideBacktestPayload:
+      oneOf:
+        - type: object
+          description: DCA or Combo bot backtest payload
+          required:
+            - type
+            - data
+            - config
+          properties:
+            type:
+              type: string
+              enum:
+                - dca
+                - combo
+              description: Bot type for backtest
+            data:
+              $ref: "#/components/schemas/BacktestDCAConfig"
+        - type: object
+          description: Grid bot backtest payload  
+          required:
+            - type
+            - data
+            - config
+          properties:
+            type:
+              type: string
+              enum:
+                - grid
+              description: Bot type for backtest
+            data:
+              $ref: "#/components/schemas/BacktestGridConfig"
+            config:
+              type: object
+              description: Backtest configuration settings
+              properties:
+                periodName:
+                  type: string
+                  description: Name for the backtest period
+                  example: "Q1 2024"
     BalanceListResponse:
       allOf:
         - $ref: "#/components/schemas/APIResponse"
@@ -449,7 +588,6 @@ components:
               example: false
     BaseSettings:
       type: object
-      description: BaseSettings configuration
       properties:
         name:
           type: string
@@ -490,9 +628,7 @@ components:
             - SHORT
           example: LONG
     BotSettings:
-      type: object
       description: BotSettings configuration
-      properties: {}
       allOf:
         - $ref: "#/components/schemas/BaseSettings"
         - type: object
@@ -663,9 +799,7 @@ components:
     ComboBotMinimal:
       $ref: "#/components/schemas/DCABotMinimal"
     ComboBotSettings:
-      type: object
       description: ComboBotSettings configuration
-      properties: {}
       allOf:
         - $ref: "#/components/schemas/DCABotSettings"
         - type: object
@@ -692,21 +826,14 @@ components:
       $ref: "#/components/schemas/DCADealStandard"
     CreateComboBotInput:
       type: object
-      description: >
-        Input schema for creating a new Combo bot. Inherits all ComboBotSettings properties plus additional required
-        fields for creation.
+      description: |
+        Input schema for creating a new Combo bot. Inherits all ComboBotSettings properties plus additional required fields for creation.
 
-
-        Combo bots extend DCA bots with additional grid-level functionality. Some settings in ComboBotSettings type are
-        not used - refer to API documentation for excluded fields list.
-
+        Combo bots extend DCA bots with additional grid-level functionality. Some settings in ComboBotSettings type are not used - refer to API documentation for excluded fields list.
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -727,9 +854,7 @@ components:
                 properties:
                   path:
                     type: string
-                    description: >-
-                      Path to the variable in bot settings or stats. For example, "orderSize" or
-                      "indicators.{uuid}.value"
+                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
                     example: orderSize
                   variable:
                     type: string
@@ -749,17 +874,12 @@ components:
                 example: BTC_USDT
     CreateDCABotInput:
       type: object
-      description: >
-        Input schema for creating a new DCA bot. Inherits all DCABotSettings properties plus additional required fields
-        for creation.
-
+      description: |
+        Input schema for creating a new DCA bot. Inherits all DCABotSettings properties plus additional required fields for creation.
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -780,9 +900,7 @@ components:
                 properties:
                   path:
                     type: string
-                    description: >-
-                      Path to the variable in bot settings or stats. For example, "orderSize" or
-                      "indicators.{uuid}.value"
+                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
                     example: orderSize
                   variable:
                     type: string
@@ -802,17 +920,12 @@ components:
                 example: BTC_USDT
     CreateGridBotInput:
       type: object
-      description: >
-        Input schema for creating a new Grid bot. Grid bots automatically buy and sell assets within a configured price
-        range.
-
+      description: |
+        Input schema for creating a new Grid bot. Grid bots automatically buy and sell assets within a configured price range.
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -840,24 +953,16 @@ components:
               example: BTC_USDT
     CreateTerminalDealInput:
       type: object
-      description: >
-        Input schema for creating a new Terminal Deal (one-time trade). Inherits all DCABotSettings properties plus
-        additional required fields.
-
+      description: |
+        Input schema for creating a new Terminal Deal (one-time trade). Inherits all DCABotSettings properties plus additional required fields.
 
         Terminal deals are one-time trades that execute immediately and don't continue running like regular bots.
-
         The type field will be automatically set to 'terminal'.
 
-
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `type` (automatically set to 'terminal')
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -1120,9 +1225,7 @@ components:
           description: Paper trading context ID (null for real trading)
           example: false
     DCABotSettings:
-      type: object
       description: DCABotSettings configuration
-      properties: {}
       allOf:
         - $ref: "#/components/schemas/BaseSettings"
         - type: object
@@ -2028,7 +2131,6 @@ components:
               example: "2024-01-20T14:22:33Z"
     DCACustom:
       type: object
-      description: DCACustom configuration
       properties:
         step:
           type: string
@@ -2042,6 +2144,7 @@ components:
           type: string
           description: Unique identifier
           example: 123e4567-e89b-12d3-a456-426614174000
+      description: DCACustom configuration
     DCADealExtended:
       allOf:
         - $ref: "#/components/schemas/DCADealStandard"
@@ -2510,7 +2613,6 @@ components:
               example: 1705391999999
     MultiTP:
       type: object
-      description: MultiTP configuration
       properties:
         target:
           type: string
@@ -2528,6 +2630,7 @@ components:
           type: string
           description: Fixed price target
           example: "55000"
+      description: MultiTP configuration
     ResponseMeta:
       type: object
       required:
@@ -2702,7 +2805,6 @@ components:
               example: Layer 1
     SettingsIndicatorGroup:
       type: object
-      description: SettingsIndicatorGroup configuration
       properties:
         id:
           type: string
@@ -2735,9 +2837,9 @@ components:
             - dca
             - controller
           example: sl
+      description: SettingsIndicatorGroup configuration
     SettingsIndicators:
       type: object
-      description: SettingsIndicators configuration
       properties:
         type:
           type: string
@@ -3389,6 +3491,7 @@ components:
             - low
             - middle
           example: high
+      description: SettingsIndicators configuration
     UpdateComboBotInput:
       type: object
       description: Input schema for updating Combo bot settings
@@ -3479,14 +3582,10 @@ components:
           description: Maximum price for open deal
         useDynamicPriceFilter:
           type: boolean
-          description: >-
-            Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or
-            dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
         dynamicPriceFilterDirection:
           type: string
-          description: >-
-            Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require
-            dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
           enum:
             - over
             - under
@@ -3828,14 +3927,10 @@ components:
           description: Maximum price for open deal
         useDynamicPriceFilter:
           type: boolean
-          description: >-
-            Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or
-            dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
         dynamicPriceFilterDirection:
           type: string
-          description: >-
-            Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require
-            dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
           enum:
             - over
             - under
@@ -7061,6 +7156,402 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
+  /api/v2/backtest/dca/request:
+    post:
+      summary: Request DCA Bot Server Side Backtest
+      description: |
+        Submit a DCA server side backtest request to test strategies against historical data.
+        
+        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
+        
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestDcaServerSideBacktest
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: DCA backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/DCABacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: "BTC DCA Strategy"
+                    pair: ["BTC/USDT"]
+                    strategy: LONG
+                    baseOrderSize: "100"
+                    tpPerc: "2.5"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: "1h"
+                  fromBacktest: false
+                  trades: true
+                  paperContext: true
+      responses:
+        "200":
+          description: DCA backtest request submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          description: Invalid DCA backtest configuration or insufficient credits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/dca/estimate-cost:
+    post:
+      summary: Estimate DCA Bot Backtest Cost
+      description: |
+        Estimate the cost in credits for a DCA server side backtest before submitting.
+        
+        This endpoint calculates the expected credit cost based on the backtest configuration,
+        symbol count, timeframe, and date range.
+        
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: estimateDcaServerSideBacktestCost
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: DCA backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/DCABacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: "BTC DCA Strategy"
+                    pair: ["BTC/USDT"]
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: "1h"
+      responses:
+        "200":
+          description: DCA backtest cost estimated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestCostEstimate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/combo/request:
+    post:
+      summary: Request Combo Bot Server Side Backtest
+      description: |
+        Submit a Combo server side backtest request to test strategies against historical data.
+        
+        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
+        
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestComboServerSideBacktest
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Combo backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/ComboBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: "BTC Combo Strategy"
+                    pair: ["BTC/USDT"]
+                    dcaSettings:
+                      baseOrderSize: "100"
+                      safetyOrderSize: "150"
+                      maxSafetyOrders: 5
+                    gridSettings:
+                      triggerPerc: "1.5"
+                      levels: 10
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: "1h"
+                  fromBacktest: false
+                  trades: true
+                  paperContext: true
+      responses:
+        "200":
+          description: Combo backtest request submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          description: Invalid Combo backtest configuration or insufficient credits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/combo/estimate-cost:
+    post:
+      summary: Estimate Combo Bot Backtest Cost
+      description: |
+        Estimate the cost in credits for a Combo server side backtest before submitting.
+        
+        This endpoint calculates the expected credit cost based on the backtest configuration,
+        symbol count, timeframe, and date range.
+        
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: estimateComboServerSideBacktestCost
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Combo backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/ComboBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: "BTC Combo Strategy"
+                    pair: ["BTC/USDT"]
+                    dcaSettings:
+                      baseOrderSize: "100"
+                      safetyOrderSize: "150"
+                      maxSafetyOrders: 5
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: "1h"
+      responses:
+        "200":
+          description: Combo backtest cost estimated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestCostEstimate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/grid/request:
+    post:
+      summary: Request Grid Bot Server Side Backtest
+      description: |
+        Submit a Grid server side backtest request to test strategies against historical data.
+        
+        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
+        
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestGridServerSideBacktest
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Grid backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/GridBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: "BTC Grid Strategy"
+                    pair: ["BTC/USDT"]
+                    gridType: ARITHMETIC
+                    upperPrice: "50000"
+                    lowerPrice: "30000"
+                    levels: 20
+                    investment: "1000"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: "1h"
+                  fromBacktest: false
+                  trades: true
+                  paperContext: true
+      responses:
+        "200":
+          description: Grid backtest request submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          description: Invalid Grid backtest configuration or insufficient credits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/grid/estimate-cost:
+    post:
+      summary: Estimate Grid Bot Backtest Cost
+      description: |
+        Estimate the cost in credits for a Grid server side backtest before submitting.
+        
+        This endpoint calculates the expected credit cost based on the backtest configuration,
+        symbol count, timeframe, and date range.
+        
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: estimateGridServerSideBacktestCost
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Grid backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/GridBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: "BTC Grid Strategy"
+                    pair: ["BTC/USDT"]
+                    gridType: ARITHMETIC
+                    upperPrice: "50000"
+                    lowerPrice: "30000"
+                    levels: 20
+                    investment: "1000"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: "1h"
+      responses:
+        "200":
+          description: Grid backtest cost estimated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestCostEstimate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 security:
   - ApiKeyAuth: []
     SecretAuth: []
@@ -7071,6 +7562,8 @@ tags:
     description: Combo bot management endpoints
   - name: Bots - Grid
     description: Grid bot management endpoints
+  - name: Backtest
+    description: Server side backtest endpoints for strategy testing
   - name: Deals - DCA
     description: DCA deal management endpoints
   - name: Deals - Combo
