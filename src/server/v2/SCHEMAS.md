@@ -7,7 +7,7 @@ This document contains detailed schema definitions for all API endpoints.
 All schemas include field descriptions, types, validation rules, and examples.
 This documentation is automatically generated from the OpenAPI specification.
 
-**Last Updated:** 2026-02-24T14:59:44.219Z
+**Last Updated:** 2026-02-26T14:45:36.777Z
 
 ---
 
@@ -198,6 +198,87 @@ This documentation is automatically generated from the OpenAPI specification.
 
 ---
 
+## BacktestRequestItem
+
+A single backtest request record including optional embedded result
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `_id` | string | No | MongoDB ObjectId of the request |
+| `status` | enum: `pending|loadingData|processing|success|failed` | No | Current processing status |
+| `type` | enum: `dca|combo|grid` | No | Bot type for this backtest |
+| `exchange` | string | No | Exchange code |
+| `exchangeUUID` | string | No | Exchange connection UUID |
+| `symbols` | Array<[BacktestSymbol](#backtestsymbol)> | No | Trading pairs included in the backtest |
+| `cost` | integer | No | Credits charged for this backtest |
+| `backtestId` | string | No | shareId of the saved backtest result (present when status is success) |
+| `statusReason` | string | No | Human-readable reason for the current status (usually set on failure) |
+| `statusHistory` | Array<[BacktestStatusHistoryItem](#backteststatushistoryitem)> | No | Full timeline of status transitions |
+| `payload` | object | No | Full backtest configuration payload (only included when payload field is selected) |
+| `backtest` | object | No | Embedded backtest result object. Present when backtestId is set and
+one or more `backtest.*` fields are selected (or no field filter).
+Use `backtest.financial`, `backtest.settings`, etc. for field selection.
+ |
+| `created` | string | No | ISO timestamp when the request was created |
+| `updated` | string | No | ISO timestamp of last update |
+
+### Example
+
+```json
+{
+  "_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "pending",
+  "type": "dca",
+  "exchange": "binance",
+  "exchangeUUID": "550e8400-e29b-41d4-a716-446655440000",
+  "symbols": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced BacktestSymbol schema"
+    }
+  ],
+  "cost": 0,
+  "backtestId": "550e8400-e29b-41d4-a716-446655440000",
+  "statusReason": "active",
+  "statusHistory": "active",
+  "payload": {},
+  "backtest": {},
+  "created": "2024-01-15T10:30:00.000Z",
+  "updated": "2024-01-15T10:30:00.000Z"
+}
+```
+
+
+---
+
+## BacktestRequestListResponse
+
+### Example
+
+```json
+{
+  "exampleField": "example-value"
+}
+```
+
+
+---
+
+## BacktestRequestSingleResponse
+
+### Example
+
+```json
+{
+  "exampleField": "example-value"
+}
+```
+
+
+---
+
 ## BacktestResponse
 
 ### Example
@@ -211,6 +292,29 @@ This documentation is automatically generated from the OpenAPI specification.
 
 ---
 
+## BacktestStatusHistoryItem
+
+A single status transition entry for a backtest request
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `status` | enum: `pending|loadingData|processing|success|failed` | No | Status at this point in time |
+| `time` | integer | No | Unix timestamp (ms) when the status was set |
+
+### Example
+
+```json
+{
+  "status": "pending",
+  "time": "2024-01-15T10:30:00.000Z"
+}
+```
+
+
+---
+
 ## BacktestSymbol
 
 ### Fields
@@ -218,8 +322,8 @@ This documentation is automatically generated from the OpenAPI specification.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `pair` | string | Yes | Trading pair symbol |
-| `baseAsset` | string | Yes | Base asset symbol (e.g., BTC in BTC/USDT) |
-| `quoteAsset` | string | Yes | Quote asset symbol (e.g., USDT in BTC/USDT) |
+| `baseAsset` | string | Yes | Base asset symbol (e.g., BTC in BTC_USDT) |
+| `quoteAsset` | string | Yes | Quote asset symbol (e.g., USDT in BTC_USDT) |
 
 ### Example
 
@@ -331,6 +435,32 @@ BotSettings configuration
 ```json
 {
   "exampleField": "example-value"
+}
+```
+
+
+---
+
+## ComboBacktestRequest
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `payload` | object | Yes | Combo backtest payload without type field (specified in URL) |
+| `symbols` | Array<[BacktestSymbol](#backtestsymbol)> | Yes | Array of trading symbols for backtest |
+
+### Example
+
+```json
+{
+  "payload": {},
+  "symbols": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced BacktestSymbol schema"
+    }
+  ]
 }
 ```
 
@@ -767,6 +897,32 @@ Minimal DCA deal representation
 
 ---
 
+## DcaBacktestRequest
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `payload` | object | Yes | DCA backtest payload without type field (specified in URL) |
+| `symbols` | Array<[BacktestSymbol](#backtestsymbol)> | Yes | Array of trading symbols for backtest |
+
+### Example
+
+```json
+{
+  "payload": {},
+  "symbols": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced BacktestSymbol schema"
+    }
+  ]
+}
+```
+
+
+---
+
 ## DealListResponse
 
 ### Example
@@ -909,6 +1065,32 @@ Global variable
 ```json
 {
   "exampleField": "example-value"
+}
+```
+
+
+---
+
+## GridBacktestRequest
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `payload` | object | Yes | Grid backtest payload without type field (specified in URL) |
+| `symbols` | Array<[BacktestSymbol](#backtestsymbol)> | Yes | Array of trading symbols for backtest |
+
+### Example
+
+```json
+{
+  "payload": {},
+  "symbols": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced BacktestSymbol schema"
+    }
+  ]
 }
 ```
 

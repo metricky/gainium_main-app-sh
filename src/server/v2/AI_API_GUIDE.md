@@ -25,7 +25,7 @@ All API requests require three headers:
 | Header | Description | Example |
 |--------|-------------|---------|
 | `token` | Public API key | `your-public-key` |
-| `time` | Request timestamp (ms) | `1771945184202` |
+| `time` | Request timestamp (ms) | `1772117136774` |
 | `signature` | HMAC-SHA256 signature | `calculated-signature` |
 
 ### Signature Calculation
@@ -196,6 +196,26 @@ All endpoints support field selection via `?fields=minimal|standard|extended|ful
 
 For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 
+### Backtest
+
+| Method | URL | Input Schema | Response | Description |
+|--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/backtest/combo/requests/{id}` | Query params only | [BacktestRequestSingleResponse](./SCHEMAS.md#backtestrequestsingleresponse) | Get Combo Backtest Request by ID |
+| GET | `/api/v2/backtest/combo/requests` | Query params only | [BacktestRequestListResponse](./SCHEMAS.md#backtestrequestlistresponse) | Get Combo Backtest Requests |
+| GET | `/api/v2/backtest/dca/requests/{id}` | Query params only | [BacktestRequestSingleResponse](./SCHEMAS.md#backtestrequestsingleresponse) | Get DCA Backtest Request by ID |
+| GET | `/api/v2/backtest/dca/requests` | Query params only | [BacktestRequestListResponse](./SCHEMAS.md#backtestrequestlistresponse) | Get DCA Backtest Requests |
+| GET | `/api/v2/backtest/grid/requests/{id}` | Query params only | [BacktestRequestSingleResponse](./SCHEMAS.md#backtestrequestsingleresponse) | Get Grid Backtest Request by ID |
+| GET | `/api/v2/backtest/grid/requests` | Query params only | [BacktestRequestListResponse](./SCHEMAS.md#backtestrequestlistresponse) | Get Grid Backtest Requests |
+| POST | `/api/v2/backtest/combo/estimate-cost` | Request body | [BacktestCostEstimate](./SCHEMAS.md#backtestcostestimate) | Estimate Combo Bot Backtest Cost |
+| POST | `/api/v2/backtest/dca/estimate-cost` | Request body | [BacktestCostEstimate](./SCHEMAS.md#backtestcostestimate) | Estimate DCA Bot Backtest Cost |
+| POST | `/api/v2/backtest/grid/estimate-cost` | Request body | [BacktestCostEstimate](./SCHEMAS.md#backtestcostestimate) | Estimate Grid Bot Backtest Cost |
+| POST | `/api/v2/backtest/combo/request` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Combo Bot Server Side Backtest |
+| POST | `/api/v2/backtest/combo/request/sync` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Combo Backtest (Synchronous) |
+| POST | `/api/v2/backtest/dca/request` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request DCA Bot Server Side Backtest |
+| POST | `/api/v2/backtest/dca/request/sync` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request DCA Backtest (Synchronous) |
+| POST | `/api/v2/backtest/grid/request` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Grid Bot Server Side Backtest |
+| POST | `/api/v2/backtest/grid/request/sync` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Grid Backtest (Synchronous) |
+
 ### Bots - Combo
 
 | Method | URL | Input Schema | Response | Description |
@@ -283,13 +303,6 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 | POST | `/api/v2/user/global-vars` | Request body | Success response | Create Global Variable |
 | PUT | `/api/v2/user/global-vars/{id}` | Request body | Success response | Update Global Variable |
 | DELETE | `/api/v2/user/global-vars/{id}` | Query params only | Success response | Delete Global Variable |
-
-### Backtest
-
-| Method | URL | Input Schema | Response | Description |
-|--------|-----|--------------|----------|-------------|
-| POST | `/api/v2/backtest/request` | [BacktestRequest](./SCHEMAS.md#backtestrequest) | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Server Side Backtest |
-| POST | `/api/v2/backtest/estimate-cost` | Request body | [BacktestCostEstimate](./SCHEMAS.md#backtestcostestimate) | Estimate Server Side Backtest Cost |
 
 
 
@@ -381,7 +394,7 @@ def get_all_bots():
 ---
 
 *This documentation is automatically generated from the OpenAPI specification.*  
-*Last updated: 2026-02-24T14:59:44.208Z*  
+*Last updated: 2026-02-26T14:45:36.775Z*  
 *For detailed schemas, see [SCHEMAS.md](./SCHEMAS.md)*
 
 ## Schemas
