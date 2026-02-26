@@ -766,7 +766,7 @@ export interface DCABotSettings extends BaseSettings {
   botStart?: BotStartTypeEnum
   useBotController?: boolean
   stopType?: CloseDCATypeEnum
-  stopStatus?: BotStatusEnum
+  stopStatus?: 'closed' | 'monitoring'
   dealCloseCondition?: CloseConditionEnum
   dealCloseConditionSL?: CloseConditionEnum
   useMinTP?: boolean
@@ -4169,7 +4169,7 @@ export type CSVCandle = {
 }
 
 export type BacktestingSettings = {
-  userFee: string
+  userFee: number
   slippage: string
   firstDataTime?: number
   lastDataTime?: number

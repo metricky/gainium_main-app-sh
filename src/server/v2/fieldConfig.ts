@@ -268,6 +268,39 @@ export const SCREENER_EXTENDED_FIELDS = [
 ] as const
 
 /**
+ * Essential fields for backtest requests
+ */
+export const BACKTEST_REQUEST_ESSENTIAL_FIELDS = [
+  '_id',
+  'status',
+  'type',
+  'exchange',
+  'symbols',
+  'created',
+] as const
+
+/**
+ * Standard fields for backtest requests
+ */
+export const BACKTEST_REQUEST_STANDARD_FIELDS = [
+  ...BACKTEST_REQUEST_ESSENTIAL_FIELDS,
+  'exchangeUUID',
+  'cost',
+  'backtestId',
+  'statusReason',
+  'updated',
+] as const
+
+/**
+ * Extended fields for backtest requests (includes full payload and history)
+ */
+export const BACKTEST_REQUEST_EXTENDED_FIELDS = [
+  ...BACKTEST_REQUEST_STANDARD_FIELDS,
+  'statusHistory',
+  'payload',
+] as const
+
+/**
  * Field presets for easy selection
  */
 export const FIELD_PRESETS = {
@@ -320,6 +353,11 @@ export const ENDPOINT_FIELD_CONFIG = {
     minimal: SCREENER_ESSENTIAL_FIELDS,
     standard: SCREENER_STANDARD_FIELDS,
     extended: SCREENER_EXTENDED_FIELDS,
+  },
+  'backtest.requests': {
+    minimal: BACKTEST_REQUEST_ESSENTIAL_FIELDS,
+    standard: BACKTEST_REQUEST_STANDARD_FIELDS,
+    extended: BACKTEST_REQUEST_EXTENDED_FIELDS,
   },
 } as const
 

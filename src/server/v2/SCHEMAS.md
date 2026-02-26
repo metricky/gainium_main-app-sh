@@ -7,7 +7,7 @@ This document contains detailed schema definitions for all API endpoints.
 All schemas include field descriptions, types, validation rules, and examples.
 This documentation is automatically generated from the OpenAPI specification.
 
-**Last Updated:** 2026-02-24T14:12:00.312Z
+**Last Updated:** 2026-02-24T14:59:44.219Z
 
 ---
 
@@ -70,6 +70,170 @@ This documentation is automatically generated from the OpenAPI specification.
 
 ---
 
+## BacktestCostEstimate
+
+### Example
+
+```json
+{
+  "exampleField": "example-value"
+}
+```
+
+
+---
+
+## BacktestDCAConfig
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `exchange` | string | Yes | Exchange identifier |
+| `exchangeUUID` | string | Yes | Unique exchange connection identifier |
+| `settings` | [DCABotSettings](#dcabotsettings) | No |  |
+| `from` | integer | No | Backtest start timestamp (milliseconds) |
+| `to` | integer | No | Backtest end timestamp (milliseconds) |
+| `interval` | string | No | Chart interval for backtest |
+| `fromBacktest` | boolean | No | Import from previous backtest |
+| `trades` | boolean | No | Include trade details in results |
+| `paperContext` | boolean | No | Paper trading context |
+
+### Example
+
+```json
+{
+  "exchange": "550e8400-e29b-41d4-a716-446655440000",
+  "exchangeUUID": "550e8400-e29b-41d4-a716-446655440000",
+  "settings": {
+    "_id": "550e8400-e29b-41d4-a716-446655440000",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "settings": {
+      "name": "Example Bot"
+    },
+    "status": "active",
+    "exchange": "binance"
+  },
+  "from": 0,
+  "to": 0,
+  "interval": "example-string",
+  "fromBacktest": true,
+  "trades": true,
+  "paperContext": "2.5"
+}
+```
+
+
+---
+
+## BacktestGridConfig
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `exchange` | string | Yes | Exchange identifier |
+| `exchangeUUID` | string | Yes | Unique exchange connection identifier |
+| `settings` | [BotSettings](#botsettings) | No |  |
+| `from` | integer | No | Backtest start timestamp (milliseconds) |
+| `to` | integer | No | Backtest end timestamp (milliseconds) |
+| `interval` | string | No | Chart interval for backtest |
+| `fromBacktest` | boolean | No | Import from previous backtest |
+| `trades` | boolean | No | Include trade details in results |
+| `paperContext` | boolean | No | Paper trading context |
+
+### Example
+
+```json
+{
+  "exchange": "550e8400-e29b-41d4-a716-446655440000",
+  "exchangeUUID": "550e8400-e29b-41d4-a716-446655440000",
+  "settings": {
+    "_id": "550e8400-e29b-41d4-a716-446655440000",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "settings": {
+      "name": "Example Bot"
+    },
+    "status": "active",
+    "exchange": "binance"
+  },
+  "from": 0,
+  "to": 0,
+  "interval": "example-string",
+  "fromBacktest": true,
+  "trades": true,
+  "paperContext": "2.5"
+}
+```
+
+
+---
+
+## BacktestRequest
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `payload` | [ServerSideBacktestPayload](#serversidebacktestpayload) | Yes |  |
+| `symbols` | Array<[BacktestSymbol](#backtestsymbol)> | Yes | Array of trading symbols for backtest |
+
+### Example
+
+```json
+{
+  "payload": {
+    "_id": "550e8400-e29b-41d4-a716-446655440000",
+    "exampleField": "Referenced ServerSideBacktestPayload schema"
+  },
+  "symbols": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced BacktestSymbol schema"
+    }
+  ]
+}
+```
+
+
+---
+
+## BacktestResponse
+
+### Example
+
+```json
+{
+  "exampleField": "example-value"
+}
+```
+
+
+---
+
+## BacktestSymbol
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `pair` | string | Yes | Trading pair symbol |
+| `baseAsset` | string | Yes | Base asset symbol (e.g., BTC in BTC/USDT) |
+| `quoteAsset` | string | Yes | Quote asset symbol (e.g., USDT in BTC/USDT) |
+
+### Example
+
+```json
+{
+  "pair": "BTC/USDT",
+  "baseAsset": "BTC/USDT",
+  "quoteAsset": "BTC/USDT"
+}
+```
+
+
+---
+
 ## BalanceListResponse
 
 ### Example
@@ -125,8 +289,6 @@ Minimal balance representation
 
 ## BaseSettings
 
-BaseSettings configuration
-
 ### Fields
 
 | Field | Type | Required | Description |
@@ -164,15 +326,12 @@ BaseSettings configuration
 
 BotSettings configuration
 
-### Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-
 ### Example
 
 ```json
-{}
+{
+  "exampleField": "example-value"
+}
 ```
 
 
@@ -246,15 +405,12 @@ BotSettings configuration
 
 ComboBotSettings configuration
 
-### Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-
 ### Example
 
 ```json
-{}
+{
+  "exampleField": "example-value"
+}
 ```
 
 
@@ -491,11 +647,6 @@ Minimal DCA bot representation
 ## DCABotSettings
 
 DCABotSettings configuration
-
-### Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
 
 ### Example
 
@@ -954,6 +1105,19 @@ Minimal screener coin representation
 ---
 
 ## ScreenerStandard
+
+### Example
+
+```json
+{
+  "exampleField": "example-value"
+}
+```
+
+
+---
+
+## ServerSideBacktestPayload
 
 ### Example
 

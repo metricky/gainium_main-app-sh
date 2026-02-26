@@ -25,7 +25,7 @@ All API requests require three headers:
 | Header | Description | Example |
 |--------|-------------|---------|
 | `token` | Public API key | `your-public-key` |
-| `time` | Request timestamp (ms) | `1771942320310` |
+| `time` | Request timestamp (ms) | `1771945184202` |
 | `signature` | HMAC-SHA256 signature | `calculated-signature` |
 
 ### Signature Calculation
@@ -284,6 +284,13 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 | PUT | `/api/v2/user/global-vars/{id}` | Request body | Success response | Update Global Variable |
 | DELETE | `/api/v2/user/global-vars/{id}` | Query params only | Success response | Delete Global Variable |
 
+### Backtest
+
+| Method | URL | Input Schema | Response | Description |
+|--------|-----|--------------|----------|-------------|
+| POST | `/api/v2/backtest/request` | [BacktestRequest](./SCHEMAS.md#backtestrequest) | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Server Side Backtest |
+| POST | `/api/v2/backtest/estimate-cost` | Request body | [BacktestCostEstimate](./SCHEMAS.md#backtestcostestimate) | Estimate Server Side Backtest Cost |
+
 
 
 ## Error Handling
@@ -374,7 +381,7 @@ def get_all_bots():
 ---
 
 *This documentation is automatically generated from the OpenAPI specification.*  
-*Last updated: 2026-02-24T14:12:00.311Z*  
+*Last updated: 2026-02-24T14:59:44.208Z*  
 *For detailed schemas, see [SCHEMAS.md](./SCHEMAS.md)*
 
 ## Schemas

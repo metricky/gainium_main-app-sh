@@ -33,6 +33,9 @@ import {
   DCACloseTriggerEnum,
   CloseGRIDTypeEnum,
   PairsToSetMode,
+  BaseReturn,
+  ComboBotSettings,
+  BotSettings,
 } from '../../../types'
 import BotInstance from '../../bot'
 import allAPI from '../api'
@@ -51,11 +54,13 @@ import {
   botDb,
   userDb as _userDb,
   globalVarsDb,
+  feeDb,
+  pairDb,
 } from '../../db/dbInit'
 import DB from '../../db'
-import { buildProjection } from './fieldUtils'
+import { buildProjection, type FieldSelection } from './fieldUtils'
 import { fieldSelectionMiddlewares, paperContextMiddleware } from './middleware'
-import { isFutures, isCoinm } from '../../utils'
+import { isFutures, isCoinm, isPaper } from '../../utils'
 import {
   DCA_FORM_DEFAULTS,
   COMBO_FORM_DEFAULTS,
@@ -77,6 +82,20 @@ import {
   sortFields,
 } from './helpers'
 import RedisClient from '../../db/redis'
+import {
+  ServerSideBacktestPayload,
+  BacktestRequestStatus,
+  BotType,
+} from '../../../types'
+import {
+  dcaBacktestRequestDb,
+  comboBacktestRequestDb,
+  gridBacktestRequestDb,
+  backtestDb as backtestResultDb,
+  comboBacktestDb as comboBacktestResultDb,
+  gridBacktestDb as gridBacktestResultDb,
+} from '../../db/dbInit'
+import { sendServerSideRequest } from '../../graphql/handlers/backtest'
 
 type APIMap = Map<
   string,
@@ -518,6 +537,81 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
+   * GET /api/v2/user/exchanges
+   *
+   * List user exchanges with field selection
+   *
+   * Query params:
+   * - fields: Field selection
+   *
+   * Headers:
+   * - paper-context: true|false (optional, defaults to false)
+   */
+  get.set('/api/v2/user/exchanges', {
+    middlewares: [paperContextMiddleware],
+    handler: async (req, res) => {
+      const user = req.userData
+      const paperContext = req.paperContext
+
+      if (!user) {
+        res.status(403).send({
+          status: StatusEnum.notok,
+          reason: 'User not found',
+        })
+        return
+      }
+
+      try {
+        const exchanges = await userDb.readData(
+          {
+            _id: new Types.ObjectId(user.id),
+          },
+          { exchanges: 1 },
+        )
+
+        if (exchanges.status === StatusEnum.notok) {
+          res.status(403).send({
+            status: StatusEnum.notok,
+            reason: 'Unknown error',
+          })
+          return
+        }
+
+        const result = (exchanges.data?.result?.exchanges ?? [])
+          .filter((b) =>
+            paperContext === null || paperContext === undefined
+              ? true
+              : paperContext
+                ? isPaper(b.provider)
+                : !isPaper(b.provider),
+          )
+          .map((exchange) => ({
+            code: exchange.provider,
+            market: isFutures(exchange.provider) ? 'futures' : 'spot',
+            type: isFutures(exchange.provider)
+              ? isCoinm(exchange.provider)
+                ? 'inverse'
+                : 'linear'
+              : undefined,
+            id: exchange.uuid,
+            name: exchange.name,
+          }))
+
+        res.send({
+          status: StatusEnum.ok,
+          reason: null,
+          data: result,
+        })
+      } catch (error) {
+        res.status(500).send({
+          status: StatusEnum.notok,
+          reason: 'Internal server error',
+        })
+      }
+    },
+  })
+
+  /**
    * GET /api/v2/user/balances
    *
    * List user balances with field selection
@@ -793,6 +887,426 @@ const v2API = <R extends UserSchema = UserSchema>(
         })
       } catch (error) {
         res.status(500).send({
+          status: StatusEnum.notok,
+          reason: 'Internal server error',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * GET /api/v2/backtest/:botType/requests
+   *
+   * List backtest requests for the current user with pagination.
+   * Sorted from newest to oldest (10 per page by default).
+   *
+   * URL params:
+   * - botType: dca | combo | grid
+   *
+   * Query params:
+   * - page: page number (default 1)
+   * - fields: comma-separated field list. Fields prefixed with "backtest."
+   *   (e.g. backtest.financial, backtest.settings) are resolved from the
+   *   corresponding backtest result collection and returned under the
+   *   "backtest" key on each item.
+   *
+   * Response:
+   * - 200: List of backtest requests with optional embedded backtest result
+   * - 400: Invalid botType
+   * - 500: Internal server error
+   */
+  get.set('/api/v2/backtest/:botType/requests', {
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('backtest.requests'),
+    ],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botType } = req.params
+      const { page: _page }: { page?: string } = req.query
+      const rawFields = req.fieldSelection
+
+      if (!['dca', 'combo', 'grid'].includes(botType!)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be dca, combo, or grid.',
+          data: null,
+        })
+      }
+
+      const page = Math.max(1, parseInt(_page || '1', 10) || 1)
+      const limit = 10
+      const skip = (page - 1) * limit
+
+      // Split fieldSelection: request fields vs backtest.* fields
+      const includeBacktest =
+        !rawFields || rawFields.some((f) => f.startsWith('backtest'))
+      const backtestFieldsList: string[] | null = rawFields
+        ? rawFields
+            .filter((f) => f.startsWith('backtest.'))
+            .map((f) => f.slice('backtest.'.length))
+        : null // null → all backtest fields
+
+      let requestFieldsList: string[] | null = rawFields
+        ? rawFields.filter((f) => !f.startsWith('backtest'))
+        : null // null → all request fields
+
+      // Ensure backtestId is always fetched when we need to do the lookup
+      if (
+        includeBacktest &&
+        requestFieldsList !== null &&
+        !requestFieldsList.includes('backtestId')
+      ) {
+        requestFieldsList = [...requestFieldsList, 'backtestId']
+      }
+
+      const requestProjection = buildProjection(requestFieldsList)
+      const backtestProjection = buildProjection(backtestFieldsList)
+      if (
+        backtestProjection &&
+        Object.keys(backtestProjection).length > 0 &&
+        !('shareId' in backtestProjection)
+      ) {
+        backtestProjection.shareId = 1
+      }
+      const requestDb =
+        botType === BotType.dca
+          ? dcaBacktestRequestDb
+          : botType === BotType.combo
+            ? comboBacktestRequestDb
+            : gridBacktestRequestDb
+
+      const resultDb =
+        botType === BotType.dca
+          ? backtestResultDb
+          : botType === BotType.combo
+            ? comboBacktestResultDb
+            : gridBacktestResultDb
+
+      try {
+        const result = await requestDb.readData(
+          { userId: user.id },
+          requestProjection,
+          { sort: { created: -1 }, skip, limit },
+          true,
+          true,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          return res.status(500).json(result)
+        }
+
+        let items: any[] = result.data.result
+
+        // Resolve backtest results in a single batched query
+        if (includeBacktest) {
+          const backtestIds: string[] = items
+            .filter((r: any) => r.backtestId)
+            .map((r: any) => r.backtestId)
+          const backtestMap: Record<string, any> = {}
+          if (backtestIds.length > 0) {
+            const backtestsResult = await (resultDb as any).readData(
+              { shareId: { $in: backtestIds } },
+              backtestProjection,
+              {},
+              true,
+              false,
+            )
+            if (
+              backtestsResult.status === StatusEnum.ok &&
+              Array.isArray(backtestsResult.data?.result)
+            ) {
+              for (const bt of backtestsResult.data.result) {
+                if (bt.shareId) {
+                  backtestMap[bt.shareId] = bt
+                }
+              }
+            }
+          }
+
+          items = items.map((r: any) => ({
+            ...r,
+            backtest: r.backtestId ? (backtestMap[r.backtestId] ?? null) : null,
+          }))
+        }
+
+        const meta: ResponseMeta = {
+          page,
+          total: Math.ceil(result.data.count / limit),
+          count: result.data.count,
+          onPage: items.length,
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: items,
+          meta,
+        })
+      } catch (error) {
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason: 'Internal server error',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * Fetch a single backtest request item by ID, optionally embedding the linked
+   * backtest result under the `backtest` key.
+   *
+   * Shared by the GET-by-id handler and the sync wait loop.
+   */
+  const fetchBacktestRequestItem = async (
+    botType: string,
+    requestId: string,
+    userId: string,
+    rawFields: FieldSelection,
+  ): Promise<{ status: StatusEnum; data: any; reason: string | null }> => {
+    const includeBacktest =
+      !rawFields || rawFields.some((f) => f.startsWith('backtest.'))
+    const backtestFieldsList: string[] | null = rawFields
+      ? rawFields
+          .filter((f) => f.startsWith('backtest.'))
+          .map((f) => f.slice('backtest.'.length))
+      : null
+
+    let requestFieldsList: string[] | null = rawFields
+      ? rawFields.filter((f) => !f.startsWith('backtest.'))
+      : null
+
+    if (
+      includeBacktest &&
+      requestFieldsList !== null &&
+      !requestFieldsList.includes('backtestId')
+    ) {
+      requestFieldsList = [...requestFieldsList, 'backtestId']
+    }
+
+    const requestProjection = buildProjection(requestFieldsList)
+    const backtestProjection = buildProjection(backtestFieldsList)
+
+    const requestDb =
+      botType === BotType.dca
+        ? dcaBacktestRequestDb
+        : botType === BotType.combo
+          ? comboBacktestRequestDb
+          : gridBacktestRequestDb
+
+    const resultDb =
+      botType === BotType.dca
+        ? backtestResultDb
+        : botType === BotType.combo
+          ? comboBacktestResultDb
+          : gridBacktestResultDb
+
+    const result = await requestDb.readData(
+      { _id: requestId, userId },
+      requestProjection,
+    )
+
+    if (result.status === StatusEnum.notok) {
+      return {
+        status: StatusEnum.notok,
+        data: null,
+        reason: result.reason || 'Failed to read backtest request',
+      }
+    }
+
+    if (!result.data?.result) {
+      return {
+        status: StatusEnum.notok,
+        data: null,
+        reason: 'Backtest request not found.',
+      }
+    }
+
+    let item: any = result.data.result
+
+    if (includeBacktest && item.backtestId) {
+      const backtestResult = await (resultDb as any).readData(
+        { shareId: item.backtestId },
+        backtestProjection,
+      )
+      item = {
+        ...item,
+        backtest:
+          backtestResult.status === StatusEnum.ok && backtestResult.data?.result
+            ? backtestResult.data.result
+            : null,
+      }
+    } else if (includeBacktest) {
+      item = { ...item, backtest: null }
+    }
+
+    return { status: StatusEnum.ok, data: item, reason: null }
+  }
+
+  /**
+   * Poll the DB every 10 s until the request reaches a terminal status
+   * (success | failed) or the 1-hour timeout elapses.
+   * On completion: returns the full request item (same as GET-by-id).
+   * On timeout: returns { requestId, message } so the client can poll later.
+   */
+  const waitForBacktestCompletion = (
+    botType: string,
+    requestId: string,
+    userId: string,
+    rawFields: FieldSelection,
+    timeoutMs = 3_600_000, // 1 hour
+  ): Promise<{ status: StatusEnum; data: any; reason: string | null }> => {
+    const terminal = new Set<BacktestRequestStatus>([
+      BacktestRequestStatus.success,
+      BacktestRequestStatus.failed,
+    ])
+
+    const requestDb =
+      botType === BotType.dca
+        ? dcaBacktestRequestDb
+        : botType === BotType.combo
+          ? comboBacktestRequestDb
+          : gridBacktestRequestDb
+
+    return new Promise((resolve) => {
+      const startedAt = Date.now()
+      const LOG_INTERVAL_POLLS = 60 // 60 × 10 s = 10 min
+      let pollCount = 0
+
+      const log = (msg: string) =>
+        console.log(
+          `[backtest:sync] botType=${botType} requestId=${requestId} userId=${userId} ${msg}`,
+        )
+
+      log('started — polling every 10 s, timeout 1 h')
+
+      const deadlineHandle = setTimeout(() => {
+        const elapsed = Math.round((Date.now() - startedAt) / 60_000)
+        log(`timed out after ${elapsed} min — returning requestId to client`)
+        resolve({
+          status: StatusEnum.ok,
+          data: {
+            requestId,
+            message:
+              'Backtest did not complete within 1 hour. Use GET /api/v2/backtest/{botType}/requests/{id} to check the result when ready.',
+          },
+          reason: null,
+        })
+      }, timeoutMs)
+
+      const poll = () => {
+        pollCount++
+        requestDb
+          .readData({ _id: requestId, userId }, { status: 1 } as any)
+          .then((statusResult) => {
+            if (
+              statusResult.status === StatusEnum.ok &&
+              statusResult.data?.result &&
+              terminal.has(
+                statusResult.data.result.status as BacktestRequestStatus,
+              )
+            ) {
+              clearTimeout(deadlineHandle)
+              const elapsed = Math.round((Date.now() - startedAt) / 1_000)
+              const terminalStatus = statusResult.data.result.status
+              log(`completed with status=${terminalStatus} after ${elapsed} s`)
+              resolve(
+                fetchBacktestRequestItem(botType, requestId, userId, rawFields),
+              )
+            } else {
+              if (pollCount % LOG_INTERVAL_POLLS === 0) {
+                const elapsed = Math.round((Date.now() - startedAt) / 60_000)
+                const currentStatus =
+                  statusResult.data?.result?.status ?? 'unknown'
+                log(
+                  `still waiting — elapsed ${elapsed} min, status=${currentStatus}`,
+                )
+              }
+              setTimeout(poll, 10_000)
+            }
+          })
+          .catch((err) => {
+            if (pollCount % LOG_INTERVAL_POLLS === 0) {
+              log(`poll error (suppressed): ${err?.message ?? err}`)
+            }
+            setTimeout(poll, 10_000)
+          })
+      }
+
+      setTimeout(poll, 10_000)
+    })
+  }
+
+  /**
+   * GET /api/v2/backtest/:botType/requests/:id
+   *
+   * Get a single backtest request by ID.
+   *
+   * URL params:
+   * - botType: dca | combo | grid
+   * - id: MongoDB ObjectId of the backtest request
+   *
+   * Query params:
+   * - fields: comma-separated field list. Fields prefixed with "backtest."
+   *   are resolved from the corresponding backtest result collection and
+   *   returned under the "backtest" key on the response item.
+   *
+   * Response:
+   * - 200: Backtest request object with optional embedded backtest result
+   * - 400: Invalid botType or missing id
+   * - 404: Not found
+   * - 500: Internal server error
+   */
+  get.set('/api/v2/backtest/:botType/requests/:id', {
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('backtest.requests'),
+    ],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botType, id } = req.params
+      const rawFields = req.fieldSelection ?? null
+
+      if (!['dca', 'combo', 'grid'].includes(botType!)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be dca, combo, or grid.',
+          data: null,
+        })
+      }
+
+      if (!id) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Request ID is required.',
+          data: null,
+        })
+      }
+
+      try {
+        const result = await fetchBacktestRequestItem(
+          botType!,
+          id,
+          user.id,
+          rawFields,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          if (result.reason === 'Backtest request not found.') {
+            return res.status(404).json({ ...result, data: null })
+          }
+          return res.status(500).json(result)
+        }
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: result.data,
+        })
+      } catch (error) {
+        return res.status(500).json({
           status: StatusEnum.notok,
           reason: 'Internal server error',
           data: null,
@@ -2730,6 +3244,10 @@ const v2API = <R extends UserSchema = UserSchema>(
     },
   })
 
+  // Middleware chain for legacy v1 routes: just use the modern header parser
+  // Legacy v1 API methods will be updated to use req.paperContext instead of req.query.paperContext
+  const legacyMiddlewares = [paperContextMiddleware]
+
   // Import v1 API for POST, PUT, DELETE operations
   // These operations don't use field selection, so we map them 1:1
   const v1API = allAPI(userDb, Bot)
@@ -2752,11 +3270,723 @@ const v2API = <R extends UserSchema = UserSchema>(
     '/api/reduceFunds',
   ]
 
+  /**
+   * Core backtest request logic (extracted for reuse)
+   */
+  const submitBacktestRequest = async (
+    userId: string,
+    botType: string,
+    payload: Omit<ServerSideBacktestPayload, 'type'>,
+    sendServerSideRequest: (
+      payload: ServerSideBacktestPayload,
+      userId: string,
+      cost: number,
+      requestId: string,
+    ) => Promise<void>,
+    cost: number,
+  ): Promise<{
+    status: StatusEnum
+    reason?: string
+    data?: { message: string; requestId: string }
+  }> => {
+    // Validate bot type
+    if (!['dca', 'combo', 'grid'].includes(botType)) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Invalid bot type. Must be dca, combo, or grid',
+      }
+    }
+
+    // Validate required fields
+    if (!payload) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Payload is required',
+      }
+    }
+
+    // Validate pairs in settings
+    if (
+      !payload.data?.settings?.pair ||
+      !Array.isArray(payload.data.settings.pair)
+    ) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Payload must include settings with pair array',
+      }
+    }
+
+    // Validate at least one pair
+    if (payload.data.settings.pair.length === 0) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'At least one trading pair is required',
+      }
+    }
+
+    // Validate payload.data structure
+    if (!payload.data || !payload.data.exchange || !payload.data.exchangeUUID) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Payload must include data with exchange and exchangeUUID',
+      }
+    }
+
+    try {
+      const pairs = await pairDb.readData<{
+        pair: string
+        baseAsset: { name: string }
+        quoteAsset: { name: string }
+      }>(
+        { exchange: payload.data.exchange },
+        {},
+        { pair: 1, 'baseAsset.name': 1, 'quoteAsset.name': 1 },
+        true,
+      )
+      if (pairs.status === StatusEnum.notok || !pairs.data.result) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Failed to retrieve pairs for exchange',
+        }
+      }
+      const foundPairs = pairs.data.result.filter((p) =>
+        [payload.data.settings.pair].flat().some((pp) => {
+          const [base, quote] = pp.split('_')
+          return p.baseAsset.name === base && p.quoteAsset.name === quote
+        }),
+      )
+      if (foundPairs.length !== payload.data.settings.pair.length) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'One or more pairs in payload are invalid for the exchange',
+        }
+      }
+      payload.data.settings.pair = foundPairs.map((p) => p.pair)
+      // Build symbols array from pairs and exchange
+      const symbols = foundPairs.map((pair) => {
+        return {
+          pair: pair.pair,
+          baseAsset: pair.baseAsset.name,
+          quoteAsset: pair.quoteAsset.name,
+        }
+      })
+
+      if (
+        !payload.config ||
+        !payload.config.userFee ||
+        !payload.config.slippage
+      ) {
+        const userFree = await feeDb.readData({
+          userId,
+          exchangeUUID: payload.data.exchangeUUID,
+          pair: payload.data.settings.pair[0],
+        })
+        const userFee =
+          userFree.status === StatusEnum.ok && userFree.data.result
+            ? `${userFree.data.result.maker}`
+            : '0.001'
+        payload.config = {
+          ...(payload.config || {}),
+          firstDataTime: payload.config?.firstDataTime ?? payload.data.from,
+          lastDataTime: payload.config?.lastDataTime ?? payload.data.to,
+          userFee: +(payload.config?.userFee ?? userFee) || 0.001,
+          slippage: payload.config?.slippage ?? '0',
+        } as ServerSideBacktestPayload['config']
+      }
+      payload.data.userFee = +payload.config.userFee || 0.001
+      const result = await createServerSideBacktestRequest(
+        userId,
+        botType as BotType,
+        payload as ServerSideBacktestPayload,
+        symbols,
+        sendServerSideRequest,
+        cost,
+      )
+
+      if (result.status === StatusEnum.ok) {
+        return {
+          status: StatusEnum.ok,
+          data: {
+            message: `${botType.toUpperCase()} backtest request submitted successfully`,
+            requestId: result.data!,
+          },
+        }
+      } else {
+        return {
+          status: StatusEnum.notok,
+          reason: result.reason || 'Failed to submit backtest request',
+        }
+      }
+    } catch (error) {
+      console.error(`Error submitting ${botType} backtest request:`, error)
+
+      let errorMessage = 'Failed to submit backtest request'
+      if (error instanceof Error) {
+        if (
+          error.message.includes('ECONNREFUSED') ||
+          error.message.includes('connect')
+        ) {
+          errorMessage =
+            'Backtest service is not available. Please try again later'
+        } else {
+          errorMessage = error.message
+        }
+      }
+
+      return {
+        status: StatusEnum.notok,
+        reason: errorMessage,
+      }
+    }
+  }
+
+  /**
+   * Create Server Side Backtest request
+   */
+  const createServerSideBacktestRequest = async (
+    userId: string,
+    botType: BotType,
+    payload: ServerSideBacktestPayload,
+    symbols: { pair: string; baseAsset: string; quoteAsset: string }[],
+    sendServerSideRequest: (
+      payload: ServerSideBacktestPayload,
+      userId: string,
+      cost: number,
+      requestId: string,
+    ) => Promise<void>,
+    cost: number,
+  ): Promise<BaseReturn<string>> => {
+    try {
+      // Apply default settings based on bot type, same pattern as create endpoints
+      let enhancedPayload = { ...payload }
+
+      if (botType === BotType.dca) {
+        let settings: CreateDCABotInput = {
+          ...DCA_FORM_DEFAULTS,
+          ...(payload.data.settings as DCABotSettings),
+          type: DCATypeEnum.regular,
+          exchange: payload.data.exchange,
+          exchangeUUID: payload.data.exchangeUUID,
+        }
+        settings = addIndicatorsDefaults(settings)
+
+        enhancedPayload = {
+          ...payload,
+          type: BotType.dca,
+          data: {
+            ...payload.data,
+            settings: settings as DCABotSettings,
+          },
+        }
+      } else if (botType === BotType.combo) {
+        let settings: CreateComboBotInput = {
+          ...COMBO_FORM_DEFAULTS,
+          ...(payload.data.settings as ComboBotSettings),
+          dealCloseCondition: CloseConditionEnum.tp,
+          dealCloseConditionSL: CloseConditionEnum.tp,
+          dcaCondition: DCAConditionEnum.percentage,
+          scaleDcaType: ScaleDcaTypeEnum.percentage,
+          type: DCATypeEnum.regular,
+          exchange: payload.data.exchange,
+          exchangeUUID: payload.data.exchangeUUID,
+        }
+        settings = addIndicatorsDefaults(settings)
+
+        enhancedPayload = {
+          ...payload,
+          type: BotType.combo,
+          data: {
+            ...payload.data,
+            settings: settings as ComboBotSettings,
+          },
+        }
+      } else if (botType === BotType.grid) {
+        const settings: CreateGridBotInput = {
+          ...GRID_FORM_DEFAULTS,
+          ...(payload.data.settings as BotSettings),
+          exchange: payload.data.exchange,
+          exchangeUUID: payload.data.exchangeUUID,
+        }
+
+        enhancedPayload = {
+          ...payload,
+          type: BotType.grid,
+          data: {
+            ...payload.data,
+            settings: settings as BotSettings,
+          },
+        }
+      }
+
+      let requestId = ''
+      const baseRequestData = {
+        userId,
+        status: BacktestRequestStatus.pending,
+        exchange: enhancedPayload.data.exchange,
+        exchangeUUID: enhancedPayload.data.exchangeUUID,
+        symbols,
+        statusHistory: [
+          { status: BacktestRequestStatus.pending, time: +new Date() },
+        ],
+        cost,
+      }
+
+      if (botType === BotType.dca) {
+        const dcaRequest = await dcaBacktestRequestDb.createData({
+          ...baseRequestData,
+          type: BotType.dca,
+          payload: enhancedPayload as ServerSideBacktestPayload,
+        })
+        if (dcaRequest.status === StatusEnum.notok) {
+          return dcaRequest
+        }
+        requestId = `${dcaRequest.data._id}`
+      } else if (botType === BotType.combo) {
+        const comboRequest = await comboBacktestRequestDb.createData({
+          ...baseRequestData,
+          type: BotType.combo,
+          payload: enhancedPayload as ServerSideBacktestPayload,
+        })
+        if (comboRequest.status === StatusEnum.notok) {
+          return comboRequest
+        }
+        requestId = `${comboRequest.data._id}`
+      } else if (botType === BotType.grid) {
+        const gridRequest = await gridBacktestRequestDb.createData({
+          ...baseRequestData,
+          type: BotType.grid,
+          payload: enhancedPayload as ServerSideBacktestPayload,
+        })
+        if (gridRequest.status === StatusEnum.notok) {
+          return gridRequest
+        }
+        requestId = `${gridRequest.data._id}`
+      } else {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be dca, combo, or grid.',
+          data: null,
+        }
+      }
+
+      try {
+        await sendServerSideRequest(
+          enhancedPayload as ServerSideBacktestPayload,
+          userId,
+          cost,
+          requestId,
+        )
+      } catch (e) {
+        if (botType === BotType.dca) {
+          await dcaBacktestRequestDb.updateData(
+            { _id: requestId },
+            {
+              status: BacktestRequestStatus.failed,
+              $push: {
+                statusHistory: {
+                  status: BacktestRequestStatus.failed,
+                  time: +new Date(),
+                },
+              },
+            },
+          )
+        } else if (botType === BotType.combo) {
+          await comboBacktestRequestDb.updateData(
+            { _id: requestId },
+            {
+              status: BacktestRequestStatus.failed,
+              $push: {
+                statusHistory: {
+                  status: BacktestRequestStatus.failed,
+                  time: +new Date(),
+                },
+              },
+            },
+          )
+        } else if (botType === BotType.grid) {
+          await gridBacktestRequestDb.updateData(
+            { _id: requestId },
+            {
+              status: BacktestRequestStatus.failed,
+              $push: {
+                statusHistory: {
+                  status: BacktestRequestStatus.failed,
+                  time: +new Date(),
+                },
+              },
+            },
+          )
+        }
+        throw e
+      }
+      return {
+        status: StatusEnum.ok,
+        data: requestId,
+        reason: null,
+      }
+    } catch (e: any) {
+      let message = `${(e as Error)?.message || e}`
+      if (message.includes('ECONNREFUSED') || message.includes('connect')) {
+        message = 'Server is not available. Please try again later'
+      }
+      return {
+        status: StatusEnum.notok,
+        data: null,
+        reason: `Request not sent: ${message}`,
+      }
+    }
+  }
+
+  /**
+   * POST /api/v2/backtest/:botType/request
+   *
+   * Request Server Side Backtest for specific bot type
+   *
+   * URL params:
+   * - botType: Type of bot (dca, combo, grid)
+   *
+   * Body: { payload: Omit<ServerSideBacktestPayload, 'type'>, symbols: BacktestSymbol[] }
+   *
+   * Headers:
+   * - paper-context: true|false (optional, defaults to false)
+   *
+   * Response:
+   * - 200: Backtest request submitted successfully
+   * - 400: Validation error
+   * - 401: Unauthorized
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/backtest/:botType/request/:sync', {
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('backtest.requests'),
+    ],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botType, sync } = req.params
+      const rawFields = req.fieldSelection ?? null
+      const {
+        payload,
+      }: {
+        payload: Omit<ServerSideBacktestPayload, 'type'>
+      } = req.body
+
+      const result = await submitBacktestRequest(
+        user.id,
+        botType!,
+        payload,
+        (payload, userId, _, requestId) =>
+          sendServerSideRequest(payload, userId, requestId),
+        0,
+      )
+
+      if (result.status === StatusEnum.notok) {
+        return res
+          .status(
+            result.reason?.includes('Invalid bot type') ||
+              result.reason?.includes('required')
+              ? 400
+              : 500,
+          )
+          .json({
+            status: StatusEnum.notok,
+            reason: result.reason,
+            data: null,
+          })
+      }
+
+      const requestId = result.data!.requestId
+
+      // Sync mode: wait for terminal status and return the full request item
+      if (sync === 'sync') {
+        const itemResult = await waitForBacktestCompletion(
+          botType!,
+          requestId,
+          user.id,
+          rawFields,
+        )
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: itemResult.data,
+        })
+      }
+
+      return res.status(200).json({
+        status: StatusEnum.ok,
+        reason: null,
+        data: result.data,
+      })
+    },
+  })
+  post.set(
+    '/api/v2/backtest/:botType/request',
+    post.get('/api/v2/backtest/:botType/request/:sync')!,
+  )
+
+  /**
+   * POST /api/v2/backtest/dca/estimate-cost
+   *
+   * Estimate DCA Server Side Backtest Cost
+   *
+   * Body: { payload: Omit<ServerSideBacktestPayload, 'type'> }
+   *
+   * Response:
+   * - 200: Cost estimation completed successfully (always 0 for core docker)
+   * - 400: Validation error
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/backtest/dca/estimate-cost', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const {
+        payload,
+      }: {
+        payload: Omit<ServerSideBacktestPayload, 'type'>
+      } = req.body
+
+      // Validate required fields
+      if (!payload) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Payload is required',
+          data: null,
+        })
+      }
+
+      // Validate pairs in settings
+      if (
+        !payload.data?.settings?.pair ||
+        !Array.isArray(payload.data.settings.pair)
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Payload must include settings with pair array',
+          data: null,
+        })
+      }
+
+      // Validate at least one pair
+      if (payload.data.settings.pair.length === 0) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'At least one trading pair is required',
+          data: null,
+        })
+      }
+
+      try {
+        // For core docker installation, cost estimation is always 0
+        const symbolCount = payload.data.settings.pair.length
+        const estimatedCredits = 0
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: {
+            estimatedCredits,
+            estimatedTimeMinutes: 1,
+            symbolCount,
+            botType: 'dca',
+            factors: {
+              baseCredits: 0,
+              symbolMultiplier: 0,
+              complexityMultiplier: 1,
+              additionalCredits: 0,
+            },
+          },
+        })
+      } catch (error) {
+        console.error('Error estimating DCA backtest cost:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to estimate DCA backtest cost',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/backtest/combo/estimate-cost
+   *
+   * Estimate Combo Server Side Backtest Cost
+   *
+   * Body: { payload: Omit<ServerSideBacktestPayload, 'type'> }
+   *
+   * Response:
+   * - 200: Cost estimation completed successfully (always 0 for core docker)
+   * - 400: Validation error
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/backtest/combo/estimate-cost', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const {
+        payload,
+      }: {
+        payload: Omit<ServerSideBacktestPayload, 'type'>
+      } = req.body
+
+      // Validate required fields
+      if (!payload) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Payload is required',
+          data: null,
+        })
+      }
+
+      // Validate pairs in settings
+      if (
+        !payload.data?.settings?.pair ||
+        !Array.isArray(payload.data.settings.pair)
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Payload must include settings with pair array',
+          data: null,
+        })
+      }
+
+      // Validate at least one pair
+      if (payload.data.settings.pair.length === 0) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'At least one trading pair is required',
+          data: null,
+        })
+      }
+
+      try {
+        // For core docker installation, cost estimation is always 0
+        const symbolCount = payload.data.settings.pair.length
+        const estimatedCredits = 0
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: {
+            estimatedCredits,
+            estimatedTimeMinutes: 1,
+            symbolCount,
+            botType: 'combo',
+            factors: {
+              baseCredits: 0,
+              symbolMultiplier: 0,
+              complexityMultiplier: 1,
+              additionalCredits: 0,
+            },
+          },
+        })
+      } catch (error) {
+        console.error('Error estimating Combo backtest cost:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to estimate Combo backtest cost',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/backtest/grid/estimate-cost
+   *
+   * Estimate Grid Server Side Backtest Cost
+   *
+   * Body: { payload: Omit<ServerSideBacktestPayload, 'type'> }
+   *
+   * Response:
+   * - 200: Cost estimation completed successfully (always 0 for core docker)
+   * - 400: Validation error
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/backtest/grid/estimate-cost', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const {
+        payload,
+      }: {
+        payload: Omit<ServerSideBacktestPayload, 'type'>
+      } = req.body
+
+      // Validate required fields
+      if (!payload) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Payload is required',
+          data: null,
+        })
+      }
+
+      // Validate pairs in settings
+      if (
+        !payload.data?.settings?.pair ||
+        !Array.isArray(payload.data.settings.pair)
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Payload must include settings with pair array',
+          data: null,
+        })
+      }
+
+      // Validate at least one pair
+      if (payload.data.settings.pair.length === 0) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'At least one trading pair is required',
+          data: null,
+        })
+      }
+
+      try {
+        // For core docker installation, cost estimation is always 0
+        const symbolCount = payload.data.settings.pair.length
+        const estimatedCredits = 0
+
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: {
+            estimatedCredits,
+            estimatedTimeMinutes: 1,
+            symbolCount,
+            botType: 'grid',
+            factors: {
+              baseCredits: 0,
+              symbolMultiplier: 0,
+              complexityMultiplier: 1,
+              additionalCredits: 0,
+            },
+          },
+        })
+      } catch (error) {
+        console.error('Error estimating Grid backtest cost:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to estimate Grid backtest cost',
+          data: null,
+        })
+      }
+    },
+  })
+
   // Map v1 POST endpoints to v2 with /v2 prefix and kebab-case (excluding REST endpoints)
   v1API.post.forEach((handler, route) => {
     if (!excludedV1Routes.includes(route)) {
       const v2Route = transformV1RouteToV2(route)
-      post.set(v2Route, { handler, middlewares: [] })
+      post.set(v2Route, { handler, middlewares: legacyMiddlewares })
     }
   })
 
@@ -2887,7 +4117,7 @@ const v2API = <R extends UserSchema = UserSchema>(
   v1API.put.forEach((handler, route) => {
     if (!excludedV1Routes.includes(route)) {
       const v2Route = transformV1RouteToV2(route)
-      put.set(v2Route, { handler, middlewares: [] })
+      put.set(v2Route, { handler, middlewares: legacyMiddlewares })
     }
   })
 
@@ -3068,26 +4298,26 @@ const v2API = <R extends UserSchema = UserSchema>(
 
   v1API.delete.forEach((handler, route) => {
     const v2Route = transformV1RouteToV2(route)
-    deleteMap.set(v2Route, { handler, middlewares: [] })
+    deleteMap.set(v2Route, { handler, middlewares: legacyMiddlewares })
   })
 
   const getPublic: APIMap = new Map()
   v1API.getPublic.forEach((handler, route) => {
     const v2Route = transformV1RouteToV2(route)
-    getPublic.set(v2Route, { handler, middlewares: [] })
+    getPublic.set(v2Route, { handler, middlewares: legacyMiddlewares })
   })
 
-  v1API.get.forEach((handler, route) => {
-    if (route === '/api/user/exchanges') {
-      const v2Route = route.replace('/api/', '/api/v2/')
-      get.set(v2Route, {
-        handler,
-        middlewares: [],
-      })
-    }
-  })
+  // Legacy v1 API method for /api/user/balances is now properly handled by /api/v2/user/balances above
 
-  return { get, post, put, delete: deleteMap, getPublic }
+  return {
+    get,
+    post,
+    put,
+    delete: deleteMap,
+    getPublic,
+    submitBacktestRequest,
+    waitForBacktestCompletion,
+  }
 }
 
 export default v2API

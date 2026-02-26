@@ -676,6 +676,72 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
   bbwpLookback: { description: 'BBWP lookback period', example: 252 },
   ecdTrigger: { description: 'ECD trigger type', example: 'bullish' },
 
+  // Backtest specific fields
+  from: {
+    description: 'Backtest start timestamp (milliseconds)',
+    example: 1640995200000,
+  },
+  to: {
+    description: 'Backtest end timestamp (milliseconds)',
+    example: 1672531199000,
+  },
+  backtestInterval: { description: 'Backtest chart interval', example: '1h' },
+  fromBacktest: {
+    description: 'Import from previous backtest',
+    example: false,
+  },
+  trades: { description: 'Include trade details in results', example: true },
+  symbols: {
+    description: 'Array of trading symbols for backtest',
+    example: [],
+  },
+  payload: {
+    description: 'Complete backtest configuration and settings',
+    example: {},
+  },
+  cost: { description: 'Estimated cost in credits for backtest', example: 10 },
+  requestId: {
+    description: 'Unique identifier for backtest request',
+    example: '507f1f77bcf86cd799439011',
+  },
+  status: {
+    description: 'Current status of backtest request',
+    example: 'pending',
+  },
+  statusHistory: { description: 'History of status changes', example: [] },
+  userId: {
+    description: 'User ID who requested the backtest',
+    example: '507f1f77bcf86cd799439011',
+  },
+  data: { description: 'Backtest input data and settings', example: {} },
+  results: { description: 'Backtest execution results', example: {} },
+
+  // Backtest symbol fields
+  baseAsset: {
+    description: 'Base asset symbol (e.g., BTC in BTC/USDT)',
+    example: 'BTC',
+  },
+  quoteAsset: {
+    description: 'Quote asset symbol (e.g., USDT in BTC/USDT)',
+    example: 'USDT',
+  },
+
+  // Backtest result fields
+  totalProfit: { description: 'Total profit from backtest', example: 250.75 },
+  totalProfitPerc: { description: 'Total profit percentage', example: 12.5 },
+  maxDrawdown: { description: 'Maximum drawdown percentage', example: -8.2 },
+  winRate: { description: 'Win rate percentage', example: 68.5 },
+  totalDeals: { description: 'Total number of deals executed', example: 156 },
+  profitableDeals: { description: 'Number of profitable deals', example: 107 },
+  avgDealProfit: { description: 'Average profit per deal', example: 1.61 },
+
+  // Exchange and connection
+  exchange: { description: 'Exchange identifier', example: 'binance' },
+  exchangeUUID: {
+    description: 'Unique exchange connection identifier',
+    example: '550e8400-e29b-41d4-a716-446655440000',
+  },
+
   // Cross oscillator
   xOscillator2length: { description: 'Second oscillator length', example: 14 },
   xOscillator2Interval: {
@@ -776,6 +842,12 @@ class SchemaGenerator {
     'SettingsIndicators',
     'SettingsIndicatorGroup',
     'MultiTP',
+    'ServerSideBacktestPayload',
+    'DCABacktestingResult',
+    'ComboBacktestingResult',
+    'GRIDBacktestingResult',
+    'BacktestRequest',
+    'BacktestSettings',
   ])
 
   constructor(typesFilePath: string) {
@@ -828,11 +900,17 @@ class SchemaGenerator {
   private parseInterface(node: ts.InterfaceDeclaration) {
     const name = node.name.text
 
-    // Only process bot-related interfaces
+    // Only process bot-related, settings, indicator, and backtest interfaces
     if (
       !name.includes('Bot') &&
       !name.includes('Settings') &&
-      !name.includes('Indicator')
+      !name.includes('Indicator') &&
+      !name.includes('Backtest') &&
+      !name.includes('Request') &&
+      !name.includes('Result') &&
+      !name.includes('Payload') &&
+      !name.includes('Input') &&
+      !name.includes('Response')
     ) {
       return
     }
@@ -891,7 +969,17 @@ class SchemaGenerator {
         'DCACustom',
         'SettingsIndicators',
         'SettingsIndicatorGroup',
-      ].includes(name)
+        'ServerSideBacktestPayload',
+        'DCABacktestingResult',
+        'ComboBacktestingResult',
+        'GRIDBacktestingResult',
+        'BacktestRequest',
+        'BacktestSettings',
+      ].includes(name) &&
+      !name.includes('Backtest') &&
+      !name.includes('Request') &&
+      !name.includes('Result') &&
+      !name.includes('Payload')
     ) {
       return
     }
@@ -1273,6 +1361,16 @@ async function main() {
     'SettingsIndicatorGroup',
     'MultiTP',
     'DCACustom',
+    'ServerSideBacktestPayload',
+    'DCABacktestingResult',
+    'ComboBacktestingResult',
+    'GRIDBacktestingResult',
+    'BacktestRequest',
+    'BacktestSettings',
+    'CreateServerSideBacktestInput',
+    'EstimateBacktestCostInput',
+    'BacktestSymbol',
+    'BacktestRequestStatus',
   ]
 
   schemasToUpdate.forEach((schemaName) => {
