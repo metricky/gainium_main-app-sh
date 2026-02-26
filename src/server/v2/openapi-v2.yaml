@@ -2,57 +2,91 @@ openapi: 3.1.0
 info:
   title: Gainium API v2.0
   version: 2.0.0
-  description: |
+  description: >
     # Gainium API v2.0 with Field Selection
+
 
     API v2.0 introduces efficient field selection to reduce payload size by 70-90%.
 
+
     ## Authentication
+
 
     All REST requests must contain the following headers:
 
+
     - **token**: Public key of the user  
+
     - **time**: Timestamp of the request in ms  
+
     - **signature**: The base64-encoded signature  
+
 
     ### To sign a request:
 
+
     1. Use API-Secret to encrypt the prehash string {body+method+endpoint+timestamp} with sha256 HMAC
+
     2. The request body is a JSON string and need to be the same with the parameters passed by the API
+
     3. After that, use base64-encode to encrypt the result in step 1 again
 
+
     **Example:**
+
     ```javascript
+
     crypto.createHmac('sha256', secret).update(body + method + endpoint + time).digest('base64')
+
     ```
+
 
     ## Field Selection
 
+
     All GET endpoints in v2 support field selection via the `fields` query parameter.
+
 
     ### Field Presets
 
+
     - **minimal**: Essential fields only (IDs, names, status)
+
     - **standard**: Commonly requested fields (default)
+
     - **extended**: Additional useful fields
+
     - **full**: All available fields
+
 
     ### Custom Fields
 
+
     Specify custom fields with comma-separated list:
-    ```
-    ?fields=_id,uuid,settings.name,profit.total
+
     ```
 
+    ?fields=_id,uuid,settings.name,profit.total
+
+    ```
+
+
     Supports dot notation for nested fields:
+
     ```
+
     ?fields=settings.name,settings.pair,profit.total,profit.totalUsd
+
     ```
+
 
     ### Response Metadata
 
+
     All responses include metadata with selected fields:
+
     ```json
+
     {
       "status": "OK",
       "reason": null,
@@ -65,75 +99,130 @@ info:
         "fields": ["_id", "uuid", "settings.name", ...]
       }
     }
+
     ```
+
 
     ### Benefits
 
+
     - **70-90% smaller payloads** with minimal/standard presets
+
     - **Faster response times** via MongoDB projection
+
     - **Reduced network bandwidth** usage
+
     - **Better API performance** overall
+
 
     ## V1 to V2 Migration Guide
 
-    V2 introduces REST-compliant endpoints with proper HTTP methods and resource-oriented URLs. All v1 endpoints remain available for backward compatibility.
+
+    V2 introduces REST-compliant endpoints with proper HTTP methods and resource-oriented URLs. All v1 endpoints remain
+    available for backward compatibility.
+
 
     ### Paper Trading Context
 
+
     - **V1**: `paperContext` as query parameter or body field
+
     - **V2**: `paper-context` header (optional, defaults to `false`)
+
 
     ### Bot Operations
 
+
     #### Get Bots
+
     - **V1**: `GET /api/bots/dca` → **V2**: `GET /api/v2/bots/dca`
+
     - **V1**: `GET /api/bots/combo` → **V2**: `GET /api/v2/bots/combo`
+
     - **V1**: `GET /api/bots/grid` → **V2**: `GET /api/v2/bots/grid`
 
+
     #### Update Bots
+
     - **V1**: `POST /api/updateDCABot` → **V2**: `PUT /api/v2/bots/dca/{botId}`
+
     - **V1**: `POST /api/updateComboBot` → **V2**: `PUT /api/v2/bots/combo/{botId}`
 
+
     #### Bot Actions
+
     - **V1**: `POST /api/startBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/start`
+
     - **V1**: `POST /api/stopBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/stop`
+
     - **V1**: `POST /api/archiveBot` → **V2**: `DELETE /api/v2/bots/{dca|combo|grid}/{botId}`
+
     - **V1**: `POST /api/restoreBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/restore`
+
     - **V1**: `POST /api/cloneDCABot` → **V2**: `POST /api/v2/bots/dca/{botId}/clone`
+
     - **V1**: `POST /api/cloneComboBot` → **V2**: `POST /api/v2/bots/combo/{botId}/clone`
+
     - **V1**: not exist → **V2**: `POST /api/v2/bots/grid/{botId}/clone`
+
     - **V1**: `POST /api/changeBotPairs` → **V2**: `PUT /api/v2/bots/dca/{botId}/pairs`
+
 
     ### Deal Operations
 
+
     #### Get Deals
+
     - **V1**: `GET /api/deals` → **V2**: `GET /api/v2/deals/{dca|combo|terminal}`
 
+
     #### Update Deals
+
     - **V1**: `POST /api/updateDCADeal` → **V2**: `PUT /api/v2/deals/dca/{dealId}`
+
     - **V1**: `POST /api/updateComboDeal` → **V2**: `PUT /api/v2/deals/combo/{dealId}`
 
+
     #### Deal Actions
+
     - **V1**: `POST /api/startDeal` → **V2**: `POST /api/v2/deals/{dca|combo}/{dealId}/start`
+
     - **V1**: `POST /api/addFunds` → **V2**: `POST /api/v2/deals/add-funds`
+
     - **V1**: `POST /api/reduceFunds` → **V2**: `POST /api/v2/deals/reduce-funds`
-    - **V1**: `POST /api/closeDeal/{dealId}` → **V2**: `DELETE /api/v2/deals/{dca|combo|terminal}/{dealId}?type=closeByMarket`
+
+    - **V1**: `POST /api/closeDeal/{dealId}` → **V2**: `DELETE
+    /api/v2/deals/{dca|combo|terminal}/{dealId}?type=closeByMarket`
+
     - **V1**: `POST /api/cancelDeal/{dealId}` → **V2**: `DELETE /api/v2/deals/{dca|combo|terminal}/{dealId}?type=cancel`
+
 
     ### User Operations
 
+
     #### Get User Data
+
     - **V1**: `GET /api/user/exchanges` → **V2**: `GET /api/v2/user/exchanges`
+
     - **V1**: `GET /api/user/balances` → **V2**: `GET /api/v2/user/balances`
+
 
     ### Key Differences
 
+
     1. **HTTP Methods**: V2 uses proper REST methods (GET, POST, PUT, DELETE) instead of POST for everything
+
     2. **URL Structure**: Resource-oriented paths (`/bots/dca/{botId}`) instead of action verbs (`/updateDCABot`)
+
     3. **Bot Type in Path**: Bot type is now part of the URL path for better API documentation and clarity
+
     4. **Headers vs Parameters**: Cross-cutting concerns like `paperContext` moved to headers
+
     5. **Field Selection**: V2 supports efficient field selection on all GET endpoints
-    6. **Deal Type Specification**: V1 used a single `/api/deals` endpoint; V2 separates by type (`/deals/dca`, `/deals/combo`, `/deals/terminal`)
+
+    6. **Deal Type Specification**: V1 used a single `/api/deals` endpoint; V2 separates by type (`/deals/dca`,
+    `/deals/combo`, `/deals/terminal`)
+
     7. **Bot Creation**: V2 creates bots via `POST /api/v2/bots/{type}` (implemented in future version)
 servers:
   - url: http://localhost:7503
@@ -304,115 +393,35 @@ components:
             - perc
           description: Funds type (default is fixed)
           example: fixed
-    BacktestRequest:
-      type: object
-      required:
-        - payload
-        - symbols
-      properties:
-        payload:
-          $ref: "#/components/schemas/ServerSideBacktestPayload"
-        symbols:
-          type: array
-          description: Array of trading symbols for backtest
-          items:
-            $ref: "#/components/schemas/BacktestSymbol"
-    DcaBacktestRequest:
-      type: object
-      required:
-        - payload
-        - symbols
-      properties:
-        payload:
-          type: object
-          description: DCA backtest payload without type field (specified in URL)
-          allOf:
-            - $ref: "#/components/schemas/BacktestPayload"
-            - type: object
-              properties:
-                data:
-                  $ref: "#/components/schemas/DCABacktestPayload"
-        symbols:
-          type: array
-          description: Array of trading symbols for backtest
-          items:
-            $ref: "#/components/schemas/BacktestSymbol"
-    ComboBacktestRequest:
-      type: object
-      required:
-        - payload
-        - symbols
-      properties:
-        payload:
-          type: object
-          description: Combo backtest payload without type field (specified in URL)
-          allOf:
-            - $ref: "#/components/schemas/BacktestPayload"
-            - type: object
-              properties:
-                data:
-                  $ref: "#/components/schemas/ComboBacktestPayload"
-        symbols:
-          type: array
-          description: Array of trading symbols for backtest
-          items:
-            $ref: "#/components/schemas/BacktestSymbol"
-    GridBacktestRequest:
-      type: object
-      required:
-        - payload
-        - symbols
-      properties:
-        payload:
-          type: object
-          description: Grid backtest payload without type field (specified in URL)
-          allOf:
-            - $ref: "#/components/schemas/BacktestPayload"
-            - type: object
-              properties:
-                data:
-                  $ref: "#/components/schemas/GridBacktestPayload"
-        symbols:
-          type: array
-          description: Array of trading symbols for backtest
-          items:
-            $ref: "#/components/schemas/BacktestSymbol"
-    BacktestResponse:
-      allOf:
-        - $ref: "#/components/schemas/APIResponse"
-        - type: object
-          properties:
-            data:
-              type: string
-              example: "Request sent"
-    BacktestSymbol:
-      type: object
-      required:
-        - pair
-        - baseAsset
-        - quoteAsset
-      properties:
-        pair:
-          type: string
-          description: Trading pair symbol
-          example: BTC/USDT
-        baseAsset:
-          type: string
-          description: Base asset symbol (e.g., BTC in BTC/USDT)
-          example: BTC
-        quoteAsset:
-          type: string
-          description: Quote asset symbol (e.g., USDT in BTC/USDT) 
-          example: USDT
     BacktestCostEstimate:
       allOf:
         - $ref: "#/components/schemas/APIResponse"
         - type: object
           properties:
             data:
-              type: integer
-              description: Estimated cost in credits for the backtest
-              example: 10
+              type: object
+              description: Backtest cost estimation with credit information
+              required:
+                - estimatedCredits
+                - availableCredits
+                - allowed
+              properties:
+                estimatedCredits:
+                  type: integer
+                  description: Estimated cost in credits for the backtest
+                  example: 2
+                availableCredits:
+                  type: integer
+                  description: User's currently available credits
+                  example: 10000
+                allowed:
+                  type: boolean
+                  description: Whether user has sufficient credits for the backtest
+                  example: true
+              example:
+                estimatedCredits: 2
+                availableCredits: 10000
+                allowed: true
     BacktestDCAConfig:
       type: object
       required:
@@ -493,45 +502,173 @@ components:
           type: boolean
           description: Paper trading context
           example: true
-    ServerSideBacktestPayload:
-      oneOf:
+    BacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          $ref: "#/components/schemas/ServerSideBacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
+    BacktestRequestItem:
+      type: object
+      description: A single backtest request record including optional embedded result
+      properties:
+        _id:
+          type: string
+          description: MongoDB ObjectId of the request
+          example: 69a04ceccf441b9c0d60dcd7
+        status:
+          type: string
+          enum:
+            - pending
+            - loadingData
+            - processing
+            - success
+            - failed
+          description: Current processing status
+          example: success
+        type:
+          type: string
+          enum:
+            - dca
+            - combo
+            - grid
+          description: Bot type for this backtest
+          example: dca
+        exchange:
+          type: string
+          description: Exchange code
+          example: binance
+        exchangeUUID:
+          type: string
+          format: uuid
+          description: Exchange connection UUID
+          example: dc6679c4-1e33-43b8-80d7-a4954c5234ce
+        symbols:
+          type: array
+          description: Trading pairs included in the backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
+        cost:
+          type: integer
+          description: Credits charged for this backtest
+          example: 2
+        backtestId:
+          type: string
+          nullable: true
+          description: shareId of the saved backtest result (present when status is success)
+          example: 09f94e16-fdbd-4196-b7fe-969a683b94c4
+        statusReason:
+          type: string
+          nullable: true
+          description: Human-readable reason for the current status (usually set on failure)
+          example: null
+        statusHistory:
+          type: array
+          description: Full timeline of status transitions
+          items:
+            $ref: "#/components/schemas/BacktestStatusHistoryItem"
+        payload:
+          type: object
+          description: Full backtest configuration payload (only included when payload field is selected)
+        backtest:
+          type: object
+          nullable: true
+          description: |
+            Embedded backtest result object. Present when backtestId is set and
+            one or more `backtest.*` fields are selected (or no field filter).
+            Use `backtest.financial`, `backtest.settings`, etc. for field selection.
+          example: null
+        created:
+          type: string
+          format: date-time
+          description: ISO timestamp when the request was created
+          example: "2026-02-26T13:38:52.929Z"
+        updated:
+          type: string
+          format: date-time
+          description: ISO timestamp of last update
+          example: "2026-02-26T13:39:09.686Z"
+    BacktestRequestListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
         - type: object
-          description: DCA or Combo bot backtest payload
           required:
-            - type
-            - data
-            - config
+            - meta
           properties:
-            type:
-              type: string
-              enum:
-                - dca
-                - combo
-              description: Bot type for backtest
             data:
-              $ref: "#/components/schemas/BacktestDCAConfig"
+              type: array
+              description: Array of backtest request items
+              items:
+                $ref: "#/components/schemas/BacktestRequestItem"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    BacktestRequestSingleResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
         - type: object
-          description: Grid bot backtest payload  
-          required:
-            - type
-            - data
-            - config
           properties:
-            type:
-              type: string
-              enum:
-                - grid
-              description: Bot type for backtest
             data:
-              $ref: "#/components/schemas/BacktestGridConfig"
-            config:
+              $ref: "#/components/schemas/BacktestRequestItem"
+    BacktestResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          properties:
+            data:
               type: object
-              description: Backtest configuration settings
               properties:
-                periodName:
+                message:
                   type: string
-                  description: Name for the backtest period
-                  example: "Q1 2024"
+                  description: Backtest result message
+                  example: Backtest request sent successfully
+                requestId:
+                  type: string
+                  description: Request ID for tracking backtest status
+                  example: 507f1f77bcf86cd799439013
+    BacktestStatusHistoryItem:
+      type: object
+      description: A single status transition entry for a backtest request
+      properties:
+        status:
+          type: string
+          enum:
+            - pending
+            - loadingData
+            - processing
+            - success
+            - failed
+          description: Status at this point in time
+          example: pending
+        time:
+          type: integer
+          description: Unix timestamp (ms) when the status was set
+          example: 1772113132925
+    BacktestSymbol:
+      type: object
+      required:
+        - pair
+        - baseAsset
+        - quoteAsset
+      properties:
+        pair:
+          type: string
+          description: Trading pair symbol
+          example: BTC_USDT
+        baseAsset:
+          type: string
+          description: Base asset symbol (e.g., BTC in BTC_USDT)
+          example: BTC
+        quoteAsset:
+          type: string
+          description: Quote asset symbol (e.g., USDT in BTC_USDT)
+          example: USDT
     BalanceListResponse:
       allOf:
         - $ref: "#/components/schemas/APIResponse"
@@ -599,7 +736,7 @@ components:
         pair:
           type: string
           description: Trading pair symbol
-          example: BTC/USDT
+          example: BTC_USDT
         futures:
           type: boolean
           description: Enable futures trading
@@ -636,7 +773,7 @@ components:
             pair:
               type: string
               description: Trading pair symbol
-              example: BTC/USDT
+              example: BTC_USDT
             topPrice:
               type: number
               description: Top price of grid range
@@ -780,6 +917,26 @@ components:
               type: boolean
               description: Skip balance verification
               example: false
+    ComboBacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          type: object
+          description: Combo backtest payload without type field (specified in URL)
+          allOf:
+            - $ref: "#/components/schemas/BacktestPayload"
+            - type: object
+              properties:
+                data:
+                  $ref: "#/components/schemas/ComboBacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
     ComboBotExtended:
       $ref: "#/components/schemas/DCABotExtended"
     ComboBotListResponse:
@@ -826,14 +983,21 @@ components:
       $ref: "#/components/schemas/DCADealStandard"
     CreateComboBotInput:
       type: object
-      description: |
-        Input schema for creating a new Combo bot. Inherits all ComboBotSettings properties plus additional required fields for creation.
+      description: >
+        Input schema for creating a new Combo bot. Inherits all ComboBotSettings properties plus additional required
+        fields for creation.
 
-        Combo bots extend DCA bots with additional grid-level functionality. Some settings in ComboBotSettings type are not used - refer to API documentation for excluded fields list.
+
+        Combo bots extend DCA bots with additional grid-level functionality. Some settings in ComboBotSettings type are
+        not used - refer to API documentation for excluded fields list.
+
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
+
         - `futures` (auto-detected from exchange configuration)
+
         - `coinm` (auto-detected from exchange configuration)
+
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -854,7 +1018,9 @@ components:
                 properties:
                   path:
                     type: string
-                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
+                    description: >-
+                      Path to the variable in bot settings or stats. For example, "orderSize" or
+                      "indicators.{uuid}.value"
                     example: orderSize
                   variable:
                     type: string
@@ -874,12 +1040,17 @@ components:
                 example: BTC_USDT
     CreateDCABotInput:
       type: object
-      description: |
-        Input schema for creating a new DCA bot. Inherits all DCABotSettings properties plus additional required fields for creation.
+      description: >
+        Input schema for creating a new DCA bot. Inherits all DCABotSettings properties plus additional required fields
+        for creation.
+
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
+
         - `futures` (auto-detected from exchange configuration)
+
         - `coinm` (auto-detected from exchange configuration)
+
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -900,7 +1071,9 @@ components:
                 properties:
                   path:
                     type: string
-                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
+                    description: >-
+                      Path to the variable in bot settings or stats. For example, "orderSize" or
+                      "indicators.{uuid}.value"
                     example: orderSize
                   variable:
                     type: string
@@ -920,12 +1093,17 @@ components:
                 example: BTC_USDT
     CreateGridBotInput:
       type: object
-      description: |
-        Input schema for creating a new Grid bot. Grid bots automatically buy and sell assets within a configured price range.
+      description: >
+        Input schema for creating a new Grid bot. Grid bots automatically buy and sell assets within a configured price
+        range.
+
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
+
         - `futures` (auto-detected from exchange configuration)
+
         - `coinm` (auto-detected from exchange configuration)
+
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -953,16 +1131,24 @@ components:
               example: BTC_USDT
     CreateTerminalDealInput:
       type: object
-      description: |
-        Input schema for creating a new Terminal Deal (one-time trade). Inherits all DCABotSettings properties plus additional required fields.
+      description: >
+        Input schema for creating a new Terminal Deal (one-time trade). Inherits all DCABotSettings properties plus
+        additional required fields.
+
 
         Terminal deals are one-time trades that execute immediately and don't continue running like regular bots.
+
         The type field will be automatically set to 'terminal'.
 
+
         Note: The following properties are auto-generated and should NOT be provided in the request:
+
         - `futures` (auto-detected from exchange configuration)
+
         - `coinm` (auto-detected from exchange configuration)
+
         - `type` (automatically set to 'terminal')
+
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -1566,7 +1752,7 @@ components:
               description: Trading pair symbol
               items:
                 type: string
-              example: BTC/USDT
+              example: BTC_USDT
             useMulti:
               type: boolean
               description: Enable multiple pairs trading
@@ -2287,6 +2473,26 @@ components:
               nullable: true
               description: Deal close timestamp (null if active)
               example: null
+    DcaBacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          type: object
+          description: DCA backtest payload without type field (specified in URL)
+          allOf:
+            - $ref: "#/components/schemas/BacktestPayload"
+            - type: object
+              properties:
+                data:
+                  $ref: "#/components/schemas/DCABacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
     DealListResponse:
       allOf:
         - $ref: "#/components/schemas/APIResponse"
@@ -2458,6 +2664,26 @@ components:
                 $ref: "#/components/schemas/GlobalVariable"
             meta:
               $ref: "#/components/schemas/ResponseMeta"
+    GridBacktestRequest:
+      type: object
+      required:
+        - payload
+        - symbols
+      properties:
+        payload:
+          type: object
+          description: Grid backtest payload without type field (specified in URL)
+          allOf:
+            - $ref: "#/components/schemas/BacktestPayload"
+            - type: object
+              properties:
+                data:
+                  $ref: "#/components/schemas/GridBacktestPayload"
+        symbols:
+          type: array
+          description: Array of trading symbols for backtest
+          items:
+            $ref: "#/components/schemas/BacktestSymbol"
     GridBotExtended:
       allOf:
         - $ref: "#/components/schemas/GridBotStandard"
@@ -2803,6 +3029,45 @@ components:
               type: string
               description: Coin category
               example: Layer 1
+    ServerSideBacktestPayload:
+      oneOf:
+        - type: object
+          description: DCA or Combo bot backtest payload
+          required:
+            - type
+            - data
+            - config
+          properties:
+            type:
+              type: string
+              enum:
+                - dca
+                - combo
+              description: Bot type for backtest
+            data:
+              $ref: "#/components/schemas/BacktestDCAConfig"
+        - type: object
+          description: Grid bot backtest payload
+          required:
+            - type
+            - data
+            - config
+          properties:
+            type:
+              type: string
+              enum:
+                - grid
+              description: Bot type for backtest
+            data:
+              $ref: "#/components/schemas/BacktestGridConfig"
+            config:
+              type: object
+              description: Backtest configuration settings
+              properties:
+                periodName:
+                  type: string
+                  description: Name for the backtest period
+                  example: Q1 2024
     SettingsIndicatorGroup:
       type: object
       properties:
@@ -3582,10 +3847,14 @@ components:
           description: Maximum price for open deal
         useDynamicPriceFilter:
           type: boolean
-          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+          description: >-
+            Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or
+            dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
         dynamicPriceFilterDirection:
           type: string
-          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          description: >-
+            Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require
+            dynamicPriceFilterUnderValue field, overAndUnder require both fields
           enum:
             - over
             - under
@@ -3927,10 +4196,14 @@ components:
           description: Maximum price for open deal
         useDynamicPriceFilter:
           type: boolean
-          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+          description: >-
+            Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or
+            dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
         dynamicPriceFilterDirection:
           type: string
-          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          description: >-
+            Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require
+            dynamicPriceFilterUnderValue field, overAndUnder require both fields
           enum:
             - over
             - under
@@ -4310,6 +4583,72 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
 paths:
+  /api/v2/backtest/combo/requests/{id}:
+    get:
+      summary: Get Combo Backtest Request by ID
+      description: |
+        Retrieve a single Combo backtest request by its MongoDB ObjectId.
+        The request must belong to the authenticated user.
+      tags:
+        - Backtest
+      operationId: getComboBacktestRequestById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: MongoDB ObjectId of the backtest request
+          schema:
+            type: string
+            example: 69a04ceccf441b9c0d60dcd7
+        - $ref: "#/components/parameters/FieldsParam"
+      responses:
+        "200":
+          description: Combo backtest request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestRequestSingleResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/combo/requests:
+    get:
+      summary: Get Combo Backtest Requests
+      description: |
+        Retrieve a paginated list of Combo backtest requests for the current user,
+        sorted from newest to oldest (10 per page).
+
+        Supports the same field selection as the DCA variant:
+        use `backtest.*` field prefixes to include fields from the linked backtest result.
+      tags:
+        - Backtest
+      operationId: getComboBacktestRequests
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+      responses:
+        "200":
+          description: Paginated Combo backtest requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestRequestListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /api/v2/bots/combo:
     get:
       summary: Get Combo Bots
@@ -4835,6 +5174,213 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/v2/backtest/dca/requests/{id}:
+    get:
+      summary: Get DCA Backtest Request by ID
+      description: |
+        Retrieve a single DCA backtest request by its MongoDB ObjectId.
+        The request must belong to the authenticated user.
+
+        Use `backtest.*` field prefixes to include fields from the linked backtest result.
+      tags:
+        - Backtest
+      operationId: getDcaBacktestRequestById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: MongoDB ObjectId of the backtest request
+          schema:
+            type: string
+            example: 69a04ceccf441b9c0d60dcd7
+        - $ref: "#/components/parameters/FieldsParam"
+      responses:
+        "200":
+          description: DCA backtest request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestRequestSingleResponse"
+              example:
+                status: OK
+                reason: null
+                data:
+                  _id: 69a04ceccf441b9c0d60dcd7
+                  status: success
+                  type: dca
+                  exchange: binance
+                  exchangeUUID: dc6679c4-1e33-43b8-80d7-a4954c5234ce
+                  symbols:
+                    - pair: BTCUSDT
+                      baseAsset: BTC
+                      quoteAsset: USDT
+                  cost: 2
+                  backtestId: 09f94e16-fdbd-4196-b7fe-969a683b94c4
+                  statusReason: null
+                  statusHistory:
+                    - status: pending
+                      time: 1772113132925
+                    - status: success
+                      time: 1772113149686
+                  updated: "2026-02-26T13:39:09.686Z"
+                  created: "2026-02-26T13:38:52.929Z"
+                  backtest: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/dca/requests:
+    get:
+      summary: Get DCA Backtest Requests
+      description: |
+        Retrieve a paginated list of DCA backtest requests for the current user,
+        sorted from newest to oldest (10 per page).
+
+        **Field selection:**
+        - Fields without a prefix are applied to the request document.
+        - Fields prefixed with `backtest.` (e.g. `backtest.financial`, `backtest.settings`)
+          are applied to the linked backtest result and returned under the `backtest` key.
+        - If no `fields` param is set, all request fields and the full backtest result are returned.
+        - If fields are specified **without** any `backtest.*` field, the `backtest` key is omitted.
+
+        **Field presets:**
+        - `minimal`: _id, status, type, exchange, symbols, created
+        - `standard`: minimal + exchangeUUID, cost, backtestId, statusReason, updated
+        - `extended`: standard + statusHistory, payload
+        - `full`: All fields
+      tags:
+        - Backtest
+      operationId: getDcaBacktestRequests
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+      responses:
+        "200":
+          description: Paginated DCA backtest requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestRequestListResponse"
+              examples:
+                standard:
+                  summary: Standard preset
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      - _id: 69a04ceccf441b9c0d60dcd7
+                        status: success
+                        type: dca
+                        exchange: binance
+                        exchangeUUID: dc6679c4-1e33-43b8-80d7-a4954c5234ce
+                        symbols:
+                          - pair: BTCUSDT
+                            baseAsset: BTC
+                            quoteAsset: USDT
+                        cost: 2
+                        backtestId: 09f94e16-fdbd-4196-b7fe-969a683b94c4
+                        statusReason: null
+                        updated: "2026-02-26T13:39:09.686Z"
+                        created: "2026-02-26T13:38:52.929Z"
+                        backtest: null
+                    meta:
+                      page: 1
+                      total: 3
+                      count: 30
+                      onPage: 10
+                      fields:
+                        - _id
+                        - status
+                        - type
+                        - exchange
+                        - exchangeUUID
+                        - symbols
+                        - cost
+                        - backtestId
+                        - statusReason
+                        - updated
+                        - created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/grid/requests/{id}:
+    get:
+      summary: Get Grid Backtest Request by ID
+      description: |
+        Retrieve a single Grid backtest request by its MongoDB ObjectId.
+        The request must belong to the authenticated user.
+      tags:
+        - Backtest
+      operationId: getGridBacktestRequestById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: MongoDB ObjectId of the backtest request
+          schema:
+            type: string
+            example: 69a04ceccf441b9c0d60dcd7
+        - $ref: "#/components/parameters/FieldsParam"
+      responses:
+        "200":
+          description: Grid backtest request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestRequestSingleResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/grid/requests:
+    get:
+      summary: Get Grid Backtest Requests
+      description: |
+        Retrieve a paginated list of Grid backtest requests for the current user,
+        sorted from newest to oldest (10 per page).
+
+        Supports the same field selection as the DCA variant:
+        use `backtest.*` field prefixes to include fields from the linked backtest result.
+      tags:
+        - Backtest
+      operationId: getGridBacktestRequests
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+      responses:
+        "200":
+          description: Paginated Grid backtest requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestRequestListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /api/v2/bots/grid:
     get:
       summary: Get Grid Bots
@@ -5844,6 +6390,283 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
+  /api/v2/backtest/combo/estimate-cost:
+    post:
+      summary: Estimate Combo Bot Backtest Cost
+      description: |
+        Estimate the cost in credits for a Combo server side backtest before submitting.
+
+        This endpoint calculates the expected credit cost based on the backtest configuration,
+        symbol count, timeframe, and date range.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: estimateComboServerSideBacktestCost
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Combo backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/ComboBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC Combo Strategy
+                    pair:
+                      - BTC_USDT
+                    dcaSettings:
+                      baseOrderSize: "100"
+                      safetyOrderSize: "150"
+                      maxSafetyOrders: 5
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: Combo backtest cost estimated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestCostEstimate"
+              examples:
+                sufficient_credits:
+                  summary: User has sufficient credits
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      estimatedCredits: 3
+                      availableCredits: 10000
+                      allowed: true
+                insufficient_credits:
+                  summary: User has insufficient credits
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      estimatedCredits: 20
+                      availableCredits: 8
+                      allowed: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/dca/estimate-cost:
+    post:
+      summary: Estimate DCA Bot Backtest Cost
+      description: |
+        Estimate the cost in credits for a DCA server side backtest before submitting.
+
+        This endpoint calculates the expected credit cost based on the backtest configuration,
+        symbol count, timeframe, and date range.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: estimateDcaServerSideBacktestCost
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: DCA backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/DCABacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC DCA Strategy
+                    pair:
+                      - BTC_USDT
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+            examples:
+              sufficient_credits:
+                summary: User has sufficient credits
+                value:
+                  payload:
+                    data:
+                      exchange: binance
+                      exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                      settings:
+                        name: BTC DCA Strategy
+                        pair:
+                          - BTC_USDT
+                      from: 1640995200000
+                      to: 1672531199000
+                      interval: 1h
+              insufficient_credits:
+                summary: User has insufficient credits
+                value:
+                  payload:
+                    data:
+                      exchange: binance
+                      exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                      settings:
+                        name: BTC DCA Strategy
+                        pair:
+                          - BTC_USDT
+                          - ETH/USDT
+                          - ADA/USDT
+                      from: 1640995200000
+                      to: 1672531199000
+                      interval: 1h
+      responses:
+        "200":
+          description: DCA backtest cost estimated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestCostEstimate"
+              examples:
+                sufficient_credits:
+                  summary: User has sufficient credits
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      estimatedCredits: 2
+                      availableCredits: 10000
+                      allowed: true
+                insufficient_credits:
+                  summary: User has insufficient credits
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      estimatedCredits: 15
+                      availableCredits: 5
+                      allowed: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/grid/estimate-cost:
+    post:
+      summary: Estimate Grid Bot Backtest Cost
+      description: |
+        Estimate the cost in credits for a Grid server side backtest before submitting.
+
+        This endpoint calculates the expected credit cost based on the backtest configuration,
+        symbol count, timeframe, and date range.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: estimateGridServerSideBacktestCost
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Grid backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/GridBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC Grid Strategy
+                    pair:
+                      - BTC_USDT
+                    gridType: ARITHMETIC
+                    upperPrice: "50000"
+                    lowerPrice: "30000"
+                    levels: 20
+                    investment: "1000"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: Grid backtest cost estimated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestCostEstimate"
+              examples:
+                sufficient_credits:
+                  summary: User has sufficient credits
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      estimatedCredits: 1
+                      availableCredits: 10000
+                      allowed: true
+                insufficient_credits:
+                  summary: User has insufficient credits
+                  value:
+                    status: OK
+                    reason: null
+                    data:
+                      estimatedCredits: 12
+                      availableCredits: 3
+                      allowed: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /api/v2/deals/dca/reduce-funds:
     post:
       summary: Reduce Funds from Deal
@@ -5951,6 +6774,436 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Terminal deal not found
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/combo/request:
+    post:
+      summary: Request Combo Bot Server Side Backtest
+      description: |
+        Submit a Combo server side backtest request to test strategies against historical data.
+
+        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestComboServerSideBacktest
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Combo backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/ComboBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC Combo Strategy
+                    pair:
+                      - BTC_USDT
+                    dcaSettings:
+                      baseOrderSize: "100"
+                      safetyOrderSize: "150"
+                      maxSafetyOrders: 5
+                    gridSettings:
+                      triggerPerc: "1.5"
+                      levels: 10
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: Combo backtest request submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          description: Invalid Combo backtest configuration or insufficient credits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/combo/request/sync:
+    post:
+      summary: Request Combo Backtest (Synchronous)
+      description: |
+        Identical to `POST /api/v2/backtest/combo/request` but **holds the connection open** and
+        waits for the backtest to finish before responding.
+
+        The server polls the database every 10 seconds. Two possible outcomes:
+
+        - **Completed within 1 hour** — returns the full backtest request object, identical
+          to `GET /api/v2/backtest/dca/requests/{id}`. Supports the same `fields` / `backtest.*`
+          field selection.
+        - **1-hour timeout exceeded** — returns `{ requestId, message }` so the client can
+          poll `GET /api/v2/backtest/dca/requests/{id}` manually when ready.
+
+        If the backtest fails, credits are already unlocked server-side.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestComboServerSideBacktestSync
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Combo backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/ComboBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC Combo Strategy
+                    pair:
+                      - BTC_USDT
+                    dcaSettings:
+                      baseOrderSize: "100"
+                      safetyOrderSize: "150"
+                      maxSafetyOrders: 5
+                    gridSettings:
+                      triggerPerc: "1.5"
+                      levels: 10
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: |
+            Backtest completed — returns the full request record.
+            If the timeout was exceeded, returns `{ requestId, message }` instead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/dca/request:
+    post:
+      summary: Request DCA Bot Server Side Backtest
+      description: |
+        Submit a DCA server side backtest request to test strategies against historical data.
+
+        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestDcaServerSideBacktest
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: DCA backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/DCABacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC DCA Strategy
+                    pair:
+                      - BTC_USDT
+                    strategy: LONG
+                    baseOrderSize: "100"
+                    tpPerc: "2.5"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: DCA backtest request submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          description: Invalid DCA backtest configuration or insufficient credits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/dca/request/sync:
+    post:
+      summary: Request DCA Backtest (Synchronous)
+      description: |
+        Identical to `POST /api/v2/backtest/dca/request` but **holds the connection open** and
+        waits for the backtest to finish before responding.
+
+        The server polls the database every 10 seconds. Two possible outcomes:
+
+        - **Completed within 1 hour** — returns the full backtest request object, identical
+          to `GET /api/v2/backtest/dca/requests/{id}`. Supports the same `fields` / `backtest.*`
+          field selection.
+        - **1-hour timeout exceeded** — returns `{ requestId, message }` so the client can
+          poll `GET /api/v2/backtest/dca/requests/{id}` manually when ready.
+
+        If the backtest fails, credits are already unlocked server-side.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestDcaServerSideBacktestSync
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: DCA backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/DCABacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC DCA Strategy
+                    pair:
+                      - BTC_USDT
+                    strategy: LONG
+                    baseOrderSize: "100"
+                    tpPerc: "2.5"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: |
+            Backtest completed — returns the full request record (same as GET-by-id).
+            If the timeout was exceeded, returns `{ requestId, message }` instead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/grid/request:
+    post:
+      summary: Request Grid Bot Server Side Backtest
+      description: |
+        Submit a Grid server side backtest request to test strategies against historical data.
+
+        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestGridServerSideBacktest
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Grid backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/GridBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC Grid Strategy
+                    pair:
+                      - BTC_USDT
+                    topPrice: "50000"
+                    lowPrice: "30000"
+                    levels: 20
+                    budget: "1000"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: Grid backtest request submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          description: Invalid Grid backtest configuration or insufficient credits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v2/backtest/grid/request/sync:
+    post:
+      summary: Request Grid Backtest (Synchronous)
+      description: |
+        Identical to `POST /api/v2/backtest/grid/request` but **holds the connection open** and
+        waits for the backtest to finish before responding.
+
+        The server polls the database every 10 seconds. Two possible outcomes:
+
+        - **Completed within 1 hour** — returns the full backtest request object, identical
+          to `GET /api/v2/backtest/dca/requests/{id}`. Supports the same `fields` / `backtest.*`
+          field selection.
+        - **1-hour timeout exceeded** — returns `{ requestId, message }` so the client can
+          poll `GET /api/v2/backtest/dca/requests/{id}` manually when ready.
+
+        If the backtest fails, credits are already unlocked server-side.
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: requestGridServerSideBacktestSync
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  description: Grid backtest payload without type field (specified in URL)
+                  allOf:
+                    - $ref: "#/components/schemas/BacktestPayload"
+                    - type: object
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/GridBacktestPayload"
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: BTC Grid Strategy
+                    pair:
+                      - BTC_USDT
+                    topPrice: "50000"
+                    lowPrice: "30000"
+                    levels: 20
+                    budget: "1000"
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: |
+            Backtest completed — returns the full request record.
+            If the timeout was exceeded, returns `{ requestId, message }` instead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v2/bots/combo/{botId}/restore:
@@ -7156,402 +8409,6 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
-  /api/v2/backtest/dca/request:
-    post:
-      summary: Request DCA Bot Server Side Backtest
-      description: |
-        Submit a DCA server side backtest request to test strategies against historical data.
-        
-        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
-        
-        Requires write permission of API keys.
-      tags:
-        - Backtest
-      operationId: requestDcaServerSideBacktest
-      parameters:
-        - $ref: "#/components/parameters/PaperContextHeader"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - payload
-              properties:
-                payload:
-                  type: object
-                  description: DCA backtest payload without type field (specified in URL)
-                  allOf:
-                    - $ref: "#/components/schemas/BacktestPayload"
-                    - type: object
-                      properties:
-                        data:
-                          $ref: "#/components/schemas/DCABacktestPayload"
-            example:
-              payload:
-                data:
-                  exchange: binance
-                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
-                  settings:
-                    name: "BTC DCA Strategy"
-                    pair: ["BTC/USDT"]
-                    strategy: LONG
-                    baseOrderSize: "100"
-                    tpPerc: "2.5"
-                  from: 1640995200000
-                  to: 1672531199000
-                  interval: "1h"
-                  fromBacktest: false
-                  trades: true
-                  paperContext: true
-      responses:
-        "200":
-          description: DCA backtest request submitted successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BacktestResponse"
-        "400":
-          description: Invalid DCA backtest configuration or insufficient credits
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-  /api/v2/backtest/dca/estimate-cost:
-    post:
-      summary: Estimate DCA Bot Backtest Cost
-      description: |
-        Estimate the cost in credits for a DCA server side backtest before submitting.
-        
-        This endpoint calculates the expected credit cost based on the backtest configuration,
-        symbol count, timeframe, and date range.
-        
-        Requires write permission of API keys.
-      tags:
-        - Backtest
-      operationId: estimateDcaServerSideBacktestCost
-      parameters:
-        - $ref: "#/components/parameters/PaperContextHeader"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - payload
-              properties:
-                payload:
-                  type: object
-                  description: DCA backtest payload without type field (specified in URL)
-                  allOf:
-                    - $ref: "#/components/schemas/BacktestPayload"
-                    - type: object
-                      properties:
-                        data:
-                          $ref: "#/components/schemas/DCABacktestPayload"
-            example:
-              payload:
-                data:
-                  exchange: binance
-                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
-                  settings:
-                    name: "BTC DCA Strategy"
-                    pair: ["BTC/USDT"]
-                  from: 1640995200000
-                  to: 1672531199000
-                  interval: "1h"
-      responses:
-        "200":
-          description: DCA backtest cost estimated successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BacktestCostEstimate"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-  /api/v2/backtest/combo/request:
-    post:
-      summary: Request Combo Bot Server Side Backtest
-      description: |
-        Submit a Combo server side backtest request to test strategies against historical data.
-        
-        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
-        
-        Requires write permission of API keys.
-      tags:
-        - Backtest
-      operationId: requestComboServerSideBacktest
-      parameters:
-        - $ref: "#/components/parameters/PaperContextHeader"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - payload
-              properties:
-                payload:
-                  type: object
-                  description: Combo backtest payload without type field (specified in URL)
-                  allOf:
-                    - $ref: "#/components/schemas/BacktestPayload"
-                    - type: object
-                      properties:
-                        data:
-                          $ref: "#/components/schemas/ComboBacktestPayload"
-            example:
-              payload:
-                data:
-                  exchange: binance
-                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
-                  settings:
-                    name: "BTC Combo Strategy"
-                    pair: ["BTC/USDT"]
-                    dcaSettings:
-                      baseOrderSize: "100"
-                      safetyOrderSize: "150"
-                      maxSafetyOrders: 5
-                    gridSettings:
-                      triggerPerc: "1.5"
-                      levels: 10
-                  from: 1640995200000
-                  to: 1672531199000
-                  interval: "1h"
-                  fromBacktest: false
-                  trades: true
-                  paperContext: true
-      responses:
-        "200":
-          description: Combo backtest request submitted successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BacktestResponse"
-        "400":
-          description: Invalid Combo backtest configuration or insufficient credits
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-  /api/v2/backtest/combo/estimate-cost:
-    post:
-      summary: Estimate Combo Bot Backtest Cost
-      description: |
-        Estimate the cost in credits for a Combo server side backtest before submitting.
-        
-        This endpoint calculates the expected credit cost based on the backtest configuration,
-        symbol count, timeframe, and date range.
-        
-        Requires write permission of API keys.
-      tags:
-        - Backtest
-      operationId: estimateComboServerSideBacktestCost
-      parameters:
-        - $ref: "#/components/parameters/PaperContextHeader"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - payload
-              properties:
-                payload:
-                  type: object
-                  description: Combo backtest payload without type field (specified in URL)
-                  allOf:
-                    - $ref: "#/components/schemas/BacktestPayload"
-                    - type: object
-                      properties:
-                        data:
-                          $ref: "#/components/schemas/ComboBacktestPayload"
-            example:
-              payload:
-                data:
-                  exchange: binance
-                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
-                  settings:
-                    name: "BTC Combo Strategy"
-                    pair: ["BTC/USDT"]
-                    dcaSettings:
-                      baseOrderSize: "100"
-                      safetyOrderSize: "150"
-                      maxSafetyOrders: 5
-                  from: 1640995200000
-                  to: 1672531199000
-                  interval: "1h"
-      responses:
-        "200":
-          description: Combo backtest cost estimated successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BacktestCostEstimate"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-  /api/v2/backtest/grid/request:
-    post:
-      summary: Request Grid Bot Server Side Backtest
-      description: |
-        Submit a Grid server side backtest request to test strategies against historical data.
-        
-        The request will be queued and processed asynchronously. Credits will be deducted from the user account.
-        
-        Requires write permission of API keys.
-      tags:
-        - Backtest
-      operationId: requestGridServerSideBacktest
-      parameters:
-        - $ref: "#/components/parameters/PaperContextHeader"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - payload
-              properties:
-                payload:
-                  type: object
-                  description: Grid backtest payload without type field (specified in URL)
-                  allOf:
-                    - $ref: "#/components/schemas/BacktestPayload"
-                    - type: object
-                      properties:
-                        data:
-                          $ref: "#/components/schemas/GridBacktestPayload"
-            example:
-              payload:
-                data:
-                  exchange: binance
-                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
-                  settings:
-                    name: "BTC Grid Strategy"
-                    pair: ["BTC/USDT"]
-                    gridType: ARITHMETIC
-                    upperPrice: "50000"
-                    lowerPrice: "30000"
-                    levels: 20
-                    investment: "1000"
-                  from: 1640995200000
-                  to: 1672531199000
-                  interval: "1h"
-                  fromBacktest: false
-                  trades: true
-                  paperContext: true
-      responses:
-        "200":
-          description: Grid backtest request submitted successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BacktestResponse"
-        "400":
-          description: Invalid Grid backtest configuration or insufficient credits
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-  /api/v2/backtest/grid/estimate-cost:
-    post:
-      summary: Estimate Grid Bot Backtest Cost
-      description: |
-        Estimate the cost in credits for a Grid server side backtest before submitting.
-        
-        This endpoint calculates the expected credit cost based on the backtest configuration,
-        symbol count, timeframe, and date range.
-        
-        Requires write permission of API keys.
-      tags:
-        - Backtest
-      operationId: estimateGridServerSideBacktestCost
-      parameters:
-        - $ref: "#/components/parameters/PaperContextHeader"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - payload
-              properties:
-                payload:
-                  type: object
-                  description: Grid backtest payload without type field (specified in URL)
-                  allOf:
-                    - $ref: "#/components/schemas/BacktestPayload"
-                    - type: object
-                      properties:
-                        data:
-                          $ref: "#/components/schemas/GridBacktestPayload"
-            example:
-              payload:
-                data:
-                  exchange: binance
-                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
-                  settings:
-                    name: "BTC Grid Strategy"
-                    pair: ["BTC/USDT"]
-                    gridType: ARITHMETIC
-                    upperPrice: "50000"
-                    lowerPrice: "30000"
-                    levels: 20
-                    investment: "1000"
-                  from: 1640995200000
-                  to: 1672531199000
-                  interval: "1h"
-      responses:
-        "200":
-          description: Grid backtest cost estimated successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BacktestCostEstimate"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
 security:
   - ApiKeyAuth: []
     SecretAuth: []

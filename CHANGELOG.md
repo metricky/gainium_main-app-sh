@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.13.0] - 2026-02-26
+### Added 
+- SSB API endpoints.
+- Sync mode for SSB backtest.   
+
 ## [1.12.0] - 2026-02-24
 ### Changed 
 - Refactored API v2 endpoints.

@@ -4169,7 +4169,7 @@ export type CSVCandle = {
 }
 
 export type BacktestingSettings = {
-  userFee: string
+  userFee: number
   slippage: string
   firstDataTime?: number
   lastDataTime?: number

@@ -190,11 +190,11 @@ export const addAditionalFields = (
   }
 }
 
-export const addIndicatorsDefaults = <T extends CreateDCABotInput>(
+export const addIndicatorsDefaults = <T extends Partial<CreateDCABotInput>>(
   settings: T,
 ): T => {
-  if (settings.indicators.length) {
-    settings.indicators = settings.indicators.map((indicator) => ({
+  if (settings?.indicators?.length) {
+    settings.indicators = settings?.indicators?.map((indicator) => ({
       ...(indicatorConfigDefaults[indicator.type] ?? {}),
       ...indicator,
     }))
