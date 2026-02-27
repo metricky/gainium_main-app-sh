@@ -469,9 +469,9 @@ const v2API = <R extends UserSchema = UserSchema>(
 
       // Apply deal type specific filters
       if (dealType === 'dca') {
-        filter.terminal = { $ne: true }
+        filter.type = { $ne: 'terminal' }
       } else if (dealType === 'terminal') {
-        filter.terminal = { $eq: true }
+        filter.type = { $eq: 'terminal' }
       }
       // combo has no terminal filter
 
@@ -1891,7 +1891,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const deal = await dcaDealsDb.readData({
           _id: dealId,
           userId: user.id,
-          terminal: { $eq: true },
+          type: { $eq: 'terminal' },
           status: {
             $nin: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
           },
@@ -2000,7 +2000,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const deal = await dcaDealsDb.readData({
           _id: dealId,
           userId: user.id,
-          terminal: { $eq: true },
+          type: { $eq: 'terminal' },
           status: {
             $nin: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
           },
@@ -2936,7 +2936,9 @@ const v2API = <R extends UserSchema = UserSchema>(
             : await dcaDealsDb.readData({
                 _id: dealId,
                 userId: user.id,
-                ...(dealType === 'terminal' ? { terminal: { $eq: true } } : {}),
+                ...(dealType === 'terminal'
+                  ? { type: { $eq: 'terminal' } }
+                  : {}),
                 status: {
                   $nin: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
                 },

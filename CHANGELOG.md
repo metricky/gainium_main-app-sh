@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.13.1] - 2026-02-27
+### Fixed
+- Terminal property in API handlers. 
+
 ## [1.13.0] - 2026-02-26
 ### Added 
 - SSB API endpoints.
