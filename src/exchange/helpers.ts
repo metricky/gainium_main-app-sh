@@ -34,6 +34,10 @@ export const getExchangeTradeType = (exchange: ExchangeEnum) => {
       ExchangeEnum.okxLinear,
       ExchangeEnum.kucoinInverse,
       ExchangeEnum.kucoinLinear,
+      ExchangeEnum.bitgetUsdm,
+      ExchangeEnum.bitgetCoinm,
+      ExchangeEnum.krakenUsdm,
+      ExchangeEnum.hyperliquidLinear,
     ].includes(exchange)
   ) {
     return TradeTypeEnum.futures
