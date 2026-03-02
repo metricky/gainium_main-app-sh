@@ -84,5 +84,9 @@ export const removePaperFormExchangeName = (exchange: ExchangeEnum) => {
                           ? ExchangeEnum.okxInverse
                           : exchange === ExchangeEnum.paperOkxLinear
                             ? ExchangeEnum.okxLinear
-                            : exchange
+                            : exchange === ExchangeEnum.paperKraken
+                              ? ExchangeEnum.kraken
+                              : exchange === ExchangeEnum.paperKrakenUsdm
+                                ? ExchangeEnum.krakenUsdm
+                                : exchange
 }

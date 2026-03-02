@@ -2281,6 +2281,10 @@ export const BotSchema = /* GraphQL */ `
     paperHyperliquid
     hyperliquidLinear
     paperHyperliquidLinear
+    kraken
+    paperKraken
+    krakenUsdm
+    paperKrakenUsdm
   }
   enum CurrencyEnum {
     quote

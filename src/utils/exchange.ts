@@ -22,3 +22,11 @@ export const isOkx = (exchange: ExchangeEnum) =>
     ExchangeEnum.paperOkxInverse,
     ExchangeEnum.paperOkxLinear,
   ].includes(exchange)
+
+export const isKraken = (exchange: ExchangeEnum) =>
+  [
+    ExchangeEnum.kraken,
+    ExchangeEnum.krakenUsdm,
+    ExchangeEnum.paperKraken,
+    ExchangeEnum.paperKrakenUsdm,
+  ].includes(exchange)

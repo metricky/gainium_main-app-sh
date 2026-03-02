@@ -5152,7 +5152,13 @@ const resolvers = <
                                 : tt === TradeTypeEnum.futures &&
                                     provider === ExchangeEnum.hyperliquid
                                   ? [ExchangeEnum.hyperliquidLinear]
-                                  : [provider]) {
+                                  : tt === TradeTypeEnum.futures &&
+                                      provider === ExchangeEnum.kraken
+                                    ? [ExchangeEnum.krakenUsdm]
+                                    : tt === TradeTypeEnum.futures &&
+                                        provider === ExchangeEnum.paperKraken
+                                      ? [ExchangeEnum.paperKrakenUsdm]
+                                      : [provider]) {
             const paper = paperExchanges.includes(provider)
             if (paper) {
               key = v4()
@@ -5332,7 +5338,20 @@ const resolvers = <
                                             ? 'Linear'
                                             : 'Inverse'
                                       })`
-                                    : name,
+                                    : tradeType === TradeTypeEnum.all &&
+                                        [
+                                          ExchangeEnum.kraken,
+                                          ExchangeEnum.paperKraken,
+                                        ].includes(provider)
+                                      ? `${name} (${
+                                          [
+                                            ExchangeEnum.kraken,
+                                            ExchangeEnum.paperKraken,
+                                          ].includes(e)
+                                            ? 'SPOT'
+                                            : 'USDM'
+                                        })`
+                                      : name,
                       key: encrypt(key),
                       secret: encrypt(secret),
                       uuid,

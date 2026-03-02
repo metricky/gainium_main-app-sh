@@ -47,6 +47,10 @@ const providers = [
   ExchangeEnum.paperHyperliquid,
   ExchangeEnum.hyperliquidLinear,
   ExchangeEnum.paperHyperliquidLinear,
+  ExchangeEnum.kraken,
+  ExchangeEnum.paperKraken,
+  ExchangeEnum.krakenUsdm,
+  ExchangeEnum.paperKrakenUsdm,
 ]
 
 export const updateExchangeInfo = async (ec = ExchangeChooser) => {

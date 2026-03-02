@@ -271,6 +271,8 @@ const allAPI = <R extends UserSchema = UserSchema>(
         { code: ExchangeEnum.bitget, market: 'spot' },
         { code: ExchangeEnum.bitgetCoinm, market: 'futures', type: 'inverse' },
         { code: ExchangeEnum.bitgetUsdm, market: 'futures', type: 'linear' },
+        { code: ExchangeEnum.kraken, market: 'spot' },
+        { code: ExchangeEnum.krakenUsdm, market: 'futures', type: 'linear' },
       ],
     })
   })

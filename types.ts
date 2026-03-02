@@ -128,6 +128,10 @@ export enum ExchangeEnum {
   hyperliquidLinear = 'hyperliquidLinear',
   paperHyperliquid = 'paperHyperliquid',
   paperHyperliquidLinear = 'paperHyperliquidLinear',
+  kraken = 'kraken',
+  krakenUsdm = 'krakenUsdm',
+  paperKraken = 'paperKraken',
+  paperKrakenUsdm = 'paperKrakenUsdm',
 }
 
 export enum BinanceFutures {

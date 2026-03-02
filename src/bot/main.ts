@@ -156,6 +156,11 @@ const unknownOrderMessages = [
   'Order cancelled.',
   'unknownOid',
   'order was never placed, already canceled, or filled',
+  'EOrder:Unknown order',
+  'EOrder:Order not found',
+  'EOrder:Order already canceled',
+  'EOrder:Order already closed',
+  'EOrder:Cannot cancel order',
 ]
 
 const mutex = new IdMutex()
