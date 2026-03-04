@@ -629,6 +629,7 @@ export const errorDict = {
   'ETrade:Invalid volume': orderParams,
   'EFunding:Unknown withdraw key': 'Withdrawal error',
   'EFunding:Invalid amount': orderParams,
+  wouldNotReducePosition: futuresPosition,
 }
 
 export const getErrorSubType = (string: string): string => {

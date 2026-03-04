@@ -38,6 +38,7 @@ export const getExchangeTradeType = (exchange: ExchangeEnum) => {
       ExchangeEnum.bitgetCoinm,
       ExchangeEnum.krakenUsdm,
       ExchangeEnum.hyperliquidLinear,
+      ExchangeEnum.krakenCoinm,
     ].includes(exchange)
   ) {
     return TradeTypeEnum.futures
@@ -92,5 +93,19 @@ export const removePaperFormExchangeName = (exchange: ExchangeEnum) => {
                               ? ExchangeEnum.kraken
                               : exchange === ExchangeEnum.paperKrakenUsdm
                                 ? ExchangeEnum.krakenUsdm
-                                : exchange
+                                : exchange === ExchangeEnum.paperKrakenCoinm
+                                  ? ExchangeEnum.krakenCoinm
+                                  : exchange === ExchangeEnum.paperBitgetCoinm
+                                    ? ExchangeEnum.bitgetCoinm
+                                    : exchange === ExchangeEnum.paperBitgetUsdm
+                                      ? ExchangeEnum.bitgetUsdm
+                                      : exchange ===
+                                          ExchangeEnum.paperHyperliquidLinear
+                                        ? ExchangeEnum.hyperliquidLinear
+                                        : exchange ===
+                                            ExchangeEnum.paperHyperliquid
+                                          ? ExchangeEnum.hyperliquid
+                                          : exchange === ExchangeEnum.bitget
+                                            ? ExchangeEnum.bitget
+                                            : exchange
 }

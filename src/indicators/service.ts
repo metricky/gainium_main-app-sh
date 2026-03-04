@@ -147,7 +147,7 @@ const mexcKlineIntervals = {
   [ExchangeIntervals.eightH]: 'Hour4',
 }
 
-const krakenIntervals: Partial<Record<ExchangeIntervals, string>> = {
+const krakenSpotIntervals: Partial<Record<ExchangeIntervals, string>> = {
   [ExchangeIntervals.oneM]: '1',
   [ExchangeIntervals.fiveM]: '5',
   [ExchangeIntervals.fifteenM]: '15',
@@ -211,10 +211,8 @@ const getIntervalByExchange = (
       return interval
     }
     case ExchangeEnum.kraken:
-    case ExchangeEnum.paperKraken:
-    case ExchangeEnum.krakenUsdm:
-    case ExchangeEnum.paperKrakenUsdm: {
-      return krakenIntervals[interval] ?? interval
+    case ExchangeEnum.paperKraken: {
+      return krakenSpotIntervals[interval] ?? interval
     }
     default:
       return interval

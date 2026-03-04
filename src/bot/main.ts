@@ -1815,12 +1815,20 @@ class MainBot<T extends IMainBot> {
     }
   }
 
+  get isKraken() {
+    return (
+      this.data?.exchange === ExchangeEnum.kraken ||
+      this.data?.exchange === ExchangeEnum.krakenUsdm ||
+      this.data?.exchange === ExchangeEnum.krakenCoinm
+    )
+  }
+
   async redisSubKeys(pairs: string[]) {
     if (this.hyperliquid) {
       pairs = await Promise.all(
         pairs.map(async (p) => {
           const find = await this.getExchangeInfo(p)
-          return find?.code ?? p
+          return this.isKraken ? p : (find?.code ?? p)
         }),
       )
     }
@@ -2155,7 +2163,8 @@ class MainBot<T extends IMainBot> {
                 if (
                   activeMargin !== requiredMargin &&
                   !paperExchanges.includes(this.data.exchange) &&
-                  !this.kucoinFullFutures
+                  !this.kucoinFullFutures &&
+                  !this.isKraken
                 ) {
                   this.handleErrors(
                     `Cannot start when existing position not met bot settings. Margin type in active position is ${activeMargin}, but required is ${requiredMargin}. Symbol: ${symbol}`,
@@ -2777,7 +2786,8 @@ class MainBot<T extends IMainBot> {
     if (this.exchange && this.data) {
       if (
         this.data.exchange === ExchangeEnum.coinbase ||
-        this.kucoinFullFutures
+        this.kucoinFullFutures ||
+        this.data.exchange === ExchangeEnum.kraken
       ) {
         const local = this.getOrderFromMap(id)
         if (local) {

@@ -95,6 +95,7 @@ export type PaperExchangeType =
   | ExchangeEnum.paperHyperliquidLinear
   | ExchangeEnum.paperKraken
   | ExchangeEnum.paperKrakenUsdm
+  | ExchangeEnum.paperKrakenCoinm
 
 export const paperExchanges = [
   ExchangeEnum.paperBinance,
@@ -119,6 +120,7 @@ export const paperExchanges = [
   ExchangeEnum.paperHyperliquidLinear,
   ExchangeEnum.paperKraken,
   ExchangeEnum.paperKrakenUsdm,
+  ExchangeEnum.paperKrakenCoinm,
 ]
 
 export const mapPaperToReal = (exchange: PaperExchangeType) => {
@@ -167,6 +169,8 @@ export const mapPaperToReal = (exchange: PaperExchangeType) => {
       return ExchangeEnum.kraken
     case ExchangeEnum.paperKrakenUsdm:
       return ExchangeEnum.krakenUsdm
+    case ExchangeEnum.paperKrakenCoinm:
+      return ExchangeEnum.krakenCoinm
     default:
       throw new Error(`${exchange} is not found as paper`)
   }

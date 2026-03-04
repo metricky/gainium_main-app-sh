@@ -5153,11 +5153,24 @@ const resolvers = <
                                     provider === ExchangeEnum.hyperliquid
                                   ? [ExchangeEnum.hyperliquidLinear]
                                   : tt === TradeTypeEnum.futures &&
-                                      provider === ExchangeEnum.kraken
-                                    ? [ExchangeEnum.krakenUsdm]
+                                      (provider === ExchangeEnum.kraken ||
+                                        provider === ExchangeEnum.krakenUsdm ||
+                                        provider === ExchangeEnum.krakenCoinm)
+                                    ? [
+                                        ExchangeEnum.krakenUsdm,
+                                        ExchangeEnum.krakenCoinm,
+                                      ]
                                     : tt === TradeTypeEnum.futures &&
-                                        provider === ExchangeEnum.paperKraken
-                                      ? [ExchangeEnum.paperKrakenUsdm]
+                                        (provider ===
+                                          ExchangeEnum.paperKraken ||
+                                          provider ===
+                                            ExchangeEnum.paperKrakenUsdm ||
+                                          provider ===
+                                            ExchangeEnum.paperKrakenCoinm)
+                                      ? [
+                                          ExchangeEnum.paperKrakenUsdm,
+                                          ExchangeEnum.paperKrakenCoinm,
+                                        ]
                                       : [provider]) {
             const paper = paperExchanges.includes(provider)
             if (paper) {
@@ -5176,7 +5189,8 @@ const resolvers = <
                         e === ExchangeEnum.paperBybitCoinm ||
                         e === ExchangeEnum.paperOkxInverse ||
                         e === ExchangeEnum.paperKucoinInverse ||
-                        e === ExchangeEnum.paperBitgetCoinm)
+                        e === ExchangeEnum.paperBitgetCoinm ||
+                        e === ExchangeEnum.paperKrakenCoinm)
                         ? 0.5
                         : stablecoinBalance || 50,
                     asset:
@@ -5185,7 +5199,8 @@ const resolvers = <
                         e === ExchangeEnum.paperBybitCoinm ||
                         e === ExchangeEnum.paperOkxInverse ||
                         e === ExchangeEnum.paperKucoinInverse ||
-                        e === ExchangeEnum.paperBitgetCoinm)
+                        e === ExchangeEnum.paperBitgetCoinm ||
+                        e === ExchangeEnum.paperKrakenCoinm)
                         ? 'BTC'
                         : coinToTopUp || 'USDT',
                   },
@@ -5345,11 +5360,16 @@ const resolvers = <
                                         ].includes(provider)
                                       ? `${name} (${
                                           [
-                                            ExchangeEnum.kraken,
-                                            ExchangeEnum.paperKraken,
+                                            ExchangeEnum.krakenCoinm,
+                                            ExchangeEnum.paperKrakenCoinm,
                                           ].includes(e)
-                                            ? 'SPOT'
-                                            : 'USDM'
+                                            ? 'Inverse'
+                                            : [
+                                                  ExchangeEnum.krakenUsdm,
+                                                  ExchangeEnum.paperKrakenUsdm,
+                                                ].includes(e)
+                                              ? 'Inverse'
+                                              : 'Spot'
                                         })`
                                       : name,
                       key: encrypt(key),
@@ -5450,6 +5470,23 @@ const resolvers = <
                       )) ||
                     (u.provider === ExchangeEnum.okxInverse &&
                       [ExchangeEnum.okx, ExchangeEnum.okxLinear].includes(e))),
+              )
+              if (findTheSameKeys) {
+                await userDb.updateData(
+                  { 'exchanges.uuid': uuid },
+                  { $set: { 'exchanges.$.linkedTo': findTheSameKeys.uuid } },
+                )
+              }
+            }
+            if (e.toLowerCase().indexOf('kraken') !== -1) {
+              const findTheSameKeys = saveDataRequest.data.exchanges.find(
+                (u) =>
+                  decrypt(u.key) === key &&
+                  decrypt(u.secret) === secret &&
+                  ((u.provider === ExchangeEnum.krakenUsdm &&
+                    [ExchangeEnum.krakenCoinm].includes(e)) ||
+                    (u.provider === ExchangeEnum.krakenCoinm &&
+                      [ExchangeEnum.krakenUsdm].includes(e))),
               )
               if (findTheSameKeys) {
                 await userDb.updateData(

@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.0] - 2026-03-04
+### Added
+- Kraken. 
+
 ## [1.13.1] - 2026-02-27
 ### Fixed
 - Terminal property in API handlers. 
