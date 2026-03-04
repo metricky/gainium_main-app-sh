@@ -10150,6 +10150,10 @@ function createDCABotHelper<
                     this.handleDebug(text)
                   }
                   if (maChild) {
+                    const load1d =
+                      hasLower &&
+                      timeIntervalMap[indicatorInterval] <=
+                        timeIntervalMap[maCrossingInterval]
                     const indicatorChildData: BotParentIndicatorEventDto = {
                       data: {
                         indicatorConfig: {
@@ -10161,6 +10165,7 @@ function createDCABotHelper<
                         symbol,
                         exchange: this.data.exchange,
                         test: false,
+                        load1d,
                       },
 
                       botId: this.botId,
@@ -10213,7 +10218,7 @@ function createDCABotHelper<
                       childIndicator: '',
                       cb: cbChild,
                       groupId: '',
-                      is1d: false,
+                      is1d: load1d,
                     })
                     const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
                     if (this.showIndicatorLogs()) {
@@ -10223,6 +10228,12 @@ function createDCABotHelper<
                     }
                   }
                   if (xoChild) {
+                    const load1d =
+                      hasLower &&
+                      timeIntervalMap[indicatorInterval] <=
+                        timeIntervalMap[
+                          xOscillator2Interval || indicatorInterval
+                        ]
                     const indicatorChildData: BotParentIndicatorEventDto = {
                       data: {
                         indicatorConfig:
@@ -10240,6 +10251,7 @@ function createDCABotHelper<
                         symbol,
                         exchange: this.data.exchange,
                         test: false,
+                        load1d,
                       },
                       event: 'subscribeIndicator',
                       botId: this.botId,
@@ -10290,7 +10302,7 @@ function createDCABotHelper<
                       parentIndicator: uuid,
                       cb: cbChild,
                       groupId: '',
-                      is1d: false,
+                      is1d: load1d,
                     })
                     const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
                     if (this.showIndicatorLogs()) {
@@ -13634,7 +13646,9 @@ function createDCABotHelper<
       const settings = await this.getAggregatedSettings(d.deal)
       const { avgPrice, moveSLTrigger } = settings
       const avgToUse = avgPrice ?? d.deal.avgPrice
-      const trigger = +(moveSLTrigger ?? '0') / 100
+      const feeFactor =
+        ((await this.getUserFee(d.deal.symbol.symbol))?.taker ?? 0) * 2
+      const trigger = +(moveSLTrigger ?? '0') / 100 + feeFactor
       const required = this.isLong
         ? avgToUse * (trigger + 1)
         : avgToUse * (1 - trigger)

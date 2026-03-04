@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.14.1] - 2026-03-04
+### Fixed
+- Move SL trigger not respect fee. 
+- Connect child indicators with load1d flag. 
+
 ## [1.14.0] - 2026-03-04
 ### Added
 - Kraken. 
