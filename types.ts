@@ -128,6 +128,12 @@ export enum ExchangeEnum {
   hyperliquidLinear = 'hyperliquidLinear',
   paperHyperliquid = 'paperHyperliquid',
   paperHyperliquidLinear = 'paperHyperliquidLinear',
+  kraken = 'kraken',
+  krakenUsdm = 'krakenUsdm',
+  krakenCoinm = 'krakenCoinm',
+  paperKraken = 'paperKraken',
+  paperKrakenUsdm = 'paperKrakenUsdm',
+  paperKrakenCoinm = 'paperKrakenCoinm',
 }
 
 export enum BinanceFutures {
@@ -227,6 +233,7 @@ export enum OrderSideEnum {
 }
 
 export type ExchangeInfo = {
+  wsCode?: string
   code?: string
   baseAsset: {
     minAmount: number
@@ -2158,6 +2165,7 @@ export interface RateSchema extends SchemaI {
 export type ClearRateSchema = ExcludeDoc<RateSchema>
 
 export interface PairsSchema extends SchemaI {
+  wsCode?: string
   code?: string
   pair: string
   exchange: ExchangeEnum

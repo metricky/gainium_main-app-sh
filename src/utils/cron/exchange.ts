@@ -47,6 +47,12 @@ const providers = [
   ExchangeEnum.paperHyperliquid,
   ExchangeEnum.hyperliquidLinear,
   ExchangeEnum.paperHyperliquidLinear,
+  ExchangeEnum.kraken,
+  ExchangeEnum.paperKraken,
+  ExchangeEnum.krakenUsdm,
+  ExchangeEnum.paperKrakenUsdm,
+  ExchangeEnum.krakenCoinm,
+  ExchangeEnum.paperKrakenCoinm,
 ]
 
 export const updateExchangeInfo = async (ec = ExchangeChooser) => {
@@ -75,6 +81,8 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
             )
             if (getPair) {
               if (
+                getPair.wsCode !== info.wsCode ||
+                getPair.code !== info.code ||
                 getPair.baseAsset.name !== info.baseAsset.name ||
                 getPair.baseAsset.minAmount !== info.baseAsset.minAmount ||
                 getPair.baseAsset.step !== info.baseAsset.step ||

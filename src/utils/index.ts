@@ -160,6 +160,8 @@ export const getRealFutures = () => [
   ExchangeEnum.bitgetCoinm,
   ExchangeEnum.bitgetUsdm,
   ExchangeEnum.hyperliquidLinear,
+  ExchangeEnum.krakenUsdm,
+  ExchangeEnum.krakenCoinm,
 ]
 
 export const getRealCoinm = () => [
@@ -168,6 +170,7 @@ export const getRealCoinm = () => [
   ExchangeEnum.okxInverse,
   ExchangeEnum.kucoinInverse,
   ExchangeEnum.bitgetCoinm,
+  ExchangeEnum.krakenCoinm,
 ]
 
 export const getRealSpot = () => [
@@ -179,6 +182,7 @@ export const getRealSpot = () => [
   ExchangeEnum.bitget,
   ExchangeEnum.mexc,
   ExchangeEnum.hyperliquid,
+  ExchangeEnum.kraken,
 ]
 
 export const isFutures = (exchange: ExchangeEnum) => {
@@ -205,6 +209,10 @@ export const isFutures = (exchange: ExchangeEnum) => {
     ExchangeEnum.paperBitgetUsdm,
     ExchangeEnum.hyperliquidLinear,
     ExchangeEnum.paperHyperliquidLinear,
+    ExchangeEnum.krakenUsdm,
+    ExchangeEnum.paperKrakenUsdm,
+    ExchangeEnum.krakenCoinm,
+    ExchangeEnum.paperKrakenCoinm,
   ].includes(exchange)
 }
 
@@ -220,6 +228,8 @@ export const isCoinm = (exchange: ExchangeEnum) => {
     ExchangeEnum.kucoinInverse,
     ExchangeEnum.bitgetCoinm,
     ExchangeEnum.paperBitgetCoinm,
+    ExchangeEnum.krakenCoinm,
+    ExchangeEnum.paperKrakenCoinm,
   ].includes(exchange)
 }
 
@@ -245,6 +255,9 @@ export const isPaper = (exchange: ExchangeEnum) => {
     ExchangeEnum.paperMexc,
     ExchangeEnum.paperHyperliquid,
     ExchangeEnum.paperHyperliquidLinear,
+    ExchangeEnum.paperKraken,
+    ExchangeEnum.paperKrakenUsdm,
+    ExchangeEnum.paperKrakenCoinm,
   ].includes(exchange)
 }
 

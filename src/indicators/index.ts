@@ -118,6 +118,17 @@ const mexcSupported = [
   ExchangeIntervals.oneW,
 ]
 
+const krakenSupported = [
+  ExchangeIntervals.oneM,
+  ExchangeIntervals.fiveM,
+  ExchangeIntervals.fifteenM,
+  ExchangeIntervals.thirtyM,
+  ExchangeIntervals.oneH,
+  ExchangeIntervals.fourH,
+  ExchangeIntervals.oneD,
+  ExchangeIntervals.oneW,
+]
+
 const filterIndicatorIntervalsByExchange = (
   intervals: ExchangeIntervals[],
   exchange: ExchangeEnum,
@@ -169,6 +180,9 @@ const filterIndicatorIntervalsByExchange = (
     )
   ) {
     return intervals.filter((i) => binanceSupported.includes(i))
+  }
+  if ([ExchangeEnum.kraken, ExchangeEnum.krakenUsdm].includes(exchange)) {
+    return intervals.filter((i) => krakenSupported.includes(i))
   }
   return intervals
 }

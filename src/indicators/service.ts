@@ -147,6 +147,17 @@ const mexcKlineIntervals = {
   [ExchangeIntervals.eightH]: 'Hour4',
 }
 
+const krakenSpotIntervals: Partial<Record<ExchangeIntervals, string>> = {
+  [ExchangeIntervals.oneM]: '1',
+  [ExchangeIntervals.fiveM]: '5',
+  [ExchangeIntervals.fifteenM]: '15',
+  [ExchangeIntervals.thirtyM]: '30',
+  [ExchangeIntervals.oneH]: '60',
+  [ExchangeIntervals.fourH]: '240',
+  [ExchangeIntervals.oneD]: '1440',
+  [ExchangeIntervals.oneW]: '10080',
+}
+
 const getIntervalByExchange = (
   exchange: ExchangeEnum,
   interval: ExchangeIntervals,
@@ -198,6 +209,10 @@ const getIntervalByExchange = (
     case ExchangeEnum.hyperliquidLinear:
     case ExchangeEnum.paperHyperliquidLinear: {
       return interval
+    }
+    case ExchangeEnum.kraken:
+    case ExchangeEnum.paperKraken: {
+      return krakenSpotIntervals[interval] ?? interval
     }
     default:
       return interval
@@ -1270,7 +1285,12 @@ class InternalIndicator {
                   this.exchange === ExchangeEnum.paperHyperliquid ||
                   this.exchange === ExchangeEnum.paperHyperliquidLinear
                 ? 4999
-                : 200
+                : this.exchange === ExchangeEnum.kraken ||
+                    this.exchange === ExchangeEnum.krakenUsdm ||
+                    this.exchange === ExchangeEnum.paperKraken ||
+                    this.exchange === ExchangeEnum.paperKrakenUsdm
+                  ? 720
+                  : 200
     const to = this.to || new Date().getTime()
     const step = intervalMap[this.interval]
     const length = Math.max(Math.ceil(this.length * 2), 500)
