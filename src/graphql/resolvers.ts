@@ -5368,7 +5368,7 @@ const resolvers = <
                                                   ExchangeEnum.krakenUsdm,
                                                   ExchangeEnum.paperKrakenUsdm,
                                                 ].includes(e)
-                                              ? 'Inverse'
+                                              ? 'Linear'
                                               : 'Spot'
                                         })`
                                       : name,

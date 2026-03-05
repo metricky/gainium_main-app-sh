@@ -741,6 +741,12 @@ const exchanges = [
   ExchangeEnum.hyperliquidLinear,
   ExchangeEnum.paperHyperliquid,
   ExchangeEnum.paperHyperliquidLinear,
+  ExchangeEnum.kraken,
+  ExchangeEnum.paperKraken,
+  ExchangeEnum.krakenUsdm,
+  ExchangeEnum.paperKrakenUsdm,
+  ExchangeEnum.krakenCoinm,
+  ExchangeEnum.paperKrakenCoinm,
 ]
 
 const userSnapshots = async (

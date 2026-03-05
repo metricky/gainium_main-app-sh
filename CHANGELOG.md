@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.2] - 2026-03-05
+### Fixed
+- Kraken balance snapshot. 
+
 ## [1.14.1] - 2026-03-04
 ### Fixed
 - Move SL trigger not respect fee. 
