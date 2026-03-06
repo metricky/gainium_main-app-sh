@@ -365,11 +365,14 @@ class Candles {
                   this.exchangeName === ExchangeEnum.paperHyperliquidLinear
                 ? 4999
                 : this.exchangeName === ExchangeEnum.kraken ||
-                    this.exchangeName === ExchangeEnum.krakenUsdm ||
-                    this.exchangeName === ExchangeEnum.paperKraken ||
-                    this.exchangeName === ExchangeEnum.paperKrakenUsdm
+                    this.exchangeName === ExchangeEnum.paperKraken
                   ? 720
-                  : 200
+                  : this.exchangeName === ExchangeEnum.krakenUsdm ||
+                      this.exchangeName === ExchangeEnum.paperKrakenUsdm ||
+                      this.exchangeName === ExchangeEnum.krakenCoinm ||
+                      this.exchangeName === ExchangeEnum.paperKrakenCoinm
+                    ? 2000
+                    : 200
     try {
       const step = timeIntervalMap[interval]
       const count = Math.ceil((to - from) / step / requestStep)

@@ -1286,11 +1286,14 @@ class InternalIndicator {
                   this.exchange === ExchangeEnum.paperHyperliquidLinear
                 ? 4999
                 : this.exchange === ExchangeEnum.kraken ||
-                    this.exchange === ExchangeEnum.krakenUsdm ||
-                    this.exchange === ExchangeEnum.paperKraken ||
-                    this.exchange === ExchangeEnum.paperKrakenUsdm
+                    this.exchange === ExchangeEnum.paperKraken
                   ? 720
-                  : 200
+                  : this.exchange === ExchangeEnum.krakenUsdm ||
+                      this.exchange === ExchangeEnum.paperKrakenUsdm ||
+                      this.exchange === ExchangeEnum.krakenCoinm ||
+                      this.exchange === ExchangeEnum.paperKrakenCoinm
+                    ? 2000
+                    : 200
     const to = this.to || new Date().getTime()
     const step = intervalMap[this.interval]
     const length = Math.max(Math.ceil(this.length * 2), 500)
