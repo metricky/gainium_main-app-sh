@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.3] - 2026-03-06
+### Fixed
+- Separate over and under limit not worked with dynamic price filter. 
+
 ## [1.14.2] - 2026-03-05
 ### Fixed
 - Kraken balance snapshot. 

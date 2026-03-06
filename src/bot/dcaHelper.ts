@@ -15789,43 +15789,14 @@ function createDCABotHelper<
         !settings.useRiskReward
       )
       if (useDynamic && settings.startCondition === StartConditionEnum.asap) {
-        const dealsPerSymbol = this.getOpenDeals(false, symbol)
-        let maxDeals =
-          settings.maxNumberOfOpenDeals &&
-          !isNaN(+settings.maxNumberOfOpenDeals)
-            ? +settings.maxNumberOfOpenDeals
-            : 1
-        if (maxDeals < 0) {
-          maxDeals = Infinity
-        }
-        let maxPerSymbol =
-          settings.useMulti &&
-          settings.maxDealsPerPair &&
-          +settings.maxDealsPerPair !== 0 &&
-          !isNaN(+settings.maxDealsPerPair)
-            ? +settings.maxDealsPerPair
-            : 1
-        if (maxPerSymbol < 0) {
-          maxPerSymbol = Infinity
-        }
-        if (
-          dealsPerSymbol.length &&
-          dealsPerSymbol.length <
-            (settings.useMulti
-              ? maxPerSymbol
-              : useDynamic && maxDeals
-                ? maxDeals
-                : 1)
-        ) {
-          if (await this.checkInRange(symbol, price)) {
-            const lastData = (this.data?.lastPricesPerSymbol ?? []).find(
-              (d) => d.symbol === symbol,
-            )
-            this.handleDebug(
-              `Price ${price} in range for ${symbol}. Last data: avg - ${lastData?.avg}, entry - ${lastData?.entry}, time - ${lastData?.time}`,
-            )
-            await this.openNewDeal(this.botId, symbol, true, true, +new Date())
-          }
+        if (await this.checkInRange(symbol, price)) {
+          const lastData = (this.data?.lastPricesPerSymbol ?? []).find(
+            (d) => d.symbol === symbol,
+          )
+          this.handleDebug(
+            `Price ${price} in range for ${symbol}. Last data: avg - ${lastData?.avg}, entry - ${lastData?.entry}, time - ${lastData?.time}`,
+          )
+          await this.openNewDeal(this.botId, symbol, true, true, +new Date())
         }
       }
     }
