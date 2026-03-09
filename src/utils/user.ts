@@ -745,8 +745,6 @@ const exchanges = [
   ExchangeEnum.paperKraken,
   ExchangeEnum.krakenUsdm,
   ExchangeEnum.paperKrakenUsdm,
-  ExchangeEnum.krakenCoinm,
-  ExchangeEnum.paperKrakenCoinm,
 ]
 
 const userSnapshots = async (

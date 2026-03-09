@@ -5154,23 +5154,14 @@ const resolvers = <
                                   ? [ExchangeEnum.hyperliquidLinear]
                                   : tt === TradeTypeEnum.futures &&
                                       (provider === ExchangeEnum.kraken ||
-                                        provider === ExchangeEnum.krakenUsdm ||
-                                        provider === ExchangeEnum.krakenCoinm)
-                                    ? [
-                                        ExchangeEnum.krakenUsdm,
-                                        ExchangeEnum.krakenCoinm,
-                                      ]
+                                        provider === ExchangeEnum.krakenUsdm)
+                                    ? [ExchangeEnum.krakenUsdm]
                                     : tt === TradeTypeEnum.futures &&
                                         (provider ===
                                           ExchangeEnum.paperKraken ||
                                           provider ===
-                                            ExchangeEnum.paperKrakenUsdm ||
-                                          provider ===
-                                            ExchangeEnum.paperKrakenCoinm)
-                                      ? [
-                                          ExchangeEnum.paperKrakenUsdm,
-                                          ExchangeEnum.paperKrakenCoinm,
-                                        ]
+                                            ExchangeEnum.paperKrakenUsdm)
+                                      ? [ExchangeEnum.paperKrakenUsdm]
                                       : [provider]) {
             const paper = paperExchanges.includes(provider)
             if (paper) {
@@ -5360,16 +5351,11 @@ const resolvers = <
                                         ].includes(provider)
                                       ? `${name} (${
                                           [
-                                            ExchangeEnum.krakenCoinm,
-                                            ExchangeEnum.paperKrakenCoinm,
+                                            ExchangeEnum.krakenUsdm,
+                                            ExchangeEnum.paperKrakenUsdm,
                                           ].includes(e)
-                                            ? 'Inverse'
-                                            : [
-                                                  ExchangeEnum.krakenUsdm,
-                                                  ExchangeEnum.paperKrakenUsdm,
-                                                ].includes(e)
-                                              ? 'Linear'
-                                              : 'Spot'
+                                            ? 'Linear'
+                                            : 'Spot'
                                         })`
                                       : name,
                       key: encrypt(key),
@@ -5470,23 +5456,6 @@ const resolvers = <
                       )) ||
                     (u.provider === ExchangeEnum.okxInverse &&
                       [ExchangeEnum.okx, ExchangeEnum.okxLinear].includes(e))),
-              )
-              if (findTheSameKeys) {
-                await userDb.updateData(
-                  { 'exchanges.uuid': uuid },
-                  { $set: { 'exchanges.$.linkedTo': findTheSameKeys.uuid } },
-                )
-              }
-            }
-            if (e.toLowerCase().indexOf('kraken') !== -1) {
-              const findTheSameKeys = saveDataRequest.data.exchanges.find(
-                (u) =>
-                  decrypt(u.key) === key &&
-                  decrypt(u.secret) === secret &&
-                  ((u.provider === ExchangeEnum.krakenUsdm &&
-                    [ExchangeEnum.krakenCoinm].includes(e)) ||
-                    (u.provider === ExchangeEnum.krakenCoinm &&
-                      [ExchangeEnum.krakenUsdm].includes(e))),
               )
               if (findTheSameKeys) {
                 await userDb.updateData(

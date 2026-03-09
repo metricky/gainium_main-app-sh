@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.6] - 2026-03-09
+### Changed
+- Drop Kraken Coinm. 
+
 ## [1.14.5] - 2026-03-09
 ### Changed
 - Hedge bots list for big account. 

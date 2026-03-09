@@ -51,8 +51,6 @@ const providers = [
   ExchangeEnum.paperKraken,
   ExchangeEnum.krakenUsdm,
   ExchangeEnum.paperKrakenUsdm,
-  ExchangeEnum.krakenCoinm,
-  ExchangeEnum.paperKrakenCoinm,
 ]
 
 export const updateExchangeInfo = async (ec = ExchangeChooser) => {
