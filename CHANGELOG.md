@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.5] - 2026-03-09
+### Changed
+- Hedge bots list for big account. 
+
 ## [1.14.4] - 2026-03-06
 ### Changed
 - Kraken futures candles count. 

@@ -11107,10 +11107,21 @@ class Bot<T extends UserSchema = UserSchema> {
       skip = dataGridSkip
       sort = dataGridSort
     }
+    let _limit = Math.max(limit ?? 500, 500)
+    const user = await this.userDb.readData({ _id: userId })
+    if (user.status === StatusEnum.notok) {
+      return user
+    }
+    if (user.data?.result?.bigAccount) {
+      _limit = Math.max(limit ?? 1000, 1000)
+      if (typeof sort === 'undefined') {
+        sort = { status: -1 }
+      }
+    }
     const request = await hedgeComboBotDb.readData(
       { ...filter, isDeleted: { $ne: true } },
       undefined,
-      { sort, limit: limit ?? 500, skip, populate: 'bots' },
+      { sort, limit: _limit, skip, populate: 'bots' },
       true,
       true,
     )
@@ -11184,10 +11195,21 @@ class Bot<T extends UserSchema = UserSchema> {
       skip = dataGridSkip
       sort = dataGridSort
     }
+    let _limit = Math.max(limit ?? 500, 500)
+    const user = await this.userDb.readData({ _id: userId })
+    if (user.status === StatusEnum.notok) {
+      return user
+    }
+    if (user.data?.result?.bigAccount) {
+      _limit = Math.max(limit ?? 1000, 1000)
+      if (typeof sort === 'undefined') {
+        sort = { status: -1 }
+      }
+    }
     const request = await hedgeDCABotDb.readData(
       { ...filter, isDeleted: { $ne: true } },
       undefined,
-      { sort, limit: limit ?? 500, skip, populate: 'bots' },
+      { sort, limit: _limit, skip, populate: 'bots' },
       true,
       true,
     )
