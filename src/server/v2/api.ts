@@ -96,6 +96,11 @@ import {
   gridBacktestDb as gridBacktestResultDb,
 } from '../../db/dbInit'
 import { sendServerSideRequest } from '../../graphql/handlers/backtest'
+import {
+  botSchemaDefinitions,
+  indicatorDefinitions,
+  indicatorGroupFieldDefinitions,
+} from './definitions/generated'
 
 type APIMap = Map<
   string,
@@ -1238,6 +1243,315 @@ const v2API = <R extends UserSchema = UserSchema>(
       setTimeout(poll, 10_000)
     })
   }
+
+  /**
+   * GET /api/v2/discovery/bots
+   *
+   * Returns schema definitions for all bot types (dca, combo, grid).
+   * Each definition contains sections, and each section lists all fields
+   * with their type, validators, constraints and default value.
+   */
+  get.set('/api/v2/discovery/bots', {
+    middlewares: [],
+    handler: (_req, res) => {
+      return res.status(200).json({
+        status: StatusEnum.ok,
+        reason: null,
+        data: botSchemaDefinitions,
+      })
+    },
+  })
+
+  /**
+   * GET /api/v2/discovery/bots/:botType
+   *
+   * Returns the full schema definition for a single bot type.
+   * Optional query param ?section=<id> returns only that one section.
+   */
+  get.set('/api/v2/discovery/bots/:botType', {
+    middlewares: [],
+    handler: (req, res) => {
+      const { botType } = req.params
+      const { section } = req.query as { section?: string }
+      const schema = botSchemaDefinitions.find((s) => s.botType === botType)
+      if (!schema) {
+        return res.status(404).json({
+          status: StatusEnum.notok,
+          reason: `Unknown bot type "${botType}". Valid values: dca, combo, grid.`,
+          data: null,
+        })
+      }
+      if (section) {
+        const found = schema.sections.find((s) => s.id === section)
+        if (!found) {
+          const available = schema.sections.map((s) => s.id).join(', ')
+          return res.status(404).json({
+            status: StatusEnum.notok,
+            reason: `Section "${section}" not found for ${botType}. Available: ${available}.`,
+            data: null,
+          })
+        }
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: found,
+        })
+      }
+      return res.status(200).json({
+        status: StatusEnum.ok,
+        reason: null,
+        data: schema,
+      })
+    },
+  })
+
+  /**
+   * GET /api/v2/discovery/bots/:botType/sections
+   *
+   * Returns a lightweight summary of all sections for a bot type:
+   * id, name, description and field count — without full field definitions.
+   */
+  get.set('/api/v2/discovery/bots/:botType/sections', {
+    middlewares: [],
+    handler: (req, res) => {
+      const { botType } = req.params
+      const schema = botSchemaDefinitions.find((s) => s.botType === botType)
+      if (!schema) {
+        return res.status(404).json({
+          status: StatusEnum.notok,
+          reason: `Unknown bot type "${botType}". Valid values: dca, combo, grid.`,
+          data: null,
+        })
+      }
+      const data = schema.sections.map(({ id, name, description, fields }) => ({
+        id,
+        name,
+        description,
+        fieldCount: fields.length,
+      }))
+      return res.status(200).json({
+        status: StatusEnum.ok,
+        reason: null,
+        data,
+      })
+    },
+  })
+
+  // Supported candlestick intervals per exchange (values from ExchangeIntervals enum).
+  // Used to filter the indicatorInterval enum when ?exchange= is provided.
+  const ALL_INTERVALS = [
+    '1m',
+    '3m',
+    '5m',
+    '15m',
+    '30m',
+    '1h',
+    '2h',
+    '4h',
+    '8h',
+    '1d',
+    '1w',
+  ]
+  const EXCHANGE_INTERVAL_MAP: Record<string, string[]> = (() => {
+    const binance = [
+      '1m',
+      '3m',
+      '5m',
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+      '4h',
+      '8h',
+      '1d',
+      '1w',
+    ]
+    const bitget = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w']
+    const bybit = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d', '1w']
+    const kucoin = [
+      '1m',
+      '3m',
+      '5m',
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+      '4h',
+      '8h',
+      '1d',
+      '1w',
+    ]
+    const kucoinFutures = [
+      '1m',
+      '5m',
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+      '4h',
+      '8h',
+      '1d',
+      '1w',
+    ]
+    const okx = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d', '1w']
+    const coinbase = ['1m', '5m', '15m', '30m', '1h', '2h', '1d']
+    const mexc = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w']
+    const kraken = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w']
+    return {
+      binance,
+      binanceUS: binance,
+      paperBinance: binance,
+      binanceCoinm: binance,
+      binanceUsdm: binance,
+      paperBinanceCoinm: binance,
+      paperBinanceUsdm: binance,
+      bitget,
+      paperBitget: bitget,
+      bitgetUsdm: bitget,
+      bitgetCoinm: bitget,
+      paperBitgetUsdm: bitget,
+      paperBitgetCoinm: bitget,
+      bybit,
+      paperBybit: bybit,
+      bybitInverse: bybit,
+      bybitLinear: bybit,
+      paperBybitInverse: bybit,
+      paperBybitLinear: bybit,
+      kucoin,
+      paperKucoin: kucoin,
+      kucoinLinear: kucoinFutures,
+      kucoinInverse: kucoinFutures,
+      paperKucoinLinear: kucoinFutures,
+      paperKucoinInverse: kucoinFutures,
+      okx,
+      paperOkx: okx,
+      okxLinear: okx,
+      okxInverse: okx,
+      paperOkxLinear: okx,
+      paperOkxInverse: okx,
+      coinbase,
+      paperCoinbase: coinbase,
+      mexc,
+      paperMexc: mexc,
+      kraken,
+      paperKraken: kraken,
+      krakenUsdm: kraken,
+      krakenCoinm: kraken,
+      paperKrakenUsdm: kraken,
+      paperKrakenCoinm: kraken,
+    }
+  })()
+
+  // Group schema embedded in every full indicator detail response.
+  // Teaches an AI agent how to create indicatorGroups entries and link indicators to them.
+  const INDICATOR_GROUP_DEFINITION = {
+    description:
+      'Indicators must be placed in an indicator group. ' +
+      "The bot settings object contains two parallel arrays: 'indicators' and 'indicatorGroups'. " +
+      "Each indicator references its group via the 'groupId' field, which must equal the 'id' " +
+      "of an existing entry in 'indicatorGroups'. " +
+      "The group's 'action' must match the indicator's 'indicatorAction', and the group's 'section' " +
+      "must match the indicator's 'section'. " +
+      "The group's 'logic' ('and'/'or') controls how triggers are combined within that group. " +
+      'Multiple groups that share the same action+section are always ANDed together.',
+    rules: [
+      'Every indicator must have a non-empty groupId that equals the id of an entry in settings.indicatorGroups.',
+      'Never generate a groupId without first creating the corresponding group object.',
+      "A group's action must exactly equal the indicator's indicatorAction.",
+      "A group's section must exactly equal the indicator's section (or both must be absent/undefined).",
+      'Never mix indicators with different indicatorAction or section values in the same group.',
+      "Indicators within a group are combined using the group's logic field ('and' = all must trigger, 'or' = any must trigger).",
+      'Multiple groups for the same action+section are ANDed: every group must trigger before the condition fires.',
+    ],
+    fields: indicatorGroupFieldDefinitions,
+  }
+
+  /**
+   * GET /api/v2/discovery/indicators
+   *
+   * Returns a summary list of all supported indicator types.
+   *
+   * Query params:
+   * - action: filter to indicators whose supportedActions includes this value (e.g. "startDca")
+   * - exchange: when provided, adds a supportedIntervals field to each item
+   *   with the intervals available on that exchange (e.g. "binance")
+   */
+  get.set('/api/v2/discovery/indicators', {
+    middlewares: [],
+    handler: (req, res) => {
+      const { action, exchange } = req.query as Record<
+        string,
+        string | undefined
+      >
+      const intervals = exchange
+        ? (EXCHANGE_INTERVAL_MAP[exchange] ?? ALL_INTERVALS)
+        : null
+      let list = indicatorDefinitions
+      if (action) {
+        list = list.filter((i) => i.supportedActions.includes(action))
+      }
+      const summaries = list.map(
+        ({ type, name, description, supportedActions, supportedSections }) => ({
+          type,
+          name,
+          description,
+          supportedActions,
+          supportedSections,
+          ...(intervals ? { supportedIntervals: intervals } : {}),
+        }),
+      )
+      return res.status(200).json({
+        status: StatusEnum.ok,
+        reason: null,
+        data: summaries,
+      })
+    },
+  })
+
+  /**
+   * GET /api/v2/discovery/indicators/:type
+   *
+   * Returns the full field definition for a single indicator type.
+   *
+   * Query params:
+   * - exchange: when provided, filters the indicatorInterval enum in coreFields
+   *   to only include intervals supported by the given exchange (e.g. "binance")
+   */
+  get.set('/api/v2/discovery/indicators/:type', {
+    middlewares: [],
+    handler: (req, res) => {
+      const { type } = req.params
+      const { exchange } = req.query as Record<string, string | undefined>
+      const indicator = indicatorDefinitions.find((i) => i.type === type)
+      if (!indicator) {
+        return res.status(404).json({
+          status: StatusEnum.notok,
+          reason: `Unknown indicator type "${type}".`,
+          data: null,
+        })
+      }
+      if (exchange) {
+        const intervals = EXCHANGE_INTERVAL_MAP[exchange] ?? ALL_INTERVALS
+        const filtered = {
+          ...indicator,
+          groupDefinition: INDICATOR_GROUP_DEFINITION,
+          coreFields: indicator.coreFields.map((f) =>
+            f.name === 'indicatorInterval' ? { ...f, enum: intervals } : f,
+          ),
+        }
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: filtered,
+        })
+      }
+      return res.status(200).json({
+        status: StatusEnum.ok,
+        reason: null,
+        data: { ...indicator, groupDefinition: INDICATOR_GROUP_DEFINITION },
+      })
+    },
+  })
 
   /**
    * GET /api/v2/backtest/:botType/requests/:id
@@ -3978,6 +4292,184 @@ const v2API = <R extends UserSchema = UserSchema>(
             error instanceof Error
               ? error.message
               : 'Failed to estimate Grid backtest cost',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/backtest/:botType/validate
+   *
+   * Validate a bot settings payload using the exact same rules as the bot-creation
+   * endpoints, but without creating any DB record or dispatching to the backtest queue.
+   *
+   * Accepts the same body shape as POST /api/v2/backtest/:botType/request:
+   *   { payload: { data: { exchange, exchangeUUID, settings: { ... } } } }
+   *
+   * Runs, in order:
+   *   1. Bot type check
+   *   2. validateBotCreationContext  (exchange lookup, paper-context, user lookup)
+   *   3. Merge defaults (same as create endpoint for that botType)
+   *   4. validateCreateDCABotInput / validateCreateComboBotInput / validateCreateGridBotInput
+   *
+   * This gives AI agents a safe discover → build → validate → submit loop.
+   *
+   * URL params:
+   * - botType: dca | combo | grid
+   *
+   * Body: { payload: Omit<ServerSideBacktestPayload, 'type'> }  (same as submit endpoint)
+   *
+   * Response:
+   * - 200: Payload is valid — returns the normalised settings that would be submitted
+   * - 400: Validation error — includes field-level errors array
+   * - 401: Unauthorized
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/backtest/:botType/validate', {
+    middlewares: [paperContextMiddleware],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { botType } = req.params
+
+      // --- Step 1: bot type ---
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be dca, combo, or grid',
+          data: null,
+        })
+      }
+
+      // Unpack the same payload wrapper used by the submit endpoint
+      const { payload }: { payload: Omit<ServerSideBacktestPayload, 'type'> } =
+        req.body
+
+      if (!payload?.data) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'payload.data is required',
+          data: null,
+        })
+      }
+
+      // Flatten payload.data.settings + exchange / exchangeUUID into a single
+      // input object — the same shape that bot-creation endpoints expect.
+      const input = {
+        ...(payload.data.settings as Record<string, unknown>),
+        exchange: payload.data.exchange,
+        exchangeUUID: payload.data.exchangeUUID,
+      } as CreateDCABotInputRaw
+
+      // --- Step 2: context validation (exchange, paperContext, user) ---
+      const contextValidation = await validateBotCreationContext(
+        input as any,
+        user.id,
+        userDb,
+        res,
+        req.paperContext || false,
+      )
+      if (!contextValidation.valid) return
+
+      const { userData, exchange } = contextValidation
+
+      try {
+        // --- Step 3: merge defaults + Step 4: semantic validation ---
+        if (botType === 'dca') {
+          let settings: CreateDCABotInput = {
+            ...DCA_FORM_DEFAULTS,
+            ...input,
+            type: DCATypeEnum.regular,
+            ...addAditionalFields(input, exchange),
+          }
+          settings = addIndicatorsDefaults(settings)
+          settings = await replaceVarsInInput(settings, userData._id.toString())
+
+          const validate = await validateCreateDCABotInput(
+            settings,
+            input,
+            userData._id,
+          )
+          if (!validate.valid) {
+            return res.status(400).json({
+              status: StatusEnum.notok,
+              reason: 'Validation error',
+              errors: validate.errors,
+              data: null,
+            })
+          }
+          return res.status(200).json({
+            status: StatusEnum.ok,
+            reason: null,
+            data: { valid: true, botType, settings: sortFields(validate.data) },
+          })
+        }
+
+        if (botType === 'combo') {
+          let settings: CreateComboBotInput = {
+            ...COMBO_FORM_DEFAULTS,
+            ...input,
+            dealCloseCondition: CloseConditionEnum.tp,
+            dealCloseConditionSL: CloseConditionEnum.tp,
+            dcaCondition: DCAConditionEnum.percentage,
+            scaleDcaType: ScaleDcaTypeEnum.percentage,
+            type: DCATypeEnum.regular,
+            ...addAditionalFields(input, exchange),
+          }
+          settings = addIndicatorsDefaults(settings)
+          settings = await replaceVarsInInput(settings, userData._id.toString())
+
+          const validate = await validateCreateComboBotInput(
+            settings,
+            input,
+            userData._id,
+          )
+          if (!validate.valid) {
+            return res.status(400).json({
+              status: StatusEnum.notok,
+              reason: 'Validation error',
+              errors: validate.errors,
+              data: null,
+            })
+          }
+          return res.status(200).json({
+            status: StatusEnum.ok,
+            reason: null,
+            data: { valid: true, botType, settings: sortFields(validate.data) },
+          })
+        }
+
+        // grid
+        const gridInput = input as CreateGridBotInputRaw
+        const settings: CreateGridBotInput = {
+          ...GRID_FORM_DEFAULTS,
+          ...gridInput,
+          ...addAditionalFields(gridInput, exchange),
+        }
+        delete (settings as any).vars
+
+        const validate = await validateCreateGridBotInput(
+          settings as any,
+          gridInput as any,
+        )
+        if (!validate.valid) {
+          return res.status(400).json({
+            status: StatusEnum.notok,
+            reason: 'Validation error',
+            errors: validate.errors,
+            data: null,
+          })
+        }
+        return res.status(200).json({
+          status: StatusEnum.ok,
+          reason: null,
+          data: { valid: true, botType, settings: sortFields(validate.data) },
+        })
+      } catch (error) {
+        console.error(`Error validating ${botType} backtest payload:`, error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason: error instanceof Error ? error.message : 'Validation failed',
           data: null,
         })
       }

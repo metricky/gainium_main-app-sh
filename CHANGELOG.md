@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.14.7] - 2026-03-10
+### Added
+- Validation backtest endpoint.
+- Discovery endpoints.  
+
 ## [1.14.6] - 2026-03-09
 ### Changed
 - Drop Kraken Coinm. 

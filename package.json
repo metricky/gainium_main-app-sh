@@ -1,6 +1,6 @@
 {
   "name": "@gainium/main-app",
-  "version": "1.14.6",
+  "version": "1.14.7",
   "description": "Main app",
   "author": "Maksym Shamko",
   "private": true,
@@ -27,6 +27,7 @@
     "cli:reset-password": "node -r dotenv/config ./dist/src/cli/resetPassword.js",
     "generate:schemas": "ts-node src/utils/generate-openapi-schemas.ts",
     "generate:ai-docs": "ts-node src/utils/generate-ai-docs.ts",
+    "generate:definitions": "ts-node src/utils/generate-definitions.ts",
     "generate:docs": "npm run generate:schemas && npm run generate:ai-docs",
     "sort:openapi": "ts-node src/utils/sort-openapi.ts",
     "prepare": "husky"

@@ -84,7 +84,7 @@ export const maxStringLength = 200
 export const maxPrecision = 12
 
 // Field configurations for nested arrays
-type NestedFieldConfig = {
+export type NestedFieldConfig = {
   required?: boolean
   validators: ValidatorsEnum[]
   enum?: readonly string[]
