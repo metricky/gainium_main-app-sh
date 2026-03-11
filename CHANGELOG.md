@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.8] - 2026-03-11
+### Fixed
+- API v2 bugs.   
+
 ## [1.14.7] - 2026-03-10
 ### Added
 - Validation backtest endpoint.

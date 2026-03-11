@@ -11,7 +11,7 @@
  */
 
 import type { Request, Response } from 'express'
-import { Types } from 'mongoose'
+import { Types, isValidObjectId } from 'mongoose'
 import {
   StatusEnum,
   BotStatusEnum,
@@ -542,6 +542,109 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
+   * GET /api/v2/deals/:dealType/details
+   *
+   * Fetch a single deal by its ID.
+   * dealType: dca | combo | terminal
+   *
+   * Query params:
+   * - dealId: MongoDB ObjectId or UUID (required)
+   * - fields: Field selection (minimal|standard|extended|full|custom list)
+   *
+   * Headers:
+   * - paper-context: true|false (optional, defaults to false)
+   */
+  get.set('/api/v2/deals/:dealType/details', {
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('deals.dca'),
+    ],
+    handler: async (req, res) => {
+      const { dealType } = req.params
+      const { dealId }: { dealId?: string } = req.query
+
+      if (!['dca', 'combo', 'terminal'].includes(dealType)) {
+        res.status(400).send({
+          status: StatusEnum.notok,
+          reason: 'Invalid deal type. Must be one of: dca, combo, terminal',
+          data: null,
+        })
+        return
+      }
+
+      if (!dealId) {
+        res.status(400).send({
+          status: StatusEnum.notok,
+          reason: 'dealId query parameter is required',
+          data: null,
+        })
+        return
+      }
+
+      const user = req.userData
+      const fields = req.fieldSelection
+      const paperContext = req.paperContext || false
+
+      const filter: Record<string, any> = {
+        userId: user.id,
+        isDeleted: { $ne: true },
+        $or: [
+          { _id: isValidObjectId(dealId) ? new Types.ObjectId(dealId) : null },
+          { uuid: dealId },
+        ],
+      }
+
+      if (dealType === 'dca') {
+        filter.type = { $ne: 'terminal' }
+      } else if (dealType === 'terminal') {
+        filter.type = { $eq: 'terminal' }
+      }
+
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+
+      const projection = buildProjection(fields || null)
+
+      try {
+        const db = dealType === 'combo' ? comboDealsDb : dcaDealsDb
+
+        const result = await (db as typeof comboDealsDb).readData(
+          filter,
+          projection,
+          {},
+          false,
+          false,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          res.status(500).send(result)
+          return
+        }
+
+        if (!result.data?.result) {
+          res.status(404).send({
+            status: StatusEnum.notok,
+            reason: 'Deal not found',
+            data: null,
+          })
+          return
+        }
+
+        res.send({
+          status: StatusEnum.ok,
+          reason: null,
+          data: result.data.result,
+        })
+      } catch (error) {
+        res.status(500).send({
+          status: StatusEnum.notok,
+          reason: 'Internal server error',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
    * GET /api/v2/user/exchanges
    *
    * List user exchanges with field selection
@@ -889,6 +992,108 @@ const v2API = <R extends UserSchema = UserSchema>(
           reason: null,
           data: result.data.result,
           meta,
+        })
+      } catch (error) {
+        res.status(500).send({
+          status: StatusEnum.notok,
+          reason: 'Internal server error',
+          data: null,
+        })
+      }
+    },
+  })
+
+  /**
+   * GET /api/v2/bots/:botType/details
+   *
+   * Fetch a single bot by its ID.
+   * botType: dca | combo | grid
+   *
+   * Query params:
+   * - botId: MongoDB ObjectId or UUID (required)
+   * - fields: Field selection (minimal|standard|extended|full|custom list)
+   *
+   * Headers:
+   * - paper-context: true|false (optional, defaults to false)
+   */
+  get.set('/api/v2/bots/:botType/details', {
+    middlewares: [
+      paperContextMiddleware,
+      ...fieldSelectionMiddlewares('bots.dca'), // field presets are the same across all bot types
+    ],
+    handler: async (req, res) => {
+      const { botType } = req.params
+      const { botId }: { botId?: string } = req.query
+
+      if (!['dca', 'combo', 'grid'].includes(botType)) {
+        res.status(400).send({
+          status: StatusEnum.notok,
+          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+          data: null,
+        })
+        return
+      }
+
+      if (!botId) {
+        res.status(400).send({
+          status: StatusEnum.notok,
+          reason: 'botId query parameter is required',
+          data: null,
+        })
+        return
+      }
+
+      const user = req.userData
+      const fields = req.fieldSelection
+      const paperContext = req.paperContext || false
+
+      const filter: Record<string, any> = {
+        userId: user.id,
+        isDeleted: { $ne: true },
+        $or: [
+          { _id: isValidObjectId(botId) ? new Types.ObjectId(botId) : null },
+          { uuid: botId },
+        ],
+      }
+
+      filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+
+      const projection = buildProjection(fields || null)
+
+      try {
+        const db =
+          botType === 'combo'
+            ? comboBotDb
+            : botType === 'grid'
+              ? botDb
+              : dcaBotDb
+
+        const result = await (db as typeof comboBotDb).readData(
+          filter,
+          projection,
+          {},
+          false,
+          false,
+        )
+
+        if (result.status === StatusEnum.notok) {
+          res.status(500).send(result)
+          return
+        }
+
+        if (!result.data?.result) {
+          res.status(404).send({
+            status: StatusEnum.notok,
+            reason: 'Bot not found',
+            data: null,
+          })
+          return
+        }
+
+        res.send({
+          status: StatusEnum.ok,
+          reason: null,
+          data: result.data.result,
         })
       } catch (error) {
         res.status(500).send({
@@ -1959,6 +2164,7 @@ const v2API = <R extends UserSchema = UserSchema>(
       let settings: CreateDCABotInput = {
         ...DCA_FORM_DEFAULTS,
         ...input,
+        pair: [input.pair ?? ''].flat(),
         dcaCondition: DCAConditionEnum.percentage,
         scaleDcaType: ScaleDcaTypeEnum.percentage,
         startCondition: StartConditionEnum.asap,
@@ -2460,18 +2666,28 @@ const v2API = <R extends UserSchema = UserSchema>(
           }
         }
 
-        const updateMethod =
-          botType === 'combo' ? Bot.changeComboBot : Bot.changeDCABot
-        const result = await updateMethod(
-          {
-            ...rest,
-            pair: pairToUse,
-            id: botId,
-            vars: bot.data.result.vars,
-          },
-          user.id,
-          !!bot.data.result.paperContext,
-        )
+        const result =
+          botType === 'combo'
+            ? await Bot.changeComboBot(
+                {
+                  ...rest,
+                  pair: pairToUse,
+                  id: botId,
+                  vars: bot.data.result.vars,
+                },
+                user.id,
+                !!bot.data.result.paperContext,
+              )
+            : await Bot.changeDCABot(
+                {
+                  ...rest,
+                  pair: pairToUse,
+                  id: botId,
+                  vars: bot.data.result.vars,
+                },
+                user.id,
+                !!bot.data.result.paperContext,
+              )
 
         if (result && result.status === StatusEnum.notok) {
           return res.status(400).json(result)
@@ -3114,19 +3330,28 @@ const v2API = <R extends UserSchema = UserSchema>(
             paperContext,
           )
         } else {
-          const createMethod =
-            botType === 'combo' ? Bot.createComboBot : Bot.createDCABot
-
-          result = await createMethod(
-            userData.data.result._id.toString(),
-            {
-              ...Bot.removeNullableValuesFromSettings(combinedSettings),
-              exchange: sourceBot.exchange,
-              exchangeUUID: sourceBot.exchangeUUID,
-              vars,
-            } as any,
-            paperContext,
-          )
+          result =
+            botType === 'combo'
+              ? await Bot.createComboBot(
+                  userData.data.result._id.toString(),
+                  {
+                    ...Bot.removeNullableValuesFromSettings(combinedSettings),
+                    exchange: sourceBot.exchange,
+                    exchangeUUID: sourceBot.exchangeUUID,
+                    vars,
+                  } as any,
+                  paperContext,
+                )
+              : await Bot.createDCABot(
+                  userData.data.result._id.toString(),
+                  {
+                    ...Bot.removeNullableValuesFromSettings(combinedSettings),
+                    exchange: sourceBot.exchange,
+                    exchangeUUID: sourceBot.exchangeUUID,
+                    vars,
+                  } as any,
+                  paperContext,
+                )
         }
 
         if (result.status === StatusEnum.notok) {
@@ -3284,12 +3509,10 @@ const v2API = <R extends UserSchema = UserSchema>(
         }
 
         // Update deal settings
-        const updateMethod =
+        const result =
           dealType === 'combo'
-            ? Bot.updateComboDealSettings
-            : Bot.updateDCADealSettings
-
-        const result = await updateMethod(user.id, '', dealId, settings)
+            ? await Bot.updateComboDealSettings(user.id, '', dealId, settings)
+            : await Bot.updateDCADealSettings(user.id, '', dealId, settings)
 
         return res.status(200).json(result)
       } catch (error) {
@@ -3665,12 +3888,15 @@ const v2API = <R extends UserSchema = UserSchema>(
           reason: 'Failed to retrieve pairs for exchange',
         }
       }
-      const foundPairs = pairs.data.result.filter((p) =>
-        [payload.data.settings.pair].flat().some((pp) => {
+      const foundPairs = [payload.data.settings.pair]
+        .flat()
+        .map((pp) => {
           const [base, quote] = pp.split('_')
-          return p.baseAsset.name === base && p.quoteAsset.name === quote
-        }),
-      )
+          return pairs.data.result?.find(
+            (p) => p.baseAsset.name === base && p.quoteAsset.name === quote,
+          )
+        })
+        .filter((p): p is (typeof pairs.data.result)[0] => !!p)
       if (foundPairs.length !== payload.data.settings.pair.length) {
         return {
           status: StatusEnum.notok,

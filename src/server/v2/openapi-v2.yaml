@@ -764,6 +764,29 @@ components:
             - LONG
             - SHORT
           example: LONG
+    BotSchemaDefinition:
+      type: object
+      required:
+        - botType
+        - label
+        - description
+        - sections
+      properties:
+        botType:
+          type: string
+          enum:
+            - dca
+            - combo
+            - grid
+        label:
+          type: string
+          example: DCA Bot
+        description:
+          type: string
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/SectionDefinition"
     BotSettings:
       description: BotSettings configuration
       allOf:
@@ -2602,6 +2625,67 @@ components:
                 - real
                 - paper
               example: real
+    FieldDefinition:
+      type: object
+      description: >
+        Describes a single field on a bot settings or indicator object. `type` is the runtime JS type; `validators` are
+        the constraint labels; `enum` lists allowed values when type = "enum".
+      required:
+        - name
+        - type
+        - required
+        - validators
+      properties:
+        name:
+          type: string
+          example: tpPerc
+        type:
+          type: string
+          enum:
+            - string
+            - number
+            - numberInString
+            - boolean
+            - enum
+            - array
+            - object
+            - Date
+          example: numberInString
+        required:
+          type: boolean
+          example: false
+        validators:
+          type: array
+          items:
+            type: string
+          example:
+            - mustBeString
+            - mustBeValidNumber
+            - mustBePositive
+        enum:
+          type: array
+          items:
+            type: string
+          description: Allowed values, only present when type = "enum"
+        itemType:
+          type: string
+          description: Element type when type = "array"
+        min:
+          type: number
+        max:
+          type: number
+        maxPrecision:
+          type: number
+        maxLength:
+          type: number
+        default:
+          description: Default value used when field is omitted
+        note:
+          type: string
+          description: Extra human-readable usage guidance
+        example:
+          description: Representative example value
+          example: "2.5"
     GlobalVariable:
       type: object
       description: Global variable
@@ -2837,6 +2921,109 @@ components:
               type: number
               description: Last update timestamp
               example: 1705391999999
+    IndicatorDefinition:
+      allOf:
+        - $ref: "#/components/schemas/IndicatorSummary"
+        - type: object
+          required:
+            - coreFields
+            - typeSpecificFields
+            - example
+            - groupDefinition
+          properties:
+            coreFields:
+              type: array
+              description: Fields required for every indicator regardless of type
+              items:
+                $ref: "#/components/schemas/FieldDefinition"
+            typeSpecificFields:
+              type: array
+              description: Additional fields for this specific indicator type
+              items:
+                $ref: "#/components/schemas/FieldDefinition"
+            example:
+              type: object
+              description: Minimal valid indicator object for this type
+            groupDefinition:
+              $ref: "#/components/schemas/IndicatorGroupDefinition"
+    IndicatorGroupDefinition:
+      type: object
+      required:
+        - description
+        - rules
+        - fields
+      description: >-
+        Documents the indicatorGroups mechanism. Every indicator must reference a group via its groupId field. The group
+        object lives in the settings.indicatorGroups array and ties one or more indicators together under a shared
+        action+section with AND/OR logic.
+      properties:
+        description:
+          type: string
+          description: Plain-English explanation of how groups work and why they are required.
+        rules:
+          type: array
+          description: >-
+            Validation rules that must hold between each indicator and its group. An AI agent must follow all of these
+            when constructing bot settings.
+          items:
+            type: string
+          example:
+            - Every indicator must have a non-empty groupId that equals the id of an entry in settings.indicatorGroups.
+            - A group's action must exactly equal the indicator's indicatorAction.
+            - A group's section must exactly equal the indicator's section (or both must be absent/undefined).
+            - Never mix indicators with different indicatorAction or section values in the same group.
+            - Indicators within a group are combined using the group's logic field ('and' or 'or').
+            - Multiple groups for the same action+section are ANDed together.
+        fields:
+          type: array
+          description: Field definitions for a single IndicatorGroup object in settings.indicatorGroups.
+          items:
+            $ref: "#/components/schemas/FieldDefinition"
+    IndicatorSummary:
+      type: object
+      required:
+        - type
+        - name
+        - supportedActions
+      properties:
+        type:
+          type: string
+          example: RSI
+        name:
+          type: string
+          example: Relative Strength Index (RSI)
+        description:
+          type: string
+        supportedActions:
+          type: array
+          items:
+            type: string
+          example:
+            - startDeal
+            - closeDeal
+            - startDca
+            - stopBot
+            - startBot
+        supportedSections:
+          type: array
+          items:
+            type: string
+        supportedIntervals:
+          type: array
+          description: >-
+            Only present when the `?exchange=` query parameter is supplied. Lists the candlestick intervals available on
+            that exchange.
+          items:
+            type: string
+          example:
+            - 1m
+            - 5m
+            - 15m
+            - 30m
+            - 1h
+            - 4h
+            - 1d
+            - 1w
     MultiTP:
       type: object
       properties:
@@ -3029,6 +3216,46 @@ components:
               type: string
               description: Coin category
               example: Layer 1
+    SectionDefinition:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - fields
+      properties:
+        id:
+          type: string
+          example: take_profit
+        name:
+          type: string
+          example: Take Profit
+        description:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/FieldDefinition"
+    SectionSummary:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - fieldCount
+      properties:
+        id:
+          type: string
+          example: take_profit
+        name:
+          type: string
+          example: Take Profit
+        description:
+          type: string
+        fieldCount:
+          type: integer
+          description: Number of fields in this section
+          example: 12
     ServerSideBacktestPayload:
       oneOf:
         - type: object
@@ -4557,186 +4784,6 @@ components:
               uuid:
                 type: string
                 description: Unique Id of the level
-    FieldDefinition:
-      type: object
-      description: >
-        Describes a single field on a bot settings or indicator object.
-        `type` is the runtime JS type; `validators` are the constraint labels;
-        `enum` lists allowed values when type = "enum".
-      required:
-        - name
-        - type
-        - required
-        - validators
-      properties:
-        name:
-          type: string
-          example: tpPerc
-        type:
-          type: string
-          enum: [string, number, numberInString, boolean, enum, array, object, Date]
-          example: numberInString
-        required:
-          type: boolean
-          example: false
-        validators:
-          type: array
-          items:
-            type: string
-          example: ["mustBeString", "mustBeValidNumber", "mustBePositive"]
-        enum:
-          type: array
-          items:
-            type: string
-          description: Allowed values, only present when type = "enum"
-        itemType:
-          type: string
-          description: Element type when type = "array"
-        min:
-          type: number
-        max:
-          type: number
-        maxPrecision:
-          type: number
-        maxLength:
-          type: number
-        default:
-          description: Default value used when field is omitted
-        note:
-          type: string
-          description: Extra human-readable usage guidance
-        example:
-          description: Representative example value
-          example: "2.5"
-    SectionDefinition:
-      type: object
-      required: [id, name, description, fields]
-      properties:
-        id:
-          type: string
-          example: take_profit
-        name:
-          type: string
-          example: Take Profit
-        description:
-          type: string
-        fields:
-          type: array
-          items:
-            $ref: "#/components/schemas/FieldDefinition"
-    BotSchemaDefinition:
-      type: object
-      required: [botType, label, description, sections]
-      properties:
-        botType:
-          type: string
-          enum: [dca, combo, grid]
-        label:
-          type: string
-          example: DCA Bot
-        description:
-          type: string
-        sections:
-          type: array
-          items:
-            $ref: "#/components/schemas/SectionDefinition"
-    IndicatorSummary:
-      type: object
-      required: [type, name, supportedActions]
-      properties:
-        type:
-          type: string
-          example: RSI
-        name:
-          type: string
-          example: Relative Strength Index (RSI)
-        description:
-          type: string
-        supportedActions:
-          type: array
-          items:
-            type: string
-          example: [startDeal, closeDeal, startDca, stopBot, startBot]
-        supportedSections:
-          type: array
-          items:
-            type: string
-        supportedIntervals:
-          type: array
-          description: >-
-            Only present when the `?exchange=` query parameter is supplied.
-            Lists the candlestick intervals available on that exchange.
-          items:
-            type: string
-          example: ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
-    IndicatorDefinition:
-      allOf:
-        - $ref: "#/components/schemas/IndicatorSummary"
-        - type: object
-          required: [coreFields, typeSpecificFields, example, groupDefinition]
-          properties:
-            coreFields:
-              type: array
-              description: Fields required for every indicator regardless of type
-              items:
-                $ref: "#/components/schemas/FieldDefinition"
-            typeSpecificFields:
-              type: array
-              description: Additional fields for this specific indicator type
-              items:
-                $ref: "#/components/schemas/FieldDefinition"
-            example:
-              type: object
-              description: Minimal valid indicator object for this type
-            groupDefinition:
-              $ref: "#/components/schemas/IndicatorGroupDefinition"
-    IndicatorGroupDefinition:
-      type: object
-      required: [description, rules, fields]
-      description: >-
-        Documents the indicatorGroups mechanism. Every indicator must reference
-        a group via its groupId field. The group object lives in the
-        settings.indicatorGroups array and ties one or more indicators together
-        under a shared action+section with AND/OR logic.
-      properties:
-        description:
-          type: string
-          description: Plain-English explanation of how groups work and why they are required.
-        rules:
-          type: array
-          description: >-
-            Validation rules that must hold between each indicator and its group.
-            An AI agent must follow all of these when constructing bot settings.
-          items:
-            type: string
-          example:
-            - "Every indicator must have a non-empty groupId that equals the id of an entry in settings.indicatorGroups."
-            - "A group's action must exactly equal the indicator's indicatorAction."
-            - "A group's section must exactly equal the indicator's section (or both must be absent/undefined)."
-            - "Never mix indicators with different indicatorAction or section values in the same group."
-            - "Indicators within a group are combined using the group's logic field ('and' or 'or')."
-            - "Multiple groups for the same action+section are ANDed together."
-        fields:
-          type: array
-          description: Field definitions for a single IndicatorGroup object in settings.indicatorGroups.
-          items:
-            $ref: "#/components/schemas/FieldDefinition"
-    SectionSummary:
-      type: object
-      required: [id, name, description, fieldCount]
-      properties:
-        id:
-          type: string
-          example: take_profit
-        name:
-          type: string
-          example: Take Profit
-        description:
-          type: string
-        fieldCount:
-          type: integer
-          description: Number of fields in this section
-          example: 12
   responses:
     BadRequest:
       description: Bad request - invalid parameters
@@ -4762,198 +4809,16 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Not found - the requested resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            status: NOTOK
+            reason: Bot not found
 paths:
-  /api/v2/discovery/bots:
-    get:
-      summary: List all bot schema definitions
-      description: >
-        Returns schema definitions for all bot types (dca, combo, grid).
-        Each definition contains sections; each section contains fields with
-        type, validators, constraints, default value and an example.
-        Use this endpoint to understand what fields a bot creation/update payload accepts.
-      tags:
-        - Discovery
-      operationId: getDiscoveryBots
-      security: []
-      responses:
-        "200":
-          description: Bot schema definitions
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/APIResponse"
-                  - type: object
-                    properties:
-                      data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/BotSchemaDefinition"
-  /api/v2/discovery/bots/{botType}:
-    get:
-      summary: Get schema definition for a single bot type
-      description: >
-        Returns the full schema for the given bot type.
-        Pass `?section=<id>` to retrieve only a single section (e.g. `?section=take_profit`).
-      tags:
-        - Discovery
-      operationId: getDiscoveryBot
-      security: []
-      parameters:
-        - name: botType
-          in: path
-          required: true
-          schema:
-            type: string
-            enum: [dca, combo, grid]
-        - name: section
-          in: query
-          required: false
-          description: If provided, returns only the matching section instead of the full schema.
-          schema:
-            type: string
-          example: take_profit
-      responses:
-        "200":
-          description: Bot schema definition (or single section when ?section= is used)
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/APIResponse"
-                  - type: object
-                    properties:
-                      data:
-                        oneOf:
-                          - $ref: "#/components/schemas/BotSchemaDefinition"
-                          - $ref: "#/components/schemas/SectionDefinition"
-        "404":
-          $ref: "#/components/responses/NotFound"
-  /api/v2/discovery/bots/{botType}/sections:
-    get:
-      summary: List sections for a bot type
-      description: >
-        Returns a lightweight summary of every section for the given bot type:
-        `id`, `name`, `description`, and `fieldCount`.
-        Use this to discover available section ids before requesting a specific one
-        with `GET /api/v2/discovery/bots/{botType}?section={id}`.
-      tags:
-        - Discovery
-      operationId: getDiscoveryBotSections
-      security: []
-      parameters:
-        - name: botType
-          in: path
-          required: true
-          schema:
-            type: string
-            enum: [dca, combo, grid]
-      responses:
-        "200":
-          description: Section summaries
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/APIResponse"
-                  - type: object
-                    properties:
-                      data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/SectionSummary"
-        "404":
-          $ref: "#/components/responses/NotFound"
-  /api/v2/discovery/indicators:
-    get:
-      summary: List all indicator types
-      description: >
-        Returns a summary of every supported indicator type: its type key,
-        display name, description, supported actions and sections.
-        Use `GET /api/v2/discovery/indicators/{type}` to get full field definitions.
-        Filter by `?action=` to narrow to indicators usable in a specific context.
-        Pass `?exchange=` to include a `supportedIntervals` field on each item.
-      tags:
-        - Discovery
-      operationId: getDiscoveryIndicators
-      security: []
-      parameters:
-        - name: action
-          in: query
-          required: false
-          description: >-
-            Filter indicators to those whose `supportedActions` list includes
-            this value (e.g. `startDca`, `closeDeal`, `stopBot`).
-          schema:
-            type: string
-          example: startDca
-        - name: exchange
-          in: query
-          required: false
-          description: >-
-            When provided, each summary item will include a `supportedIntervals`
-            array listing the candlestick intervals available on that exchange
-            (e.g. `binance`, `bybit`, `kucoin`).
-          schema:
-            type: string
-          example: binance
-      responses:
-        "200":
-          description: Indicator summary list
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/APIResponse"
-                  - type: object
-                    properties:
-                      data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/IndicatorSummary"
-  /api/v2/discovery/indicators/{type}:
-    get:
-      summary: Get full field definition for an indicator type
-      description: >
-        Returns the complete field definition for a single indicator type,
-        including core fields (shared by all indicators) and type-specific fields.
-        Pass `?exchange=` to restrict the `indicatorInterval` enum in `coreFields`
-        to only the intervals supported by that exchange.
-      tags:
-        - Discovery
-      operationId: getDiscoveryIndicator
-      security: []
-      parameters:
-        - name: type
-          in: path
-          required: true
-          schema:
-            type: string
-          example: RSI
-        - name: exchange
-          in: query
-          required: false
-          description: >-
-            When provided, the `indicatorInterval` field enum in `coreFields`
-            is filtered to only include intervals supported by the given exchange
-            (e.g. `binance`, `bybit`, `kucoin`).
-          schema:
-            type: string
-          example: binance
-      responses:
-        "200":
-          description: Indicator definition with core and type-specific fields
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/APIResponse"
-                  - type: object
-                    properties:
-                      data:
-                        $ref: "#/components/schemas/IndicatorDefinition"
-        "404":
-          $ref: "#/components/responses/NotFound"
   /api/v2/backtest/combo/requests/{id}:
     get:
       summary: Get Combo Backtest Request by ID
@@ -5020,6 +4885,46 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /api/v2/bots/combo/details:
+    get:
+      summary: Get Combo Bot by ID
+      description: |
+        Retrieve a single Combo bot by its MongoDB ObjectId or UUID.
+
+        Supports the same field selection presets as `GET /api/v2/bots/combo`.
+      tags:
+        - Bots - Combo
+      operationId: getComboBotById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: botId
+          in: query
+          required: true
+          description: Bot MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single Combo bot object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ComboBot"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v2/bots/combo:
     get:
       summary: Get Combo Bots
@@ -5163,6 +5068,46 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/v2/deals/combo/details:
+    get:
+      summary: Get Combo Deal by ID
+      description: |
+        Retrieve a single Combo deal by its MongoDB ObjectId or UUID.
+
+        Supports the same field selection presets as `GET /api/v2/deals/combo`.
+      tags:
+        - Deals - Combo
+      operationId: getComboDealById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: dealId
+          in: query
+          required: true
+          description: Deal MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single Combo deal object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Deal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v2/deals/combo:
     get:
       summary: Get Combo Deals
@@ -5218,6 +5163,46 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/v2/bots/dca/details:
+    get:
+      summary: Get DCA Bot by ID
+      description: |
+        Retrieve a single DCA bot by its MongoDB ObjectId or UUID.
+
+        Supports the same field selection presets as `GET /api/v2/bots/dca`.
+      tags:
+        - Bots - DCA
+      operationId: getDCABotById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: botId
+          in: query
+          required: true
+          description: Bot MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single DCA bot object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DCABot"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v2/bots/dca:
     get:
       summary: Get DCA Bots
@@ -5490,6 +5475,46 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/v2/deals/dca/details:
+    get:
+      summary: Get DCA Deal by ID
+      description: |
+        Retrieve a single DCA deal by its MongoDB ObjectId or UUID.
+
+        Supports the same field selection presets as `GET /api/v2/deals/dca`.
+      tags:
+        - Deals - DCA
+      operationId: getDCADealById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: dealId
+          in: query
+          required: true
+          description: Deal MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single DCA deal object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Deal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v2/deals/dca:
     get:
       summary: Get DCA Deals
@@ -5686,6 +5711,197 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /api/v2/discovery/bots/{botType}:
+    get:
+      summary: Get schema definition for a single bot type
+      description: >
+        Returns the full schema for the given bot type. Pass `?section=<id>` to retrieve only a single section (e.g.
+        `?section=take_profit`).
+      tags:
+        - Discovery
+      operationId: getDiscoveryBot
+      security: []
+      parameters:
+        - name: botType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - dca
+              - combo
+              - grid
+        - name: section
+          in: query
+          required: false
+          description: If provided, returns only the matching section instead of the full schema.
+          schema:
+            type: string
+          example: take_profit
+      responses:
+        "200":
+          description: Bot schema definition (or single section when ?section= is used)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/BotSchemaDefinition"
+                          - $ref: "#/components/schemas/SectionDefinition"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v2/discovery/bots/{botType}/sections:
+    get:
+      summary: List sections for a bot type
+      description: >
+        Returns a lightweight summary of every section for the given bot type: `id`, `name`, `description`, and
+        `fieldCount`. Use this to discover available section ids before requesting a specific one with `GET
+        /api/v2/discovery/bots/{botType}?section={id}`.
+      tags:
+        - Discovery
+      operationId: getDiscoveryBotSections
+      security: []
+      parameters:
+        - name: botType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - dca
+              - combo
+              - grid
+      responses:
+        "200":
+          description: Section summaries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/SectionSummary"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v2/discovery/bots:
+    get:
+      summary: List all bot schema definitions
+      description: >
+        Returns schema definitions for all bot types (dca, combo, grid). Each definition contains sections; each section
+        contains fields with type, validators, constraints, default value and an example. Use this endpoint to
+        understand what fields a bot creation/update payload accepts.
+      tags:
+        - Discovery
+      operationId: getDiscoveryBots
+      security: []
+      responses:
+        "200":
+          description: Bot schema definitions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/BotSchemaDefinition"
+  /api/v2/discovery/indicators/{type}:
+    get:
+      summary: Get full field definition for an indicator type
+      description: >
+        Returns the complete field definition for a single indicator type, including core fields (shared by all
+        indicators) and type-specific fields. Pass `?exchange=` to restrict the `indicatorInterval` enum in `coreFields`
+        to only the intervals supported by that exchange.
+      tags:
+        - Discovery
+      operationId: getDiscoveryIndicator
+      security: []
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+          example: RSI
+        - name: exchange
+          in: query
+          required: false
+          description: >-
+            When provided, the `indicatorInterval` field enum in `coreFields` is filtered to only include intervals
+            supported by the given exchange (e.g. `binance`, `bybit`, `kucoin`).
+          schema:
+            type: string
+          example: binance
+      responses:
+        "200":
+          description: Indicator definition with core and type-specific fields
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/IndicatorDefinition"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v2/discovery/indicators:
+    get:
+      summary: List all indicator types
+      description: >
+        Returns a summary of every supported indicator type: its type key, display name, description, supported actions
+        and sections. Use `GET /api/v2/discovery/indicators/{type}` to get full field definitions. Filter by `?action=`
+        to narrow to indicators usable in a specific context. Pass `?exchange=` to include a `supportedIntervals` field
+        on each item.
+      tags:
+        - Discovery
+      operationId: getDiscoveryIndicators
+      security: []
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: >-
+            Filter indicators to those whose `supportedActions` list includes this value (e.g. `startDca`, `closeDeal`,
+            `stopBot`).
+          schema:
+            type: string
+          example: startDca
+        - name: exchange
+          in: query
+          required: false
+          description: >-
+            When provided, each summary item will include a `supportedIntervals` array listing the candlestick intervals
+            available on that exchange (e.g. `binance`, `bybit`, `kucoin`).
+          schema:
+            type: string
+          example: binance
+      responses:
+        "200":
+          description: Indicator summary list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/IndicatorSummary"
   /api/v2/backtest/grid/requests/{id}:
     get:
       summary: Get Grid Backtest Request by ID
@@ -5752,6 +5968,46 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /api/v2/bots/grid/details:
+    get:
+      summary: Get Grid Bot by ID
+      description: |
+        Retrieve a single Grid bot by its MongoDB ObjectId or UUID.
+
+        Supports the same field selection presets as `GET /api/v2/bots/grid`.
+      tags:
+        - Bots - Grid
+      operationId: getGridBotById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: botId
+          in: query
+          required: true
+          description: Bot MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single Grid bot object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/GridBot"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v2/bots/grid:
     get:
       summary: Get Grid Bots
@@ -6078,6 +6334,46 @@ paths:
               example:
                 status: NOTOK
                 reason: Screener access requires active subscription
+  /api/v2/deals/terminal/details:
+    get:
+      summary: Get Terminal Deal by ID
+      description: |
+        Retrieve a single Terminal deal by its MongoDB ObjectId or UUID.
+
+        Supports the same field selection presets as `GET /api/v2/deals/terminal`.
+      tags:
+        - Terminal
+      operationId: getTerminalDealById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: dealId
+          in: query
+          required: true
+          description: Deal MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single Terminal deal object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Deal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v2/deals/terminal:
     get:
       summary: Get Terminal Deals
@@ -7032,198 +7328,6 @@ paths:
                       allowed: false
         "400":
           $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-  /api/v2/backtest/{botType}/validate:
-    post:
-      summary: Validate bot settings without creating a bot or backtest
-      description: |
-        Runs the **exact same validation** as `POST /api/v2/bots/{botType}` but
-        does **not** create a bot, DB record, or dispatch to the backtest queue.
-
-        Validation steps performed (in order):
-        1. Bot type check (`dca`, `combo`, `grid`)
-        2. Exchange / paper-context / user lookup (`validateBotCreationContext`)
-        3. Default-settings merge (same defaults as the create endpoint)
-        4. Full semantic field validation (`validateCreateDCABotInput` / `validateCreateComboBotInput` / `validateCreateGridBotInput`)
-
-        On success the response includes the **normalised settings object** that
-        would be passed to the backtest — useful for confirming exactly what the
-        platform would use after defaults are applied.
-
-        This endpoint is designed for the AI-agent workflow:
-        **discover schema → build settings → validate → submit backtest**
-
-        Requires write permission of API keys.
-      tags:
-        - Backtest
-      operationId: validateBacktestPayload
-      parameters:
-        - name: botType
-          in: path
-          required: true
-          description: Type of bot to validate
-          schema:
-            type: string
-            enum: [dca, combo, grid]
-          example: dca
-        - $ref: "#/components/parameters/PaperContextHeader"
-      requestBody:
-        required: true
-        description: >-
-          Same body shape as `POST /api/v2/backtest/{botType}/request`.
-          The `settings` object inside `payload.data` is the bot configuration
-          to validate.
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - payload
-              properties:
-                payload:
-                  type: object
-                  required: [data]
-                  properties:
-                    data:
-                      type: object
-                      required: [exchange, exchangeUUID, settings]
-                      properties:
-                        exchange:
-                          type: string
-                          description: Exchange identifier
-                          example: binance
-                        exchangeUUID:
-                          type: string
-                          format: uuid
-                          description: UUID of the exchange account to validate against
-                          example: 550e8400-e29b-41d4-a716-446655440000
-                        settings:
-                          type: object
-                          description: >-
-                            Bot settings to validate. Must include at minimum `pair` (array).
-                            All other fields are optional and will be filled with defaults.
-                          required: [pair]
-                          properties:
-                            pair:
-                              type: array
-                              items:
-                                type: string
-                              description: Trading pair(s) in BASE_QUOTE format
-                              example: ["BTC_USDT"]
-                          additionalProperties: true
-                        from:
-                          type: integer
-                          description: Backtest start timestamp (ms) — optional for validation
-                          example: 1640995200000
-                        to:
-                          type: integer
-                          description: Backtest end timestamp (ms) — optional for validation
-                          example: 1672531199000
-                        interval:
-                          type: string
-                          description: Chart interval — optional for validation
-                          example: 1h
-            example:
-              payload:
-                data:
-                  exchange: binance
-                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
-                  settings:
-                    name: My DCA Bot
-                    pair:
-                      - BTC_USDT
-                    strategy: LONG
-                  from: 1640995200000
-                  to: 1672531199000
-                  interval: 1h
-      responses:
-        "200":
-          description: Settings are valid — returns the normalised settings that would be submitted
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/APIResponse"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        required: [valid, botType, settings]
-                        properties:
-                          valid:
-                            type: boolean
-                            example: true
-                          botType:
-                            type: string
-                            example: dca
-                          settings:
-                            type: object
-                            description: >-
-                              Normalised bot settings after defaults are applied.
-                              This is the exact object that would be passed to the backtest.
-              example:
-                status: OK
-                reason: null
-                data:
-                  valid: true
-                  botType: dca
-                  settings:
-                    exchange: binance
-                    pair: ["BTCUSDT"]
-                    strategy: LONG
-                    baseOrderSize: "100"
-                    takeProfit: "2"
-        "400":
-          description: Validation failed
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: NOTOK
-                  reason:
-                    type: string
-                    example: Validation error
-                  errors:
-                    type: array
-                    description: Field-level validation errors (same format as bot create endpoints)
-                    items:
-                      type: object
-                      properties:
-                        field:
-                          type: string
-                        message:
-                          type: string
-              examples:
-                invalid_bot_type:
-                  summary: Invalid bot type
-                  value:
-                    status: NOTOK
-                    reason: "Invalid bot type. Must be dca, combo, or grid"
-                    errors: null
-                field_errors:
-                  summary: Field-level validation errors
-                  value:
-                    status: NOTOK
-                    reason: Validation error
-                    errors:
-                      - field: takeProfit
-                        message: Must be greater than 0
-                      - field: baseOrderSize
-                        message: Must be a positive number
-                missing_exchange:
-                  summary: Exchange not found
-                  value:
-                    status: NOTOK
-                    reason: Exchange not found
-                    errors: null
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -8200,6 +8304,223 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
+  /api/v2/backtest/{botType}/validate:
+    post:
+      summary: Validate bot settings without creating a bot or backtest
+      description: >
+        Runs the **exact same validation** as `POST /api/v2/bots/{botType}` but
+
+        does **not** create a bot, DB record, or dispatch to the backtest queue.
+
+
+        Validation steps performed (in order):
+
+        1. Bot type check (`dca`, `combo`, `grid`)
+
+        2. Exchange / paper-context / user lookup (`validateBotCreationContext`)
+
+        3. Default-settings merge (same defaults as the create endpoint)
+
+        4. Full semantic field validation (`validateCreateDCABotInput` / `validateCreateComboBotInput` /
+        `validateCreateGridBotInput`)
+
+
+        On success the response includes the **normalised settings object** that
+
+        would be passed to the backtest — useful for confirming exactly what the
+
+        platform would use after defaults are applied.
+
+
+        This endpoint is designed for the AI-agent workflow:
+
+        **discover schema → build settings → validate → submit backtest**
+
+
+        Requires write permission of API keys.
+      tags:
+        - Backtest
+      operationId: validateBacktestPayload
+      parameters:
+        - name: botType
+          in: path
+          required: true
+          description: Type of bot to validate
+          schema:
+            type: string
+            enum:
+              - dca
+              - combo
+              - grid
+          example: dca
+        - $ref: "#/components/parameters/PaperContextHeader"
+      requestBody:
+        required: true
+        description: >-
+          Same body shape as `POST /api/v2/backtest/{botType}/request`. The `settings` object inside `payload.data` is
+          the bot configuration to validate.
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  type: object
+                  required:
+                    - data
+                  properties:
+                    data:
+                      type: object
+                      required:
+                        - exchange
+                        - exchangeUUID
+                        - settings
+                      properties:
+                        exchange:
+                          type: string
+                          description: Exchange identifier
+                          example: binance
+                        exchangeUUID:
+                          type: string
+                          format: uuid
+                          description: UUID of the exchange account to validate against
+                          example: 550e8400-e29b-41d4-a716-446655440000
+                        settings:
+                          type: object
+                          description: >-
+                            Bot settings to validate. Must include at minimum `pair` (array). All other fields are
+                            optional and will be filled with defaults.
+                          required:
+                            - pair
+                          properties:
+                            pair:
+                              type: array
+                              items:
+                                type: string
+                              description: Trading pair(s) in BASE_QUOTE format
+                              example:
+                                - BTC_USDT
+                          additionalProperties: true
+                        from:
+                          type: integer
+                          description: Backtest start timestamp (ms) — optional for validation
+                          example: 1640995200000
+                        to:
+                          type: integer
+                          description: Backtest end timestamp (ms) — optional for validation
+                          example: 1672531199000
+                        interval:
+                          type: string
+                          description: Chart interval — optional for validation
+                          example: 1h
+            example:
+              payload:
+                data:
+                  exchange: binance
+                  exchangeUUID: 550e8400-e29b-41d4-a716-446655440000
+                  settings:
+                    name: My DCA Bot
+                    pair:
+                      - BTC_USDT
+                    strategy: LONG
+                  from: 1640995200000
+                  to: 1672531199000
+                  interval: 1h
+      responses:
+        "200":
+          description: Settings are valid — returns the normalised settings that would be submitted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required:
+                          - valid
+                          - botType
+                          - settings
+                        properties:
+                          valid:
+                            type: boolean
+                            example: true
+                          botType:
+                            type: string
+                            example: dca
+                          settings:
+                            type: object
+                            description: >-
+                              Normalised bot settings after defaults are applied. This is the exact object that would be
+                              passed to the backtest.
+              example:
+                status: OK
+                reason: null
+                data:
+                  valid: true
+                  botType: dca
+                  settings:
+                    exchange: binance
+                    pair:
+                      - BTCUSDT
+                    strategy: LONG
+                    baseOrderSize: "100"
+                    takeProfit: "2"
+        "400":
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: NOTOK
+                  reason:
+                    type: string
+                    example: Validation error
+                  errors:
+                    type: array
+                    description: Field-level validation errors (same format as bot create endpoints)
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        message:
+                          type: string
+              examples:
+                invalid_bot_type:
+                  summary: Invalid bot type
+                  value:
+                    status: NOTOK
+                    reason: Invalid bot type. Must be dca, combo, or grid
+                    errors: null
+                field_errors:
+                  summary: Field-level validation errors
+                  value:
+                    status: NOTOK
+                    reason: Validation error
+                    errors:
+                      - field: takeProfit
+                        message: Must be greater than 0
+                      - field: baseOrderSize
+                        message: Must be a positive number
+                missing_exchange:
+                  summary: Exchange not found
+                  value:
+                    status: NOTOK
+                    reason: Exchange not found
+                    errors: null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /api/v2/bots/dca/{botId}/pairs:
     put:
       summary: Change DCA Bot Trading Pairs

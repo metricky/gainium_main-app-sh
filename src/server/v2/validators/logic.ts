@@ -381,11 +381,6 @@ export const validateCreateDCABotInputLogic = async <
       'useRiskReward',
       'Risk/Reward cannot be used together with DCA, SL or TP. Please choose one of these options.',
     ])
-  } else {
-    response.data.useRiskReward = originalInput.useRiskReward
-    response.data.useDca = false
-    response.data.useSl = false
-    response.data.useTp = false
   }
 
   if (input.vars?.paths.length) {
