@@ -7568,6 +7568,68 @@ const resolvers = <
         data: saveDataRequest.data.apiKeys,
       }
     },
+    changeAPIKeysPaperContext: async (
+      _parent: unknown,
+      { input }: { input: { key: string; paperContext?: boolean } },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const saveDataRequest = await userDb.updateData(
+        { _id: user.data._id.toString(), 'apiKeys._id': input.key },
+        {
+          $set: {
+            'apiKeys.$.paperContext': input.paperContext ?? null,
+          },
+        },
+        true,
+        true,
+      )
+      if (saveDataRequest.status === StatusEnum.notok) {
+        return saveDataRequest
+      }
+      return {
+        status: StatusEnum.ok,
+        reason: null,
+        data: saveDataRequest.data.apiKeys,
+      }
+    },
+    changeAPIKeysBotId: async (
+      _parent: unknown,
+      { input }: { input: { key: string; botId?: string } },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const saveDataRequest = await userDb.updateData(
+        { _id: user.data._id.toString(), 'apiKeys._id': input.key },
+        {
+          $set: {
+            'apiKeys.$.botId': input.botId ?? null,
+          },
+        },
+        true,
+        true,
+      )
+      if (saveDataRequest.status === StatusEnum.notok) {
+        return saveDataRequest
+      }
+      return {
+        status: StatusEnum.ok,
+        reason: null,
+        data: saveDataRequest.data.apiKeys,
+      }
+    },
     deleteAPIKeys: async (
       _parent: unknown,
       { input }: { input: { key: string } },

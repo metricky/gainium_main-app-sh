@@ -1569,6 +1569,8 @@ export interface UserSchema extends SchemaI {
     created: Date
     expired: Date
     permission: APIPermission
+    paperContext?: boolean
+    botId?: string
   }[]
   shouldOnBoard?: boolean
   shouldOnBoardExchange?: boolean

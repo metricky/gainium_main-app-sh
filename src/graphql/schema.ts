@@ -184,6 +184,10 @@ export const UserSchema = /* GraphQL */ `
       input: changeAPIKeysPermissionInput!
     ): renewAPIKeysResponse
     changeAPIKeysName(input: changeAPIKeysNameInput!): renewAPIKeysResponse
+    changeAPIKeysPaperContext(
+      input: changeAPIKeysPaperContextInput!
+    ): renewAPIKeysResponse
+    changeAPIKeysBotId(input: changeAPIKeysBotIdInput!): renewAPIKeysResponse
     deleteAPIKeys(input: apiKeysInput!): renewAPIKeysResponse
     changePassword(input: changePasswordInput!): changePasswordResponse
     saveUserPeriod(input: userPeriodInput!): getUserPeriodsResponse
@@ -347,6 +351,14 @@ export const UserSchema = /* GraphQL */ `
     key: String
     name: String
   }
+  input changeAPIKeysPaperContextInput {
+    key: String!
+    paperContext: Boolean
+  }
+  input changeAPIKeysBotIdInput {
+    key: String!
+    botId: String
+  }
   type renewAPIKeysResponse implements BasicResponse {
     status: Status
     reason: String
@@ -367,6 +379,8 @@ export const UserSchema = /* GraphQL */ `
     created: Date
     expired: Date
     permission: APIPermission
+    paperContext: Boolean
+    botId: String
   }
   type createAPIKeysResponse implements BasicResponse {
     status: Status
@@ -388,6 +402,8 @@ export const UserSchema = /* GraphQL */ `
     expired: Date
     permission: APIPermission
     name: String
+    paperContext: Boolean
+    botId: String
   }
   type user {
     _id: String

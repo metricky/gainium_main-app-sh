@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.9] - 2026-03-12
+### Added
+- API v2 keys options: paper context and bot id.   
+
 ## [1.14.8] - 2026-03-11
 ### Fixed
 - API v2 bugs.   

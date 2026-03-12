@@ -134,12 +134,16 @@ const getUserByKey = async <R extends UserSchema = UserSchema>(
       id: user.data?.result?._id.toString(),
       secret: api ? decrypt(api.secret) : undefined,
       permission: api?.permission,
+      keyPaperContext: api?.paperContext,
+      keyBotId: api?.botId,
     }
   } catch {
     return {
       id: undefined,
       secret: undefined,
       permission: undefined,
+      keyPaperContext: undefined,
+      keyBotId: undefined,
     }
   }
 }
@@ -152,6 +156,8 @@ declare global {
         id: string
         secret: string
         permission: APIPermission
+        keyPaperContext?: boolean
+        keyBotId?: string
       }
     }
   }
@@ -186,16 +192,20 @@ export const middleware =
       return
     }
     const user = await getUserByKey(token.toString(), userDb)
-    if (
-      !user.id ||
-      !user.secret ||
-      !user.permission ||
-      (req.method !== 'GET' && user.permission !== APIPermission.write)
-    ) {
-      error(
-        `API request: ${req.method} ${req.url} user not found or permission denied`,
-      )
+    if (!user.id || !user.secret || !user.permission) {
+      error(`API request: ${req.method} ${req.url} user not found`)
       res.sendStatus(403)
+      return
+    }
+    if (req.method !== 'GET' && user.permission !== APIPermission.write) {
+      error(
+        `API request: ${req.method} ${req.url} permission denied (read-only key)`,
+      )
+      res.status(403).json({
+        status: StatusEnum.notok,
+        reason:
+          'This API key has read-only permission. Change the key permission to "write" to perform this action.',
+      })
       return
     }
     if (
@@ -217,6 +227,8 @@ export const middleware =
       id: user.id,
       secret: user.secret,
       permission: user.permission,
+      keyPaperContext: user.keyPaperContext,
+      keyBotId: user.keyBotId,
     }
     next()
   }

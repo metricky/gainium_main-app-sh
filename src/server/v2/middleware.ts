@@ -163,3 +163,52 @@ export function fieldSelectionMiddlewares(
     responseMetadataMiddleware(),
   ]
 }
+
+/**
+ * API Key Restrictions Middleware
+ *
+ * Enforces per-API-key access restrictions for paperContext and botId.
+ * Must run AFTER the auth middleware (which sets req.userData with keyPaperContext / keyBotId).
+ *
+ * - If the key has a paperContext restriction, the request's `paper-context` header must match.
+ * - If the key has a botId restriction, the request's botId (params or query) must match.
+ *
+ * Skipped when the key has no restriction set (undefined = no restriction).
+ */
+export function apiKeyRestrictionsMiddleware(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  const { keyPaperContext, keyBotId } = req.userData ?? {}
+
+  if (keyPaperContext !== undefined && keyPaperContext !== null) {
+    const requestedPaper = req.get('paper-context') === 'true'
+    if (requestedPaper !== keyPaperContext) {
+      res.status(403).json({
+        status: StatusEnum.notok,
+        reason:
+          `API key is restricted to ${keyPaperContext ? 'paper' : 'real'} trading only. ` +
+          `Request uses ${requestedPaper ? 'paper' : 'real'} context.`,
+      })
+      return
+    }
+  }
+
+  if (keyBotId !== undefined && keyBotId !== null) {
+    const requestBotId =
+      (req.params?.botId as string | undefined) ??
+      (req.query?.botId as string | undefined)
+    if (requestBotId && requestBotId !== keyBotId) {
+      res.status(403).json({
+        status: StatusEnum.notok,
+        reason:
+          `API key is restricted to bot ${keyBotId} only. ` +
+          `Request targets bot ${requestBotId}.`,
+      })
+      return
+    }
+  }
+
+  next()
+}

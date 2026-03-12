@@ -188,6 +188,8 @@ export const userAPIKeys: Schema<UserSchema['apiKeys']> = new Schema({
   expired: RequiredDate,
   permission: { ...RequiredString, enum: APIPermission },
   name: String,
+  paperContext: Boolean,
+  botId: String,
 })
 
 const botEventSchema: Schema<BotEventSchema> = new Schema({
