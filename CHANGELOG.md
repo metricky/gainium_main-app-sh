@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.10] - 2026-03-13
+### Changed
+- Reduce bitget user stream connections.   
+
 ## [1.14.9] - 2026-03-12
 ### Added
 - API v2 keys options: paper context and bot id.   

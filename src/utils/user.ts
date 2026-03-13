@@ -76,6 +76,10 @@ const hyperliquidTimer: Map<string, NodeJS.Timeout> = new Map()
 
 const hyperliquidTimeout = 10 * 60 * 1000
 
+const bitgetTimer: Map<string, NodeJS.Timeout> = new Map()
+
+const bitgetTimeout = 2 * 60 * 1000
+
 const balanceMsg: (UserDataStreamEvent & {
   userId: string
   e: ExchangeInUser
@@ -457,6 +461,29 @@ const setHyperliquidTimer = async (
   )
 }
 
+const setBitgetTimer = async (
+  user: ClearUserSchema,
+  uuid: string,
+  ec = ExchangeChooser,
+) => {
+  const key = `${uuid}`
+  const get = bitgetTimer.get(key)
+  if (get) {
+    clearInterval(get)
+  }
+  logger.debug(`Bitget timer set for ${uuid}`)
+  bitgetTimer.set(
+    key,
+    setInterval(
+      () => (
+        logger.debug(`Bitget timer trigger for ${uuid}`),
+        updateUserBalance(user, uuid, undefined, ec)
+      ),
+      bitgetTimeout,
+    ),
+  )
+}
+
 const connectUserBalance = async (
   id?: string,
   uuid?: string,
@@ -493,6 +520,14 @@ const connectUserBalance = async (
           setHyperliquidTimer(u, e.uuid, ec)
           continue
         }
+        if (
+          e.provider === ExchangeEnum.bitget ||
+          e.provider === ExchangeEnum.bitgetUsdm ||
+          e.provider === ExchangeEnum.bitgetCoinm
+        ) {
+          setBitgetTimer(u, e.uuid, ec)
+          continue
+        }
         const find = streams.find((s) => s.uuid === e.uuid)
         if (find) {
           disconnectUserBalance(find.uuid)
@@ -520,10 +555,18 @@ const connectUserBalance = async (
             uuid: e.uuid,
           })
         connect()
-        redisClient?.subscribe(serviceLogRedis, (msg: string) => {
+        redisClient?.subscribe(serviceLogRedis, async (msg: string) => {
           const service = JSON.parse(msg)?.restart
           if (service === 'userStream') {
-            connect()
+            const currentUser = await userDb.readData({ _id: userId })
+            if (
+              currentUser.status === StatusEnum.ok &&
+              currentUser.data.result?.exchanges.some(
+                (ex) => ex.uuid === e.uuid,
+              )
+            ) {
+              connect()
+            }
           }
         })
         streamsSet.add(e.uuid)
@@ -553,6 +596,12 @@ const disconnectUserBalance = async (uuid: string) => {
   if (getTimerHyperliquid) {
     clearInterval(getTimerHyperliquid)
     hyperliquidTimer.delete(uuid)
+  }
+
+  const getTimerBitget = bitgetTimer.get(uuid)
+  if (getTimerBitget) {
+    clearInterval(getTimerBitget)
+    bitgetTimer.delete(uuid)
   }
 
   if (streamsSet.has(uuid)) {
