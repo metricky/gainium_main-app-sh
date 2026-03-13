@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.14.11] - 2026-03-13
+### Changed
+- Return hyperliquid indicators.  
+
 ## [1.14.10] - 2026-03-13
 ### Changed
 - Reduce bitget user stream connections.   
