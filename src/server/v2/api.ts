@@ -107,6 +107,7 @@ type APIMap = Map<
   {
     handler: (req: Request, res: Response) => void
     middlewares: any[]
+    ignoreMiddlewares?: any[]
   }
 >
 
@@ -254,6 +255,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         userId: user.id,
         isDeleted: { $ne: true },
         exchangeUnassigned: { $ne: true },
+        parentBotId: { $exists: false },
       }
 
       if (status) {
@@ -273,7 +275,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await dcaBotDb.readData(
           filter,
           projection,
-          { sort: { createdAt: -1 }, skip, limit },
+          { sort: { created: -1 }, skip, limit },
           true, // returnArray
           true, // count
         )
@@ -353,6 +355,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         userId: user.id,
         isDeleted: { $ne: true },
         exchangeUnassigned: { $ne: true },
+        parentBotId: { $exists: false },
       }
 
       if (status) {
@@ -369,7 +372,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await comboBotDb.readData(
           filter,
           projection,
-          { sort: { createdAt: -1 }, skip, limit },
+          { sort: { created: -1 }, skip, limit },
           true,
           true,
         )
@@ -869,7 +872,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await globalVarsDb.readData(
           filter,
           {},
-          { sort: { createdAt: -1 }, skip, limit },
+          { sort: { created: -1 }, skip, limit },
           true,
           true,
         )
@@ -970,7 +973,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await botDb.readData(
           filter,
           projection,
-          { sort: { createdAt: -1 }, skip, limit },
+          { sort: { created: -1 }, skip, limit },
           true,
           true,
         )

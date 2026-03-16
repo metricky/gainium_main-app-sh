@@ -1,555 +1,822 @@
 # Changelog
 
+## [1.14.12] - 2026-03-16
+
+### Fixed
+
+- API v2:
+  - Pagination wrong
+  - Paper context check in info endpoints
+
 ## [1.14.11] - 2026-03-13
+
 ### Changed
-- Return hyperliquid indicators.  
+
+- Return hyperliquid indicators.
 
 ## [1.14.10] - 2026-03-13
+
 ### Changed
-- Reduce bitget user stream connections.   
+
+- Reduce bitget user stream connections.
 
 ## [1.14.9] - 2026-03-12
+
 ### Added
-- API v2 keys options: paper context and bot id.   
+
+- API v2 keys options: paper context and bot id.
 
 ## [1.14.8] - 2026-03-11
+
 ### Fixed
-- API v2 bugs.   
+
+- API v2 bugs.
 
 ## [1.14.7] - 2026-03-10
+
 ### Added
+
 - Validation backtest endpoint.
-- Discovery endpoints.  
+- Discovery endpoints.
 
 ## [1.14.6] - 2026-03-09
+
 ### Changed
-- Drop Kraken Coinm. 
+
+- Drop Kraken Coinm.
 
 ## [1.14.5] - 2026-03-09
+
 ### Changed
-- Hedge bots list for big account. 
+
+- Hedge bots list for big account.
 
 ## [1.14.4] - 2026-03-06
+
 ### Changed
-- Kraken futures candles count. 
+
+- Kraken futures candles count.
 
 ## [1.14.3] - 2026-03-06
+
 ### Fixed
-- Separate over and under limit not worked with dynamic price filter. 
+
+- Separate over and under limit not worked with dynamic price filter.
 
 ## [1.14.2] - 2026-03-05
+
 ### Fixed
-- Kraken balance snapshot. 
+
+- Kraken balance snapshot.
 
 ## [1.14.1] - 2026-03-04
+
 ### Fixed
-- Move SL trigger not respect fee. 
-- Connect child indicators with load1d flag. 
+
+- Move SL trigger not respect fee.
+- Connect child indicators with load1d flag.
 
 ## [1.14.0] - 2026-03-04
+
 ### Added
-- Kraken. 
+
+- Kraken.
 
 ## [1.13.1] - 2026-02-27
+
 ### Fixed
-- Terminal property in API handlers. 
+
+- Terminal property in API handlers.
 
 ## [1.13.0] - 2026-02-26
-### Added 
+
+### Added
+
 - SSB API endpoints.
-- Sync mode for SSB backtest.   
+- Sync mode for SSB backtest.
 
 ## [1.12.0] - 2026-02-24
-### Changed 
+
+### Changed
+
 - Refactored API v2 endpoints.
 - Split endpoint per bot type and deal type. Separate endpoints for terminal
 - Refactored .MD docs, extract schemas to a separate file
-- Moved paper context to a header  
+- Moved paper context to a header
 
 ## [1.11.2] - 2026-02-20
-### Added 
-- API v2 added createComboBot, createTerminalDeal, createGridBot requests, CRUD operations on global variables.  
+
+### Added
+
+- API v2 added createComboBot, createTerminalDeal, createGridBot requests, CRUD operations on global variables.
 
 ## [1.11.1] - 2026-02-18
-### Added 
+
+### Added
+
 - API v2 added createDCABot request, get global variables request
 
 ## [1.11.0] - 2026-02-18
-### Added 
+
+### Added
+
 - API v2
 
 ## [1.10.12] - 2026-02-18
-### Changed 
+
+### Changed
+
 - Increased max number of bots to return in related bots query
 
 ## [1.10.11] - 2026-02-17
-### Changed 
+
+### Changed
+
 - Added paperContext and bot status to related bots query
 
 ## [1.10.10] - 2026-02-16
-### Fixed 
+
+### Fixed
+
 - OKX position size and order size
 
 ## [1.10.9] - 2026-02-09
-### Fixed 
+
+### Fixed
+
 - Short required change calculation
 
 ## [1.10.8] - 2026-02-06
+
 ### Fixed
-- DCA by market errors not shown. 
+
+- DCA by market errors not shown.
 
 ## [1.10.7] - 2026-02-06
+
 ### Changed
+
 - Added OKX host app.okx.com
 
 ## [1.10.6] - 2026-02-06
+
 ### Changed
+
 - Add listen flag for candles provider
 
 ## [1.10.5] - 2026-02-05
+
 ### Fixed
+
 - Prevent duplicates in DCA by market orders
 
 ## [1.10.4] - 2026-02-02
+
 ### Changed
+
 - Enhanced log DCA by Market
 
 ## [1.10.3] - 2026-01-29
+
 ### Changed
+
 - Connect to user streams for active users
 
 ## [1.10.2] - 2026-01-26
+
 ### Fixed
+
 - Hyperliquid reposition partially filled order
 
 ## [1.10.1] - 2026-01-26
+
 ### Fixed
+
 - Missed orders in search by status
-  
+
 ## [1.10.0] - 2026-01-23
+
 ### Added
+
 - DCA By Market
 
 ## [1.9.1] - 2026-01-16
+
 ### Fixed
+
 - TP section settings mixed up
 
 ## [1.9.0] - 2026-01-15
+
 ### Added
+
 - Separate max deal limits when using dynamic price filter over and under
 
 ## [1.8.4] - 2026-01-14
+
 ### Changed
-- Bot id in bot live stats. 
+
+- Bot id in bot live stats.
 
 ## [1.8.3] - 2026-01-14
+
 ### Changed
-- GQL schema. 
+
+- GQL schema.
 
 ## [1.8.2] - 2026-01-13
+
 ### Changed
-- GQL schema. 
+
+- GQL schema.
 
 ## [1.8.1] - 2026-01-12
+
 ### Fixed
-- Multi TP by Market caught duplicate order error, Multi SL not fired. 
+
+- Multi TP by Market caught duplicate order error, Multi SL not fired.
 
 ## [1.8.0] - 2026-01-07
+
 ### Added
-- Bot live stats. 
+
+- Bot live stats.
 
 ## [1.7.4] - 2026-01-06
+
 ### Changed
-- Broker codes with zone. 
+
+- Broker codes with zone.
 
 ## [1.7.3] - 2026-01-02
+
 ### Changed
-- Exchange error dictionary. 
+
+- Exchange error dictionary.
 
 ## [1.7.2] - 2025-12-30
+
 ### Fixed
-- Missed indicator events if the same indicator is used in different sections. 
+
+- Missed indicator events if the same indicator is used in different sections.
 
 ## [1.7.1] - 2025-12-29
+
 ### Fixed
-- Overwritten deal orders when updating deal. 
+
+- Overwritten deal orders when updating deal.
 
 ## [1.7.0] - 2025-12-25
+
 ### Added
-- Password reset. 
+
+- Password reset.
 
 ## [1.6.14] - 2025-12-25
+
 ### Changed
-- Packages update. 
+
+- Packages update.
 
 ## [1.6.13] - 2025-12-24
+
 ### Fixed
-- Check TP level wrong price. 
+
+- Check TP level wrong price.
 
 ## [1.6.12] - 2025-12-23
+
 ### Fixed
+
 - AVP issue with group and section indicator logic
 
 ## [1.6.11] - 2025-12-22
+
 ### Fixed
-- Skip balance check in move deal to terminal. 
+
+- Skip balance check in move deal to terminal.
 
 ## [1.6.10] - 2025-12-18
+
 ### Fixed
-- Timezone offset. 
+
+- Timezone offset.
 
 ## [1.6.9] - 2025-12-16
+
 ### Changed
-- Combo breakeven calculation. 
+
+- Combo breakeven calculation.
 
 ## [1.6.8] - 2025-12-16
+
 ### Changed
-- Improve random pair filtering. 
-  
+
+- Improve random pair filtering.
+
 ## [1.6.7] - 2025-12-08
+
 ### Fixed
-- Profit by user/bot start date. 
+
+- Profit by user/bot start date.
 
 ## [1.6.6] - 2025-11-28
+
 ### Fixed
-- API signature not valid with empty body. 
+
+- API signature not valid with empty body.
 
 ## [1.6.5] - 2025-11-26
+
 ### Fixed
-- Hedge bot not found when stopped. 
+
+- Hedge bot not found when stopped.
 
 ## [1.6.4] - 2025-11-24
+
 ### Changed
-- Demo user. 
+
+- Demo user.
 
 ## [1.6.3] - 2025-11-17
+
 ### Changed
-- Decorators apply logic in bot helpers. 
+
+- Decorators apply logic in bot helpers.
 
 ## [1.6.2] - 2025-11-14
+
 ### Fixed
-- Market TP order triggered at wrong price when having multiple deals. 
+
+- Market TP order triggered at wrong price when having multiple deals.
 
 ## [1.6.1] - 2025-11-11
+
 ### Changed
-- Request candles for indicators through main thread. 
+
+- Request candles for indicators through main thread.
 
 ## [1.6.0] - 2025-11-10
+
 ### Added
-- Skip balance check option for Grid bots. 
+
+- Skip balance check option for Grid bots.
 
 ## [1.5.5] - 2025-11-10
+
 ### Changed
-- Soft reset live account. 
+
+- Soft reset live account.
 
 ## [1.5.4] - 2025-11-10
+
 ### Added
-- Hyperliquid sub-account support. 
+
+- Hyperliquid sub-account support.
 
 ## [1.5.3] - 2025-11-10
+
 ### Fixed
-- Use fixed base price in RR with fixed SL.   
+
+- Use fixed base price in RR with fixed SL.
 
 ## [1.5.2] - 2025-11-07
+
 ### Fixed
-- Hedge Combo bot TP/SL base on value ignored.  
+
+- Hedge Combo bot TP/SL base on value ignored.
 
 ## [1.5.1] - 2025-11-06
-### Changed 
-- Hyperliquid max candles. Hide hyperliquid in indicators. 
+
+### Changed
+
+- Hyperliquid max candles. Hide hyperliquid in indicators.
 
 ## [1.5.0] - 2025-11-05
-### Added 
+
+### Added
+
 - Fixed Stop Loss in Risk Reward
 
 ## [1.4.23] – 2025-11-05
+
 ### Fixed
-- Max deal levels. 
+
+- Max deal levels.
 
 ## [1.4.22] – 2025-11-04
+
 ### Fixed
-- Clone combo bot unsupported fields.  
+
+- Clone combo bot unsupported fields.
 
 ## [1.4.21] – 2025-11-03
+
 ### Fixed
-- Handle worker terminate. 
+
+- Handle worker terminate.
 
 ## [1.4.20] – 2025-11-03
+
 ### Fixed
-- Reset account with hedge bots. 
+
+- Reset account with hedge bots.
 
 ## [1.4.19] – 2025-10-29
+
 ### Fixed
-- Deals filter in reset user method. 
+
+- Deals filter in reset user method.
 
 ## [1.4.18] – 2025-10-29
+
 ### Added
-- Close old start deals. 
+
+- Close old start deals.
 
 ## [1.4.17] – 2025-10-29
+
 ### Fixed
-- Prevent duplicate transaction error. 
+
+- Prevent duplicate transaction error.
 
 ## [1.4.16] – 2025-10-27
+
 ### Fixed
-- Hyperliquid price precision.   
+
+- Hyperliquid price precision.
 
 ## [1.4.15] – 2025-10-27
+
 ### Fixed
-- Share Grid backtest input.  
+
+- Share Grid backtest input.
 
 ## [1.4.14] – 2025-10-22
+
 ### Fixed
-- Market TP wrong trigger when having SL and multicoin. 
+
+- Market TP wrong trigger when having SL and multicoin.
 
 ### Added
-- New bot schema fields. 
+
+- New bot schema fields.
 
 ## [1.4.13] – 2025-10-20
+
 ### Changed
+
 - Hyperliquid USD rates
 
 ## [1.4.12] – 2025-10-20
+
 ### Fixed
+
 - Reset trailing mode
 
 ## [1.4.11] – 2025-10-20
+
 ### Added
+
 - Step parameter to update bot/deal API
 
 ## [1.4.10] – 2025-10-20
+
 ### Fixed
-- Move deal to terminal of multicoin bot. 
+
+- Move deal to terminal of multicoin bot.
 
 ## [1.4.9] – 2025-10-17
+
 ### Fixed
+
 - NOB order id
 
 ## [1.4.8] – 2025-10-17
+
 ### Changed
+
 - Mongo delete method
 
 ## [1.4.7] – 2025-10-16
+
 ### Changed
+
 - Backtester update
 
 ## [1.4.6] – 2025-10-15
+
 ### Changed
+
 - NOB logic for bot
 
 ## [1.4.5] – 2025-10-15
+
 ### Changed
+
 - Debug log for indicators
 
 ## [1.4.4] – 2025-10-14
+
 ### Fixed
+
 - Clone combo bot input body
 - Server url in swagger
 
 ## [1.4.3] – 2025-10-13
+
 ### Changed
+
 - Reduced unknown order retry count
 
 ## [1.4.2] – 2025-10-10
+
 ### Fixed
+
 - Multi SL issue
 
 ## [1.4.1] – 2025-10-09
+
 ### Fixed
+
 - GQL input schema
 
 ## [1.4.0] – 2025-10-09
+
 ### Added
+
 - Order Blocks & Fair Value Gaps (FVG only)
 
 ## [1.3.8] – 2025-10-07
+
 ### Changed
+
 - Remove delisted pairs from the bot
 
 ## [1.3.7] – 2025-10-07
+
 ### Changed
+
 - Added mutex to check candle in indicator service
 
 ## [1.3.6] – 2025-10-06
+
 ### Fixed
+
 - Hyperliquid spot order price precision
 
 ## [1.3.5] – 2025-10-01
+
 ### Fixed
+
 - Reset not enough balance status
 
 ## [1.3.4] – 2025-09-30
+
 ### Added
+
 - Market TP order
 
 ## [1.3.3] – 2025-09-30
+
 ### Fixed
+
 - Market structure price actions
 
 ## [1.3.2] – 2025-09-29
+
 ### Change
+
 - Bot errors map updated
 
 ## [1.3.1] – 2025-09-26
+
 ### Change
+
 - Rearranged set leverage and set margin methods to fit hyperliquid logic
 
 ## [1.3.0] – 2025-09-26
+
 ### Added
+
 - Hyperliquid integration
-  
+
 ## [1.2.8] – 2025-09-26
+
 ### Added
+
 - ENCRYPT_KEY
 
 ## [1.2.7] – 2025-09-18
+
 ### Fixed
+
 - Bot not stopped when reset account
 
 ## [1.2.6] – 2025-09-18
+
 ### Fixed
+
 - TP called multiple times with OR condition and multiple timeframes
 
 ## [1.2.5] – 2025-09-15
+
 ### Changed
+
 - TP order size calculation for long profit in base
 
 ## [1.2.4] – 2025-09-12
+
 ### Fixed
+
 - Bot stop stuck
 - Bitget Linear base order calculation
 
 ## [1.2.3] – 2025-09-09
+
 ### Changed
+
 - Lock the bot while loading
 
 ## [1.2.2] – 2025-09-08
+
 ### Changed
+
 - Indicators logs
 
 ## [1.2.1] – 2025-09-05
+
 ### Changed
+
 - Indicators (QFL fix)
 
 ## [1.2.0] – 2025-09-04
+
 ### Changed
+
 - Hedge backtest
 
 ## [1.1.3] – 2025-08-25
+
 ### Changed
+
 - Increase parallel listeners in bot
 - Calcualte deal profit if deal canceled, but TP order is filled
+
 ### Fixed
+
 - Bot not able to be closed if catch error deal not found
 
 ## [1.1.2] – 2025-08-20
+
 ### Changed
+
 - Reset stats when corresponding global variable changed
 - Optmization of get hedge bot deals stats
 - Minimum dynamic price deviation
 
 ## [1.1.1] – 2025-08-08
+
 ### Changed
+
 - Changed log level for some logs
 
 ## [1.1.0] – 2025-08-07
+
 ### Changed
+
 - Updated log level logic
 
 ## [1.0.15] – 2025-08-05
+
 ### Changed
+
 - Retry reasons in exchange connector
 - Read hedge status from db while in service restart
 
 ## [1.0.14] – 2025-08-04
+
 ### Changed
+
 - Not bypass dynamic price condition if not able to load latest price
 
 ## [1.0.13] – 2025-07-28
+
 ### Fixed
+
 - Use static filter in multi coin bot
 
 ## [1.0.12] – 2025-07-24
+
 ### Fixed
+
 - Retry 500 error
 
 ### Changed
+
 - Bumped dependencies versions
 
 ## [1.0.11] – 2025-07-21
+
 ### Fixed
+
 - Retry request timeout exchange requests
 
 ## [1.0.10] – 2025-07-18
+
 ### Changed
+
 - Backtester update
 
 ## [1.0.9] – 2025-07-17
+
 ### Added
+
 - Increased core compatibilities
 
 ### Fixed
+
 - Fixed bot dashboard stats for bigAccount, prevent showing terminal bots in DCA bots stats
 
 ## [1.0.8] – 2025-07-16
+
 ### Added
+
 - Added support for changing Bybit host configuration (com, eu, nl, tr, kz, ge)
 - Enhanced exchange factory to support Bybit host parameter
 - Added BybitHost enum for different regional hosts
 
 ### Changed
+
 - Updated exchange types and interfaces to include bybitHost parameter
 - Modified bot exchange update functionality to support Bybit host selection
 
 ### Fixed
+
 - Undefined broker code
 - Indicator connect timeout
 
 ## [1.0.7] – 2025-07-15
+
 ### Added
+
 - Added license key validation to user registration form
 - Enhanced license key checking functionality with registration support
 - Snapshot assets aggregation by exchange UUID
 
 ### Changed
+
 - Updated user registration GraphQL schema to include required license key field
 - Modified license key validation to support both registration and existing user checks
-  
+
 ### Fixed
+
 - Return getGlobalVariablesByIds request
 
 ## [1.0.6] – 2025-07-14
+
 ### Fixed
+
 - Fixed TP order size calculation in coinm futures for limit-based orders placed after base order is filled
 
 ## [1.0.5] – 2025-07-08
+
 ### Changed
+
 - Updated indicator service connection and publish channel logic
 - Enhanced hedge bot to use callback after successful start
 
 ## [1.0.4] – 2025-07-02
+
 ### Changed
+
 - Updated all dependencies to their latest versions
 - Updated private dependencies (@gainium/indicators, @gainium/backtester)
 - Updated package-lock.json with latest dependency versions
 
 ### Fixed
+
 - Fixed database reference in deal monitor
 
 ## [1.0.3] – 2025-06-30
+
 ### Changed
+
 - Switched to npm package manager
 - Removed yarn.lock file (no longer needed with npm)
 
 ## [1.0.2] – 2025-06-30
-### Added  
-- Initial public release of Gainium Main Backend.  
-- Main API Server (GraphQL, auth, user & trading endpoints).  
-- Bot Services (DCA, Grid, Combo, Hedge).  
-- Stream Service (real-time WebSocket).  
-- Indicators Service (technical indicators & subscriptions).  
-- Backtest Service (server-side strategy back-testing).  
+
+### Added
+
+- Initial public release of Gainium Main Backend.
+- Main API Server (GraphQL, auth, user & trading endpoints).
+- Bot Services (DCA, Grid, Combo, Hedge).
+- Stream Service (real-time WebSocket).
+- Indicators Service (technical indicators & subscriptions).
+- Backtest Service (server-side strategy back-testing).
 - Cron Service (scheduled maintenance & data updates).
 
-### Changed  
+### Changed
+
 - Bumped package version from 1.0.1 → 1.0.2.
