@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.14] - 2026-03-17
+
+### Changed
+
+- Bot messages index.
+
 ## [1.14.13] - 2026-03-17
 
 ### Changed

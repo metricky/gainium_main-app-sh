@@ -2732,6 +2732,12 @@ export const registerIndexes = () => {
     userId: 1,
   })
 
+  botMessageSchema.index({
+    userId: 1,
+    botId: 1,
+    subType: 1,
+  })
+
   botSchema.index({ userId: 1 })
 
   comboBotSchema.index({ userId: 1 })
