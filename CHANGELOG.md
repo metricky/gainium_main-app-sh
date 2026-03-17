@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.13] - 2026-03-17
+
+### Changed
+
+- Runtime cache for all pairs.
+
 ## [1.14.12] - 2026-03-16
 
 ### Fixed

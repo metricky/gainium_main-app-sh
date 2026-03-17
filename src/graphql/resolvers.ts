@@ -131,6 +131,42 @@ import { DataResponse, ErrorResponse } from '../db/crud'
 
 const math = new MathHelper()
 
+type PairsCacheEntry = {
+  latestKey: string | null
+  result: any[] | null
+}
+
+type PairsCacheKey = 'paper' | 'real'
+
+const pairsRuntimeCache: Record<PairsCacheKey, PairsCacheEntry> = {
+  paper: { latestKey: null, result: null },
+  real: { latestKey: null, result: null },
+}
+
+const toUpdatedKey = (value: unknown) => {
+  if (value && typeof (value as Date).getTime === 'function') {
+    return `${(value as Date).getTime()}`
+  }
+  if (typeof value === 'string' || typeof value === 'number') {
+    try {
+      const date = new Date(value)
+      if (!isNaN(date.getTime())) {
+        return `${date.getTime()}`
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+  return value == null ? '' : `${value}`
+}
+
+const buildPairsLatestKey = (
+  doc: { _id?: unknown; updated?: unknown } | undefined,
+) => {
+  if (!doc) return null
+  return `${doc._id ?? ''}:${toUpdatedKey(doc.updated)}`
+}
+
 const { getTimezoneOffset, id } = utils
 
 if (!JWT_SECRET) {
@@ -3047,13 +3083,51 @@ const resolvers = <
       }
     },
     getAllPairs: async (_parent: any, {}, { paperContext }: InputRequest) => {
-      const pairs = await pairDb.readData(
-        { exchange: { $regex: paperContext ? 'paper' : '^(?!paper)' } },
-        undefined,
+      const isPaperContext = !!paperContext
+      const cacheKey: PairsCacheKey = isPaperContext ? 'paper' : 'real'
+      const cacheEntry = pairsRuntimeCache[cacheKey]
+      const exchangeFilter = {
+        exchange: { $regex: isPaperContext ? 'paper' : '^(?!paper)' },
+      }
+
+      const latest = await pairDb.readData(
         {},
-        true,
+        { updated: 1 },
+        { sort: { updated: -1 } },
       )
+      if (latest.status === StatusEnum.notok) {
+        return latest
+      }
+
+      const latestDoc = latest.data.result
+      const latestKey = buildPairsLatestKey(latestDoc)
+
+      if (cacheEntry.result !== null && cacheEntry.latestKey === latestKey) {
+        return {
+          status: StatusEnum.ok,
+          reason: null,
+          data: {
+            result: cacheEntry.result,
+          },
+        }
+      }
+
+      if (!latestDoc) {
+        cacheEntry.latestKey = null
+        cacheEntry.result = []
+        return {
+          status: StatusEnum.ok,
+          reason: null,
+          data: {
+            result: [],
+          },
+        }
+      }
+
+      const pairs = await pairDb.readData(exchangeFilter, undefined, {}, true)
       if (pairs.status === StatusEnum.ok) {
+        cacheEntry.latestKey = latestKey
+        cacheEntry.result = pairs.data.result
         return {
           status: StatusEnum.ok,
           reason: null,
