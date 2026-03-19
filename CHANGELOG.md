@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.16] - 2026-03-19
+
+### Changed
+
+- Close deal by TP as Market order
+
 ## [1.14.15] - 2026-03-19
 
 ### Fixed

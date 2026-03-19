@@ -15998,6 +15998,26 @@ function createDCABotHelper<
               `Deal: ${deal.deal._id} adding TP order by TP level check`,
             )
             const settings = await this.getAggregatedSettings(deal.deal)
+            if (!settings.useMultiTp) {
+              this.handleDebug(
+                `Deal ${deal.deal._id} is not multi TP, close deal completely`,
+              )
+              deal.closeByTp = true
+              this.saveDeal(deal)
+              return await this.closeDealById(
+                this.botId,
+                deal.deal._id,
+                CloseDCATypeEnum.closeByMarket,
+                undefined,
+                undefined,
+                undefined,
+                false,
+                undefined,
+                undefined,
+                false,
+                DCACloseTriggerEnum.tp,
+              )
+            }
             const order = deal.currentOrders.find(
               (o) =>
                 (settings.useMultiTp ? +o.price === v : true) &&
