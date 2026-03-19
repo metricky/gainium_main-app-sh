@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.15] - 2026-03-19
+
+### Fixed
+
+- Sell remainder false fired on deal start.
+
 ## [1.14.14] - 2026-03-17
 
 ### Changed

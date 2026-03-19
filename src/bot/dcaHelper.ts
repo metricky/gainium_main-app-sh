@@ -5553,13 +5553,24 @@ function createDCABotHelper<
           (findDeal.deal.status === DCADealStatusEnum.closed ||
             findDeal.deal.status === DCADealStatusEnum.canceled))
       ) {
-        await this.sellRemainder(
+        const findTp = await this.ordersDb.countData({
+          botId: this.botId,
           dealId,
-          +orderBo.executedQty,
-          +orderBo.price,
-          false,
-          findDeal,
-        )
+          type: TypeOrderEnum.dealTP,
+        })
+        if (findTp.data?.result && findTp.data.result > 0) {
+          this.handleDebug(
+            `Sell remainder | TP order found for deal ${dealId}, skipping sell remainder`,
+          )
+        } else {
+          await this.sellRemainder(
+            dealId,
+            +orderBo.executedQty,
+            +orderBo.price,
+            false,
+            findDeal,
+          )
+        }
       }
       this.endMethod(_id)
     }
