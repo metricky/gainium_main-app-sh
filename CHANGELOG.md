@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.18] - 2026-03-20
+
+### Changed
+
+- Fee db index
+
 ## [1.14.17] - 2026-03-20
 
 ### Changed

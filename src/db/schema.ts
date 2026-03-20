@@ -2777,6 +2777,8 @@ export const registerIndexes = () => {
   userPeriod.index({ userId: 1 })
 
   botProfitChart.index({ botId: 1 })
+
+  feesSchema.index({ userId: 1, exchangeUUID: 1 })
 }
 
 const schema = {
