@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.19] - 2026-03-20
+
+### Changed
+
+- Debug log to bot monitor
+
 ## [1.14.18] - 2026-03-20
 
 ### Changed
