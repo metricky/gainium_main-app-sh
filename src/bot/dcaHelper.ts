@@ -11789,12 +11789,12 @@ function createDCABotHelper<
           filledCloseOrders.reduce((acc, v) => acc + +v.executedQty, 0) -
           pendingReduceFunds.base -
           reduceFundsBase
-        let qty = _qty * (this.futures ? 1 : 1 - fee.taker) + add
+        const maxFee = Math.max(fee?.maker ?? 0, fee?.taker ?? 0)
+        let qty = _qty * (this.futures ? 1 : 1 - maxFee) + add
         let origQty = qty
-        const sellDisplacement = fee.maker * 2
+        const sellDisplacement = maxFee * 2
         const priceDisplacement = this.futures
-          ? 1 +
-            ((await this.getUserFee(_symbol))?.maker ?? 0) * 2 * (long ? 1 : -1)
+          ? 1 + maxFee * 2 * (long ? 1 : -1)
           : 1 + (long ? 1 : -1) * sellDisplacement
         let tpPrice = this.math.round(
           settings.useFixedTPPrices && settings.fixedTpPrice
@@ -11855,10 +11855,7 @@ function createDCABotHelper<
                 ? +o.executedQty !== 0
                 : o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED'),
           )
-          const f = filled.reduce(
-            (acc, v) => acc + +v.executedQty * (fee?.taker ?? 0),
-            0,
-          )
+          const f = filled.reduce((acc, v) => acc + +v.executedQty * maxFee, 0)
           qty -= f
           if (qty < symbol.baseAsset.minAmount && !this.futures) {
             this.handleDebug(
@@ -11947,7 +11944,7 @@ function createDCABotHelper<
             (((long && !this.futures && hasNewRevTp ? _qty + add : origQty) *
               avgPrice) /
               tpOrder.price) *
-              (long && !this.futures && hasNewRevTp ? 1 : 1 - fee.maker),
+              (long && !this.futures && hasNewRevTp ? 1 : 1 - maxFee),
             precision,
             !this.futures,
           )

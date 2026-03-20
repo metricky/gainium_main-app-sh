@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.17] - 2026-03-20
+
+### Changed
+
+- Use max fee in tp order
+
 ## [1.14.16] - 2026-03-19
 
 ### Changed
