@@ -977,9 +977,6 @@ function createDCABotHelper<
                 this.setDeal(
                   {
                     ...d,
-                    closeBySl: false,
-                    notCheckSl: false,
-                    closeByTp: false,
                     initialOrders,
                     currentOrders,
                   },

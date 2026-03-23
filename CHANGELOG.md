@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.22] - 2026-03-23
+
+### Fixed
+
+- Restore original state of deals from Redis. 
+
 ## [1.14.21] - 2026-03-23
 
 ### Fixed
