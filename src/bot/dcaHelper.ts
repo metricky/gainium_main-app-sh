@@ -5556,7 +5556,7 @@ function createDCABotHelper<
         const findTp = await this.ordersDb.countData({
           botId: this.botId,
           dealId,
-          type: TypeOrderEnum.dealTP,
+          typeOrder: TypeOrderEnum.dealTP,
         })
         if (findTp.data?.result && findTp.data.result > 0) {
           this.handleDebug(
