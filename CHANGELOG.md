@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.20] - 2026-03-23
+
+### Changed
+
+- Set stats time after bot data converted. 
+
+
 ## [1.14.19] - 2026-03-20
 
 ### Changed

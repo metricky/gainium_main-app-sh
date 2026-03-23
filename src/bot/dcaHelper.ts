@@ -15057,6 +15057,7 @@ function createDCABotHelper<
             ? convertDCABot(this.data)
             : //@ts-ignore
               convertComboBot(this.data)
+        this.setStatsTimer()
       }
       if (this.data?.status === BotStatusEnum.archive) {
         this.loadingComplete = true
@@ -16335,7 +16336,6 @@ function createDCABotHelper<
       }
       if (start) {
         this.setEquityTimer()
-        this.setStatsTimer()
       }
       this.indicatorActions = {
         startDeal: new Map<string, number>(),
