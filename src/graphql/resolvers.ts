@@ -5042,9 +5042,11 @@ const resolvers = <
         name?: string
         lastName?: string
         nickname?: string
+        'userDefined.name'?: string
       } = {}
       if (name) {
         $set.name = name
+        $set['userDefined.name'] = name
       }
       if (lastName) {
         $set.lastName = lastName
