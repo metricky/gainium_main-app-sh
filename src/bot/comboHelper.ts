@@ -4501,7 +4501,15 @@ function createComboBotHelper<
               quote: 0,
             },
           },
-          settings: { ...dealSettings, updatedComboAdjustments: true },
+          settings: {
+            ...dealSettings,
+            updatedComboAdjustments:
+              (dealSettings.orderSizeType === OrderSizeTypeEnum.percFree ||
+                dealSettings.orderSizeType === OrderSizeTypeEnum.percTotal) &&
+              (dealSettings.coinm || dealSettings.profitCurrency === 'base')
+                ? true
+                : undefined,
+          },
           parentId: null,
           childIds: [],
           parent: false,

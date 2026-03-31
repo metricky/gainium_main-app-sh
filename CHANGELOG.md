@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.24] - 2026-03-31
+
+### Fixed
+
+- Combo bot grid order size. 
+
 ## [1.14.23] - 2026-03-26
 
 ### Fixed
