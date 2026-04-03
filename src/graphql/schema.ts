@@ -2793,6 +2793,11 @@ export const BotSchema = /* GraphQL */ `
     unpnlValue: Float
     unpnlCondition: String
     dcValue: String
+    sessionDays: [Int]
+    sessionRule: String
+    lwMaxDuration: Int
+    lwThreshold: Float
+    lwValue: String
   }
   enum MAEnum {
     sma
@@ -4305,6 +4310,8 @@ export const BotSchema = /* GraphQL */ `
     UNPNL
     DC
     OBFVG
+    LW
+    SESSION
   }
   enum BBCrossingEnum {
     middle
@@ -4423,6 +4430,11 @@ export const BotSchema = /* GraphQL */ `
     unpnlValue: Float
     unpnlCondition: String
     dcValue: String
+    sessionDays: [Int]
+    sessionRule: String
+    lwMaxDuration: Int
+    lwThreshold: Float
+    lwValue: String
   }
   enum IndicatorSection {
     sl

@@ -10439,13 +10439,35 @@ function createDCABotHelper<
         }
       }
       const check = () => {
+        this.handleDebug('Checking session indicator status')
         const inSession = isInSession(Date.now(), days, rule)
+        const toProcess: (() => void)[] = []
         for (const [key, ind] of this.indicators.entries()) {
           if (ind.uuid === uuid) {
             ind.status = inSession
             ind.data = true
+            ind.history = ind.history ?? []
+            const lastData = {
+              time: Date.now(),
+              value: inSession,
+              type: IndicatorEnum.session as typeof IndicatorEnum.session,
+            }
+            ind.history.push(lastData)
             this.indicators.set(key, ind)
+            if (inSession) {
+              toProcess.push(() =>
+                this.checkIndicatorStatus(
+                  this.botId,
+                  ind.symbol,
+                  lastData,
+                  ind.interval,
+                  ind.section,
+                  ind.action,
+                ),
+              )
+            }
           }
+          toProcess.forEach((fn) => fn())
         }
       }
       // Run immediately then every 60s

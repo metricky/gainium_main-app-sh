@@ -103,6 +103,8 @@ import {
   BybitHost,
   OBFVGValueEnum,
   OBFVGRefEnum,
+  SessionRuleEnum,
+  LWValueEnum,
   RRSlTypeEnum,
 } from '../../types'
 import { collections } from './config'
@@ -992,6 +994,11 @@ const indicatorsSettings = new Schema({
   dcValue: { type: String, enum: DCValueEnum },
   obfvgValue: { type: String, enum: OBFVGValueEnum },
   obfvgRef: { type: String, enum: OBFVGRefEnum },
+  sessionDays: [Number],
+  sessionRule: { type: String, enum: SessionRuleEnum },
+  lwThreshold: Number,
+  lwMaxDuration: Number,
+  lwValue: { type: String, enum: LWValueEnum },
 })
 
 const multiTP = new Schema({
