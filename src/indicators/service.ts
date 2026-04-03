@@ -45,6 +45,7 @@ import {
   KeltnerChannelPB,
   DonchianChannels,
   OBFVG,
+  LongWick,
 } from '@gainium/indicators'
 import { v4 } from 'uuid'
 import {
@@ -274,6 +275,7 @@ class InternalIndicator {
     | KeltnerChannelPB
     | DonchianChannels
     | OBFVG
+    | LongWick
   private data: IndicatorHistory[]
   private lastPrice = 0
   private subscribers: IndicatorSubscribers[]
@@ -779,6 +781,13 @@ class InternalIndicator {
       this.indicator = new OBFVG()
       this.length = 1000
     }
+    if (indicatorConfig.type === IndicatorEnum.lw) {
+      this.indicator = new LongWick(
+        indicatorConfig.lwThreshold ?? 2,
+        indicatorConfig.lwMaxDuration ?? 1000,
+      )
+      this.length = 201
+    }
 
     this.type = indicatorConfig.type
     this.data = []
@@ -1155,7 +1164,8 @@ class InternalIndicator {
         this.indicator instanceof MOM ||
         this.indicator instanceof ECD ||
         this.indicator instanceof DonchianChannels ||
-        this.indicator instanceof OBFVG)
+        this.indicator instanceof OBFVG ||
+        this.indicator instanceof LongWick)
     ) {
       this.indicator?.next({
         high: +value.h,

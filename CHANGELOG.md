@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0] - 2026-04-03
+
+### Added
+
+- Long Wick
+- Session
+
 ## [1.14.24] - 2026-03-31
 
 ### Fixed

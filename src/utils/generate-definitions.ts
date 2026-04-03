@@ -1831,6 +1831,53 @@ const INDICATOR_META: Record<
       indicatorAction: 'startDeal',
     },
   },
+  SESSION: {
+    name: 'Session Selector',
+    description:
+      'Filters signals based on the day of the week (UTC). Select which days are active and whether to trade in or out of the selected sessions.',
+    typeSpecificFields: ['sessionDays', 'sessionRule'],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'SESSION',
+      indicatorLength: 1,
+      indicatorValue: '0',
+      indicatorCondition: 'cd',
+      indicatorInterval: '1h',
+      sessionDays: [1, 2, 3, 4, 5],
+      sessionRule: 'in',
+      indicatorAction: 'startDeal',
+    },
+  },
+  LW: {
+    name: 'Long Wick Detector',
+    description:
+      'Detects candles with unusually long wicks based on ATR(200). Tracks wick levels until price mitigates them or they expire.',
+    typeSpecificFields: ['lwThreshold', 'lwMaxDuration', 'lwValue'],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'LW',
+      indicatorLength: 1,
+      indicatorValue: '0',
+      indicatorCondition: 'cu',
+      indicatorInterval: '1h',
+      lwThreshold: 2,
+      lwMaxDuration: 1000,
+      lwValue: 'any',
+      indicatorAction: 'startDeal',
+    },
+  },
 }
 
 // Core indicator fields (required for every indicator)

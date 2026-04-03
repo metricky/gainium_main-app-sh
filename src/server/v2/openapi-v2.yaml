@@ -736,7 +736,7 @@ components:
         pair:
           type: string
           description: Trading pair symbol
-          example: BTC_USDT
+          example: BTC/USDT
         futures:
           type: boolean
           description: Enable futures trading
@@ -796,7 +796,7 @@ components:
             pair:
               type: string
               description: Trading pair symbol
-              example: BTC_USDT
+              example: BTC/USDT
             topPrice:
               type: number
               description: Top price of grid range
@@ -1775,7 +1775,7 @@ components:
               description: Trading pair symbol
               items:
                 type: string
-              example: BTC_USDT
+              example: BTC/USDT
             useMulti:
               type: boolean
               description: Enable multiple pairs trading
@@ -1821,12 +1821,7 @@ components:
               type: string
               description: Bot status for stopping
               enum:
-                - open
                 - closed
-                - range
-                - error
-                - archive
-                - monitoring
               example: monitoring
             dealCloseCondition:
               type: string
@@ -3375,6 +3370,8 @@ components:
             - UNPNL
             - DC
             - OBFVG
+            - SESSION
+            - LW
           example: regular
         indicatorLength:
           type: number
@@ -3983,6 +3980,28 @@ components:
             - low
             - middle
           example: high
+        sessionDays:
+          type: array
+          items:
+            type: number
+          example: null
+        sessionRule:
+          type: string
+          enum:
+            - in
+            - out
+        lwThreshold:
+          type: number
+          example: null
+        lwMaxDuration:
+          type: number
+          example: null
+        lwValue:
+          type: string
+          enum:
+            - top
+            - bottom
+            - any
       description: SettingsIndicators configuration
     UpdateComboBotInput:
       type: object

@@ -62,6 +62,7 @@ import {
   TradingviewAnalysisSignalEnum,
   TrendFilterOperatorEnum,
   DivergenceOscillators,
+  SessionRuleEnum,
 } from '../../../types'
 
 export const DCA_FORM_DEFAULTS: DCABotSettings = {
@@ -603,6 +604,20 @@ export const indicatorConfigDefaults: {
   [IndicatorEnum.kcpb]: {
     indicatorLength: 20,
     indicatorValue: '0',
+    ...base,
+  },
+  [IndicatorEnum.lw]: {
+    indicatorLength: 20,
+    indicatorValue: '0',
+    lwThreshold: 2,
+    lwMaxDuration: 1000,
+    ...base,
+  },
+  [IndicatorEnum.session]: {
+    indicatorLength: 20,
+    indicatorValue: '0',
+    sessionDays: [1, 2, 3, 4, 5],
+    sessionRule: SessionRuleEnum.in,
     ...base,
   },
 }

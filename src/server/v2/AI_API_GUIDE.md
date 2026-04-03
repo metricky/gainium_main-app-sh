@@ -25,7 +25,7 @@ All API requests require three headers:
 | Header | Description | Example |
 |--------|-------------|---------|
 | `token` | Public API key | `your-public-key` |
-| `time` | Request timestamp (ms) | `1772117136774` |
+| `time` | Request timestamp (ms) | `1775213048599` |
 | `signature` | HMAC-SHA256 signature | `calculated-signature` |
 
 ### Signature Calculation
@@ -215,11 +215,13 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 | POST | `/api/v2/backtest/dca/request/sync` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request DCA Backtest (Synchronous) |
 | POST | `/api/v2/backtest/grid/request` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Grid Bot Server Side Backtest |
 | POST | `/api/v2/backtest/grid/request/sync` | Request body | [BacktestResponse](./SCHEMAS.md#backtestresponse) | Request Grid Backtest (Synchronous) |
+| POST | `/api/v2/backtest/{botType}/validate` | Request body | Success response | Validate bot settings without creating a bot or backtest |
 
 ### Bots - Combo
 
 | Method | URL | Input Schema | Response | Description |
 |--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/bots/combo/details` | Query params | [ComboBot](./SCHEMAS.md#combobot) | Get Combo Bot by ID |
 | GET | `/api/v2/bots/combo` | Query params | [ComboBotListResponse](./SCHEMAS.md#combobotlistresponse) | Get Combo Bots |
 | POST | `/api/v2/bots/combo` | [CreateComboBotInput](./SCHEMAS.md#createcombobotinput) | Success response | Create Combo Bot |
 | POST | `/api/v2/bots/combo/{botId}/clone` | [UpdateComboBotInput](./SCHEMAS.md#updatecombobotinput) | Success response | Clone Combo Bot |
@@ -233,6 +235,7 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 
 | Method | URL | Input Schema | Response | Description |
 |--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/deals/combo/details` | Query params | [Deal](./SCHEMAS.md#deal) | Get Combo Deal by ID |
 | GET | `/api/v2/deals/combo` | Query params | [DealListResponse](./SCHEMAS.md#deallistresponse) | Get Combo Deals |
 | POST | `/api/v2/deals/combo/{botId}/start` | Query params only | Success response | Start New Combo Deal |
 | PUT | `/api/v2/deals/combo/{dealId}` | [UpdateComboDealsInput](./SCHEMAS.md#updatecombodealsinput) | Success response | Update Combo Deal |
@@ -242,6 +245,7 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 
 | Method | URL | Input Schema | Response | Description |
 |--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/bots/dca/details` | Query params | [DCABot](./SCHEMAS.md#dcabot) | Get DCA Bot by ID |
 | GET | `/api/v2/bots/dca` | Query params | [DCABotListResponse](./SCHEMAS.md#dcabotlistresponse) | Get DCA Bots |
 | POST | `/api/v2/bots/dca` | [CreateDCABotInput](./SCHEMAS.md#createdcabotinput) | Success response | Create DCA Bot |
 | POST | `/api/v2/bots/dca/{botId}/clone` | [UpdateDCABotInput](./SCHEMAS.md#updatedcabotinput) | Success response | Clone DCA Bot |
@@ -256,6 +260,7 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 
 | Method | URL | Input Schema | Response | Description |
 |--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/deals/dca/details` | Query params | [Deal](./SCHEMAS.md#deal) | Get DCA Deal by ID |
 | GET | `/api/v2/deals/dca` | Query params | [DealListResponse](./SCHEMAS.md#deallistresponse) | Get DCA Deals |
 | POST | `/api/v2/deals/dca/add-funds` | [AddFundsSchema](./SCHEMAS.md#addfundsschema) | Success response | Add Funds to Deal |
 | POST | `/api/v2/deals/dca/reduce-funds` | [AddFundsSchema](./SCHEMAS.md#addfundsschema) | Success response | Reduce Funds from Deal |
@@ -263,10 +268,21 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 | PUT | `/api/v2/deals/dca/{dealId}` | [UpdateDCADealsInput](./SCHEMAS.md#updatedcadealsinput) | Success response | Update DCA Deal |
 | DELETE | `/api/v2/deals/dca/{dealId}` | Query params | Success response | Close DCA Deal |
 
+### Discovery
+
+| Method | URL | Input Schema | Response | Description |
+|--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/discovery/bots/{botType}` | Query params | Success response | Get schema definition for a single bot type |
+| GET | `/api/v2/discovery/bots/{botType}/sections` | Query params only | Array<[SectionSummary](./SCHEMAS.md#sectionsummary)> | List sections for a bot type |
+| GET | `/api/v2/discovery/bots` | Query params only | Array<[BotSchemaDefinition](./SCHEMAS.md#botschemadefinition)> | List all bot schema definitions |
+| GET | `/api/v2/discovery/indicators/{type}` | Query params | [IndicatorDefinition](./SCHEMAS.md#indicatordefinition) | Get full field definition for an indicator type |
+| GET | `/api/v2/discovery/indicators` | Query params | Array<[IndicatorSummary](./SCHEMAS.md#indicatorsummary)> | List all indicator types |
+
 ### Bots - Grid
 
 | Method | URL | Input Schema | Response | Description |
 |--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/bots/grid/details` | Query params | [GridBot](./SCHEMAS.md#gridbot) | Get Grid Bot by ID |
 | GET | `/api/v2/bots/grid` | Query params | [GridBotListResponse](./SCHEMAS.md#gridbotlistresponse) | Get Grid Bots |
 | POST | `/api/v2/bots/grid` | [CreateGridBotInput](./SCHEMAS.md#creategridbotinput) | Success response | Create Grid Bot |
 | POST | `/api/v2/bots/grid/{botId}/clone` | [CreateGridBotInput](./SCHEMAS.md#creategridbotinput) | Success response | Clone Grid Bot |
@@ -286,6 +302,7 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 
 | Method | URL | Input Schema | Response | Description |
 |--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/deals/terminal/details` | Query params | [Deal](./SCHEMAS.md#deal) | Get Terminal Deal by ID |
 | GET | `/api/v2/deals/terminal` | Query params | [DealListResponse](./SCHEMAS.md#deallistresponse) | Get Terminal Deals |
 | POST | `/api/v2/deals/terminal` | [CreateTerminalDealInput](./SCHEMAS.md#createterminaldealinput) | Success response | Create Terminal Deal |
 | POST | `/api/v2/deals/terminal/{dealId}/add-funds` | [AddFundsSchema](./SCHEMAS.md#addfundsschema) | Success response | Add Funds to Terminal Deal |
@@ -394,7 +411,7 @@ def get_all_bots():
 ---
 
 *This documentation is automatically generated from the OpenAPI specification.*  
-*Last updated: 2026-02-26T14:45:36.775Z*  
+*Last updated: 2026-04-03T10:44:08.599Z*  
 *For detailed schemas, see [SCHEMAS.md](./SCHEMAS.md)*
 
 ## Schemas

@@ -7,7 +7,7 @@ This document contains detailed schema definitions for all API endpoints.
 All schemas include field descriptions, types, validation rules, and examples.
 This documentation is automatically generated from the OpenAPI specification.
 
-**Last Updated:** 2026-02-26T14:45:36.777Z
+**Last Updated:** 2026-04-03T10:44:08.601Z
 
 ---
 
@@ -420,6 +420,36 @@ Minimal balance representation
   "marginType": "inherit",
   "leverage": 0,
   "strategy": "LONG"
+}
+```
+
+
+---
+
+## BotSchemaDefinition
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `botType` | enum: `dca|combo|grid` | Yes |  |
+| `label` | string | Yes |  |
+| `description` | string | Yes |  |
+| `sections` | Array<[SectionDefinition](#sectiondefinition)> | Yes |  |
+
+### Example
+
+```json
+{
+  "botType": "dca",
+  "label": "example-string",
+  "description": "example-string",
+  "sections": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced SectionDefinition schema"
+    }
+  ]
 }
 ```
 
@@ -1023,6 +1053,58 @@ Minimal exchange representation
 
 ---
 
+## FieldDefinition
+
+Describes a single field on a bot settings or indicator object. `type` is the runtime JS type; `validators` are the constraint labels; `enum` lists allowed values when type = "enum".
+
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes |  |
+| `type` | enum: `string|number|numberInString|boolean|enum|array|object|Date` | Yes |  |
+| `required` | boolean | Yes |  |
+| `validators` | Array<string> | Yes |  |
+| `enum` | Array<string> | No | Allowed values, only present when type = "enum" |
+| `itemType` | string | No | Element type when type = "array" |
+| `min` | number | No |  |
+| `max` | number | No |  |
+| `maxPrecision` | number | No |  |
+| `maxLength` | number | No |  |
+| `default` | any | No | Default value used when field is omitted |
+| `note` | string | No | Extra human-readable usage guidance |
+| `example` | any | No | Representative example value |
+
+### Example
+
+```json
+{
+  "name": "BTC/USDT",
+  "type": "string",
+  "required": true,
+  "validators": "550e8400-e29b-41d4-a716-446655440000",
+  "enum": [
+    "example-string"
+  ],
+  "itemType": "example-string",
+  "min": 0,
+  "max": 0,
+  "maxPrecision": 0,
+  "maxLength": 0,
+  "default": {
+    "exampleField": "example-value"
+  },
+  "note": "example-string",
+  "example": {
+    "exampleField": "example-value"
+  }
+}
+```
+
+
+---
+
 ## GlobalVariable
 
 Global variable
@@ -1171,6 +1253,86 @@ Minimal Grid bot representation
 
 ---
 
+## IndicatorDefinition
+
+### Example
+
+```json
+{
+  "exampleField": "example-value"
+}
+```
+
+
+---
+
+## IndicatorGroupDefinition
+
+Documents the indicatorGroups mechanism. Every indicator must reference a group via its groupId field. The group object lives in the settings.indicatorGroups array and ties one or more indicators together under a shared action+section with AND/OR logic.
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `description` | string | Yes | Plain-English explanation of how groups work and why they are required. |
+| `rules` | Array<string> | Yes | Validation rules that must hold between each indicator and its group. An AI agent must follow all of these when constructing bot settings. |
+| `fields` | Array<[FieldDefinition](#fielddefinition)> | Yes | Field definitions for a single IndicatorGroup object in settings.indicatorGroups. |
+
+### Example
+
+```json
+{
+  "description": "example-string",
+  "rules": [
+    "example-string"
+  ],
+  "fields": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced FieldDefinition schema"
+    }
+  ]
+}
+```
+
+
+---
+
+## IndicatorSummary
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes |  |
+| `name` | string | Yes |  |
+| `description` | string | No |  |
+| `supportedActions` | Array<string> | Yes |  |
+| `supportedSections` | Array<string> | No |  |
+| `supportedIntervals` | Array<string> | No | Only present when the `?exchange=` query parameter is supplied. Lists the candlestick intervals available on that exchange. |
+
+### Example
+
+```json
+{
+  "type": "example-string",
+  "name": "BTC/USDT",
+  "description": "example-string",
+  "supportedActions": [
+    "example-string"
+  ],
+  "supportedSections": [
+    "example-string"
+  ],
+  "supportedIntervals": [
+    "example-string"
+  ]
+}
+```
+
+
+---
+
 ## MultiTP
 
 MultiTP configuration
@@ -1299,6 +1461,61 @@ Minimal screener coin representation
 
 ---
 
+## SectionDefinition
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes |  |
+| `name` | string | Yes |  |
+| `description` | string | Yes |  |
+| `fields` | Array<[FieldDefinition](#fielddefinition)> | Yes |  |
+
+### Example
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "BTC/USDT",
+  "description": "example-string",
+  "fields": [
+    {
+      "_id": "550e8400-e29b-41d4-a716-446655440000",
+      "exampleField": "Referenced FieldDefinition schema"
+    }
+  ]
+}
+```
+
+
+---
+
+## SectionSummary
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes |  |
+| `name` | string | Yes |  |
+| `description` | string | Yes |  |
+| `fieldCount` | integer | Yes | Number of fields in this section |
+
+### Example
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "BTC/USDT",
+  "description": "example-string",
+  "fieldCount": 0
+}
+```
+
+
+---
+
 ## ServerSideBacktestPayload
 
 ### Example
@@ -1347,7 +1564,7 @@ SettingsIndicators configuration
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | enum: `RSI|ADX|BBW|BB|MACD|Stoch|CCI|AO|StochRSI|WR|BullBear|UO|IC|TV|MA|SR|QFL|MFI|PSAR|VO|MOM|BBWP|ECD|XO|MAR|BBPB|DIV|ST|PC|ATR|PP|ADR|ATH|KC|KCPB|UNPNL|DC|OBFVG` | No | Bot or indicator type |
+| `type` | enum: `RSI|ADX|BBW|BB|MACD|Stoch|CCI|AO|StochRSI|WR|BullBear|UO|IC|TV|MA|SR|QFL|MFI|PSAR|VO|MOM|BBWP|ECD|XO|MAR|BBPB|DIV|ST|PC|ATR|PP|ADR|ATH|KC|KCPB|UNPNL|DC|OBFVG|SESSION|LW` | No | Bot or indicator type |
 | `indicatorLength` | number | No | Indicator period length |
 | `indicatorValue` | string | No | Indicator value threshold |
 | `indicatorCondition` | enum: `cd|cu|gt|lt` | No | Comparison condition |
@@ -1440,6 +1657,11 @@ SettingsIndicators configuration
 | `dcValue` | enum: `basis|lower|upper` | No | Donchian Channel line |
 | `obfvgValue` | enum: `bullish|bearish|any` | No | Order block/FVG type |
 | `obfvgRef` | enum: `high|low|middle` | No | Order block/FVG reference |
+| `sessionDays` | Array<number> | No |  |
+| `sessionRule` | enum: `in|out` | No |  |
+| `lwThreshold` | number | No |  |
+| `lwMaxDuration` | number | No |  |
+| `lwValue` | enum: `top|bottom|any` | No |  |
 
 ### Example
 
@@ -1539,7 +1761,14 @@ SettingsIndicators configuration
   "unpnlCondition": "cd",
   "dcValue": "basis",
   "obfvgValue": "bullish",
-  "obfvgRef": "high"
+  "obfvgRef": "high",
+  "sessionDays": [
+    0
+  ],
+  "sessionRule": "in",
+  "lwThreshold": 0,
+  "lwMaxDuration": 0,
+  "lwValue": "top"
 }
 ```
 

@@ -86,7 +86,16 @@ import {
 import { MathHelper } from '../utils/math'
 import MainBot, { notEnoughErrors } from './main'
 import utils from '../utils'
-import { gt, lt, lte, gte, eq, OBFVGResult } from '@gainium/indicators'
+import {
+  gt,
+  lt,
+  lte,
+  gte,
+  eq,
+  OBFVGResult,
+  LongWickResult,
+  isInSession,
+} from '@gainium/indicators'
 import { IdMute, IdMutex } from '../utils/mutex'
 import {
   DCABotSchema,
@@ -314,6 +323,7 @@ function createDCABotHelper<
       }[]
     > = new Map()
     equityTimer: NodeJS.Timeout | null = null
+    sessionCheckTimer: NodeJS.Timeout | null = null
     statsTimer: NodeJS.Timeout | null = null
     lastStatsCheck = 0
     indicatorCheckTimers: { [x: string]: NodeJS.Timeout | null | undefined } =
@@ -3367,6 +3377,7 @@ function createDCABotHelper<
               dcValue,
               obfvgRef,
               obfvgValue,
+              lwValue,
             } = find
             if (indicatorAction === IndicatorAction.riskReward) {
               risk = true
@@ -3532,6 +3543,40 @@ function createDCABotHelper<
                       lastTime,
                     )?.toISOString()}`,
                   )
+                }
+              } else if (type === IndicatorEnum.lw) {
+                const [ld, pd] = sortedByTime
+                const last = ld?.value as LongWickResult
+                const prev = pd?.value as LongWickResult
+                if (last && prev) {
+                  const useTop =
+                    !lwValue || lwValue === 'top' || lwValue === 'any'
+                  const useBottom =
+                    !lwValue || lwValue === 'bottom' || lwValue === 'any'
+                  // cu = new wick appeared, cd = wick mitigated
+                  // gt = wick level exists, lt = wick level does not exist
+                  const checkWick = (
+                    lastVal: number,
+                    prevVal: number,
+                  ): boolean => {
+                    if (indicatorCondition === IndicatorStartConditionEnum.cu) {
+                      return isNaN(prevVal) && !isNaN(lastVal)
+                    }
+                    if (indicatorCondition === IndicatorStartConditionEnum.cd) {
+                      return !isNaN(prevVal) && isNaN(lastVal)
+                    }
+                    if (indicatorCondition === IndicatorStartConditionEnum.gt) {
+                      return !isNaN(lastVal)
+                    }
+                    if (indicatorCondition === IndicatorStartConditionEnum.lt) {
+                      return isNaN(lastVal)
+                    }
+                    return false
+                  }
+                  const topAction = useTop && checkWick(last.bull, prev.bull)
+                  const bottomAction =
+                    useBottom && checkWick(last.bear, prev.bear)
+                  action = topAction || bottomAction
                 }
               } else if (type === IndicatorEnum.st) {
                 const [ld, pd] = sortedByTime
@@ -9385,6 +9430,7 @@ function createDCABotHelper<
       this.afterIndicatorsConnected = []
     }
     override async beforeDelete() {
+      this.stopSessionCheckTimer()
       for (const i of this.indicators.values()) {
         this.handleLog(`Remove listener ${i.id} ${i.uuid}@${i.symbol}`)
         if (this.redisSubIndicators) {
@@ -9478,7 +9524,11 @@ function createDCABotHelper<
         const indicatorTypeMap: Map<string, SettingsIndicators[]> = new Map()
         const groupsId = this.indicatorGroupsToUse.map((g) => g.id)
         const filteredIndicators = (settings.indicators ?? [])
-          .filter((i) => i.type !== IndicatorEnum.unpnl)
+          .filter(
+            (i) =>
+              i.type !== IndicatorEnum.unpnl &&
+              i.type !== IndicatorEnum.session,
+          )
           .filter(
             (i) => !i.groupId || (i.groupId && groupsId.includes(i.groupId)),
           )
@@ -10349,6 +10399,65 @@ function createDCABotHelper<
       }
       this.endMethod(_id)
       this.runAfterIndicatorsConnected(this.botId)
+      this.startSessionCheckTimer()
+    }
+
+    private startSessionCheckTimer() {
+      this.stopSessionCheckTimer()
+      const sessionIndicator = this.data?.settings.indicators?.find(
+        (i) => i.type === IndicatorEnum.session,
+      )
+      if (!sessionIndicator) {
+        return
+      }
+      const days = sessionIndicator.sessionDays ?? [1, 2, 3, 4, 5]
+      const rule = sessionIndicator.sessionRule ?? 'in'
+      const { uuid, indicatorAction, section, groupId } = sessionIndicator
+      // Register session indicator in the map for the first symbol
+      // Session is time-based, not symbol-specific, so one entry per symbol
+      for (const symbol of this.pairs) {
+        const key = `${uuid}@${symbol}`
+        if (!this.indicators.has(key)) {
+          this.indicators.set(key, {
+            uuid,
+            id: `session-${uuid}`,
+            room: '',
+            status: false,
+            data: true,
+            history: [],
+            symbol,
+            key,
+            action: indicatorAction,
+            maCross: false,
+            section,
+            interval: ExchangeIntervals.oneM,
+            parentIndicator: '',
+            childIndicator: '',
+            groupId: groupId,
+            is1d: false,
+          })
+        }
+      }
+      const check = () => {
+        const inSession = isInSession(Date.now(), days, rule)
+        for (const [key, ind] of this.indicators.entries()) {
+          if (ind.uuid === uuid) {
+            ind.status = inSession
+            ind.data = true
+            this.indicators.set(key, ind)
+          }
+        }
+      }
+      // Run immediately then every 60s
+      check()
+      this.sessionCheckTimer = setInterval(check, 60_000)
+    }
+
+    private stopSessionCheckTimer() {
+      if (this.sessionCheckTimer) {
+        clearInterval(this.sessionCheckTimer)
+        this.sessionCheckTimer = null
+      }
     }
 
     /**
@@ -16331,6 +16440,7 @@ function createDCABotHelper<
       if (this.timer) {
         clearInterval(this.timer)
       }
+      this.stopSessionCheckTimer()
       if (start) {
         this.setEquityTimer()
       }

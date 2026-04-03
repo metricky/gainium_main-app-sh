@@ -52,6 +52,7 @@ import {
   OBFVGValueEnum,
   OBFVGRefEnum,
   TrendFilterOperatorEnum,
+  SessionRuleEnum,
 } from '../../../../../types'
 import {
   COMBO_FORM_DEFAULTS,
@@ -800,6 +801,35 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
     enum: Object.values(OBFVGRefEnum),
+  },
+  sessionDays: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeArray],
+  },
+  sessionRule: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: [SessionRuleEnum.in, SessionRuleEnum.out],
+  },
+  lwThreshold: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+    ],
+  },
+  lwMaxDuration: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+  },
+  lwValue: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: ['top', 'bottom', 'any'],
   },
   percentile: {
     required: false,

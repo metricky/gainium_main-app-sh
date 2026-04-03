@@ -13,6 +13,7 @@ import {
   DCResult,
   PercentileResult,
   OBFVGResult,
+  LongWickResult,
 } from '@gainium/indicators'
 import {
   DCABacktestingInput,
@@ -521,8 +522,24 @@ export type SettingsIndicators = {
   dcValue?: DCValueEnum
   obfvgValue?: OBFVGValueEnum
   obfvgRef?: OBFVGRefEnum
+  sessionDays?: number[]
+  sessionRule?: SessionRuleEnum
+  lwThreshold?: number
+  lwMaxDuration?: number
+  lwValue?: LWValueEnum
 } & Percentile &
   TrendFilter
+
+export enum SessionRuleEnum {
+  in = 'in',
+  out = 'out',
+}
+
+export enum LWValueEnum {
+  top = 'top',
+  bottom = 'bottom',
+  any = 'any',
+}
 
 export enum OBFVGValueEnum {
   bullish = 'bullish',
@@ -3192,6 +3209,8 @@ export enum IndicatorEnum {
   unpnl = 'UNPNL',
   dc = 'DC',
   obfvg = 'OBFVG',
+  session = 'SESSION',
+  lw = 'LW',
 }
 
 export enum MAEnum {
@@ -3278,6 +3297,8 @@ export type IndicatorHistory = { time: number } & (
   | { type: IndicatorEnum.sr; value: PivotResult }
   | { type: IndicatorEnum.qfl; value: QFLResult }
   | { type: IndicatorEnum.psar; value: { psar: number; price: number } }
+  | { type: IndicatorEnum.lw; value: LongWickResult }
+  | { type: IndicatorEnum.session; value: boolean }
 )
 
 type Percentile = {
@@ -3456,6 +3477,11 @@ export type IndicatorConfig =
     }
   | ({ type: IndicatorEnum.vo; voShort: number; voLong: number } & Percentile)
   | { type: IndicatorEnum.ecd }
+  | {
+      type: IndicatorEnum.lw
+      lwThreshold: number
+      lwMaxDuration: number
+    }
 
 export type Prices = {
   pair: string
