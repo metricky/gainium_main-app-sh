@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.15.1] - 2026-04-06
+
+### Changed
+
+- Long Wick logic
+
 ## [1.15.0] - 2026-04-03
 
 ### Added

@@ -64,6 +64,7 @@ import {
   DivergenceOscillators,
   SessionRuleEnum,
   LWValueEnum,
+  LWConditionEnum,
 } from '../../../types'
 
 export const DCA_FORM_DEFAULTS: DCABotSettings = {
@@ -610,9 +611,10 @@ export const indicatorConfigDefaults: {
   [IndicatorEnum.lw]: {
     indicatorLength: 20,
     indicatorValue: '0',
-    lwThreshold: 2,
-    lwMaxDuration: 1000,
+    lwThreshold: '2',
+    lwMaxDuration: '1000',
     lwValue: LWValueEnum.any,
+    lwCondition: LWConditionEnum.during,
     ...base,
   },
   [IndicatorEnum.session]: {

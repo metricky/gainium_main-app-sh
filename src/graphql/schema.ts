@@ -2795,9 +2795,10 @@ export const BotSchema = /* GraphQL */ `
     dcValue: String
     sessionDays: [Int]
     sessionRule: String
-    lwMaxDuration: Int
-    lwThreshold: Float
+    lwMaxDuration: String
+    lwThreshold: String
     lwValue: String
+    lwCondition: String
   }
   enum MAEnum {
     sma
@@ -4432,9 +4433,10 @@ export const BotSchema = /* GraphQL */ `
     dcValue: String
     sessionDays: [Int]
     sessionRule: String
-    lwMaxDuration: Int
-    lwThreshold: Float
+    lwMaxDuration: String
+    lwThreshold: String
     lwValue: String
+    lwCondition: String
   }
   enum IndicatorSection {
     sl

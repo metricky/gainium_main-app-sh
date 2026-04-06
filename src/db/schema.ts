@@ -106,6 +106,7 @@ import {
   SessionRuleEnum,
   LWValueEnum,
   RRSlTypeEnum,
+  LWConditionEnum,
 } from '../../types'
 import { collections } from './config'
 
@@ -996,9 +997,10 @@ const indicatorsSettings = new Schema({
   obfvgRef: { type: String, enum: OBFVGRefEnum },
   sessionDays: [Number],
   sessionRule: { type: String, enum: SessionRuleEnum },
-  lwThreshold: Number,
-  lwMaxDuration: Number,
+  lwThreshold: String,
+  lwMaxDuration: String,
   lwValue: { type: String, enum: LWValueEnum },
+  lwCondition: { type: String, enum: LWConditionEnum },
 })
 
 const multiTP = new Schema({

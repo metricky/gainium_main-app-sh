@@ -524,11 +524,17 @@ export type SettingsIndicators = {
   obfvgRef?: OBFVGRefEnum
   sessionDays?: number[]
   sessionRule?: SessionRuleEnum
-  lwThreshold?: number
-  lwMaxDuration?: number
+  lwThreshold?: string
+  lwMaxDuration?: string
   lwValue?: LWValueEnum
+  lwCondition?: LWConditionEnum
 } & Percentile &
   TrendFilter
+
+export enum LWConditionEnum {
+  onStart = 'onStart',
+  during = 'during',
+}
 
 export enum SessionRuleEnum {
   in = 'in',
@@ -3336,6 +3342,7 @@ export type DivergenceOscillators =
   | IndicatorEnum.stoch
 
 export type IndicatorConfig =
+  | { type: IndicatorEnum.lw; lwThreshold: number; lwMaxDuration: number }
   | { type: IndicatorEnum.obfvg }
   | { type: IndicatorEnum.dc; length: number }
   | {
