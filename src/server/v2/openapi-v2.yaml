@@ -3991,10 +3991,10 @@ components:
             - in
             - out
         lwThreshold:
-          type: number
+          type: string
           example: null
         lwMaxDuration:
-          type: number
+          type: string
           example: null
         lwValue:
           type: string
@@ -4002,6 +4002,11 @@ components:
             - top
             - bottom
             - any
+        lwCondition:
+          type: string
+          enum:
+            - onStart
+            - during
       description: SettingsIndicators configuration
     UpdateComboBotInput:
       type: object

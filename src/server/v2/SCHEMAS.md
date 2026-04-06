@@ -7,7 +7,7 @@ This document contains detailed schema definitions for all API endpoints.
 All schemas include field descriptions, types, validation rules, and examples.
 This documentation is automatically generated from the OpenAPI specification.
 
-**Last Updated:** 2026-04-03T10:44:08.601Z
+**Last Updated:** 2026-04-06T09:43:18.628Z
 
 ---
 
@@ -1659,9 +1659,10 @@ SettingsIndicators configuration
 | `obfvgRef` | enum: `high|low|middle` | No | Order block/FVG reference |
 | `sessionDays` | Array<number> | No |  |
 | `sessionRule` | enum: `in|out` | No |  |
-| `lwThreshold` | number | No |  |
-| `lwMaxDuration` | number | No |  |
+| `lwThreshold` | string | No |  |
+| `lwMaxDuration` | string | No |  |
 | `lwValue` | enum: `top|bottom|any` | No |  |
+| `lwCondition` | enum: `onStart|during` | No |  |
 
 ### Example
 
@@ -1766,9 +1767,10 @@ SettingsIndicators configuration
     0
   ],
   "sessionRule": "in",
-  "lwThreshold": 0,
-  "lwMaxDuration": 0,
-  "lwValue": "top"
+  "lwThreshold": "example-string",
+  "lwMaxDuration": "example-string",
+  "lwValue": "top",
+  "lwCondition": "onStart"
 }
 ```
 

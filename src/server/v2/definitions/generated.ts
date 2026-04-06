@@ -4521,8 +4521,8 @@ export const dcaBotSchemaDefinition: BotSchemaDefinition = {
           type: 'number',
           required: true,
           validators: ['mustBeNumber', 'mustBePositive'],
-          default: 1775250000000,
-          example: 1775250000000,
+          default: 1775509200000,
+          example: 1775509200000,
         },
         {
           name: 'hodlHourly',

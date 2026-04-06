@@ -25,7 +25,7 @@ All API requests require three headers:
 | Header | Description | Example |
 |--------|-------------|---------|
 | `token` | Public API key | `your-public-key` |
-| `time` | Request timestamp (ms) | `1775213048599` |
+| `time` | Request timestamp (ms) | `1775468598625` |
 | `signature` | HMAC-SHA256 signature | `calculated-signature` |
 
 ### Signature Calculation
@@ -411,7 +411,7 @@ def get_all_bots():
 ---
 
 *This documentation is automatically generated from the OpenAPI specification.*  
-*Last updated: 2026-04-03T10:44:08.599Z*  
+*Last updated: 2026-04-06T09:43:18.625Z*  
 *For detailed schemas, see [SCHEMAS.md](./SCHEMAS.md)*
 
 ## Schemas
