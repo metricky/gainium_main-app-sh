@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.2] - 2026-04-07
+
+### Added
+
+- Mongo DB connection string support
+
+
 ## [1.15.1] - 2026-04-06
 
 ### Changed
