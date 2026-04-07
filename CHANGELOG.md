@@ -1,11 +1,16 @@
 # Changelog
 
+## [1.15.3] - 2026-04-07
+
+### Fixed
+
+- Short combo minigrids size on high deviation
+
 ## [1.15.2] - 2026-04-07
 
 ### Added
 
 - Mongo DB connection string support
-
 
 ## [1.15.1] - 2026-04-06
 

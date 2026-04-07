@@ -3607,12 +3607,8 @@ function createComboBotHelper<
               )
             }
             const pair = symbol.pair
-            const topPrice = this.isLong
-              ? price * (1 + (+(settings.step ?? '0') / 100) * stepVal)
-              : price
-            const lowPrice = this.isLong
-              ? price
-              : price * (1 - (+(settings.step ?? '0') / 100) * stepVal)
+            const topPrice = this.isLong ? price + gridStep * stepVal : price
+            const lowPrice = this.isLong ? price : price - gridStep * stepVal
             const levels = Math.floor(+(settings.gridLevel ?? '1'))
             const sellDisplacement = (fee?.maker ?? 0) * 2
             const initialGrids =
