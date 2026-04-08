@@ -8,7 +8,7 @@ import { IdMute, IdMutex } from '../../utils/mutex'
 import logger from '../../utils/logger'
 import { updateRequest } from '../utils/backtestRequest'
 
-const serverSideBacktestWorkers = 2
+const serverSideBacktestWorkers = 4
 
 const serverSideBacktestMutex = new IdMutex(serverSideBacktestWorkers)
 
