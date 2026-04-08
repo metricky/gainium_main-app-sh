@@ -33,7 +33,8 @@ type GetCandlesInput = {
 }
 
 const mutex = new IdMutex()
-
+const sleep = (milliseconds: number) =>
+new Promise((resolve) => setTimeout(resolve, milliseconds))
 class Candles {
   private exchange?: Exchange
 
@@ -382,7 +383,7 @@ class Candles {
       let ind = 0
       let chunkIndex = 0
       let currentIndex = 0
-      const maxRequestInChunk = 100
+      const maxRequestInChunk = 25
       for (const request of [...Array(count).keys()]) {
         currentIndex++
         if (!requests[chunkIndex]) {
@@ -395,13 +396,39 @@ class Candles {
               : Math.min(from + request * step * requestStep, to)
           const toThis = Math.min(from + (request + 1) * step * requestStep, to)
 
-          const result = await instance.getCandles(
+          let result = await instance.getCandles(
             symbol,
             interval,
             fromThis,
             toThis,
             isKucoin(this.exchangeName) ? undefined : requestStep,
           )
+
+          // Large 1m backtests occasionally receive empty chunk responses even
+          // though retrying the exact same range succeeds immediately after.
+          // Retry a few times before accepting an empty result.
+          if (
+            result.status === StatusEnum.ok &&
+            !result.data.length &&
+            toThis - fromThis > step
+          ) {
+            for (let retry = 1; retry <= 3; retry++) {
+              Logger.warn(
+                `${this.exchangeName} | ${symbol} | ${interval} | Empty candles response, retry ${retry} for ${fromThis} - ${toThis}`,
+              )
+              await sleep(retry * 250)
+              result = await instance.getCandles(
+                symbol,
+                interval,
+                fromThis,
+                toThis,
+                isKucoin(this.exchangeName) ? undefined : requestStep,
+              )
+              if (result.status === StatusEnum.notok || result.data.length) {
+                break
+              }
+            }
+          }
 
           if (result.status === StatusEnum.notok) {
             throw result
