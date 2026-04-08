@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.15.4] - 2026-04-08
+
+### Fixed
+
+- Kucoin intervals
+
 ## [1.15.3] - 2026-04-07
 
 ### Fixed

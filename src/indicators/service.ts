@@ -198,7 +198,11 @@ const getIntervalByExchange = (
       return okxIntervals[interval]
     }
     case ExchangeEnum.kucoin:
-    case ExchangeEnum.paperKucoin: {
+    case ExchangeEnum.paperKucoin:
+    case ExchangeEnum.kucoinLinear:
+    case ExchangeEnum.paperKucoinLinear:
+    case ExchangeEnum.kucoinInverse:
+    case ExchangeEnum.paperKucoinInverse: {
       return kucoinIntervals[interval]
     }
     case ExchangeEnum.mexc:

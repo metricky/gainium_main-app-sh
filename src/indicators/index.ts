@@ -129,7 +129,7 @@ const krakenSupported = [
   ExchangeIntervals.oneW,
 ]
 
-const filterIndicatorIntervalsByExchange = (
+export const filterIndicatorIntervalsByExchange = (
   intervals: ExchangeIntervals[],
   exchange: ExchangeEnum,
 ) => {
