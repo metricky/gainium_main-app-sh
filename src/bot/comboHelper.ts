@@ -52,6 +52,7 @@ import {
   DCADealFlags,
   ActionsEnum,
   DCACloseTriggerEnum,
+  TrailingModeEnum,
 } from '../../types'
 import { IdMute, IdMutex } from '../utils/mutex'
 import utils from '../utils'
@@ -128,6 +129,111 @@ function createComboBotHelper<
       this.botType = BotType.combo
       this.combo = true
       this.triggerStopLossCombo = this.triggerStopLossCombo.bind(this)
+    }
+    private parseComboNameFlags(name?: string) {
+      const trimmedName = `${name ?? ''}`.trim()
+      const separatorIndex = trimmedName.search(/[|#]/)
+      const rawFlags =
+        separatorIndex >= 0 ? trimmedName.slice(separatorIndex + 1) : undefined
+      const parsed: {
+        trailingTp?: boolean
+        trailingTpPerc?: string
+      } = {}
+
+      if (!rawFlags) {
+        return parsed
+      }
+
+      for (const token of rawFlags.trim().split(/\s+/)) {
+        const [rawKey, rawValue] = token.split('=', 2)
+        if (!rawKey || typeof rawValue === 'undefined') {
+          continue
+        }
+        const key = rawKey.trim().toLowerCase()
+        const value = rawValue.trim()
+        if (key === 'ttp') {
+          if (value === '1') {
+            parsed.trailingTp = true
+          } else if (value === '0') {
+            parsed.trailingTp = false
+          }
+        } else if (
+          key === 'ttpperc' &&
+          !isNaN(+value) &&
+          isFinite(+value) &&
+          +value >= 0
+        ) {
+          parsed.trailingTpPerc = value
+        }
+      }
+
+      return parsed
+    }
+    private getComboTrailingTpFlags(name?: string) {
+      const parsed = this.parseComboNameFlags(name)
+      return {
+        trailingTp: parsed.trailingTp ?? false,
+        trailingTpPerc: parsed.trailingTp ? +(parsed.trailingTpPerc ?? '5') : 0,
+      }
+    }
+    private async getComboClosePriceByPerc(
+      d: FullDeal<CleanComboDealsSchema>,
+      targetPerc: number,
+    ): Promise<number | null> {
+      const { avgPrice } = await this.getAggregatedSettings(d.deal)
+      const profitBase = await this.profitBase(d.deal)
+      const longMult = this.isLong ? 1 : -1
+      const qty = this.isLong
+        ? d.deal.currentBalances.base
+        : d.deal.initialBalances.base - d.deal.currentBalances.base
+      const quote =
+        (this.isLong
+          ? d.deal.initialBalances.quote - d.deal.currentBalances.quote
+          : d.deal.currentBalances.quote) +
+        (profitBase ? 0 : d.deal.profit.total * longMult)
+      const fee = (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0
+      const comboBasedOn = await this.comboBasedOn(d.deal)
+      const usageBase =
+        comboBasedOn === ComboTpBase.full
+          ? d.deal.usage.max.base
+          : d.deal.usage.current.base
+      const usageQuote =
+        comboBasedOn === ComboTpBase.full
+          ? d.deal.usage.max.quote
+          : d.deal.usage.current.quote
+      const avgToUse = d.deal.avgPrice || (avgPrice ?? d.deal.avgPrice)
+      const denominator = this.futures
+        ? this.coinm
+          ? usageBase
+          : usageQuote
+        : this.isLong
+          ? usageQuote * (profitBase ? 1 / avgToUse : 1)
+          : usageBase * (profitBase ? 1 : avgToUse)
+
+      if (!denominator) {
+        return null
+      }
+
+      const price = profitBase
+        ? quote /
+          (qty -
+            d.deal.profit.total * longMult -
+            (targetPerc * denominator -
+              d.deal.profit.total +
+              (d.deal.fullFee ?? 0) +
+              qty * fee) /
+              longMult)
+        : (targetPerc * denominator +
+            (d.deal.fullFee ?? 0) -
+            d.deal.profit.total +
+            quote * longMult) /
+          (qty * (longMult - fee))
+
+      if (!price || !isFinite(price) || isNaN(price) || price <= 0) {
+        return null
+      }
+
+      return price
     }
     setMingridByDeal(dealId: string, id: string) {
       if (!id) {
@@ -5218,6 +5324,10 @@ function createComboBotHelper<
     ): Promise<DealStopLossCombo> {
       const { avgPrice, slPerc, tpPerc, useTp, useSl } =
         await this.getAggregatedSettings(d.deal)
+      const trailingFlags = this.getComboTrailingTpFlags(
+        this.data?.settings.name,
+      )
+      const useTrailingTp = useTp && trailingFlags.trailingTp
       const tpToUse = +(tpPerc ?? '0') / 100
       const slToUse = +(slPerc ?? '0') / 100
       let tp: number | null = null
@@ -5261,7 +5371,7 @@ function createComboBotHelper<
         (profitBase ? qty * fee : quoteTp * fee)
       if (denominator) {
         if (profitBase) {
-          if (useTp) {
+          if (useTp && !useTrailingTp) {
             tp =
               quote /
               (qty -
@@ -5285,7 +5395,7 @@ function createComboBotHelper<
           }
         }
         if (!profitBase) {
-          if (useTp) {
+          if (useTp && !useTrailingTp) {
             tp =
               (tpToUse * denominator +
                 (d.deal.fullFee ?? 0) -
@@ -5302,6 +5412,17 @@ function createComboBotHelper<
               (qty * (longMult - fee))
           }
         }
+      }
+      if (
+        useTrailingTp &&
+        d.deal.trailingMode === TrailingModeEnum.ttp &&
+        typeof d.deal.trailingLevel === 'number' &&
+        isFinite(d.deal.trailingLevel)
+      ) {
+        tp = await this.getComboClosePriceByPerc(
+          d,
+          d.deal.trailingLevel / 100,
+        )
       }
       if (tp !== null && tp <= 0) {
         this.handleDebug(`TP less than 0, skip new tp ${tp}`)
@@ -5327,12 +5448,12 @@ function createComboBotHelper<
           if (tpPerc < 0) {
             this.handleDebug(`NEW PERCENT LOWER THAN 0 skip new tp, ${tpLog}`)
             tp = null
-          } else if (tpToUse * 0.9 > tpPerc) {
+          } else if (!useTrailingTp && tpToUse * 0.9 > tpPerc) {
             this.handleWarn(`TP calculated diff more than 10%, ${tpLog}`)
           } else {
             this.handleDebug(tpLog)
           }
-          if (tp !== null) {
+          if (tp !== null && !useTrailingTp) {
             this.botEventDb.createData({
               userId: this.userId,
               botId: this.botId,
@@ -5432,21 +5553,73 @@ function createComboBotHelper<
         return
       }
       for (const [deal, data] of this.dealsForStopLossCombo) {
-        const { tp, sl } = data
-        if (!tp && !sl) {
-          continue
-        }
         const d = this.getDeal(deal)
         if (!d || d.closeBySl || d.deal.status !== DCADealStatusEnum.open) {
           continue
         }
-        const { useSl, useTp } = await this.getAggregatedSettings(d.deal)
+        const { useSl, useTp, tpPerc } = await this.getAggregatedSettings(d.deal)
+        const trailingFlags = this.getComboTrailingTpFlags(
+          this.data?.settings.name,
+        )
+        const useTrailingTp = useTp && trailingFlags.trailingTp
+        let currentData = data
+
+        if (useTrailingTp) {
+          const currentPerc = (await this.claculateTpSlFromPrice(d, price)) * 100
+          if (isFinite(currentPerc) && !isNaN(currentPerc)) {
+            const targetTpPerc = +(tpPerc ?? '0')
+            const oldMode = d.deal.trailingMode
+            const oldBestPrice = d.deal.bestPrice
+            const oldTrailingLevel = d.deal.trailingLevel
+
+            if (
+              d.deal.trailingMode !== TrailingModeEnum.ttp &&
+              targetTpPerc <= currentPerc
+            ) {
+              d.deal.trailingMode = TrailingModeEnum.ttp
+              d.deal.bestPrice = currentPerc
+              d.deal.trailingLevel = currentPerc - trailingFlags.trailingTpPerc
+              this.handleLog(
+                `Deal: ${deal} activate combo trailing TP. Current: ${currentPerc}%, level: ${d.deal.trailingLevel}%`,
+              )
+            } else if (d.deal.trailingMode === TrailingModeEnum.ttp) {
+              d.deal.bestPrice = Math.max(
+                d.deal.bestPrice ?? currentPerc,
+                currentPerc,
+              )
+              d.deal.trailingLevel =
+                (d.deal.bestPrice ?? currentPerc) - trailingFlags.trailingTpPerc
+            }
+
+            if (
+              oldMode !== d.deal.trailingMode ||
+              oldBestPrice !== d.deal.bestPrice ||
+              oldTrailingLevel !== d.deal.trailingLevel
+            ) {
+              this.saveDeal(d, {
+                trailingMode: d.deal.trailingMode,
+                bestPrice: d.deal.bestPrice,
+                trailingLevel: d.deal.trailingLevel,
+              })
+            }
+          }
+
+          currentData = await this.getDealStopLossPriceCombo(d)
+          this.dealsForStopLossCombo.set(d.deal._id, currentData)
+        }
+
+        const { tp, sl } = currentData
+        if (!tp && !sl) {
+          continue
+        }
         const slTrigger =
           !!sl &&
           ((this.isLong && price <= sl) || (!this.isLong && price >= sl))
         const tpTrigger =
           !!tp &&
-          ((this.isLong && price >= tp) || (!this.isLong && price <= tp))
+          (useTrailingTp && d.deal.trailingMode === TrailingModeEnum.ttp
+            ? (this.isLong && price <= tp) || (!this.isLong && price >= tp)
+            : (this.isLong && price >= tp) || (!this.isLong && price <= tp))
         const close = slTrigger || tpTrigger
         if (!isNaN(sl) && isFinite(sl) && useSl && slTrigger && !d.closeBySl) {
           this.handleLog(
