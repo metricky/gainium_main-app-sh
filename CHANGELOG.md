@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.15.5] - 2026-04-13
+
+### Added
+
+- Timer to release mutex
+
 ## [1.15.4] - 2026-04-08
 
 ### Fixed
