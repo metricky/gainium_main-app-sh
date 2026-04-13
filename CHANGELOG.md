@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.15.6] - 2026-04-13
+
+### Fixed
+
+- Long Wick types
+
 ## [1.15.5] - 2026-04-13
 
 ### Added
