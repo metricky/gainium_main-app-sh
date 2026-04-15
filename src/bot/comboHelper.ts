@@ -180,18 +180,75 @@ function createComboBotHelper<
       d: FullDeal<CleanComboDealsSchema>,
       targetPerc: number,
     ): Promise<number | null> {
-      const { avgPrice } = await this.getAggregatedSettings(d.deal)
+      return this.findComboPriceByPerc(d, targetPerc)
+    }
+    private async getComboActivationPriceByPerc(
+      d: FullDeal<CleanComboDealsSchema>,
+      targetPerc: number,
+    ): Promise<number | null> {
+      return this.findComboPriceByPerc(d, targetPerc)
+    }
+    private async getComboPercAtPrice(
+      d: FullDeal<CleanComboDealsSchema>,
+      price: number,
+    ): Promise<number | null> {
+      if (!price || !isFinite(price) || isNaN(price) || price <= 0) {
+        return null
+      }
       const profitBase = await this.profitBase(d.deal)
-      const longMult = this.isLong ? 1 : -1
       const qty = this.isLong
         ? d.deal.currentBalances.base
         : d.deal.initialBalances.base - d.deal.currentBalances.base
-      const quote =
+      let quote =
         (this.isLong
           ? d.deal.initialBalances.quote - d.deal.currentBalances.quote
           : d.deal.currentBalances.quote) +
-        (profitBase ? 0 : d.deal.profit.total * longMult)
+        (profitBase ? 0 : d.deal.profit.total * (this.isLong ? 1 : -1))
+      const quoteTp = qty * price
+      let base =
+        quote / price +
+        (profitBase ? d.deal.profit.total * (this.isLong ? 1 : -1) : 0)
       const fee = (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0
+      let commission = this.futures
+        ? this.coinm
+          ? qty * fee
+          : qty * price * fee
+        : profitBase
+          ? qty * fee
+          : qty * price * fee
+      let total =
+        d.deal.profit.total +
+        (profitBase ? qty - base : quoteTp - quote) * (this.isLong ? 1 : -1) -
+        commission
+
+      if (
+        typeof d.deal.profit.pureBase !== 'undefined' &&
+        typeof d.deal.profit.pureQuote !== 'undefined' &&
+        typeof d.deal.feePaid !== 'undefined' &&
+        `${d.deal.feePaid}` !== 'null' &&
+        `${d.deal.profit.pureBase}` !== 'null' &&
+        `${d.deal.profit.pureQuote}` !== 'null' &&
+        d.deal.currentBalances.quote >= 0 &&
+        d.deal.currentBalances.base >= 0
+      ) {
+        quote = this.isLong
+          ? d.deal.initialBalances.quote - d.deal.currentBalances.quote
+          : d.deal.currentBalances.quote
+        base = quote / price
+        commission = profitBase
+          ? d.deal.feePaid
+            ? (d.deal.feePaid.base ?? 0) +
+              (d.deal.feePaid.quote ?? 0) / d.deal.avgPrice
+            : 0
+          : d.deal.feePaid
+            ? (d.deal.feePaid.base ?? 0) * d.deal.avgPrice +
+              (d.deal.feePaid.quote ?? 0)
+            : 0
+        total =
+          (profitBase ? qty - base : quoteTp - quote) * (this.isLong ? 1 : -1) -
+          commission
+      }
+
       const comboBasedOn = await this.comboBasedOn(d.deal)
       const usageBase =
         comboBasedOn === ComboTpBase.full
@@ -201,39 +258,98 @@ function createComboBotHelper<
         comboBasedOn === ComboTpBase.full
           ? d.deal.usage.max.quote
           : d.deal.usage.current.quote
-      const avgToUse = d.deal.avgPrice || (avgPrice ?? d.deal.avgPrice)
       const denominator = this.futures
         ? this.coinm
           ? usageBase
           : usageQuote
         : this.isLong
-          ? usageQuote * (profitBase ? 1 / avgToUse : 1)
-          : usageBase * (profitBase ? 1 : avgToUse)
+          ? usageQuote * (profitBase ? 1 / price : 1)
+          : usageBase * (profitBase ? 1 : price)
 
-      if (!denominator) {
+      if (!denominator || !isFinite(denominator) || isNaN(denominator)) {
         return null
       }
 
-      const price = profitBase
-        ? quote /
-          (qty -
-            d.deal.profit.total * longMult -
-            (targetPerc * denominator -
-              d.deal.profit.total +
-              (d.deal.fullFee ?? 0) +
-              qty * fee) /
-              longMult)
-        : (targetPerc * denominator +
-            (d.deal.fullFee ?? 0) -
-            d.deal.profit.total +
-            quote * longMult) /
-          (qty * (longMult - fee))
-
-      if (!price || !isFinite(price) || isNaN(price) || price <= 0) {
+      const perc = total / denominator
+      if (!isFinite(perc) || isNaN(perc)) {
+        return null
+      }
+      return perc
+    }
+    private async findComboPriceByPerc(
+      d: FullDeal<CleanComboDealsSchema>,
+      targetPerc: number,
+    ): Promise<number | null> {
+      const currentPrice =
+        this.getLastStreamData(d.deal.symbol.symbol)?.price ||
+        d.deal.lastPrice ||
+        d.deal.avgPrice ||
+        d.deal.initialPrice
+      if (!currentPrice || !isFinite(currentPrice) || isNaN(currentPrice)) {
         return null
       }
 
-      return price
+      const currentPerc = await this.getComboPercAtPrice(d, currentPrice)
+      if (currentPerc === null) {
+        return null
+      }
+
+      let low = currentPrice
+      let high = currentPrice
+      const needHigherPrice = this.isLong
+        ? targetPerc >= currentPerc
+        : targetPerc < currentPerc
+
+      if (needHigherPrice) {
+        for (let i = 0; i < 40; i++) {
+          high *= 1.5
+          const highPerc = await this.getComboPercAtPrice(d, high)
+          if (highPerc === null) {
+            return null
+          }
+          if ((this.isLong && highPerc >= targetPerc) || (!this.isLong && highPerc <= targetPerc)) {
+            break
+          }
+          if (i === 39) {
+            return null
+          }
+        }
+      } else {
+        for (let i = 0; i < 40; i++) {
+          low /= 1.5
+          if (low <= 0) {
+            return null
+          }
+          const lowPerc = await this.getComboPercAtPrice(d, low)
+          if (lowPerc === null) {
+            return null
+          }
+          if ((this.isLong && lowPerc <= targetPerc) || (!this.isLong && lowPerc >= targetPerc)) {
+            break
+          }
+          if (i === 39) {
+            return null
+          }
+        }
+      }
+
+      for (let i = 0; i < 50; i++) {
+        const mid = (low + high) / 2
+        const midPerc = await this.getComboPercAtPrice(d, mid)
+        if (midPerc === null) {
+          return null
+        }
+        if (Math.abs(midPerc - targetPerc) < 0.0001) {
+          return mid
+        }
+        if ((this.isLong && midPerc < targetPerc) || (!this.isLong && midPerc > targetPerc)) {
+          low = mid
+        } else {
+          high = mid
+        }
+      }
+
+      return (low + high) / 2
     }
     setMingridByDeal(dealId: string, id: string) {
       if (!id) {
@@ -5235,6 +5351,7 @@ function createComboBotHelper<
       dealId: string,
       sl: boolean,
       tp: boolean,
+      trailingTp = false,
     ): Promise<void> {
       const d = this.getDeal(dealId)
       if (!d) {
@@ -5273,51 +5390,14 @@ function createComboBotHelper<
         undefined,
         undefined,
         sl,
+        trailingTp ? DCACloseTriggerEnum.trailing : undefined,
       )
     }
     async claculateTpSlFromPrice(
       d: FullDeal<CleanComboDealsSchema>,
       price: number,
     ) {
-      const profitBase = await this.profitBase(d.deal)
-      const qty = this.isLong
-        ? d.deal.currentBalances.base
-        : d.deal.initialBalances.base - d.deal.currentBalances.base
-      const quote =
-        (this.isLong
-          ? d.deal.initialBalances.quote - d.deal.currentBalances.quote
-          : d.deal.currentBalances.quote) +
-        (profitBase ? 0 : d.deal.profit.total * (this.isLong ? 1 : -1))
-      const quoteTp = qty * price
-      const base =
-        quote / price +
-        (profitBase ? d.deal.profit.total * (this.isLong ? 1 : -1) : 0)
-      const fee = (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0
-      const total =
-        d.deal.profit.total +
-        (profitBase ? qty - base : quoteTp - quote) * (this.isLong ? 1 : -1) -
-        (d.deal.fullFee ?? 0) -
-        (profitBase ? qty * fee : quoteTp * fee)
-      const comboBasedOn = await this.comboBasedOn(d.deal)
-      const usageBase =
-        comboBasedOn === ComboTpBase.full
-          ? d.deal.usage.max.base
-          : d.deal.usage.current.base
-      const usageQuote =
-        comboBasedOn === ComboTpBase.full
-          ? d.deal.usage.max.quote
-          : d.deal.usage.current.quote
-      const { avgPrice } = await this.getAggregatedSettings(d.deal)
-      const avgToUse = d.deal.avgPrice || (avgPrice ?? d.deal.avgPrice)
-      const denominator = this.futures
-        ? this.coinm
-          ? usageBase
-          : usageQuote
-        : this.isLong
-          ? usageQuote * (profitBase ? 1 / avgToUse : 1)
-          : usageBase * (profitBase ? 1 : avgToUse)
-      const perc = total / denominator
-      return perc
+      return (await this.getComboPercAtPrice(d, price)) ?? 0
     }
     async getDealStopLossPriceCombo(
       d: FullDeal<CleanComboDealsSchema>,
@@ -5413,16 +5493,19 @@ function createComboBotHelper<
           }
         }
       }
-      if (
-        useTrailingTp &&
-        d.deal.trailingMode === TrailingModeEnum.ttp &&
-        typeof d.deal.trailingLevel === 'number' &&
-        isFinite(d.deal.trailingLevel)
-      ) {
-        tp = await this.getComboClosePriceByPerc(
-          d,
-          d.deal.trailingLevel / 100,
-        )
+      if (useTrailingTp) {
+        if (
+          d.deal.trailingMode === TrailingModeEnum.ttp &&
+          typeof d.deal.trailingLevel === 'number' &&
+          isFinite(d.deal.trailingLevel)
+        ) {
+          tp = await this.getComboClosePriceByPerc(
+            d,
+            d.deal.trailingLevel / 100,
+          )
+        } else {
+          tp = await this.getComboActivationPriceByPerc(d, tpToUse)
+        }
       }
       if (tp !== null && tp <= 0) {
         this.handleDebug(`TP less than 0, skip new tp ${tp}`)
@@ -5563,6 +5646,8 @@ function createComboBotHelper<
         )
         const useTrailingTp = useTp && trailingFlags.trailingTp
         let currentData = data
+        let activatedTrailingTp = false
+        let trailingChanged = false
 
         if (useTrailingTp) {
           const currentPerc = (await this.claculateTpSlFromPrice(d, price)) * 100
@@ -5579,6 +5664,7 @@ function createComboBotHelper<
               d.deal.trailingMode = TrailingModeEnum.ttp
               d.deal.bestPrice = currentPerc
               d.deal.trailingLevel = currentPerc - trailingFlags.trailingTpPerc
+              activatedTrailingTp = true
               this.handleLog(
                 `Deal: ${deal} activate combo trailing TP. Current: ${currentPerc}%, level: ${d.deal.trailingLevel}%`,
               )
@@ -5596,6 +5682,7 @@ function createComboBotHelper<
               oldBestPrice !== d.deal.bestPrice ||
               oldTrailingLevel !== d.deal.trailingLevel
             ) {
+              trailingChanged = true
               this.saveDeal(d, {
                 trailingMode: d.deal.trailingMode,
                 bestPrice: d.deal.bestPrice,
@@ -5606,6 +5693,9 @@ function createComboBotHelper<
 
           currentData = await this.getDealStopLossPriceCombo(d)
           this.dealsForStopLossCombo.set(d.deal._id, currentData)
+          if (trailingChanged || currentData.tp !== data.tp || currentData.sl !== data.sl) {
+            this.checkDealsPriceExtremum()
+          }
         }
 
         const { tp, sl } = currentData
@@ -5617,9 +5707,11 @@ function createComboBotHelper<
           ((this.isLong && price <= sl) || (!this.isLong && price >= sl))
         const tpTrigger =
           !!tp &&
-          (useTrailingTp && d.deal.trailingMode === TrailingModeEnum.ttp
-            ? (this.isLong && price <= tp) || (!this.isLong && price >= tp)
-            : (this.isLong && price >= tp) || (!this.isLong && price <= tp))
+          (useTrailingTp && activatedTrailingTp
+            ? false
+            : useTrailingTp && d.deal.trailingMode === TrailingModeEnum.ttp
+              ? (this.isLong && price <= tp) || (!this.isLong && price >= tp)
+              : (this.isLong && price >= tp) || (!this.isLong && price <= tp))
         const close = slTrigger || tpTrigger
         if (!isNaN(sl) && isFinite(sl) && useSl && slTrigger && !d.closeBySl) {
           this.handleLog(
@@ -5653,7 +5745,14 @@ function createComboBotHelper<
         }
 
         if (close) {
-          await this.triggerStopLossCombo(d.deal._id, slTrigger, tpTrigger)
+          await this.triggerStopLossCombo(
+            d.deal._id,
+            slTrigger,
+            tpTrigger,
+            tpTrigger &&
+              useTrailingTp &&
+              d.deal.trailingMode === TrailingModeEnum.ttp,
+          )
         }
       }
     }
@@ -5757,6 +5856,15 @@ function createComboBotHelper<
       this.setLastStreamData(msg.symbol, { price: msg.price, time })
       if (msg.price === lastStreamData?.price) {
         return
+      }
+      const hasActiveComboTtpDeal = this.getOpenDeals(false, msg.symbol).some(
+        (d) =>
+          d.deal.status === DCADealStatusEnum.open &&
+          d.deal.trailingMode === TrailingModeEnum.ttp &&
+          !d.closeBySl,
+      )
+      if (hasActiveComboTtpDeal) {
+        await this.unrealizedProfit()
       }
       const settings = await this.getAggregatedSettings()
       if (
