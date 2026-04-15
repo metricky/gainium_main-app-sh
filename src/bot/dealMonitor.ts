@@ -49,6 +49,18 @@ export class DealMonitor {
     this.stats.delete(id)
   }
 
+  public async flushAndRemoveDealStats(
+    combo: boolean,
+    id: string,
+    time: number,
+  ) {
+    const stats = this.stats.get(id)
+    if (stats) {
+      await this.completeStats(combo, id, time, { ...stats })
+    }
+    this.removeDealStats(id)
+  }
+
   @IdMute(
     mutex,
     (_combo: boolean, _data: unknown, _usdRate: number, deal: InputDeal) =>

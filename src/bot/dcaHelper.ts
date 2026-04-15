@@ -2074,13 +2074,18 @@ function createDCABotHelper<
       order?: Order,
     ): Promise<boolean> {
       this.removeDealFromStopLossMethods(dealId)
-      DealStats.getInstance().removeStats({ event: 'removeStats', dealId })
       const deal = this.getDeal(dealId)
       this.pendingClose.delete(dealId)
       if (!deal) {
         this.handleWarn(`Deal ${dealId} not found in local deals`)
         return false
       }
+      await DealStats.getInstance().removeStats({
+        event: 'removeStats',
+        dealId,
+        combo: this.combo,
+        time: +new Date(),
+      })
       if (!this.combo) {
         const botUpdate = {
           dealsReduceForBot:
@@ -14603,13 +14608,38 @@ function createDCABotHelper<
 
     checkDealsPriceExtremum() {
       if (this.combo) {
-        const values = [...this.dealsForStopLossCombo.values()]
+        const comboValues = [...this.dealsForStopLossCombo.entries()].map(
+          ([dealId, value]) => ({
+            deal: this.getDeal(dealId),
+            value,
+          }),
+        )
+        const comboLowerBounds = comboValues
+          .map(({ deal, value }) => {
+            const useTrailingTp =
+              deal?.deal.trailingMode === TrailingModeEnum.ttp
+            return this.isLong
+              ? [value.sl, useTrailingTp ? value.tp : 0]
+              : [useTrailingTp ? value.tp : Infinity, value.sl]
+          })
+          .flat()
+          .filter((v) => !!v && isFinite(v))
+        const comboUpperBounds = comboValues
+          .map(({ deal, value }) => {
+            const useTrailingTp =
+              deal?.deal.trailingMode === TrailingModeEnum.ttp
+            return this.isLong
+              ? [useTrailingTp ? Infinity : value.tp]
+              : [useTrailingTp ? 0 : value.tp, value.sl]
+          })
+          .flat()
+          .filter((v) => !!v && isFinite(v))
         const min = this.isLong
-          ? values.sort((a, b) => b.sl - a.sl)?.[0]?.sl
-          : values.sort((a, b) => b.tp - a.tp)?.[0]?.tp
+          ? comboLowerBounds.sort((a, b) => b - a)?.[0]
+          : comboUpperBounds.sort((a, b) => b - a)?.[0]
         const max = this.isLong
-          ? values.filter((v) => !!v.tp).sort((a, b) => a.tp - b.tp)?.[0]?.tp
-          : values.filter((v) => !!v.sl).sort((a, b) => a.sl - b.sl)?.[0]?.sl
+          ? comboUpperBounds.sort((a, b) => a - b)?.[0]
+          : comboLowerBounds.sort((a, b) => a - b)?.[0]
         this.highestLow.set(this.data?.settings.pair[0] ?? '', min ?? 0)
         this.lowestHigh.set(this.data?.settings.pair[0] ?? '', max || Infinity)
 

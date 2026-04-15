@@ -4439,6 +4439,8 @@ export type BotParentProcessStatsEventDtoDcaCombo = {
 export type BotParentRemoveStatsEventDtoDcaCombo = {
   event: 'removeStats'
   dealId: string
+  combo: boolean
+  time: number
 }
 
 export type BotParentProcessStatsEventDtoGrid = {

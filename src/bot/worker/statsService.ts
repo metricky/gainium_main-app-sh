@@ -48,9 +48,13 @@ export class DealStats {
     }
   }
 
-  public removeStats(data: BotParentRemoveStatsEventDtoDcaCombo) {
+  public async removeStats(data: BotParentRemoveStatsEventDtoDcaCombo) {
     try {
-      this.dealStats.removeDealStats(data.dealId)
+      await this.dealStats.flushAndRemoveDealStats(
+        data.combo,
+        data.dealId,
+        data.time,
+      )
     } catch (e) {
       logger.error(
         `removeStats Rejection at Promise Stats Worker ${threadId}, ${
