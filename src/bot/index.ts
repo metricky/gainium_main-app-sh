@@ -4580,18 +4580,27 @@ class Bot<T extends UserSchema = UserSchema> {
     )
     if (deals.status === StatusEnum.ok) {
       for (const d of deals.data.result) {
-        const dealSettings = new DCAUtils().getInitalDealSettings(BotType.dca, {
-          ...oldSettings.settings,
-          ...settings,
-        })
+        const merged = { ...oldSettings.settings, ...settings }
+        const dealSettings = new DCAUtils().getInitalDealSettings(
+          BotType.dca,
+          merged,
+        )
         dealSettings.avgPrice = d.settings.avgPrice
         dealSettings.slChangedByUser = d.settings.slChangedByUser
         dealSettings.orderSizePercQty = d.settings.orderSizePercQty
         dealSettings.updatedComboAdjustments =
           d.settings.updatedComboAdjustments
+        const dealUpdate: Record<string, unknown> = { settings: dealSettings }
+        if (d.moveSlActivated) {
+          if (merged.moveSL && merged.moveSLValue) {
+            dealSettings.slPerc = merged.moveSLValue
+          } else {
+            dealUpdate.moveSlActivated = false
+          }
+        }
         await this.dcaDealsDb.updateData(
           { _id: d._id.toString(), userId },
-          { $set: { settings: dealSettings } },
+          { $set: dealUpdate },
         )
       }
     }

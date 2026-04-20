@@ -14153,7 +14153,9 @@ function createDCABotHelper<
           (settings.useSl &&
             (!settings.trailingSl || settings.useMultiSl) &&
             (settings.dealCloseConditionSL === CloseConditionEnum.tp ||
-              (settings.moveSL && d.deal.moveSlActivated))) ||
+              (settings.moveSL &&
+                d.deal.moveSlActivated &&
+                +(settings.slPerc ?? 0) === +(settings.moveSLValue ?? 0)))) ||
           (this.slAr &&
             settings.useSl &&
             settings.dealCloseConditionSL === CloseConditionEnum.dynamicAr)) &&
@@ -14202,7 +14204,9 @@ function createDCABotHelper<
         useSl &&
         (!trailingSl || useMultiSl) &&
         (dealCloseConditionSL === CloseConditionEnum.tp ||
-          (moveSL && d.deal.moveSlActivated))
+          (moveSL &&
+            d.deal.moveSlActivated &&
+            +(slPerc ?? 0) === +(settings.moveSLValue ?? 0)))
       ) {
         if (
           useMultiSl &&
@@ -15582,6 +15586,8 @@ function createDCABotHelper<
           useFixedSLPrices,
           fixedSlPrice,
           multiTp,
+          slPerc,
+          moveSLValue,
         } = await this.getAggregatedSettings(d.deal)
         const dealId = d.deal._id
         let closeBySl = true
@@ -15616,7 +15622,9 @@ function createDCABotHelper<
           useSl &&
           (!trailingSl || useMultiSl) &&
           (dealCloseConditionSL === CloseConditionEnum.tp ||
-            (moveSL && d.deal.moveSlActivated))
+            (moveSL &&
+              d.deal.moveSlActivated &&
+              +(slPerc ?? 0) === +(moveSLValue ?? 0)))
         ) {
           if (
             useMultiSl &&

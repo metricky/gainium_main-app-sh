@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.15.7] - 2026-04-20
+
+### Fixed
+
+- Move SL value got overwritten
+
 ## [1.15.6] - 2026-04-13
 
 ### Fixed
