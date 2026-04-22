@@ -282,7 +282,11 @@ function createComboBotHelper<
       const baseOrder = order.typeOrder === TypeOrderEnum.dealStart
       const price = deal.initialPrice
       const stepScale = parseFloat(settings.stepScale)
-      const stepVal = order.dcaLevel ? stepScale ** (order.dcaLevel - 2) : 1
+      const stepVal = baseOrder
+        ? 1
+        : order.dcaLevel
+          ? stepScale ** (order.dcaLevel - 2)
+          : 1
       const gridStep =
         (baseOrder
           ? price * (+(settings.baseStep ?? settings.step) / 100)

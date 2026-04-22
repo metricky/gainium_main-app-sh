@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.15.8] - 2026-04-22
+
+### Fixed
+
+- Combo Base minigrid wrong step
+
 ## [1.15.7] - 2026-04-20
 
 ### Fixed
