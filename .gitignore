@@ -8,3 +8,4 @@ dist
 .DS_Store
 loaded-data-candles
 user-files
+src/bot/comboHelper.ts.original

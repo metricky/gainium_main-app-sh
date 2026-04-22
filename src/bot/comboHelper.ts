@@ -5648,6 +5648,7 @@ function createComboBotHelper<
         let currentData = data
         let activatedTrailingTp = false
         let trailingChanged = false
+        let shouldRefreshTrailingCache = false
 
         if (useTrailingTp) {
           const currentPerc = (await this.claculateTpSlFromPrice(d, price)) * 100
@@ -5665,6 +5666,7 @@ function createComboBotHelper<
               d.deal.bestPrice = currentPerc
               d.deal.trailingLevel = currentPerc - trailingFlags.trailingTpPerc
               activatedTrailingTp = true
+              shouldRefreshTrailingCache = true
               this.handleLog(
                 `Deal: ${deal} activate combo trailing TP. Current: ${currentPerc}%, level: ${d.deal.trailingLevel}%`,
               )
@@ -5683,6 +5685,7 @@ function createComboBotHelper<
               oldTrailingLevel !== d.deal.trailingLevel
             ) {
               trailingChanged = true
+              shouldRefreshTrailingCache = true
               this.saveDeal(d, {
                 trailingMode: d.deal.trailingMode,
                 bestPrice: d.deal.bestPrice,
@@ -5691,9 +5694,23 @@ function createComboBotHelper<
             }
           }
 
-          currentData = await this.getDealStopLossPriceCombo(d)
-          this.dealsForStopLossCombo.set(d.deal._id, currentData)
-          if (trailingChanged || currentData.tp !== data.tp || currentData.sl !== data.sl) {
+          if (
+            d.deal.trailingMode === TrailingModeEnum.ttp &&
+            (!currentData.tp || !isFinite(currentData.tp))
+          ) {
+            shouldRefreshTrailingCache = true
+          }
+
+          if (shouldRefreshTrailingCache) {
+            currentData = await this.getDealStopLossPriceCombo(d)
+            this.dealsForStopLossCombo.set(d.deal._id, currentData)
+          }
+          if (
+            shouldRefreshTrailingCache &&
+            (trailingChanged ||
+              currentData.tp !== data.tp ||
+              currentData.sl !== data.sl)
+          ) {
             this.checkDealsPriceExtremum()
           }
         }
