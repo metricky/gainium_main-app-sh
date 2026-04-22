@@ -997,8 +997,8 @@ const indicatorsSettings = new Schema({
   obfvgRef: { type: String, enum: OBFVGRefEnum },
   sessionDays: [Number],
   sessionRule: { type: String, enum: SessionRuleEnum },
-  lwThreshold: String,
-  lwMaxDuration: String,
+  lwThreshold: Schema.Types.Mixed,
+  lwMaxDuration: Schema.Types.Mixed,
   lwValue: { type: String, enum: LWValueEnum },
   lwCondition: { type: String, enum: LWConditionEnum },
 })
