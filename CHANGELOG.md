@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.0] - 2026-04-27
+
+### Changed
+
+- Indicator service to use indicators utils
+- Internal properties update in SSB
+
 ## [1.15.8] - 2026-04-22
 
 ### Fixed

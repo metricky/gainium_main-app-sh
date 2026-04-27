@@ -317,7 +317,7 @@ class Backtester<T extends UserSchema> {
     _total?: number,
   ) {
     //@ts-ignore
-    const candleInstance = new Candles(exchange)
+    const candleInstance = Candles.create(exchange)
     const candles = await candleInstance.getCandles({
       symbol: pair,
       //@ts-ignore
