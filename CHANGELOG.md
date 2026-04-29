@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.16.1] - 2026-04-29
+
+### Changed
+
+- Indicator service closed only exchange
+
 ## [1.16.0] - 2026-04-27
 
 ### Changed

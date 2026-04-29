@@ -584,8 +584,18 @@ class InternalIndicator {
       old.v = +v
     }
     const startIndex = start - (!forceOld ? this.period : 0)
+    const exchangesWithClosedOnly = [
+      ExchangeEnum.binance,
+      ExchangeEnum.bybit,
+      ExchangeEnum.okx,
+    ]
+    const isClosedOnly = exchangesWithClosedOnly.some(
+      (e) =>
+        this.exchange.toUpperCase().includes(e.toUpperCase()) ||
+        e.toUpperCase().includes(this.exchange.toUpperCase()),
+    )
     if (
-      ((start > this.start && this.start !== 0) || forceOld) &&
+      ((start > this.start && this.start !== 0) || isClosedOnly || forceOld) &&
       !this.updateCandlesHistory.has(startIndex)
     ) {
       this.updateCandlesHistory.add(startIndex)
