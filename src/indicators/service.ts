@@ -583,7 +583,6 @@ class InternalIndicator {
       old.c = +c
       old.v = +v
     }
-    const startIndex = start - (!forceOld ? this.period : 0)
     const exchangesWithClosedOnly = [
       ExchangeEnum.binance,
       ExchangeEnum.bybit,
@@ -594,6 +593,10 @@ class InternalIndicator {
         this.exchange.toUpperCase().includes(e.toUpperCase()) ||
         e.toUpperCase().includes(this.exchange.toUpperCase()),
     )
+    // closed-only streams deliver `start` as the just-closed candle's own start
+    // (legacy streams use the next-period open), so they index like `forceOld`.
+    const closedCandleAlreadyKnown = forceOld || isClosedOnly
+    const startIndex = closedCandleAlreadyKnown ? start : start - this.period
     if (
       ((start > this.start && this.start !== 0) || isClosedOnly || forceOld) &&
       !this.updateCandlesHistory.has(startIndex)
@@ -655,7 +658,7 @@ class InternalIndicator {
           true,
         )
       }
-      this.start = +start + (forceOld ? this.period : 0)
+      this.start = +start + (closedCandleAlreadyKnown ? this.period : 0)
       this.lastCandle = {
         open: `${old.o}`,
         high: `${old.h}`,

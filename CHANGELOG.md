@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.16.2] - 2026-04-30
+
+### Fixed
+
+- Wrong start index for closed only stream
+
 ## [1.16.1] - 2026-04-29
 
 ### Changed
