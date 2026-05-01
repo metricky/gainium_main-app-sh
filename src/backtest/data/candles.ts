@@ -40,7 +40,17 @@ class Candles {
 
   private dataPath = DATA_PATH
 
-  private exchangeName: ExchangeEnum
+  protected exchangeName: ExchangeEnum
+
+  /** Optional override: parent (or any consumer) can install a factory so
+   *  callers via `Candles.create(...)` get a subclass — e.g. one that reads
+   *  from a remote archive instead of local CSVs. Stays null in core so
+   *  the default CSV behavior is unchanged when no override is registered. */
+  static factory: ((exchange: ExchangeEnum) => Candles) | null = null
+
+  static create(exchange: ExchangeEnum): Candles {
+    return Candles.factory?.(exchange) ?? new Candles(exchange)
+  }
 
   constructor(exchange: ExchangeEnum) {
     this.exchangeName = exchange
@@ -94,7 +104,7 @@ class Candles {
       .join('\n')}`
   }
 
-  private async saveLocal(
+  protected async saveLocal(
     symbol: string,
     interval: ExchangeIntervals,
     candles: CandleResponse[],
@@ -149,7 +159,7 @@ class Candles {
     }
   }
 
-  private async getLocal({
+  protected async getLocal({
     symbol,
     interval,
     from: _from,

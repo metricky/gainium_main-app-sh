@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.16.2] - 2026-04-30
+
+### Fixed
+
+- Wrong start index for closed only stream
+
+## [1.16.1] - 2026-04-29
+
+### Changed
+
+- Indicator service closed only exchange
+
+## [1.16.0] - 2026-04-27
+
+### Changed
+
+- Indicator service to use indicators utils
+- Internal properties update in SSB
+
+## [1.15.8] - 2026-04-22
+
+### Fixed
+
+- Combo Base minigrid wrong step
+
 ## [1.15.7] - 2026-04-20
 
 ### Fixed
