@@ -1969,6 +1969,9 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
   exchange: String,
   exchangeUUID: String,
   symbol: { symbol: String, baseAsset: String, quoteAsset: String },
+  bestPrice: Number,
+  trailingLevel: Number,
+  trailingMode: { type: String, enum: TrailingModeEnum },
   stats: {
     drawdownPercent: RequiredNumber,
     runUpPercent: RequiredNumber,

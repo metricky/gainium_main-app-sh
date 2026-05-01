@@ -115,6 +115,7 @@ function createComboBotHelper<
     private usedOrderId: Map<string, Set<string>> = new Map()
     private feeOrderReasons: Map<string, string[]> = new Map()
     private lastFilledOrderMap: Map<string, Order> = new Map()
+    private comboTtpPersistAt: Map<string, number> = new Map()
 
     constructor(
       id: string,
@@ -5611,12 +5612,38 @@ function createComboBotHelper<
       this.checkDealsForDCALevelCheck()
     }
 
-    @IdMute(mutex, (botId: string) => `${botId}unrealizedProfit`, 200)
-    private async unrealizedProfit() {
+    private async saveComboTrailingTpState(
+      d: FullDeal<CleanComboDealsSchema>,
+    ) {
+      const update = {
+        trailingMode: d.deal.trailingMode,
+        bestPrice: d.deal.bestPrice,
+        trailingLevel: d.deal.trailingLevel,
+      }
+      await this.saveDeal(d, update)
+      const res = await comboDealsDb.updateData(
+        { _id: d.deal._id },
+        { $set: update },
+      )
+      this.comboTtpPersistAt.set(`${d.deal._id}`, +new Date())
+      if (res.status === StatusEnum.notok) {
+        this.handleErrors(
+          `Error saving combo trailing TP state for deal ${d.deal._id}. Reason: ${res.reason}`,
+          'saveComboTrailingTpState',
+          '',
+          false,
+          false,
+          false,
+        )
+      }
+    }
+
+    @IdMute(mutex, (symbol?: string) => `${symbol}unrealizedProfit`, 200)
+    private async unrealizedProfit(symbolOverride?: string) {
       if (!this.allowedMethods.has('checkDealsStopLoss')) {
         return
       }
-      const symbol = this.data?.settings?.pair?.[0]
+      const symbol = symbolOverride ?? this.data?.settings?.pair?.[0]
       if (!symbol) {
         return
       }
@@ -5686,11 +5713,13 @@ function createComboBotHelper<
             ) {
               trailingChanged = true
               shouldRefreshTrailingCache = true
-              this.saveDeal(d, {
-                trailingMode: d.deal.trailingMode,
-                bestPrice: d.deal.bestPrice,
-                trailingLevel: d.deal.trailingLevel,
-              })
+              await this.saveComboTrailingTpState(d)
+            } else if (d.deal.trailingMode === TrailingModeEnum.ttp) {
+              const lastPersist =
+                this.comboTtpPersistAt.get(`${d.deal._id}`) ?? 0
+              if (+new Date() - lastPersist > 60 * 1000) {
+                await this.saveComboTrailingTpState(d)
+              }
             }
           }
 
@@ -5874,14 +5903,38 @@ function createComboBotHelper<
       if (msg.price === lastStreamData?.price) {
         return
       }
-      const hasActiveComboTtpDeal = this.getOpenDeals(false, msg.symbol).some(
-        (d) =>
-          d.deal.status === DCADealStatusEnum.open &&
-          d.deal.trailingMode === TrailingModeEnum.ttp &&
-          !d.closeBySl,
+      const trailingFlags = this.getComboTrailingTpFlags(
+        this.data?.settings.name,
       )
-      if (hasActiveComboTtpDeal) {
-        await this.unrealizedProfit()
+      const openDealsForSymbol = this.getOpenDeals(false, msg.symbol)
+      const shouldCheckComboTtp = openDealsForSymbol.some((d) => {
+        if (d.deal.status !== DCADealStatusEnum.open || d.closeBySl) {
+          return false
+        }
+        return (
+          d.deal.trailingMode === TrailingModeEnum.ttp ||
+          (trailingFlags.trailingTp && d.deal.settings.useTp)
+        )
+      })
+      if (shouldCheckComboTtp) {
+        this.allowedMethods.add('checkDealsStopLoss')
+        for (const d of openDealsForSymbol) {
+          const dealId = `${d.deal._id}`
+          if (
+            d.deal.status === DCADealStatusEnum.open &&
+            !d.closeBySl &&
+            trailingFlags.trailingTp &&
+            d.deal.settings.useTp &&
+            !this.dealsForStopLossCombo.has(dealId)
+          ) {
+            this.dealsForStopLossCombo.set(
+              dealId,
+              await this.getDealStopLossPriceCombo(d),
+            )
+            this.checkDealsPriceExtremum()
+          }
+        }
+        await this.unrealizedProfit(msg.symbol)
       }
       const settings = await this.getAggregatedSettings()
       if (
@@ -5964,7 +6017,7 @@ function createComboBotHelper<
         msg.price >= (this.lowestHigh.get(msg.symbol) ?? Infinity) ||
         msg.price <= (this.highestLow.get(msg.symbol) ?? 0)
       ) {
-        this.unrealizedProfit()
+        this.unrealizedProfit(msg.symbol)
         this.checkDCALevel(this.botId, msg.price, msg.symbol)
       }
       if (
