@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.17.5] - 2026-05-14
+
+### Added
+
+- Indicator state ednpoint
+
+## [1.17.4] - 2026-05-14
+
+### Fixed
+
+- Scalar headers interceptor
+
+## [1.17.3] - 2026-05-13
+
+### Fixed
+
+- Avg lossing/winning/global deals duration
+
+## [1.17.2] - 2026-05-11
+
+### Fixed
+
+- Hyperliquid symbol precision
+
+## [1.17.1] - 2026-05-07
+
+### Changed
+
+- Control polling by ENV variable
+
+## [1.17.0] - 2026-05-06
+
+### Added
+
+- Polling for HL orders
+
 ## [1.16.2] - 2026-04-30
 
 ### Fixed

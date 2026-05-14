@@ -1943,16 +1943,19 @@ export type BotStats = {
     profit: {
       avgWinningTradeDuration: number
       maxWinningTradeDuration: number
+      totalTime: number
     }
     loss: {
       avgLosingTradeDuration: number
       maxLosingTradeDuration: number
+      totalTime: number
     }
     general: {
       maxDealDuration: number
       avgDealDuration: number
       dealsPerDay: number
       workingTime: number
+      totalTime: number
     }
   }
   chart: {
@@ -4683,11 +4686,59 @@ export type IndicatorServiceParentMessageRemoveCallback = {
   response: string
 }
 
+export type IndicatorState = {
+  id: string
+  type: IndicatorEnum
+  indicatorName: string
+  exchange: ExchangeEnum
+  symbol: string
+  symbolCode?: string
+  interval: ExchangeIntervals
+  period: number
+  loaded: boolean
+  closed: boolean
+  is1d: boolean
+  test: boolean
+  limitMultiplier: number
+  warmupCandles: number
+  allowedToProcessPriceUpdate: boolean
+  subscribers: number
+  data: IndicatorHistory[]
+  lastPrice: number
+  lastCandle: {
+    open: string
+    high: string
+    low: string
+    close: string
+    volume: string
+  }
+  current: { o: number; h: number; l: number; c: number; v: number }
+  start: number
+  to: number
+  lastCandleTime: number
+  lastCandleTimestamp: number
+  lastSentUpdateAt: number
+  recentCandleStarts: number[]
+}
+
+export type IndicatorServiceChildMessageGetState = {
+  response: string
+  data: IndicatorState | null
+}
+
+export type IndicatorServiceParentMessageGetState = {
+  event: 'getState'
+  payload: []
+  id: string
+  response: string
+}
+
 export type IndicatorServiceChildMessage =
   | IndicatorServiceChildMessageCreateIndicator
   | IndicatorServiceChildMessageSubscribeIndicator
   | IdicatorServiceChildMessageUnsubscribeIndicator
   | IndicatorServiceChildMessageRemoveCallback
+  | IndicatorServiceChildMessageGetState
 
 export type IndicatorServiceParentMessage =
   | IndicatorServiceParentMessageCreateIndicator
@@ -4695,12 +4746,14 @@ export type IndicatorServiceParentMessage =
   | IndicatorServiceParentMessageUnsubscribeIndicator
   | IndicatorServiceParentMessageRemoveCallback
   | IndicatorServiceParentMessageDeleteIndicator
+  | IndicatorServiceParentMessageGetState
   | IndicatorUpdateLogLevelIndicator
 
 export type IndicatorServiceParentMessageMethods =
   | IndicatorServiceParentMessageSubscribeIndicator
   | IndicatorServiceParentMessageUnsubscribeIndicator
   | IndicatorServiceParentMessageRemoveCallback
+  | IndicatorServiceParentMessageGetState
 
 export interface MigrationSchema extends SchemaI {
   version: number
