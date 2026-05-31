@@ -1,5 +1,55 @@
 # Changelog
 
+## [1.18.1] - 2026-05-31
+
+### Added
+
+- `getBotEvents`: optional `category` input (`recent`/`deals`/`alerts`) and a
+  `counts` response field for server-side categorization. `recent` is the full
+  feed (no filter); `alerts` = error/warning type; `deals` = deal-tied events
+  that aren't alerts. Counts are computed only when `category` is supplied, so
+  callers that don't request them are unaffected (no extra count queries).
+
+## [1.18.0] - 2026-05-28
+
+### Added
+
+- Self-hosted admin-config sync (gated by `ADMIN_CONFIG_ENABLED`). Reads
+  `gainium:admin:enabled_exchanges` from Redis, subscribes to
+  `gainium:admin:config` pubsub, and runs a 10s periodic refresh as a
+  safety net. When the flag is off (cloud / unflagged) every code path
+  is a hard no-op — no extra Redis traffic, no timers, no log lines.
+
+## [1.17.10] - 2026-05-28
+
+### Changed
+
+- Enforce profitCurrency and orderFixedIn on server side for grid bot.
+
+## [1.17.9] - 2026-05-26
+
+### Changed
+
+- Not enough balance dictionary
+
+## [1.17.8] - 2026-05-21
+
+### Fixed
+
+- Indicator duplicated candles
+
+## [1.17.7] - 2026-05-21
+
+### Fixed
+
+- Broker codes
+
+## [1.17.6] - 2026-05-20
+
+### Added
+
+- Adapters for parent features
+
 ## [1.17.5] - 2026-05-14
 
 ### Added

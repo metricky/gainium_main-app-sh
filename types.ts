@@ -4873,6 +4873,17 @@ export enum ResetAccountTypeEnum {
   softLive = 'softLive',
 }
 
+export type ResetLogStatus = 'ok' | 'error' | 'skipped'
+
+export interface ResetLogEntry {
+  step: string
+  collection?: string
+  deletedCount?: number
+  status: ResetLogStatus
+  reason?: string
+  at: Date
+}
+
 export interface BrokerCodesSchema extends SchemaI {
   exchange: ExchangeEnum
   zone?: string
