@@ -1,0 +1,104 @@
+# Fair Core License, Version 1.0, Apache 2.0 Future License
+(FCL-1.0-Apache-2.0)
+
+Licensed Work:  @gainium/main-app-sh
+Copyright (c) 2026 Gainium
+
+## Abbreviations
+
+"FCL" means the Fair Core License, Version 1.0, also referenced as
+"fcl-1.0", "FCL-1.0", or "FCL-1.0-Apache-2.0".
+
+## Acceptance
+
+In order to receive this license, you must agree to its rules. The rules
+of this license are both obligations under that agreement and conditions
+to your license. You must not do anything with the software that triggers
+a rule that you cannot or will not follow.
+
+## Licenses
+
+The licensor grants you copyright licenses to do everything with the
+software that would otherwise infringe the licensor's copyright in it,
+for any **Permitted Purpose**.
+
+The licensor grants you a patent license that covers patent claims the
+licensor can license, or becomes able to license, that you would infringe
+by using the software for a Permitted Purpose. This patent license does
+not cover any patent claims that you cause to be infringed by
+modifications or additions to the software. If you or your company make
+any written claim that the software infringes or contributes to
+infringement of any patent, your patent license for the software granted
+under these terms ends immediately. If your company makes such a claim,
+your patent license ends immediately for work on behalf of your company.
+
+## Permitted Purpose
+
+A Permitted Purpose is any purpose other than a **Competing Use**.
+
+## Competing Use
+
+A Competing Use means use of the software in or for a commercial product
+or service that competes with, or is intended to compete with, any
+product or service the licensor offers using the software. A Competing
+Use includes, but is not limited to:
+
+  - offering the software, or any derivative of it, to third parties as a
+    hosted, managed, or embedded service (a "Service") that competes with
+    a Service offered by the licensor;
+
+  - distributing the software, or any derivative of it, as part of a
+    commercial product that competes with a product offered by the
+    licensor;
+
+  - using the software to provide a commercial trading-bot,
+    portfolio-management, or related financial-tools service to third
+    parties.
+
+For the avoidance of doubt, the following uses are **Permitted Purposes**
+and are not Competing Uses:
+
+  - personal, educational, academic, or research use;
+  - non-profit operations;
+  - internal business use, including self-hosting the software within
+    your own organization to support your own operations, provided you
+    do not make the functionality of the software available to third
+    parties as a Service.
+
+If you wish to use the software for a Competing Use, please contact the
+licensor at **licensing@gainium.io** to discuss a commercial license.
+
+## Notices
+
+You must ensure that anyone who gets a copy of any part of the software
+from you, with or without changes, also gets the text of this license,
+including the copyright notice above. You may not remove or obscure any
+licensing, copyright, or other notices of the licensor in the software.
+
+## No Other Rights
+
+This license does not imply any license to any of the licensor's
+trademarks, service marks, or logos.
+
+## Future Public License
+
+On the second anniversary of the date the licensor first distributed the
+software under these terms, the **Apache License, Version 2.0** will
+become available as an additional license under which you may use the
+software. From that date forward, you may continue to use the software
+under this Fair Core License or, at your option, under the Apache
+License 2.0.
+
+This Fair Core License applies separately for each version of the
+software, and the second-anniversary date is calculated separately for
+each version released under these terms.
+
+## Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
