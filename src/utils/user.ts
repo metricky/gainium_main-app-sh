@@ -10,6 +10,7 @@ import {
   ResetAccountTypeEnum,
   ResetLogEntry,
   DCADealStatusEnum,
+  BaseReturn,
 } from '../../types'
 import {
   BotStatusEnum,
@@ -55,6 +56,7 @@ import {
   snapshotDb,
   botDb,
   dcaBotDb,
+  snapshotPerExchangeDb,
 } from '../db/dbInit'
 import RedisClient from '../db/redis'
 import Rabbit from '../db/rabbit'
@@ -960,6 +962,50 @@ const userSnapshots = async (
         userId,
         paperContext: paperContext ? { $eq: true } : { $ne: true },
       })
+      for (const e of exchangesTotal) {
+        const currentDoc = await snapshotPerExchangeDb.readData({
+          updateTime,
+          userId,
+          paperContext: paperContext ? { $eq: true } : { $ne: true },
+          uuid: e.uuid,
+        })
+        if (currentDoc.status === 'OK' && currentDoc.data.result) {
+          const data = await snapshotPerExchangeDb.updateData(
+            { _id: currentDoc.data.result._id.toString() },
+            {
+              $set: {
+                totalUsd: e.totalUsd,
+              },
+            },
+          )
+          if (data.status === 'OK') {
+            logger.debug(
+              `Snapshot per exchange | ${u.username} ${userId} ${e.uuid} updated`,
+            )
+          } else {
+            logger.error(
+              `Snapshot per exchange | ${u.username} ${userId} ${e.uuid} error ${data.reason}`,
+            )
+          }
+        } else {
+          const data = await snapshotPerExchangeDb.createData({
+            userId,
+            updateTime,
+            totalUsd: e.totalUsd,
+            paperContext: paperContext ? true : false,
+            uuid: e.uuid,
+          })
+          if (data.status === 'OK') {
+            logger.debug(
+              `Snapshot per exchange | ${u.username} ${userId} ${e.uuid} saved`,
+            )
+          } else {
+            logger.error(
+              `Snapshot per exchange | ${u.username} ${userId} ${e.uuid} error ${data.reason}`,
+            )
+          }
+        }
+      }
       if (currentSnapshot.status === 'OK' && currentSnapshot.data.result) {
         const data = await snapshotDb.updateData(
           { _id: currentSnapshot.data.result._id.toString() },
@@ -1024,6 +1070,10 @@ const processing = new Set<string>()
 export const resetUser = async (
   userId: string,
   type: ResetAccountTypeEnum,
+  cb?: (
+    userId: string,
+    type: ResetAccountTypeEnum,
+  ) => Promise<BaseReturn<string>>,
 ): Promise<ResetLogEntry[]> => {
   const prefix = `Reset user ${userId} ${type}`
   const log: ResetLogEntry[] = []
@@ -1442,7 +1492,22 @@ export const resetUser = async (
           }),
         ),
       )
-
+      const exchangesToDelete = (
+        isAll
+          ? user.exchanges
+          : user.exchanges.filter((e) =>
+              isPaper
+                ? paperExchanges.includes(e.provider)
+                : !paperExchanges.includes(e.provider),
+            )
+      ).map((e) => e.uuid)
+      for (const uuid of exchangesToDelete) {
+        disconnectUserBalance(uuid)
+        await snapshotPerExchangeDb.deleteManyData({
+          userId,
+          uuid,
+        })
+      }
       const userUpdate = await userDb.updateData(
         { _id: userId },
         {
@@ -1477,6 +1542,16 @@ export const resetUser = async (
       await updateRelatedBotsInVar(
         (vars.data?.result ?? []).map((v) => `${v._id}`),
       )
+    }
+    if (cb) {
+      const cbResult = await cb(userId, type)
+      if (cbResult.status === StatusEnum.ok) {
+        logger.debug(`${prefix} | Callback executed successfully`)
+        push({ step: 'callback', status: 'ok' })
+      } else {
+        logger.error(`${prefix} | Callback error ${cbResult.reason}`)
+        push({ step: 'callback', status: 'error', reason: cbResult.reason })
+      }
     }
     processing.delete(userId)
     logger.debug(`${prefix} | End`)

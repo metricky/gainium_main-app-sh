@@ -42,6 +42,7 @@ import type {
   BrokerCodesSchema,
   HedgeComboBacktestingResult,
   HedgeDCABacktestingResult,
+  SnapshotPerExchangeSchema,
 } from '../../types'
 import {
   APIPermission,
@@ -825,6 +826,16 @@ const snapshotsSchema: Schema<SnapshotSchema> = new Schema({
   paperContext: Boolean,
   ...CreatedUpdated,
 })
+
+const snapshotsPerExchangeSchema: Schema<SnapshotPerExchangeSchema> =
+  new Schema({
+    userId: RequiredString,
+    updateTime: RequiredNumber,
+    totalUsd: RequiredNumber,
+    uuid: String,
+    paperContext: Boolean,
+    ...CreatedUpdated,
+  })
 
 const usage = {
   current: asset,
@@ -2794,6 +2805,10 @@ export const registerIndexes = () => {
   botProfitChart.index({ botId: 1 })
 
   feesSchema.index({ userId: 1, exchangeUUID: 1 })
+
+  snapshotsPerExchangeSchema.index({ userId: 1 })
+
+  snapshotsPerExchangeSchema.index({ uuid: 1 })
 }
 
 const schema = {
@@ -2841,6 +2856,7 @@ const schema = {
   brokerCodes,
   hedgeComboBacktest: hedgeComboBacktestingResult,
   hedgeDcaBacktest: hedgeDCABacktestingResult,
+  snapshotsPerExchange: snapshotsPerExchangeSchema,
 }
 
 export default schema

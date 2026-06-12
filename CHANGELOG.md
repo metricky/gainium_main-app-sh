@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.19.0] - 2026-06-12
+
+### Added
+- Snapshots per exchange
+
+## [1.18.10] - 2026-06-12
+
+### Changed
+- Reset user process
+
+## [1.18.9] - 2026-06-11
+
+### Fixed
+- DIV indicator logic
+
+## [1.18.8] - 2026-06-10
+
+### Changed
+
+- Backtester performance fix. 
+
+## [1.18.7] - 2026-06-10
+
+### Changed
+
+- Enable gzip/deflate compression on all API responses (`compression`
+  middleware). The large `getAllPairs` payload (~3.4MB) and other big JSON
+  responses now transfer ~15x smaller, cutting response time from several
+  seconds to sub-second.
+
+## [1.18.6] - 2026-06-09
+
+### Fixed
+
+- A manual add/reduce-funds failure on a deal is now always reported to the
+  user, even when a same-type message (e.g. "Not enough balance") is already
+  active for the bot. Previously the error de-duplication gate could swallow
+  the user-initiated failure, leaving the terminal with no feedback.
+
+## [1.18.5] - 2026-06-09
+
+### Changed
+
+- Error dictionary
+
+## [1.18.4] - 2026-06-08
+
+### Fixed
+
+- Exchange disabled by host configuration for paper exchanges
+
 ## [1.18.3] - 2026-06-02
 
 ### Added
