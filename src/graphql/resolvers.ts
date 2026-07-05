@@ -61,6 +61,7 @@ import { isExchangeEnabled } from '../utils/adminConfig'
 import userUtils, { checkLicenseKey, updateUserSteps } from '../utils/user'
 import { getBalances } from './handlers/balance.handler'
 import { deleteBotMessage, getBotMessage } from './handlers/botMessage.handler'
+import { getQuantRulesStatus } from './handlers/quantRules.handler'
 import verify, { bybitAccountType } from '../exchange/verify'
 import { getExchangeTradeType } from '../exchange/helpers'
 import {
@@ -3253,6 +3254,20 @@ const resolvers = <
         input?.search,
       )
     },
+    getQuantRulesStatus: async (
+      _parent: any,
+      _args: any,
+      { token, req }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return getQuantRulesStatus(user.data._id)
+    },
     resetDealSettings: async (
       _parent: any,
       {
@@ -5186,6 +5201,7 @@ const resolvers = <
           ExchangeInUser & {
             stablecoinBalance?: number
             coinToTopUp?: string
+            topUps?: { provider: ExchangeEnum; asset: string; amount: number }[]
             tradeType?: TradeTypeEnum
             shouldCheckAffiliate?: boolean
           },
@@ -5203,6 +5219,7 @@ const resolvers = <
           name,
           stablecoinBalance,
           coinToTopUp,
+          topUps,
           tradeType: _tradeType,
           keysType,
           okxSource,
@@ -5337,30 +5354,35 @@ const resolvers = <
               key = v4()
               secret = v4()
               const exch = mapPaperToReal(e as PaperExchangeType)
+              // Per-sub-account funding: prefer an explicit topUps entry for
+              // this exact created provider (independent SPOT/USDⓈ-M/COIN-M
+              // funding); otherwise fall back to the legacy single top-up,
+              // keeping the COIN-M coin-margined default (0.5 BTC) for `all`.
+              const topUpFor = Array.isArray(topUps)
+                ? topUps.find((t) => t.provider === e)
+                : undefined
+              const isAllCoinm =
+                tradeType === TradeTypeEnum.all &&
+                (e === ExchangeEnum.paperBinanceCoinm ||
+                  e === ExchangeEnum.paperBybitCoinm ||
+                  e === ExchangeEnum.paperOkxInverse ||
+                  e === ExchangeEnum.paperKucoinInverse ||
+                  e === ExchangeEnum.paperBitgetCoinm ||
+                  e === ExchangeEnum.paperKrakenCoinm)
               const paperUserCreationResult = await createPaperUser({
                 key,
                 secret,
                 balance: [
                   {
                     exchange: exch,
-                    amount:
-                      tradeType === TradeTypeEnum.all &&
-                      (e === ExchangeEnum.paperBinanceCoinm ||
-                        e === ExchangeEnum.paperBybitCoinm ||
-                        e === ExchangeEnum.paperOkxInverse ||
-                        e === ExchangeEnum.paperKucoinInverse ||
-                        e === ExchangeEnum.paperBitgetCoinm ||
-                        e === ExchangeEnum.paperKrakenCoinm)
+                    amount: topUpFor
+                      ? topUpFor.amount
+                      : isAllCoinm
                         ? 0.5
                         : stablecoinBalance || 50,
-                    asset:
-                      tradeType === TradeTypeEnum.all &&
-                      (e === ExchangeEnum.paperBinanceCoinm ||
-                        e === ExchangeEnum.paperBybitCoinm ||
-                        e === ExchangeEnum.paperOkxInverse ||
-                        e === ExchangeEnum.paperKucoinInverse ||
-                        e === ExchangeEnum.paperBitgetCoinm ||
-                        e === ExchangeEnum.paperKrakenCoinm)
+                    asset: topUpFor
+                      ? topUpFor.asset
+                      : isAllCoinm
                         ? 'BTC'
                         : coinToTopUp || 'USDT',
                   },

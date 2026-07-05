@@ -5,6 +5,8 @@ import { collections } from './config'
 import {
   BalancesSchema,
   BotEventSchema,
+  ReconcileSweepSchema,
+  QuantRulesEventSchema,
   BotMessageSchema,
   BotSchema,
   DCABacktestingResult,
@@ -38,6 +40,7 @@ import {
   HedgeComboBacktestingResult,
   HedgeDCABacktestingResult,
   SnapshotPerExchangeSchema,
+  StreamWatchdogConfigSchema,
 } from '../../types'
 import { SYNC_USER } from '../config'
 
@@ -49,6 +52,14 @@ const models = {
   ),
   user: model<UserSchema>(`${collections.user}`, schema.user),
   botEvent: model<BotEventSchema>(`${collections.botEvent}`, schema.botEvent),
+  reconcileSweep: model<ReconcileSweepSchema>(
+    `${collections.reconcileSweep}`,
+    schema.reconcileSweep,
+  ),
+  quantRulesEvent: model<QuantRulesEventSchema>(
+    `${collections.quantRulesEvent}`,
+    schema.quantRulesEvent,
+  ),
   favoritePair: model<FavoritePairsSchema>(
     `${collections.favoritePairs}`,
     schema.favoritePairs,
@@ -166,11 +177,17 @@ const models = {
     `${collections.snapshotsPerExchange}`,
     schema.snapshotsPerExchange,
   ),
+  streamWatchdogConfig: model<StreamWatchdogConfigSchema>(
+    `${collections.streamWatchdogConfig}`,
+    schema.streamWatchdogConfig,
+  ),
 }
 
 export const syncIndexes = async (user = true) => {
   registerIndexes()
   await models.botEvent.syncIndexes()
+  await models.reconcileSweep.syncIndexes()
+  await models.quantRulesEvent.syncIndexes()
   await models.balance.syncIndexes()
   await models.backtest.syncIndexes()
   await models.gridBacktest.syncIndexes()

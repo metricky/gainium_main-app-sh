@@ -51,6 +51,9 @@ export const BasicSchema = /* GraphQL */ `
     maxOrders: Int
     priceAssetPrecision: Float
     crossAvailable: Boolean
+    assetCategory: String
+    isCanonical: Boolean
+    source: String
   }
   type getPairResponse implements BasicResponse {
     status: Status
@@ -83,6 +86,9 @@ export const BasicSchema = /* GraphQL */ `
     maxOrders: Float
     priceAssetPrecision: Float
     crossAvailable: Boolean
+    assetCategory: String
+    isCanonical: Boolean
+    source: String
   }
   type allPairInfo {
     result: [pairDetailedInfo]
@@ -136,6 +142,18 @@ const UserResponse = /* GraphQL */ `
 `
 
 export const AddExchangeInput = /* GraphQL */ `
+  # Per-sub-account paper top-up. A "SPOT & Futures" (tradeType: all)
+  # create spawns one paper account per market (SPOT, USDⓈ-M, COIN-M);
+  # an optional topUps entry funds each independently, keyed by the
+  # created account's own provider. When topUps is omitted the legacy
+  # single coinToTopUp/stablecoinBalance is used for every account, so
+  # existing callers are unaffected.
+  input paperTopUpInput {
+    provider: Exchange!
+    asset: String!
+    amount: Float!
+  }
+
   input addExchangeInput {
     key: String!
     secret: String!
@@ -145,6 +163,7 @@ export const AddExchangeInput = /* GraphQL */ `
     stablecoinBalance: Float
     coinToTopUp: String
     tradeType: TradeTypeEnum
+    topUps: [paperTopUpInput!]
     keysType: String
     okxSource: String
     bybitHost: BybitHost
@@ -687,6 +706,7 @@ export const BotSchema = /* GraphQL */ `
     getLatestOrders(input: getLatestOrdersInput): getLatestOrdersResponse
     getPortfolioByUser(input: getPortfolioByUser): getPortfolioResponse
     getMessageBot(input: getMessageBotInput): botMessageGetResponse
+    getQuantRulesStatus: quantRulesStatusResponse
     resetDealSettings(input: resetDealSettingsInput): resetDealSettingsResponse
     resetComboDealSettings(
       input: resetDealSettingsInput
@@ -2271,6 +2291,20 @@ export const BotSchema = /* GraphQL */ `
     data: botMessageList
     total: Float
   }
+  type quantRulesCooldown {
+    exchangeUUID: String
+    exchange: String
+    symbol: String
+    scope: String
+    level: Int
+    until: String
+    violationCount24h: Int
+  }
+  type quantRulesStatusResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [quantRulesCooldown]
+  }
   type restartResponse implements BasicResponse {
     status: Status
     reason: String
@@ -2690,6 +2724,7 @@ export const BotSchema = /* GraphQL */ `
     newBalance: Boolean
     transactionsCount: Level
     profit: Profit
+    funding: Funding
     profitByAssets: [ProfitByAssets]
     symbol: Symbol
     profitToday: ProfitToday
@@ -3423,6 +3458,7 @@ export const BotSchema = /* GraphQL */ `
     lastUsdRate: [priceAssetMap]
     lastPrice: [priceAssetMap]
     profit: Profit
+    funding: Funding
     profitByAssets: [ProfitByAssets]
     symbol: [MultiPairSymbols]
     profitToday: ProfitToday
@@ -3548,6 +3584,7 @@ export const BotSchema = /* GraphQL */ `
     lastUsdRate: [priceAssetMap]
     lastPrice: [priceAssetMap]
     profit: Profit
+    funding: Funding
     profitByAssets: [ProfitByAssets]
     symbol: [MultiPairSymbols]
     profitToday: ProfitToday
@@ -3954,6 +3991,7 @@ export const BotSchema = /* GraphQL */ `
     initialPrice: Float
     lastPrice: Float
     profit: Profit
+    funding: Funding
     feePaid: FeePaid
     avgPrice: Float
     displayAvg: Float
@@ -4033,6 +4071,7 @@ export const BotSchema = /* GraphQL */ `
     initialPrice: Float
     lastPrice: Float
     profit: Profit
+    funding: Funding
     feePaid: FeePaid
     avgPrice: Float
     displayAvg: Float
@@ -4170,6 +4209,20 @@ export const BotSchema = /* GraphQL */ `
     asset: String
     total: FloatOrInfinity
     totalUsd: FloatOrInfinity
+  }
+  type FundingHistoryEntry {
+    time: Float
+    rate: Float
+    markPrice: Float
+    qty: Float
+    feeQuote: Float
+    feeUsd: Float
+  }
+  type Funding {
+    total: FloatOrInfinity
+    totalUsd: FloatOrInfinity
+    lastTime: Float
+    history: [FundingHistoryEntry]
   }
   type Symbol {
     symbol: String

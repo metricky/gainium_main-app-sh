@@ -1,5 +1,108 @@
 # Changelog
 
+## [1.27.0] - 2026-07-04
+
+### Added
+- Pairs now carry an `isCanonical` flag (Hyperliquid spot only: HL-canonical or Unit-bridged = true; permissionless HIP-1 = false; absent elsewhere = canonical), persisted and exposed on `getAllPairs`, for the dashboard "Canonical only" pair-picker toggle. Paper twins mirror their real twin's flag (and `assetCategory`) since paper-trading proxies exchange-info without either signal.
+
+## [1.26.1] - 2026-07-04
+
+### Fixed
+- Never store a negative `locked` in the `balances` collection. `locked` (funds reserved by open orders/positions) is written verbatim from authoritative sources that can go negative — Binance futures `ACCOUNT_UPDATE` (`walletBalance - crossWalletBalance`, negative on positive unrealized PnL) and the connector's Hyperliquid futures balance (`accountValue - withdrawable`) — which made "available" balance display wrong/negative on heavy-churn accounts. Clamp `locked` to `≥ 0` at every write boundary in the balance-update path (`utils/user.ts`).
+
+## [1.26.0] - 2026-07-04
+
+### Added
+- OKX Europe (`okxSource=my`) authoritative spot pairs. Pairs now carry an optional `source` field (`my` = OKX Europe / eea.okx.com USDC/EUR spot universe; unset = global feed + all other exchanges), exposed on `getAllPairs`. New `updateOkxEuPairs()` fetches an EU account's account-scoped instruments (via the connector's `/exchange/account`) and reconciles them into the shared `pairs` collection tagged `source: my` — the set is account-agnostic, so the first EU account to connect refreshes it for every EU user. The exchange client gains `getAccountSpotExchangeInfo()` (private call; non-OKX exchanges get a not-supported default).
+
+## [1.25.2] - 2026-07-03
+
+### Changed
+- Deals list REST (`GET /api/v2/deals/:dealType`): cache the exact total count in Redis (60s TTL, keyed on the query filter) instead of running a full `countDocuments` on every page load. The `meta.count`/`meta.total` response stays exact within the TTL; the page rows are still fetched live. Cache is best-effort — any Redis error falls back to a live count. Removes the per-request count aggregation that dominated the Mongo slow log for large accounts.
+
+## [1.25.1] - 2026-07-03
+
+### Added
+- Register five query indexes in `registerIndexes()` to match indexes already created on prod: `dcaBot {uuid}`, `botMessage {botId, isDeleted}`, `dcaDeal {userId, createTime}` (partial on `status: 'open'`), and `transaction`/`comboTransaction {botId, userId}`. Eliminates COLLSCANs on the webhook bot-lookup and bot-error message soft-delete, removes the in-memory sort on the deals list, and lets the bot engine load a single bot's transactions instead of scanning the whole user's. All indexed fields are static/write-once (no write-path regression). No-op on prod (indexes already present); first-boot build on self-hosted/local.
+
+## [1.25.0] - 2026-07-03
+
+### Added
+- User Stream Watchdog. 
+
+## [1.24.3] - 2026-07-03
+
+### Fixed
+- Archiving a running bot now fails with a clear "Only stopped bots can be archived. Stop the bot first." error instead of silently reporting success and reappearing after a re-login/browser reopen. `setArchiveStatus` filtered the update on `status: closed`, so archiving a running bot (e.g. a hedge-combo bot) matched 0 docs yet still returned OK — the dashboard showed a false success and hid the bot locally until the next full reload. The legacy rule (only stopped bots are archivable) is preserved; the failure is now explicit and nothing is mutated on a rejected archive. Applies to all bot types (DCA/Grid/Combo/Hedge Combo/Hedge DCA).
+
+## [1.24.2] - 2026-07-02
+
+### Changed
+- (Superseded by 1.24.3 — not deployed) Dropped the `status: closed` guard so archiving worked on bots in any active state. Replaced by an explicit error, to keep the legacy "stop before archiving" rule.
+
+## [1.24.1] - 2026-07-02
+
+### Fixed
+- Combo bot stop: `ComboBot.afterBotStop()` now delegates to `super.afterBotStop()`, so stopping a combo bot also clears the price timer and reconcile-sweep interval (previously left running — combo arms both via the inherited DCA `start()`).
+
+## [1.24.0] - 2026-07-02
+
+### Added
+- Binance Futures Quantitative Rules (-4400) cooldown guard: violations are tracked per account+symbol in Redis (`QuantRulesGuard`), mirroring Binance's tiers (L1 symbol 5min, L2 symbol 2h after 10 violations/24h, L3 whole-account 2h at 10+ restricted symbols). During a cooldown, non-reduceOnly Binance-futures orders are delayed (pre-send gate + bounded deferred retry) instead of hammering the exchange; the -4400 rejection no longer errors the bot — it emits a once-per-window warning. Deferred retries are cancelled on bot stop and dropped when the deal closed meanwhile. New `quantrulesevents` collection (90d TTL; read by admin-app) and `getQuantRulesStatus` GraphQL query for the dashboard banner. Additive `subType` field on the `bot message` socket payload.
+
+## [1.23.2] - 2026-07-01
+
+### Fixed
+- Stock/ETF icons: `normalizeStockTicker` now strips a Hyperliquid HIP-3 builder-dex prefix (`xyz:AAPL` → `AAPL`) so tokenized-stock perps resolve their clean ticker for logo lookup.
+
+## [1.23.1] - 2026-06-30
+
+### Fixed
+- Stock/ETF icons: venue-gate `normalizeStockTicker` so Bitget reality (`RAAPL`), Bybit-spot xstock (`AAPLX`) and Kraken xStock (`AAPLX` on `krakenUsdm`) bases resolve to their clean ticker for logo lookup. Upper-case wrapper strips (`R`-prefix / `X`-suffix) are gated to the venue that mints them — and to its `paper` twin — so clean tickers that start with `R` (`RBLX`) or end in `X` (`NFLX` on `bybitLinear`) are no longer mangled; lower-case wrappers (`rTSLA`/`AAPLx`/`AAPLon`) still strip on any venue.
+
+## [1.23.0] - 2026-06-30
+
+### Added
+- Normalized `assetCategory` (crypto/stock/etf/commodity/metal/forex/index, default crypto) on the `pairs` collection + `getAllPairs` GraphQL, classified authoritatively from the connector's `assetClass` (no heuristics). `classifyAssetClass` trusts the exchange signal; the pairs cron persists it and paper exchanges inherit their real twin's class.
+
+## [1.22.4] - 2026-06-29
+
+### Fixed
+- Pin the reconcile-sweep collection name explicitly to `reconcilesweepcatches`. Mongoose lowercases derived model collection names (e.g. `dcaBots` → `dcabots`), so the previously-configured `reconcileSweepCatches` model would have written live catches to a lowercased collection that the admin-app reader/backfill didn't match — the admin page would have shown backfilled history but never live data. Now both sides use the same explicit lowercase name.
+
+## [1.22.3] - 2026-06-29
+
+### Added
+- Persist reconciliation-sweep catches to the `reconcileSweepCatches` collection (`MainBot.recordReconcileSweepCatch`, fire-and-forget at the grid/DCA catch sites) — `botId/botType/userId/exchange/exchangeUUID/paperContext/pair/missedFills`, 90-day TTL. Powers the admin "User Stream Health" page; a rising per-account catch rate = that account's user stream is silently dead. No-op when `RECONCILE_SWEEP_ENABLED` is off.
+
+## [1.22.2] - 2026-06-28
+
+### Changed
+- Reconciliation sweep (1.22.0) moved from `BotOperations` (worker bot-service) to the per-instance `MainBot` base class (`startReconcileSweep`/`stopReconcileSweep`, armed in `runAfterLoading()` + grid/DCA start, cleared on stop). The cloud build runs bots in-process via the `src/bot/` overlay, so the worker path never executed there; the per-instance timer runs wherever the bot instance runs, so the sweep now works in **both cloud and self-hosted**. Adds greppable logs: `reconcile-sweep armed (every Xms)` per bot on load, and `reconcile-sweep caught N missed fill(s)` when the sweep (not a reconnect) reconciled a stream-dropped fill.
+
+## [1.22.1] - 2026-06-28
+
+### Fixed
+- Merging deals on a hedge bot (DCA or Combo) now tags the resulting merged deal with its hedge wrapper id (`parentBotId`). Previously the merged deal was created without it, so the `hedge*DealList` queries — which select hedge-leg deals via `parentBotId: { $exists: true }` — dropped it, and the merged deal never appeared in the hedge bot's Deals view in the new dashboard (it only surfaced in the legacy UI).
+
+## [1.22.0] - 2026-06-28
+
+### Added
+- Opt-in Tier-2 reconciliation sweep (`RECONCILE_SWEEP_ENABLED`, interval `RECONCILE_SWEEP_INTERVAL_MS`): a per-worker timer periodically re-runs each running grid/DCA bot's existing reconnect reconcile, so order fills missed by a silently-dead user stream are caught within one interval instead of stalling the bot until a manual restart (community thread 4863). Off by default; jittered + overlap-guarded; routed through the per-bot mutex.
+
+### Fixed
+- `checkOrdersAfterReconnect` (grid + DCA) and `checkOrders` (grid) now reset `blockCheck` via `try/catch/finally`. A throw mid-check previously left `blockCheck` stuck `true`, silently freezing all subsequent order checks for that bot — turning a transient reconnect-reconcile error into a permanent stall.
+
+## [1.21.0] - 2026-06-25
+
+### Added
+- Paper `SPOT & Futures` accounts can be funded independently per market (SPOT / USDⓈ-M / COIN-M) via an optional `topUps` array on `addExchange`; omitting it preserves the previous single-top-up behavior
+
+## [1.20.0] - 2026-06-22
+
+### Added
+- Get funding rate history
+
 ## [1.19.1] - 2026-06-13
 
 ### Fixed

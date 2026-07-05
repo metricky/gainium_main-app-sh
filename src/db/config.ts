@@ -1,6 +1,8 @@
 export const collections = {
   user: 'users',
   botEvent: 'botEvent',
+  reconcileSweep: 'reconcilesweepcatches',
+  quantRulesEvent: 'quantrulesevents',
   dealStats: 'dealStats',
   favoritePairs: 'favoritePairs',
   favoriteIndicators: 'favoriteIndicators',
@@ -40,4 +42,5 @@ export const collections = {
   hedgeComboBacktest: 'hedgeComboBacktest',
   hedgeDcaBacktest: 'hedgeDcaBacktest',
   snapshotsPerExchange: 'snapshotsPerExchange',
+  streamWatchdogConfig: 'streamWatchdogConfig',
 }

@@ -3070,7 +3070,10 @@ function createComboBotHelper<
       this.usedOrderId = new Map()
     }
     override async afterBotStop() {
-      this.stopHyperliquidOrderPoll()
+      // super handles stopPriceTimer / stopHyperliquidOrderPoll /
+      // stopReconcileSweep / stopQuantRulesRetries — combo bots arm the
+      // price timer + reconcile sweep via the inherited DCA start().
+      await super.afterBotStop()
       for (const m of this.allMinigrids) {
         await this.processCloseMinigrid(m.schema._id)
       }

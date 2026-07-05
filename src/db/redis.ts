@@ -67,7 +67,7 @@ const getClient = async (count = 0): Promise<RedisClientType> => {
 }
 
 export class RedisWrapper {
-  private instance: RedisClientType | null = null
+  private _instance: RedisClientType | null = null
   private subscribeMap: Map<
     string,
     Set<(msg: string, channel: string) => void>
@@ -88,11 +88,11 @@ export class RedisWrapper {
     this.restart = this.restart.bind(this)
   }
   private async ping() {
-    if (this.instance && this.instance.isReady) {
+    if (this._instance && this._instance.isReady) {
       const _prefix = `${prefix} ${this.id ?? 'main'}${
         this.isSub ? ' (sub)' : ''
       } |`
-      await this.instance
+      await this._instance
         .ping()
         .catch((e) => {
           logger.error(
@@ -114,7 +114,7 @@ export class RedisWrapper {
     if (this.pingTimer) {
       clearInterval(this.pingTimer)
     }
-    this.instance?.quit()
+    this._instance?.quit()
   }
   private async restart() {
     await this.close()
@@ -124,7 +124,7 @@ export class RedisWrapper {
     if (this.checkTimer) {
       clearTimeout(this.checkTimer)
     }
-    if (this.instance && this.instance.isReady) {
+    if (this._instance && this._instance.isReady) {
       this.retries = 0
       for (const [key, cbs] of this.subscribeMap.entries()) {
         logger.debug(`${prefix} Redis subscribe to ${key} after reconnect`)
@@ -150,63 +150,178 @@ export class RedisWrapper {
     }
   }
   public async getInstance(isSub?: boolean, id?: string) {
-    this.instance = await getClient()
-    this.instance.on('connect', this.subscribeAll)
+    this._instance = await getClient()
+    this._instance.on('connect', this.subscribeAll)
     this.pingTimer = setInterval(this.ping, this.pingInterval)
     this.isSub = !!isSub
     this.id = id ?? null
     return this
   }
   get isReady() {
-    return this.instance?.isReady
+    return this._instance?.isReady
   }
-  public async set(key: string, value: string) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.set(key, value).catch((e) => {
+  public async set(key: string, value: string, ttlSec?: number) {
+    if (this._instance && this._instance.isReady) {
+      // Backward compatible: 2-arg calls behave exactly as before. When a
+      // positive TTL is supplied we use SET ... EX so the key self-expires
+      // (kills the historical key-leak in the auth limiters).
+      const options =
+        typeof ttlSec === 'number' && ttlSec > 0
+          ? { EX: Math.floor(ttlSec) }
+          : undefined
+      return await this._instance.set(key, value, options).catch((e) => {
         logger.error(`${prefix} Redis set Error: ${e}`)
       })
     }
   }
+  /**
+   * Atomic INCR. Returns the new counter value, or undefined when Redis is
+   * unavailable (callers must treat undefined as "could not count" and decide
+   * their own fail-open/closed policy).
+   */
+  public async incr(key: string): Promise<number | undefined> {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.incr(key).catch((e) => {
+        logger.error(`${prefix} Redis incr Error: ${e}`)
+        return undefined
+      })
+    }
+    return undefined
+  }
+  /** Set a TTL (seconds) on an existing key. */
+  public async expire(key: string, sec: number) {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.expire(key, Math.floor(sec)).catch((e) => {
+        logger.error(`${prefix} Redis expire Error: ${e}`)
+      })
+    }
+  }
+  /**
+   * Remaining TTL (seconds) for a key. Mirrors Redis TTL semantics: -2 if the
+   * key does not exist, -1 if it exists without a TTL. Returns undefined when
+   * Redis is unavailable.
+   */
+  public async ttl(key: string): Promise<number | undefined> {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.ttl(key).catch((e) => {
+        logger.error(`${prefix} Redis ttl Error: ${e}`)
+        return undefined
+      })
+    }
+    return undefined
+  }
   public async del(key: string) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.del(key).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.del(key).catch((e) => {
         logger.error(`${prefix} Redis del Error: ${e}`)
       })
     }
   }
   public async get(key: string) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.get(key).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.get(key).catch((e) => {
         logger.error(`${prefix} Redis get Error: ${e}`)
       })
     }
   }
   public async hSet(key: string, field: string, value: string) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.hSet(key, field, value).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.hSet(key, field, value).catch((e) => {
         logger.error(`${prefix} Redis hSet Error: ${e}`)
       })
     }
   }
   public async hExpire(key: string, field: string, value: number) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.hExpire(key, field, value).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.hExpire(key, field, value).catch((e) => {
         logger.error(`${prefix} Redis hExpire Error: ${e}`)
       })
     }
   }
   public async hDel(key: string, field: string) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.hDel(key, field).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.hDel(key, field).catch((e) => {
         logger.error(`${prefix} Redis hDel Error: ${e}`)
       })
     }
   }
   public async hGet(key: string, field: string) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.hGet(key, field).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.hGet(key, field).catch((e) => {
         logger.error(`${prefix} Redis hGet Error: ${e}`)
       })
+    }
+  }
+  /**
+   * Add one or more scored members to a sorted set. Pass an array to add many
+   * in a single command (e.g. a heartbeat registry flush).
+   */
+  public async zAdd(
+    key: string,
+    members:
+      | { score: number; value: string }
+      | { score: number; value: string }[],
+    gt?: boolean,
+  ) {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance
+        .zAdd(
+          key,
+          members,
+          gt
+            ? {
+                comparison: 'GT',
+              }
+            : undefined,
+        )
+        .catch((e) => {
+          logger.error(`${prefix} Redis zAdd Error: ${e}`)
+        })
+    }
+  }
+  /**
+   * Remove scored member from a sorted set.
+   */
+  public async zRem(key: string, member: string) {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.zRem(key, member).catch((e) => {
+        logger.error(`${prefix} Redis zRem Error: ${e}`)
+      })
+    }
+  }
+  /**
+   * Members with score in [min, max]. Use '-inf'/'+inf' or '(123' (exclusive)
+   * per the Redis ZRANGEBYSCORE syntax.
+   */
+  public async zRangeByScore(
+    key: string,
+    min: number | string,
+    max: number | string,
+  ) {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.zRangeByScore(key, min, max).catch((e) => {
+        logger.error(`${prefix} Redis zRangeByScore Error: ${e}`)
+      })
+    }
+  }
+  /** Remove members with score in [min, max]; used to prune stale entries. */
+  public async zRemRangeByScore(
+    key: string,
+    min: number | string,
+    max: number | string,
+  ) {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.zRemRangeByScore(key, min, max).catch((e) => {
+        logger.error(`${prefix} Redis zRemRangeByScore Error: ${e}`)
+      })
+    }
+  }
+  /**
+   * Retturn pipeline for multiple commands. Call exec() on the returned pipeline to run all commands.
+   */
+  public get instance() {
+    if (this._instance && this._instance.isReady) {
+      return this._instance
     }
   }
   @IdMute(mutexConcurrentely, () => 'subscribe')
@@ -231,11 +346,11 @@ export class RedisWrapper {
         }, 5000),
       )
     }
-    if (this.instance && this.instance.isReady) {
+    if (this._instance && this._instance.isReady) {
       const get = this.subscribeMap.get(key) ?? new Set()
       get.add(cb)
       this.subscribeMap.set(key, get)
-      return await this.instance.subscribe(key, cb).catch((e) => {
+      return await this._instance.subscribe(key, cb).catch((e) => {
         logger.error(
           `${prefix} Redis subscribe Error: ${e}, retry subscribe in 5s`,
         )
@@ -243,7 +358,7 @@ export class RedisWrapper {
         setTimer.bind(this)()
       })
     }
-    if (this.instance && !this.instance.isReady) {
+    if (this._instance && !this._instance.isReady) {
       logger.error(`${prefix} Redis is not ready yet, retry subscribe in 5s`)
       setTimer()
     }
@@ -252,15 +367,15 @@ export class RedisWrapper {
     key: string,
     cb: (msg: string, channel: string) => void,
   ) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.pSubscribe(key, cb).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.pSubscribe(key, cb).catch((e) => {
         logger.error(`${prefix} Redis pSubscribe Error: ${e}`)
       })
     }
   }
   public async publish(channel: string, msg: string) {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.publish(channel, msg).catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.publish(channel, msg).catch((e) => {
         logger.error(`${prefix} Redis publish Error: ${e}`)
       })
     }
@@ -269,7 +384,7 @@ export class RedisWrapper {
     key: string,
     cb?: (msg: string, channel: string) => void,
   ) {
-    if (this.instance && this.instance.isReady) {
+    if (this._instance && this._instance.isReady) {
       if (cb) {
         const get = this.subscribeMap.get(key) ?? new Set()
         get.delete(cb)
@@ -281,14 +396,14 @@ export class RedisWrapper {
       } else {
         this.subscribeMap.delete(key)
       }
-      return await this.instance.unsubscribe(key, cb).catch((e) => {
+      return await this._instance.unsubscribe(key, cb).catch((e) => {
         logger.error(`${prefix} Redis unsubscribe Error: ${e}`)
       })
     }
   }
   public async quit() {
-    if (this.instance && this.instance.isReady) {
-      return await this.instance.quit().catch((e) => {
+    if (this._instance && this._instance.isReady) {
+      return await this._instance.quit().catch((e) => {
         logger.error(`${prefix} Redis quit Error: ${e}`)
       })
     }
@@ -296,7 +411,7 @@ export class RedisWrapper {
 }
 
 class RedisClient {
-  static instance: RedisWrapper
+  static _instance: RedisWrapper
 
   static instanceSub: Map<string, RedisWrapper> = new Map()
   @IdMute(mutex, () => 'RedisClient')
@@ -309,10 +424,10 @@ class RedisClient {
       }
       return get
     }
-    if (!RedisClient.instance) {
-      RedisClient.instance = await new RedisWrapper().getInstance()
+    if (!RedisClient._instance) {
+      RedisClient._instance = await new RedisWrapper().getInstance()
     }
-    return RedisClient.instance
+    return RedisClient._instance
   }
   static closeSubInstance(id: string) {
     const get = RedisClient.instanceSub.get(id)

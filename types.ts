@@ -233,9 +233,28 @@ export enum OrderSideEnum {
   sell = 'SELL',
 }
 
+/**
+ * Normalized asset class of a tradable instrument. Exchanges now list real-world
+ * assets (stocks/ETFs/commodities/metals/forex/indices) alongside crypto.
+ * FROZEN CONTRACT — other repos (exchange-connector, dashboards) depend on these
+ * exact string values. Keep in sync with exchange-connector's `AssetClass`.
+ */
+export type AssetClass =
+  | 'crypto'
+  | 'stock'
+  | 'etf'
+  | 'commodity'
+  | 'metal'
+  | 'forex'
+  | 'index'
+
 export type ExchangeInfo = {
   wsCode?: string
   code?: string
+  // Coarse asset-class signal from the connector where the exchange exposes an
+  // authoritative flag (e.g. Bitget `isRwa` => 'stock'). Absent => treat as
+  // 'crypto'. main-app refines/normalizes this into `assetCategory`. Danger List #1.
+  assetClass?: AssetClass
   baseAsset: {
     minAmount: number
     maxAmount: number
@@ -258,6 +277,11 @@ export type ExchangeInfo = {
   }
   type?: string
   crossAvailable?: boolean
+  // Whether the market is a canonical / officially-curated listing (currently
+  // only Hyperliquid spot sets it: HL-canonical or Unit-bridged). Undefined for
+  // every other exchange => treated as canonical. Drives the pair-picker
+  // "Canonical only" toggle. Danger List #1.
+  isCanonical?: boolean
 }
 
 export type TpSlCondition = 'valueChanged' | 'priceReached'
@@ -1222,6 +1246,28 @@ export enum DCACloseTriggerEnum {
   base = 'base',
 }
 
+export interface FundingHistoryEntry {
+  time: number
+  rate: number
+  markPrice?: number
+  /** Signed position held at the settlement */
+  qty: number
+  feeQuote: number
+  feeUsd: number
+}
+
+export interface Funding {
+  /** Cumulative funding in quote asset (signed; negative = paid by us) */
+  total: number
+  totalUsd: number
+  /** Last processed fundingTime (ms) — dedup cursor */
+  offset: number
+  /** Last applied settlement time (ms) — UI "last funding" */
+  lastTime: number
+  /** Last 25 applied settlements (debug). */
+  history?: FundingHistoryEntry[]
+}
+
 export interface DCADealsSchema extends SchemaI {
   action?: ActionsEnum
   closeTrigger?: DCACloseTriggerEnum
@@ -1250,6 +1296,7 @@ export interface DCADealsSchema extends SchemaI {
     base?: number
     quote?: number
   }
+  funding?: Funding
   avgPrice: number
   displayAvg: number
   commission: number
@@ -1355,6 +1402,7 @@ export interface ComboDealsSchema extends DCADealsSchema {
     base?: number
     quote?: number
   }
+  funding?: Funding
   avgPrice: number
   displayAvg: number
   commission: number
@@ -1634,6 +1682,39 @@ export interface BotEventSchema extends SchemaI {
   symbol?: string
 }
 
+export interface ReconcileSweepSchema extends SchemaI {
+  botId: string
+  botType: BotType
+  userId: string
+  exchange: string
+  exchangeUUID: string
+  paperContext: boolean
+  pair?: string
+  /** Number of fills the sweep recovered in this catch (the log's "caught N"). */
+  missedFills: number
+}
+
+// One Binance Futures Quantitative Rules (-4400) cooldown event. Written by the
+// bot engine's QuantRulesGuard when a NEW cooldown (or escalation) is detected;
+// read by the getQuantRulesStatus GraphQL query, admin-app, and the dashboard.
+// Collection name is pinned all-lowercase ('quantrulesevents') — external
+// readers depend on exactly this literal (mongoose lowercasing gotcha).
+export interface QuantRulesEventSchema extends SchemaI {
+  userId: string
+  exchangeUUID: string
+  exchange?: string
+  /** null/absent for account-scope (level 3) events. */
+  symbol?: string
+  scope: 'symbol' | 'account'
+  level: 1 | 2 | 3
+  until: Date
+  violationCount24h?: number
+  botId?: string
+  botType?: string
+  dealId?: string
+  reason?: string
+}
+
 export type CleanBotEventSchema = ExcludeDoc<BotEventSchema>
 
 export type ClearUserSchema = ExcludeDoc<UserSchema>
@@ -1729,6 +1810,7 @@ export interface MainBot<T = BaseSettings> extends SchemaI {
     pureBase?: number
     pureQuote?: number
   }
+  funding?: Funding
   profitByAssets?: { asset: string; total: number; totalUsd: number }[]
   profitToday: {
     start: number
@@ -1799,6 +1881,8 @@ export interface BotSchema extends MainBot<BotSettings> {
     required: Asset
   }
   position: PositionInBot
+  /** Signed-position breakpoints {time, qty}, newest last (funding rewind). */
+  positionHistory?: { time: number; qty: number }[]
   stats: ProfitLossStats
   lastPositionChange?: number
   lastPriceRangeAlert?: number
@@ -2202,6 +2286,13 @@ export interface PairsSchema extends SchemaI {
   code?: string
   pair: string
   exchange: ExchangeEnum
+  /**
+   * OKX account-origin that owns this pair. Set to `my` for the OKX Europe
+   * (eea.okx.com) authoritative universe (USDC/EUR spot), which differs from the
+   * global public feed. Unset for the global list and every other exchange. The
+   * bot form serves an account its pairs by matching (exchange, source=okxSource).
+   */
+  source?: OKXSource
   baseAsset: {
     minAmount: number
     maxAmount: number
@@ -2224,6 +2315,19 @@ export interface PairsSchema extends SchemaI {
   }
   type?: string
   crossAvailable?: boolean
+  /**
+   * Normalized asset class persisted on every pair (default 'crypto'). Computed
+   * by `classifyAssetClass` in the pairs cron from curated lists + the connector
+   * signal. FROZEN GraphQL/DB field name — dashboards depend on it. Danger List #12.
+   */
+  assetCategory: AssetClass
+  /**
+   * Whether the market is a canonical / officially-curated listing. Currently
+   * only Hyperliquid spot sets it (HL-canonical or Unit-bridged = true;
+   * permissionless HIP-1 = false). Absent for every other exchange => treated as
+   * canonical. Drives the pair-picker "Canonical only" toggle.
+   */
+  isCanonical?: boolean
 }
 
 export interface StoreFilesSchema extends SchemaI {
@@ -3157,6 +3261,16 @@ export type TradeResponse = {
   firstId: number
   lastId: number
   timestamp: number
+}
+
+export type FundingRateResponse = {
+  symbol: string
+  /** Settled funding rate as a fraction, e.g. -0.000123 */
+  fundingRate: number
+  /** Settlement time in milliseconds */
+  fundingTime: number
+  /** Mark price associated with the funding charge, when supplied */
+  markPrice?: number
 }
 
 export type AllPricesResponse = {
@@ -4909,10 +5023,17 @@ export type InputRequest = {
   userAgent?: string
   req: {
     user?: { username: string; authorized: boolean }
-    cookies: { a?: string; aid?: string }
+    cookies: { a?: string; aid?: string; gdid?: string }
   }
+  // Express response — present in the GraphQL context so auth resolvers can set
+  // the device cookie (gdid) on a successful login. Typed loosely (only the
+  // `cookie` method is used) to avoid pulling express types into core.
+  res?: { cookie: (name: string, value: string, options?: unknown) => unknown }
   paperContext: boolean
   ip?: string
+  // Opaque device id resolved from the gdid cookie (or freshly minted on this
+  // request). Used to record loginHistory and detect new devices.
+  deviceId?: string
 }
 
 export enum BybitHost {
@@ -4933,4 +5054,19 @@ export type CreateDCABotInput = DCABotSettings & {
   exchangeUUID: string
   uuid?: string
   vars?: BotVars | null
+}
+
+export enum StreamWatchdogConfigStatusEnum {
+  on = 'on',
+  off = 'off',
+}
+
+export enum StreamWatchdogConfigTypeEnum {
+  user = 'user',
+  auto = 'auto',
+}
+
+export interface StreamWatchdogConfigSchema extends SchemaI {
+  status: StreamWatchdogConfigStatusEnum
+  type: StreamWatchdogConfigTypeEnum
 }

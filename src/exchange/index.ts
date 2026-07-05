@@ -10,6 +10,7 @@ import type {
   ReturnGood,
   OrderTypeT,
   CandleResponse,
+  FundingRateResponse,
   AllPricesResponse,
   PositionSide,
   LeverageBracket,
@@ -76,6 +77,12 @@ export interface Exchange {
     startTime?: number,
     endTime?: number,
   ): Promise<BaseReturn<TradeResponse[]>>
+  getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+  ): Promise<BaseReturn<FundingRateResponse[]>>
   getAllPrices(cache?: boolean): Promise<BaseReturn<AllPricesResponse[]>>
   changeMargin(data: {
     symbol: string
@@ -236,6 +243,17 @@ abstract class AbsctractExchange implements Exchange {
   abstract getAllExchangeInfo(): Promise<
     BaseReturn<(ExchangeInfo & { pair: string })[]>
   >
+  /**
+   * Authoritative, account-scoped SPOT instruments for an authenticated account.
+   * Only OKX Europe (`okxSource=my`) has a per-account universe that diverges from
+   * the public feed; the real exchange client overrides this. Default (paper +
+   * every other exchange): not supported.
+   */
+  async getAccountSpotExchangeInfo(): Promise<
+    BaseReturn<(ExchangeInfo & { pair: string })[]>
+  > {
+    return this.returnBad()(new Error('Method not supported'))
+  }
   /** Get all open orders for given pair
    * @param {string} symbol symbol to look for
    * @param {boolean} returnOrders return orders or orders count
@@ -280,6 +298,12 @@ abstract class AbsctractExchange implements Exchange {
     startTime?: number,
     endTime?: number,
   ): Promise<BaseReturn<TradeResponse[]>>
+  abstract getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+  ): Promise<BaseReturn<FundingRateResponse[]>>
   /**
    * Get all prices
    */

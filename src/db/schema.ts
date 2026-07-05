@@ -2,6 +2,8 @@ import { Schema } from 'mongoose'
 import type {
   BalancesSchema,
   BotEventSchema,
+  ReconcileSweepSchema,
+  QuantRulesEventSchema,
   BotMessageSchema,
   BotSchema,
   DCABacktestingResult,
@@ -43,6 +45,7 @@ import type {
   HedgeComboBacktestingResult,
   HedgeDCABacktestingResult,
   SnapshotPerExchangeSchema,
+  StreamWatchdogConfigSchema,
 } from '../../types'
 import {
   APIPermission,
@@ -108,6 +111,8 @@ import {
   LWValueEnum,
   RRSlTypeEnum,
   LWConditionEnum,
+  StreamWatchdogConfigTypeEnum,
+  StreamWatchdogConfigStatusEnum,
 } from '../../types'
 import { collections } from './config'
 
@@ -210,6 +215,54 @@ const botEventSchema: Schema<BotEventSchema> = new Schema({
   symbol: String,
   ...CreatedUpdated,
 })
+
+// Append-only record of reconciliation-sweep catches (a fill the user stream
+// dropped that the periodic sweep recovered). Powers the admin user-stream
+// health page; rows expire via TTL (see registerIndexes).
+const reconcileSweepSchema: Schema<ReconcileSweepSchema> = new Schema(
+  {
+    botId: RequiredString,
+    botType: { ...RequiredString, enum: BotType },
+    userId: RequiredString,
+    exchange: RequiredString,
+    exchangeUUID: RequiredString,
+    paperContext: Boolean,
+    pair: String,
+    missedFills: RequiredNumber,
+    ...CreatedUpdated,
+  },
+  // Pin the collection explicitly. Mongoose otherwise lowercases the model
+  // name (e.g. `dcaBots` → `dcabots`); the admin-app reader + backfill must
+  // match this exact name or they silently read an empty collection.
+  { collection: 'reconcilesweepcatches' },
+)
+
+// Binance Futures Quantitative Rules (-4400) cooldown events. Written by the
+// bot engine's QuantRulesGuard on each NEW cooldown / escalation; read by the
+// getQuantRulesStatus GraphQL query, admin-app, and the dashboard. Rows expire
+// via TTL (see registerIndexes).
+const quantRulesEventSchema: Schema<QuantRulesEventSchema> = new Schema(
+  {
+    userId: RequiredString,
+    exchangeUUID: RequiredString,
+    exchange: String,
+    // Absent for account-scope (level 3) events.
+    symbol: String,
+    scope: { ...RequiredString, enum: ['symbol', 'account'] },
+    level: RequiredNumber,
+    until: RequiredDate,
+    violationCount24h: Number,
+    botId: String,
+    botType: String,
+    dealId: String,
+    reason: String,
+    ...CreatedUpdated,
+  },
+  // Pin the collection explicitly. Mongoose otherwise lowercases the model
+  // name; the admin-app reader + dashboard GraphQL projection must match this
+  // exact literal or they silently read an empty collection.
+  { collection: 'quantrulesevents' },
+)
 
 const userSchema: Schema<UserSchema> = new Schema({
   bigAccount: Boolean,
@@ -314,6 +367,28 @@ const profit = {
   gridProfitUsd: Number,
 }
 
+// Funding fees accrued on a futures position. Kept separate from `profit`
+// because deal-close recomputes profit.total from scratch (which would wipe a
+// running funding accumulator). `offset` is the dedup cursor — per-deal for
+// DCA/Combo, per-bot for Grid; on the bot aggregate for DCA/Combo it is unused.
+const funding = {
+  total: Number, // cumulative funding in quote asset (signed; negative = paid)
+  totalUsd: Number,
+  offset: Number, // last processed fundingTime (ms)
+  lastTime: Number, // last applied settlement time (ms)
+  // Last 25 applied settlements — cheap to keep, very useful for debugging.
+  history: [
+    {
+      time: Number,
+      rate: Number,
+      markPrice: Number,
+      qty: Number, // signed position at settlement
+      feeQuote: Number,
+      feeUsd: Number,
+    },
+  ],
+}
+
 const profitByAssets = [
   {
     asset: String,
@@ -348,6 +423,7 @@ const botCommon = {
   statusReason: String,
   showErrorWarning: String,
   profit,
+  funding,
   profitByAssets,
   profitToday: {
     start: Number,
@@ -525,6 +601,15 @@ const botSchema: Schema<BotSchema> = new Schema({
     qty: Number,
     price: Number,
   },
+  // Last few signed-position breakpoints {time, qty}, newest last. Lets the
+  // funding processor rewind the position to a past settlement without reading
+  // orders (grid drops filled orders from RAM once transacted).
+  positionHistory: [
+    {
+      time: Number,
+      qty: Number,
+    },
+  ],
   lastPositionChange: Number,
   stats: {
     drawdownPercent: RequiredNumber,
@@ -754,6 +839,10 @@ const pairsSchema: Schema<PairsSchema> = new Schema({
   code: String,
   pair: RequiredString,
   exchange: { ...RequiredString, enum: ExchangeEnum },
+  // OKX account-origin owning this pair (`my` = OKX Europe / eea.okx.com
+  // authoritative USDC/EUR spot universe). Unset for the global feed + all other
+  // exchanges. Bot form matches (exchange, source) to the account's okxSource.
+  source: { type: String, enum: OKXSource },
   baseAsset: {
     minAmount: RequiredNumber,
     maxAmount: RequiredNumber,
@@ -776,6 +865,17 @@ const pairsSchema: Schema<PairsSchema> = new Schema({
   },
   type: String,
   crossAvailable: Boolean,
+  // Normalized asset class (crypto/stock/etf/commodity/metal/forex/index).
+  // Defaults to 'crypto' so legacy/un-backfilled pairs read as crypto.
+  assetCategory: {
+    type: String,
+    enum: ['crypto', 'stock', 'etf', 'commodity', 'metal', 'forex', 'index'],
+    default: 'crypto',
+  },
+  // Canonical/curated-listing flag for the pair-picker "Canonical only" toggle.
+  // Set only for Hyperliquid spot (HL-canonical or Unit-bridged); absent for
+  // every other exchange => treated as canonical.
+  isCanonical: Boolean,
   ...CreatedUpdated,
 })
 
@@ -1707,6 +1807,7 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
   initialPrice: Number,
   lastPrice: Number,
   profit: profit,
+  funding: funding,
   feePaid: {
     base: Number,
     quote: Number,
@@ -1885,6 +1986,7 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
   initialPrice: Number,
   lastPrice: Number,
   profit: profit,
+  funding: funding,
   feePaid: {
     base: Number,
     quote: Number,
@@ -2725,8 +2827,24 @@ const brokerCodes = new Schema<BrokerCodesSchema>({
   code: String,
 })
 
+const streamWatchdogConfig = new Schema<StreamWatchdogConfigSchema>({
+  status: { type: String, enum: StreamWatchdogConfigStatusEnum },
+  type: { type: String, enum: StreamWatchdogConfigTypeEnum },
+  ...CreatedUpdated,
+})
+
 export const registerIndexes = () => {
   brokerCodes.index({ exchange: 1, zone: 1 }, { unique: true })
+
+  reconcileSweepSchema.index({ created: -1 })
+  reconcileSweepSchema.index({ exchangeUUID: 1, created: -1 })
+  // Retain ~90 days of catches; bounds growth without manual cleanup.
+  reconcileSweepSchema.index({ created: 1 }, { expireAfterSeconds: 7776000 })
+
+  quantRulesEventSchema.index({ userId: 1, created: -1 })
+  quantRulesEventSchema.index({ until: -1 })
+  // Retain ~90 days of cooldown events; bounds growth without manual cleanup.
+  quantRulesEventSchema.index({ created: 1 }, { expireAfterSeconds: 7776000 })
 
   userProfitByHour.index({ userId: 1 })
 
@@ -2754,6 +2872,8 @@ export const registerIndexes = () => {
   hedgeDCABacktestingResult.index({ shareId: 1 })
 
   comboTransactionSchema.index({ userId: 1 })
+  // Bot-engine per-bot transaction load (botId far more selective than userId).
+  comboTransactionSchema.index({ botId: 1, userId: 1 })
 
   botMessageSchema.index({
     userId: 1,
@@ -2764,6 +2884,10 @@ export const registerIndexes = () => {
     botId: 1,
     subType: 1,
   })
+  // Bot-error bulk soft-delete filters (botId, isDeleted) with a residual
+  // subType:{$ne}; the userId-leading indexes above can't serve a botId-first
+  // predicate. botId is write-once (static); isDeleted is one-way/low-cardinality.
+  botMessageSchema.index({ botId: 1, isDeleted: 1 })
 
   botSchema.index({ userId: 1 })
 
@@ -2777,12 +2901,21 @@ export const registerIndexes = () => {
   comboProfitSchema.index({ userId: 1 })
 
   dcaBotSchema.index({ userId: 1 })
+  // Webhook path looks bots up by uuid (write-once/static) — was a COLLSCAN.
+  dcaBotSchema.index({ uuid: 1 })
 
   hedgeComboBotSchema.index({ userId: 1 })
   hedgeDcaBotSchema.index({ userId: 1 })
 
   dcaDealSchema.index({ userId: 1 })
   dcaDealSchema.index({ botId: 1 })
+  // Deals list (find({userId,status:'open',...}).sort({createTime:-1})): partial
+  // index on open deals only serves the sort directly and stays tiny. createTime
+  // is write-once (static); membership churns only on the open->closed transition.
+  dcaDealSchema.index(
+    { userId: 1, createTime: -1 },
+    { partialFilterExpression: { status: 'open' } },
+  )
 
   favoritePairsSchema.index({ userId: 1 })
 
@@ -2800,6 +2933,8 @@ export const registerIndexes = () => {
   snapshotsSchema.index({ userId: 1 })
 
   transactionSchema.index({ userId: 1 })
+  // Bot-engine per-bot transaction load (botId far more selective than userId).
+  transactionSchema.index({ botId: 1, userId: 1 })
 
   userPeriod.index({ userId: 1 })
 
@@ -2816,6 +2951,8 @@ const schema = {
   globalVariables: globalVariablesSchema,
   user: userSchema,
   botEvent: botEventSchema,
+  reconcileSweep: reconcileSweepSchema,
+  quantRulesEvent: quantRulesEventSchema,
   favoritePairs: favoritePairsSchema,
   favoriteIndicators: favoriteIndicatorsSchema,
   bot: botSchema,
@@ -2858,6 +2995,7 @@ const schema = {
   hedgeComboBacktest: hedgeComboBacktestingResult,
   hedgeDcaBacktest: hedgeDCABacktestingResult,
   snapshotsPerExchange: snapshotsPerExchangeSchema,
+  streamWatchdogConfig,
 }
 
 export default schema

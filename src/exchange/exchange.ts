@@ -3,6 +3,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeEnum,
   ExchangeInfo,
@@ -136,6 +137,28 @@ class Exchange extends AbstractExchange {
       },
       timeProfile,
     ).catch(this.handleError(this.getAllExchangeInfo, timeProfile))
+    this.saveTimeProfile(result.timeProfile)
+    return result.data
+  }
+
+  /**
+   * Authoritative, account-scoped SPOT instruments (OKX Europe `okxSource=my`).
+   * Private call: keys + `okxsource` travel as headers (via `isPrivate`), so the
+   * connector hits the authenticated `/exchange/account` endpoint on eea.okx.com
+   * and returns the account's real USDC/EUR spot universe (not the public USDT
+   * feed). Non-OKX exchanges resolve to the abstract "not supported" default.
+   */
+  async getAccountSpotExchangeInfo(
+    timeProfile = this.getEmptyTimeProfile('getAccountSpotExchangeInfo'),
+  ): Promise<BaseReturn<(ExchangeInfo & { pair: string })[]>> {
+    const result = await this.apiCall<(ExchangeInfo & { pair: string })[]>(
+      {
+        endpoint: 'exchange/account',
+        method: 'get',
+        isPrivate: true,
+      },
+      timeProfile,
+    ).catch(this.handleError(this.getAccountSpotExchangeInfo, timeProfile))
     this.saveTimeProfile(result.timeProfile)
     return result.data
   }
@@ -451,6 +474,52 @@ class Exchange extends AbstractExchange {
     ) {
       return this.returnGood<CandleResponse[]>()([])
     }
+    return result.data
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile('getFundingRateHistory'),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    const params: {
+      symbol: string
+      from?: number
+      to?: number
+      limit?: number
+    } = { symbol }
+    if (from) {
+      params.from = from
+    }
+    if (to) {
+      params.to = to
+    }
+    if (limit) {
+      params.limit = limit
+    }
+    const result = await this.apiCall<FundingRateResponse[]>(
+      {
+        endpoint: 'fundingRateHistory',
+        method: 'get',
+        params: {
+          ...params,
+          exchange: this.exchange,
+        },
+      },
+      timeProfile,
+    ).catch(
+      this.handleError(
+        this.getFundingRateHistory,
+        symbol,
+        from,
+        to,
+        limit,
+        timeProfile,
+      ),
+    )
+    this.saveTimeProfile(result.timeProfile)
     return result.data
   }
 

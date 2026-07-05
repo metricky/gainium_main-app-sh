@@ -55,7 +55,6 @@ import {
   BaseReturn,
   BotSchema,
   BotSettings,
-  BotStatus,
   BotStatusEnum,
   BotType,
   BuyTypeEnum,
@@ -184,6 +183,23 @@ class Bot<T extends UserSchema = UserSchema> {
       used: number
       time: number
     }[]
+    // Event-loop delay (ms) reported by the worker on each health ping — the
+    // leading signal of a wedging worker (blocked loop) before the ping times out.
+    lag?: {
+      mean: number
+      max: number
+    }
+    lagHistory?: {
+      mean: number
+      max: number
+      time: number
+    }[]
+    // Consecutive health-ping failures; reset to 0 on any successful pong. Used to
+    // distinguish a sustained wedge from transient deploy/restart ping noise.
+    consecutiveFails?: number
+    // Whether we've already escalated a WEDGED alert for the current fail episode,
+    // so we escalate once per episode rather than every 5-minute ping.
+    wedgedNotified?: boolean
     botIds: Map<string, string>
     logLevel?: LogLevel
   }[] = []
@@ -2666,7 +2682,7 @@ class Bot<T extends UserSchema = UserSchema> {
   public async getPublicBotList(
     type: BotType,
     userId: string,
-    status?: BotStatus,
+    status?: BotStatusEnum,
     paperContext?: boolean,
     page = 1,
   ) {
@@ -7233,6 +7249,44 @@ class Bot<T extends UserSchema = UserSchema> {
     archive: boolean,
     paperContext?: boolean,
   ) {
+    // Legacy rule: only stopped (`closed`) bots can be archived. Each branch
+    // below filters the update on `status: closed`, so archiving a running
+    // bot matches 0 docs — but updateMany still reports OK, so the API used
+    // to return a false success. The dashboard then hid the bot locally and
+    // it reappeared on the next full reload. Fail loudly instead, before
+    // closeAllDeals runs, so nothing is mutated on a rejected archive.
+    if (archive) {
+      const archiveDb = (
+        type === BotType.grid
+          ? this.botDb
+          : type === BotType.combo
+            ? this.comboBotDb
+            : type === BotType.hedgeCombo
+              ? hedgeComboBotDb
+              : type === BotType.hedgeDca
+                ? hedgeDCABotDb
+                : this.dcaBotDb
+      ) as { readData: (...args: any[]) => Promise<any> }
+      const current = await archiveDb.readData(
+        { _id: { $in: botIds }, userId, isDeleted: { $ne: true } },
+        { _id: true, status: true },
+        undefined,
+        true,
+      )
+      if (current.status === StatusEnum.notok) {
+        return current
+      }
+      const notClosed = (current.data?.result ?? []).filter(
+        (b: { status?: BotStatusEnum }) => b.status !== BotStatusEnum.closed,
+      )
+      if (notClosed.length > 0) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Only stopped bots can be archived. Stop the bot first.',
+          data: [],
+        }
+      }
+    }
     if (type === BotType.grid) {
       const findBotsData = await this.botDb.updateManyData(
         {

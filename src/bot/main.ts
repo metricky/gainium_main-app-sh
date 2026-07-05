@@ -67,12 +67,14 @@ import {
   convertDCABotToObject,
   exchangeOrdersLimits,
   exchangeProblems,
+  exchangeRules,
   futuresLiquidation,
   futuresPosition,
   getErrorSubType,
   indicatorsError,
   orderPrice,
 } from './utils'
+import QuantRulesGuard from './quantRulesGuard'
 import { paperExchanges } from '../exchange/paper/utils'
 import type { InitialGrid } from './helper'
 import { updateUserSteps } from '../utils/user'
@@ -83,6 +85,7 @@ import RedisClient, { RedisWrapper } from '../db/redis'
 import {
   balanceDb,
   botEventDb,
+  reconcileSweepDb,
   botMessageDb,
   brokerCodesDb,
   comboBotDb,
@@ -95,6 +98,13 @@ import Rabbit from '../db/rabbit'
 import { RunWithDelay } from '../utils/delay'
 import BotSharedData, { type StreamData } from './shared'
 import SharedStream from './sharedStream'
+import FundingStream, { fundingChannel } from './fundingStream'
+import FundingStore from './fundingStore'
+import {
+  computeFunding,
+  type SignedFill,
+  type FundingComputeResult,
+} from './fundingProcessor'
 import Bot from '.'
 import { SKIP_REDIS } from '../config'
 
@@ -262,6 +272,8 @@ class MainBot<T extends IMainBot> {
   messagesDb = botMessageDb
   /** DB instance to work with bot events */
   botEventDb = botEventDb
+  /** DB instance recording reconciliation-sweep catches (user-stream health) */
+  reconcileSweepDb = reconcileSweepDb
   /** Exchange instance */
   exchange: Exchange | null
   lastCheckPerSymbol: Map<string, number> = new Map()
@@ -275,6 +287,18 @@ class MainBot<T extends IMainBot> {
    *  response, so they don't need polling. */
   hyperliquidPollTimer: NodeJS.Timeout | null = null
   hyperliquidPollInterval = 30 * 1000
+  /** Periodic reconciliation-sweep timer (opt-in). See startReconcileSweep. */
+  consumerHeartbeatTimer: NodeJS.Timeout | null = null
+  /**
+   * Deferred re-sends of orders soft-skipped by a Binance Quantitative Rules
+   * (-4400) cooldown, keyed by clientOrderId so a given order has at most one
+   * pending retry (clear-and-replace on reschedule). See the pre-send gate in
+   * sendOrderToExchange.
+   */
+  quantRulesRetryTimers: Map<string, NodeJS.Timeout> = new Map()
+  /** True while a reconcile is running because the sweep timer fired it
+   *  (vs a real user-stream reconnect), for distinct logging. */
+  reconcileViaSweep = false
   /** Math helper instance */
   math: MathHelper
   /** Service restart flag */
@@ -941,6 +965,7 @@ class MainBot<T extends IMainBot> {
     if (this.userStreamChannel) {
       this.sharedStream.removeListener(this.userStreamChannel, this.botId)
     }
+    this.stopFunding()
   }
 
   async getExchangeData() {
@@ -1062,6 +1087,32 @@ class MainBot<T extends IMainBot> {
         this.handleLog(`User stream initial start`)
         this.userStreamInitialStart = false
       }
+    }
+    if ((msg ?? '').includes('RECONCILE VIA SWEEP')) {
+      this.reconcileViaSweep = true
+      void Promise.resolve(this.callbackAfterUserStream?.(this.botId))
+        .catch((e) =>
+          this.handleWarn(`reconcile-sweep failed: ${(e as Error).message}`),
+        )
+        .finally(() => {
+          this.reconcileViaSweep = false
+        })
+    }
+    if ((msg ?? '').includes('INFORM USERS')) {
+      reconcileSweepDb
+        .countData({
+          exchangeUUID: this.data?.exchangeUUID,
+          created: { $gt: new Date(+new Date() - 60 * 60 * 1000) },
+        })
+        .then((res) => {
+          if ((res.data?.result ?? 0) > 0) {
+            this.handleErrors(
+              `We're having trouble keeping your exchange connection up to date. Gainium is not receiving live updates for this account right now. We've attempted to reconnect automatically, but the issue is still present.`,
+              '',
+              '',
+            )
+          }
+        })
     }
   }
 
@@ -1304,6 +1355,9 @@ class MainBot<T extends IMainBot> {
       await q()
     }
     this.runAfterLoadingQueue = []
+    // Arm the reconciliation sweep on every load (fresh start AND service
+    // reload), so a bot restored after a restart is also protected.
+    this.startConsumerHeartbeat()
   }
 
   async priceUpdateCallback(_botId: string, _msg: PriceMessage) {
@@ -1436,6 +1490,9 @@ class MainBot<T extends IMainBot> {
             terminal,
             symbol: this.data?.settings.pair[0],
             exchange: this.data?.exchange,
+            // Additive: lets the dashboard recognise e.g. a Quantitative Rules
+            // cooldown warning without parsing the message text. No event rename.
+            subType,
           })
           this.cbEmit(setError, messageToSet)
         }
@@ -1532,6 +1589,15 @@ class MainBot<T extends IMainBot> {
       messageToSet = `Unable to place limit order due to exchange price rules, will retry again when price changes.`
       setError = false
       sendError = false
+    }
+    if (subType === exchangeRules) {
+      // Binance Futures Quantitative Rules (-4400): the account/symbol is in a
+      // temporary reduce-only cooldown. Don't error the bot or fail the deal —
+      // the guard delays new orders and retries after the cooldown expires.
+      // Keep it a user-visible warning so they know why orders paused; closing
+      // positions still works throughout.
+      messageToSet = `Binance temporarily restricted new orders on this account (Futures Quantitative Rules). New orders are paused and will resume automatically once the cooldown ends. Closing positions still works.`
+      setError = false
     }
     const type = setError ? MessageTypeEnum.error : MessageTypeEnum.warning
     if (setEvent) {
@@ -1874,6 +1940,153 @@ class MainBot<T extends IMainBot> {
           this.data?.exchange ?? ExchangeEnum.binance,
         )}`,
     )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Funding fees
+  //
+  // The funding store (keyed by the real exchange + universal symbol) is the
+  // source of truth; FundingStream pub/sub is only a wake-up. Subclasses react
+  // in `onFundingNotify` — Grid per-bot, DCA/Combo per open deal. Catch-up after
+  // a restart / on deal-open is the same path: just call `onFundingNotify`.
+  // ---------------------------------------------------------------------------
+
+  /** Real exchange name (paper bots accrue real rates). */
+  protected fundingExchangeName() {
+    return removePaperFormExchangeName(
+      this.data?.exchange ?? ExchangeEnum.binance,
+    )
+  }
+
+  protected fundingChannelFor(symbol: string) {
+    return fundingChannel(this.fundingExchangeName(), symbol)
+  }
+
+  private onFundingNotifyBound = (_msg: string, channelKey: string) =>
+    this.onFundingNotify(channelKey)
+
+  protected async subscribeFunding(symbol: string) {
+    if (!this.futures) {
+      return
+    }
+    await FundingStream.getInstance().addListener(
+      this.fundingChannelFor(symbol),
+      this.botId,
+      this.onFundingNotifyBound,
+    )
+  }
+
+  protected async unsubscribeFunding(symbol: string) {
+    await FundingStream.getInstance().removeListener(
+      this.fundingChannelFor(symbol),
+      this.botId,
+    )
+  }
+
+  /** Symbol carried in a `funding@<exchange>@<symbol>` channel key. */
+  protected fundingSymbolFromChannel(channelKey: string) {
+    return channelKey.split('@')[2] ?? ''
+  }
+
+  /**
+   * Symbol used on the funding channel/registry/store. Kraken & Hyperliquid
+   * pass the exchange code through their connectors, so we subscribe by code
+   * (cheap lookup from shared exchange info); everyone else uses the pair.
+   */
+  protected async toFundingSymbol(pair: string): Promise<string> {
+    if (this.isKraken || this.hyperliquid) {
+      const ed = await this.getExchangeInfo(pair)
+      return ed?.code ?? pair
+    }
+    return pair
+  }
+
+  /** Reverse of {@link toFundingSymbol}: funding symbol → the bot's pair. */
+  protected async fromFundingSymbol(fundingSym: string): Promise<string> {
+    if (this.isKraken || this.hyperliquid) {
+      const pair = await this.sharedData.getPairByCode(
+        this.fundingExchangeName() as ExchangeEnum,
+        fundingSym,
+      )
+      return pair ?? fundingSym
+    }
+    return fundingSym
+  }
+
+  /**
+   * React to a settled-funding notify (or a catch-up call) for one symbol.
+   * Default no-op; overridden by Grid (per-bot) and DCA/Combo (per deal).
+   */
+  protected async onFundingNotify(_channelKey: string): Promise<void> {
+    return
+  }
+
+  /**
+   * Start funding tracking on bot load (futures only). Subclasses subscribe
+   * their symbols and run a catch-up. Default no-op.
+   */
+  protected async startFunding(): Promise<void> {
+    return
+  }
+
+  /** Tear down all funding subscriptions for this bot. */
+  protected async stopFunding(): Promise<void> {
+    await FundingStream.getInstance().removeAllForBot(this.botId)
+  }
+
+  /**
+   * Signed fills (buy +, sell −) for a deal from in-memory orders — no DB
+   * round-trip, no full scan (uses the status+deal index). DCA/Combo keep all
+   * deal orders in RAM, so this is complete for them. Ascending by time.
+   */
+  protected getSignedFillsFromMemory(dealId: string): SignedFill[] {
+    return this.getOrdersByStatusAndDealId({ status: 'FILLED', dealId })
+      .map((o) => ({
+        time: +o.updateTime,
+        signedQty:
+          +(o.executedQty ?? o.origQty ?? 0) * (o.side === 'BUY' ? 1 : -1),
+      }))
+      .sort((a, b) => a.time - b.time)
+  }
+
+  /**
+   * Shared store-read + funding math. `storeSymbol` keys the funding store
+   * (code for kraken/HL); `pair` is the bot's pair (for exchange info / usd
+   * rate). `getQtyAt` resolves the signed position at a settlement from RAM.
+   */
+  protected async computeFundingFor(
+    storeSymbol: string,
+    pair: string,
+    offset: number,
+    getQtyAt: (eventTime: number) => number,
+  ): Promise<FundingComputeResult> {
+    const events = await FundingStore.getEventsAfter(
+      this.fundingExchangeName(),
+      storeSymbol,
+      offset,
+    )
+    if (!events.length) {
+      return {
+        deltaQuote: 0,
+        deltaUsd: 0,
+        maxTime: offset,
+        lastTime: offset,
+        applied: 0,
+        entries: [],
+      }
+    }
+    const inverse = this.coinm
+    const ed = await this.getExchangeInfo(pair)
+    const contractMultiplier = inverse ? ((ed as any)?.contractSize ?? 1) : 1
+    const usdRate = (await this.getUsdRate(pair)) || 1
+    return computeFunding({
+      events,
+      offset,
+      getQtyAt,
+      inverse,
+      contractMultiplier,
+      usdRate,
+    })
   }
 
   redisSubCb(msg: string) {
@@ -3762,6 +3975,180 @@ class MainBot<T extends IMainBot> {
     }
   }
 
+  private async heartbeatConsumer() {
+    try {
+      if (!this.redisDb || !this.data) {
+        return
+      }
+      const accountId = `${this.data.exchangeUUID}`
+      const pipeline = this.redisDb.instance?.multi()
+      if (!pipeline) {
+        return
+      }
+      pipeline.set(`stream:hasConsumer:${accountId}`, '1', {
+        EX: 30,
+      })
+      pipeline.zAdd(
+        'stream:lastEventTime',
+        { score: 0, value: accountId },
+        { comparison: 'GT' },
+      )
+      await pipeline
+        .execAsPipeline()
+        .catch((e) =>
+          this.handleError(
+            `Failed to heartbeat consumer for ${accountId}: ${
+              (e as Error)?.message ?? e
+            }`,
+          ),
+        )
+    } catch (e) {
+      this.handleError(
+        `Failed to heartbeat consumer: ${(e as Error)?.message ?? e}`,
+      )
+    }
+  }
+
+  startConsumerHeartbeat() {
+    if (this.consumerHeartbeatTimer) {
+      clearInterval(this.consumerHeartbeatTimer)
+    }
+    const interval = 30_000
+    this.consumerHeartbeatTimer = setInterval(() => {
+      this.heartbeatConsumer()
+    }, interval)
+    // Greppable: confirms the sweep is enabled+armed for this bot (once on load).
+    this.handleLog(`Consumer hearbeat armed (every ${interval}ms)`)
+  }
+
+  /** Stop the reconciliation sweep. */
+  stopConsumerHeartbeat() {
+    if (this.consumerHeartbeatTimer) {
+      clearInterval(this.consumerHeartbeatTimer)
+      this.consumerHeartbeatTimer = null
+    }
+  }
+
+  /**
+   * Cancel all pending Quantitative Rules deferred retries. MUST be called on
+   * bot stop (afterBotStop) — a retry firing after the bot stopped would place
+   * a rogue order on the exchange for a bot the user believes is stopped.
+   */
+  stopQuantRulesRetries() {
+    for (const timer of this.quantRulesRetryTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.quantRulesRetryTimers.clear()
+  }
+
+  /**
+   * Is a Quantitative Rules deferred retry still wanted when its timer fires?
+   * If the order belongs to a deal, the deal must still be open — a reduceOnly
+   * TP can close a deal DURING a cooldown, and re-sending one of its orders
+   * afterwards would create an orphan on the exchange. DCA/combo helpers hold
+   * a `deals` Map keyed by dealId; grid bots have no such map (their orders
+   * are perpetual while the bot runs), so default to true.
+   */
+  protected isOrderStillWanted(order: Order): boolean {
+    const deals = (this as { deals?: Map<string, unknown> }).deals
+    if (order.dealId && deals instanceof Map) {
+      return deals.has(order.dealId)
+    }
+    return true
+  }
+
+  /**
+   * Schedule a bounded, deduped re-send of an order soft-skipped by a Binance
+   * Quantitative Rules (-4400) cooldown. The order was NOT sent to the exchange
+   * (delay, don't fail), so nothing else will re-place it reliably during normal
+   * running; this timer is the self-heal path. It fires shortly after the
+   * cooldown expires, re-checks (so an escalation extends the wait via the gate
+   * inside sendOrderToExchange), and re-sends. Keyed by clientOrderId so a given
+   * order has at most one pending retry (clear-and-replace on reschedule).
+   */
+  protected scheduleQuantRulesRetry(
+    order: Order,
+    returnError: boolean | undefined,
+    cooldown: {
+      until: number | null
+      level: number | null
+      scope: string | null
+    },
+  ): void {
+    const key = order.clientOrderId
+    const existing = this.quantRulesRetryTimers.get(key)
+    if (existing) {
+      clearTimeout(existing)
+    }
+    const now = +new Date()
+    // Small buffer past expiry to avoid a re-send landing on the exact boundary.
+    const delayMs = Math.max(1000, (cooldown.until ?? now) - now + 1000)
+    const untilIso = cooldown.until
+      ? new Date(cooldown.until).toISOString()
+      : 'unknown'
+    this.handleLog(
+      `Order ${key} delayed by Binance Quantitative Rules cooldown (level ${
+        cooldown.level ?? '?'
+      }, ${cooldown.scope ?? '?'}) until ${untilIso}. Reduce-only orders continue to work. Will retry in ${Math.ceil(
+        delayMs / 1000,
+      )}s`,
+    )
+    const timer = setTimeout(() => {
+      this.quantRulesRetryTimers.delete(key)
+      // Re-check inside sendOrderToExchange's gate; if still restricted it will
+      // re-schedule another retry. Fire-and-forget with guards against a
+      // stopped/torn-down bot and against a deal that closed during the
+      // cooldown (a reduceOnly TP can fill while restricted — re-sending its
+      // order would orphan it on the exchange).
+      if (this.ignoreErrors || !this.data || !this.exchange) {
+        return
+      }
+      if (!this.isOrderStillWanted(order)) {
+        this.handleLog(
+          `Quantitative Rules deferred retry dropped for ${key}: deal ${order.dealId} no longer open`,
+        )
+        return
+      }
+      void this.sendOrderToExchange(order, returnError as any).catch((e) =>
+        this.handleWarn(
+          `Quantitative Rules deferred retry failed for ${key}: ${
+            (e as Error)?.message ?? e
+          }`,
+        ),
+      )
+    }, delayMs)
+    // Don't keep the event loop alive solely for a cooldown retry.
+    if (typeof timer.unref === 'function') {
+      timer.unref()
+    }
+    this.quantRulesRetryTimers.set(key, timer)
+  }
+
+  /**
+   * Persist a reconciliation-sweep catch (a fill the user stream dropped that
+   * the periodic sweep recovered). Fire-and-forget — never block or throw into
+   * the order-check path. Powers the admin user-stream health page: a rising
+   * per-account catch rate means that account's user stream is silently dead.
+   */
+  protected recordReconcileSweepCatch(missedFills: number) {
+    void this.reconcileSweepDb
+      .createData({
+        botId: this.botId,
+        botType: this.botType,
+        userId: this.userId,
+        exchange: `${this.data?.exchange ?? this.exchange ?? ''}`,
+        exchangeUUID: `${this.data?.exchangeUUID ?? ''}`,
+        paperContext: !!this.data?.paperContext,
+        pair: this.data?.settings?.pair?.[0],
+        missedFills,
+      })
+      .catch((e) =>
+        this.handleWarn(
+          `reconcile-sweep record failed: ${(e as Error).message}`,
+        ),
+      )
+  }
+
   /**
    * Hyperliquid order-status poller body. Walks every limit order this
    * bot is currently tracking that is still NEW or PARTIALLY_FILLED,
@@ -4660,6 +5047,57 @@ class MainBot<T extends IMainBot> {
             }
           }
         }
+        // Binance Futures Quantitative Rules (-4400) pre-send gate. Only for
+        // real Binance USD-M/COIN-M futures, and only for orders that would
+        // OPEN/INCREASE exposure (reduceOnly orders + cancels still work under
+        // a restriction, so they are never gated). When the account/symbol is
+        // in a cooldown we do NOT hit the exchange — hammering it would escalate
+        // Binance's penalty (L1 -> L2 -> L3). We DELAY, never fail: the bot must
+        // not enter error status and the deal must not be marked failed.
+        if (
+          !request &&
+          this.isRealBinanceFutures &&
+          !requestData.reduceOnly &&
+          this.needToSendOrder(order)
+        ) {
+          const cooldown = await QuantRulesGuard.check(
+            `${this.data.exchangeUUID}`,
+            requestData.symbol,
+          )
+          if (cooldown.restricted && cooldown.until) {
+            const remainingMs = cooldown.until - +new Date()
+            if (remainingMs > 0 && remainingMs <= 60_000) {
+              // Short tail: wait it out inline, then re-check once and proceed.
+              this.handleLog(
+                `Order ${order.clientOrderId} waiting ${Math.ceil(
+                  remainingMs / 1000,
+                )}s for Binance Quantitative Rules cooldown (level ${
+                  cooldown.level
+                }, ${cooldown.scope}) before sending`,
+              )
+              await sleep(remainingMs)
+              const recheck = await QuantRulesGuard.check(
+                `${this.data.exchangeUUID}`,
+                requestData.symbol,
+              )
+              if (recheck.restricted) {
+                this.endMethod(_id)
+                return this.scheduleQuantRulesRetry(order, returnError, recheck)
+              }
+            } else if (remainingMs > 60_000) {
+              // Long cooldown: soft-skip (no exchange call, no error) and let a
+              // bounded deferred retry re-attempt after the cooldown expires.
+              // NOTE: the engine's own reconciliation (checkOrders /
+              // reconcile-sweep) only reliably re-places missing orders on
+              // service restart or on the next fill, and the sweep is opt-in
+              // (RECONCILE_SWEEP_ENABLED), so we cannot rely on it to re-send an
+              // order that was never placed. The deferred retry below is the
+              // self-heal path; it dedups on clientOrderId.
+              this.endMethod(_id)
+              return this.scheduleQuantRulesRetry(order, returnError, cooldown)
+            }
+          }
+        }
         request = request ?? (await this.exchange.openOrder(requestData))
         if (
           request.status === StatusEnum.notok &&
@@ -4675,6 +5113,59 @@ class MainBot<T extends IMainBot> {
           })
         }
         if (request.status === StatusEnum.notok) {
+          // Binance Futures Quantitative Rules (-4400) detection. Track the
+          // violation per account+symbol, compute/refresh the cooldown, and
+          // route to the DELAY path (soft-skip + deferred retry) instead of
+          // hard-erroring the bot — repeatedly hammering Binance during a
+          // restriction escalates the penalty (L1 -> L2 -> L3).
+          if (
+            this.isRealBinanceFutures &&
+            !order.reduceOnly &&
+            this.needToSendOrder(order) &&
+            (this.getErrorSubType(request.reason) === exchangeRules ||
+              request.reason.indexOf('-4400') !== -1)
+          ) {
+            const violation = await QuantRulesGuard.recordViolation({
+              userId: this.userId,
+              exchangeUUID: `${this.data.exchangeUUID}`,
+              exchange: `${this.data.exchange}`,
+              symbol: order.symbol,
+              botId: this.data?.parentBotId || this.botId,
+              botType: `${this.botType}`,
+              dealId: order.dealId,
+              reason: request.reason,
+            })
+            // Alert the user once per window (escalations alert again). The
+            // handleErrors exchangeRules branch keeps this a non-erroring
+            // warning; `force` bypasses the 24h same-subType de-dup so an
+            // escalation still surfaces.
+            if (violation.isNew) {
+              await this.handleErrors(
+                request.reason,
+                'sendOrderToExchange()',
+                `Send new order request ${order.clientOrderId}, qty ${order.origQty}, price ${order.price}, side ${order.side}`,
+                false,
+                true,
+                true,
+                true,
+              )
+            }
+            // Clean up the local order record and defer a bounded retry that
+            // re-checks the cooldown before re-sending (self-heals the skip).
+            if (this.orders && this.orders.size > 0) {
+              this.deleteOrder(order.clientOrderId)
+              this.updateOrderOnDb({ ...order, status: 'CANCELED' })
+            }
+            this.endMethod(_id)
+            if (returnError) {
+              return request.reason
+            }
+            return this.scheduleQuantRulesRetry(order, returnError, {
+              scope: violation.scope,
+              level: violation.level,
+              until: violation.until,
+            })
+          }
           if (
             request.reason.toLowerCase().indexOf('MARKET_LOT_SIZE') !== -1 &&
             order.type === 'MARKET' && [
@@ -5321,6 +5812,19 @@ class MainBot<T extends IMainBot> {
 
   get kucoinSpot() {
     return this.data?.exchange === ExchangeEnum.kucoin
+  }
+
+  /**
+   * True only for REAL Binance USD-M / COIN-M futures — the accounts Binance's
+   * Quantitative Rules (-4400) actually restrict. Excludes spot Binance and all
+   * paper variants (paper never trips -4400), so the cooldown guard never gates
+   * simulated or spot orders.
+   */
+  get isRealBinanceFutures() {
+    return (
+      this.data?.exchange === ExchangeEnum.binanceUsdm ||
+      this.data?.exchange === ExchangeEnum.binanceCoinm
+    )
   }
 
   async getOKXDenominator(symbol: string) {
