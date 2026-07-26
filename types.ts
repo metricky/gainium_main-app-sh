@@ -1524,6 +1524,15 @@ export type UserToken = {
   token: string
   expiredAt: number
   createdAt: number
+  // Login method that minted this token ('web' | 'email' | OAuth type | 'admin'
+  // for admin impersonation | 'demo'). Absent on very old rows.
+  source?: string
+  // Device context captured at login, for the user's session list.
+  ip?: string
+  userAgent?: string
+  // Mongoose stamps an ObjectId on each array sub-document at runtime; used as
+  // the stable id when listing / revoking an individual session.
+  _id?: { toString(): string }
 }
 export type UserData = {
   id: string
@@ -1796,6 +1805,10 @@ export interface MainBot<T = BaseSettings> extends SchemaI {
   status: BotStatusEnum
   previousStatus?: BotStatusEnum
   statusReason?: string
+  /** Cold-store flag (design phase 3). True once the bot's orders/transactions
+   *  have been copy-verify-deleted to ClickHouse: the bot is then READ-ONLY /
+   *  one-way and its history reads route to CH. Absent/false = grandfathered. */
+  coldArchived?: boolean
   showErrorWarning?: 'error' | 'warning' | 'none'
   exchange: ExchangeEnum
   exchangeUUID: string
@@ -2265,6 +2278,7 @@ export interface BotMessageSchema extends SchemaI {
   time: number
   isDeleted?: boolean
   subType: string
+  count?: number
   terminal?: boolean
   paperContext?: boolean
   showUser?: boolean
@@ -2298,6 +2312,13 @@ export interface PairsSchema extends SchemaI {
     maxAmount: number
     step: number
     name: string
+    /**
+     * Human-readable asset name (e.g. "Apple Inc.", "Bitcoin"), resolved from a
+     * reference source by the `saveAssetNames` cron — exchanges don't return
+     * names. Optional/additive: absent until resolved; the UI falls back to the
+     * ticker (`name`) when unset.
+     */
+    displayName?: string
     maxMarketAmount: number
     multiplier?: number
   }

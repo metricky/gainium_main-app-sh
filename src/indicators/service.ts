@@ -232,6 +232,41 @@ const mutexConcurrently = new IdMutex(500)
 
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 
+// A delisted / no-archive-data symbol (e.g. an ESUSDT that left the exchange
+// but is still subscribed for indicators) makes checkCandle's archive query
+// fail on every candle, once per timeframe — a per-minute "parameter … does
+// not exist" flood that buries every other error in the indicator worker.
+// Track consecutive check-candle failures so we log the first few, then fall
+// silent, and slow the retry cadence until data (live or archived) comes back.
+// Any successful candle resets both (see updateCandle).
+const CHECK_CANDLE_FAIL_LOG_LIMIT = Number(
+  process.env.INDICATOR_CHECK_FAIL_LOG_LIMIT ?? 3,
+)
+const CHECK_CANDLE_FAIL_BACKOFF_AFTER = Number(
+  process.env.INDICATOR_CHECK_FAIL_BACKOFF_AFTER ?? 5,
+)
+const CHECK_CANDLE_FAIL_BACKOFF_MS = Number(
+  process.env.INDICATOR_CHECK_FAIL_BACKOFF_MS ?? 15 * 60 * 1000,
+)
+
+// …and track it per SYMBOL, not per Service. `getId` keys a Service by
+// type+config+exchange+symbol+interval, so one pair carries as many Services as
+// there are distinct indicator settings subscribed on it. checkCandle's failure
+// is a property of the candle fetch (exchange+symbol+interval) and is identical
+// for every one of them, so a per-instance counter multiplied the "first few"
+// allowance by the instance count: AERGOUSDT@binanceUsdm (~86 stale bot docs,
+// ~160 Services) burned 160 x (3 errors + 1 mute line) and was 97.5% of the
+// indicator worker's error log, hiding every other error. Sharing the streak
+// means the pair costs a fixed 3 errors + 1 mute line no matter how many
+// Services ride it — and a new Service for an already-muted pair inherits the
+// mute and the backoff instead of re-arming both.
+const candleFailuresBySymbol = new Map<string, number>()
+const candleFailureKey = (
+  symbol: string,
+  interval: ExchangeIntervals,
+  exchange: ExchangeEnum,
+) => `${symbol}@${interval}@${exchange}`
+
 class InternalIndicator {
   protected candlesProvider = CandlesProvider
   private loaded = false
@@ -402,6 +437,24 @@ class InternalIndicator {
   private handleDebug(...msg: unknown[]) {
     logger.debug(`${loggerPrefix}`, ...msg)
   }
+  // Shared across every Service on this exchange+symbol+interval — see
+  // candleFailuresBySymbol. Backed by a Map so the entry disappears on reset,
+  // leaving only currently-failing pairs resident.
+  private get consecutiveCandleFailures() {
+    return (
+      candleFailuresBySymbol.get(
+        candleFailureKey(this.symbol, this.interval, this.exchange),
+      ) ?? 0
+    )
+  }
+  private set consecutiveCandleFailures(value: number) {
+    const key = candleFailureKey(this.symbol, this.interval, this.exchange)
+    if (value <= 0) {
+      candleFailuresBySymbol.delete(key)
+    } else {
+      candleFailuresBySymbol.set(key, value)
+    }
+  }
   private addSplitPhrase(text: string) {
     return `${text}${this.splitPhrase}${this.id}`
   }
@@ -527,21 +580,43 @@ class InternalIndicator {
               volume: '0',
             },
             true,
+            true,
           )
         }
       } else {
-        this.handleError(
-          `${this.symbol}@${this.interval}@${this.exchange} error: ${candle.reason} `,
-          new Date(start),
-        )
+        this.consecutiveCandleFailures += 1
+        // Log the first few failures, then fall silent: a delisted / no-archive
+        // symbol would otherwise re-log this every candle, per timeframe, and
+        // drown out real errors. A successful candle re-arms logging + cadence.
+        if (this.consecutiveCandleFailures <= CHECK_CANDLE_FAIL_LOG_LIMIT) {
+          this.handleError(
+            `${this.symbol}@${this.interval}@${this.exchange} error: ${candle.reason} `,
+            new Date(start),
+          )
+          if (this.consecutiveCandleFailures === CHECK_CANDLE_FAIL_LOG_LIMIT) {
+            this.handleError(
+              `${this.symbol}@${this.interval}@${this.exchange} check-candle failing persistently (likely delisted / no archive data) — suppressing further errors and backing off until data returns`,
+            )
+          }
+        }
       }
     }
     if (this.checkCandleTimer) {
       clearTimeout(this.checkCandleTimer)
     }
     try {
+      // Once a symbol has failed persistently, stretch the retry cadence so a
+      // dead symbol re-probes every ~15m instead of every candle.
+      const backoff =
+        this.consecutiveCandleFailures >= CHECK_CANDLE_FAIL_BACKOFF_AFTER
+          ? CHECK_CANDLE_FAIL_BACKOFF_MS
+          : 0
       const timeout =
-        +start + +this.period * 2 + +this.waitCandlePeriod - +new Date()
+        +start +
+        +this.period * 2 +
+        +this.waitCandlePeriod -
+        +new Date() +
+        backoff
       this.checkCandleTimer = setTimeout(
         () => this.checkCandle(this.id, +start + +this.period),
         timeout,
@@ -559,9 +634,25 @@ class InternalIndicator {
     }
   }
   @IdMute(mutex, (id: string, msg: TradeMessage) => `${id}${msg.start}`)
-  private async updateCandle(_id: string, msg: TradeMessage, forceOld = false) {
+  private async updateCandle(
+    _id: string,
+    msg: TradeMessage,
+    forceOld = false,
+    synthetic = false,
+  ) {
     if (this.closed) {
       return
+    }
+    // A REAL candle came through (live stream or archive) — clear any delisted /
+    // no-data failure streak so checkCandle logging + cadence return to normal.
+    // `synthetic` fills must NOT clear it: the "serve last candle" branches
+    // re-serve lastCandle.close with volume 0, so no new data actually arrived.
+    // For a delisted symbol those alternate with real failures, and clearing the
+    // streak on one re-arms both the mute and the backoff — which is how
+    // AERGOUSDT@binanceUsdm re-logged "suppressing further errors" 1,930 times
+    // in 50h despite the ESUSDT fix.
+    if (!synthetic) {
+      this.consecutiveCandleFailures = 0
     }
     const { open: o, close: c, high: h, low: l, volume: v } = msg
     const start = +msg.start
@@ -653,6 +744,7 @@ class InternalIndicator {
                 low: this.lastCandle.close,
                 volume: '0',
               },
+              true,
               true,
             )
           }
@@ -768,7 +860,17 @@ class InternalIndicator {
       this.exchange === ExchangeEnum.paperBinance ||
       this.exchange === ExchangeEnum.binanceUS ||
       this.exchange === ExchangeEnum.mexc ||
-      this.exchange === ExchangeEnum.paperMexc
+      this.exchange === ExchangeEnum.paperMexc ||
+      // Bitget recent /market/candles serves up to 1000/call (spot & futures);
+      // pairs with the connector's 1000-candle spot paging so a warmup that
+      // falls through to the exchange (archive miss) makes ~5x fewer balancer
+      // round-trips than the previous default of 200.
+      this.exchange === ExchangeEnum.bitget ||
+      this.exchange === ExchangeEnum.paperBitget ||
+      this.exchange === ExchangeEnum.bitgetUsdm ||
+      this.exchange === ExchangeEnum.paperBitgetUsdm ||
+      this.exchange === ExchangeEnum.bitgetCoinm ||
+      this.exchange === ExchangeEnum.paperBitgetCoinm
         ? 1000
         : this.exchange === ExchangeEnum.bybit ||
             this.exchange === ExchangeEnum.bybitCoinm ||

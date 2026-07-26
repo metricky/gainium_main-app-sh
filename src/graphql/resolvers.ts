@@ -58,12 +58,17 @@ import {
 import BotInstance from '../bot'
 import utils, { isFutures } from '../utils'
 import { isExchangeEnabled } from '../utils/adminConfig'
+import { describeUserAgent } from '../utils/userAgent'
 import userUtils, { checkLicenseKey, updateUserSteps } from '../utils/user'
 import { getBalances } from './handlers/balance.handler'
 import { deleteBotMessage, getBotMessage } from './handlers/botMessage.handler'
 import { getQuantRulesStatus } from './handlers/quantRules.handler'
 import verify, { bybitAccountType } from '../exchange/verify'
 import { getExchangeTradeType } from '../exchange/helpers'
+import {
+  snapshotReadSeries,
+  snapshotReadPerExchange,
+} from '../archive/snapshotRead'
 import {
   backtestDb,
   balanceDb,
@@ -389,6 +394,53 @@ const resolvers = <
         reason: null,
       }
     },
+    // List the user's currently-valid login sessions (one per live tokens[]
+    // row). Admin-impersonation and demo rows are filtered out so a support
+    // agent checking the account never appears in the user's own session list.
+    // Expired rows (dead JWTs awaiting the GC cron) are excluded too.
+    activeSessions: async (_parent: any, {}, { token, req }: InputRequest) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const now = Date.now()
+      // Per-IP location the user doc already caches (country/city), so we can
+      // label a session's location without any extra lookup.
+      const ipList = user.data.ips ?? []
+      const locationForIp = (ip?: string): string | null => {
+        if (!ip) return null
+        const loc = ipList.find((i) => i.ip === ip)?.location
+        if (!loc) return null
+        const parts = [loc.city, loc.country].filter(Boolean)
+        return parts.length ? parts.join(', ') : null
+      }
+      const sessions = (user.data.tokens || [])
+        .filter((t) => t.source !== 'admin' && t.source !== 'demo')
+        .filter((t) => !t.expiredAt || new Date(t.expiredAt).getTime() > now)
+        .map((t) => ({
+          id: t._id?.toString() ?? '',
+          source: t.source ?? null,
+          device: describeUserAgent(t.userAgent),
+          ip: t.ip ?? null,
+          location: locationForIp(t.ip),
+          createdAt: t.createdAt ? new Date(t.createdAt).toISOString() : null,
+          expiredAt: t.expiredAt ? new Date(t.expiredAt).toISOString() : null,
+          current: t.token === token,
+        }))
+        .sort((a, b) => {
+          // Current session first, then most-recently created.
+          if (a.current !== b.current) return a.current ? -1 : 1
+          return (b.createdAt ?? '').localeCompare(a.createdAt ?? '')
+        })
+      return {
+        status: StatusEnum.ok,
+        reason: null,
+        data: sessions,
+      }
+    },
     user: async (
       _parent: any,
       {},
@@ -539,6 +591,16 @@ const resolvers = <
       const { uuid, from, to } = input ?? {}
       const useFrom = typeof from === 'number' && isFinite(from) && !isNaN(from)
       const useTo = typeof to === 'number' && isFinite(to) && !isNaN(to)
+      // Cloud: read the per-exchange series from the ClickHouse mirror; null when
+      // the flag is off / CH is unreachable → Mongo fallback below.
+      const ch = await snapshotReadPerExchange({
+        userId: user.data._id.toString(),
+        paperContext: !!paperContext,
+        uuid,
+        from: useFrom ? from : undefined,
+        to: useTo ? to : undefined,
+      })
+      if (ch) return ch
       const result = await snapshotPerExchangeDb.readData(
         {
           userId: user.data._id,
@@ -2338,7 +2400,16 @@ const resolvers = <
     },
     getPortfolioByUser: async (
       _parent: any,
-      { input }: { input?: { timezone?: string } },
+      {
+        input,
+      }: {
+        input?: {
+          timezone?: string
+          from?: number
+          to?: number
+          includeAssets?: boolean
+        }
+      },
       { token, paperContext }: InputRequest,
     ) => {
       const user = await findUser(token)
@@ -2349,11 +2420,35 @@ const resolvers = <
       const currentDay =
         new Date(new Date().setUTCHours(0, 0, 0, 0)).getTime() -
         getTimezoneOffset(timezone)
+      // Default window = the historical 30 days; `from`/`to` let the client ask
+      // for a longer range (up to CH's 12-month retention on cloud).
+      const from =
+        typeof input?.from === 'number' && isFinite(input.from)
+          ? input.from
+          : currentDay - 3600 * 24 * 30 * 1000
+      const to =
+        typeof input?.to === 'number' && isFinite(input.to)
+          ? input.to
+          : undefined
+      // `includeAssets` (default true) — the client omits per-day assets[] for
+      // the all-coins/all-exchanges line, which lets the CH read return just
+      // {updateTime,totalUsd} (no `raw` parse, tiny payload).
+      const includeAssets = input?.includeAssets !== false
+      // Cloud: read the series from the ClickHouse mirror (12mo retention).
+      // Returns null when the flag is off / CH is unreachable → Mongo fallback.
+      const ch = await snapshotReadSeries({
+        userId: user.data._id.toString(),
+        paperContext: !!paperContext,
+        from,
+        to,
+        lean: !includeAssets,
+      })
+      if (ch) return ch
       const agg: PipelineStage[] = [
         {
           $match: {
             userId: user.data._id.toString(),
-            updateTime: { $gte: currentDay - 3600 * 24 * 30 * 1000 },
+            updateTime: { $gte: from, ...(to != null && { $lte: to }) },
             // @ts-ignore
             paperContext: paperContext ? { $eq: true } : { $ne: true },
           },
@@ -4140,6 +4235,63 @@ const resolvers = <
         reason: null,
         data: 'Successfully created deal with terminal type',
       }
+    },
+    restoreDeal: async (
+      _parents: any,
+      {
+        input,
+      }: {
+        input: {
+          botId: string
+          dealId: string
+        }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      // Restore a canceled DCA or terminal deal IN PLACE — bring it back as a
+      // bare active position inside its own bot (no DCA, take profit or stop
+      // loss). Canceling only cancels the open orders and marks the deal
+      // canceled; the filled base position survives, so restore just flips the
+      // deal back to open (bare) and reloads the bot to re-adopt it. The deal
+      // returns to the bot it lived in (a terminal deal's bot is a terminal
+      // bot, so terminal deals restore in the terminal). See Bot.restoreDeal.
+      const { botId, dealId } = input
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const deal = await dcaDealsDb.readData({ _id: dealId, botId })
+      if (
+        deal.status === StatusEnum.notok ||
+        !deal.data ||
+        !('result' in deal.data) ||
+        !deal.data.result
+      ) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Deal not found',
+          data: null,
+        }
+      }
+
+      // Only canceled deals can be restored.
+      if (deal.data.result.status !== DCADealStatusEnum.canceled) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Only canceled deals can be restored',
+          data: null,
+        }
+      }
+
+      return Bot.restoreDeal(
+        user.data._id.toString(),
+        botId,
+        dealId,
+        !!user.data.paperContext,
+      )
     },
     moveGridToTerminal: async (
       _parent: any,
@@ -6131,6 +6283,76 @@ const resolvers = <
       return {
         status: StatusEnum.ok,
         reason: 'Token deleted',
+      }
+    },
+    // Revoke ONE other session (a single tokens[] row) by its sub-document _id.
+    // Admin-impersonation / demo rows are never revocable here — they're hidden
+    // from the session list to begin with, and this guards against a client
+    // passing an id it shouldn't have.
+    revokeSession: async (
+      _parent: any,
+      { input }: { input: { id: string } },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const target = (user.data.tokens || []).find(
+        (t) => t._id?.toString() === input.id,
+      )
+      if (!target || target.source === 'admin' || target.source === 'demo') {
+        return { status: StatusEnum.notok, reason: 'Session not found' }
+      }
+      const saveDataRequest = await userDb.updateData(
+        { _id: user.data._id },
+        {
+          $pull: { tokens: { _id: target._id } },
+        },
+        true,
+      )
+      if (saveDataRequest.status === StatusEnum.notok) {
+        return saveDataRequest
+      }
+      return {
+        status: StatusEnum.ok,
+        reason: 'Session revoked',
+      }
+    },
+    // "Log out all other sessions" — drop every tokens[] row except the current
+    // one. Admin-impersonation rows are preserved so an active admin session
+    // checking the account isn't kicked, and so the user can't use this to hide
+    // that they were being monitored.
+    logoutOtherSessions: async (
+      _parent: any,
+      {},
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const saveDataRequest = await userDb.updateData(
+        { _id: user.data._id },
+        {
+          $pull: {
+            tokens: { token: { $ne: token }, source: { $ne: 'admin' } },
+          },
+        },
+        true,
+      )
+      if (saveDataRequest.status === StatusEnum.notok) {
+        return saveDataRequest
+      }
+      return {
+        status: StatusEnum.ok,
+        reason: 'Other sessions logged out',
       }
     },
     createBot: async (

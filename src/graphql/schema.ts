@@ -35,6 +35,7 @@ export const BasicSchema = /* GraphQL */ `
     maxAmount: Float
     step: Float
     name: String
+    displayName: String
     maxMarketAmount: Float
   }
   type quoteAssetPair {
@@ -70,6 +71,7 @@ export const BasicSchema = /* GraphQL */ `
     step: Float
     maxAmount: Float
     name: String
+    displayName: String
     maxMarketAmount: Float
   }
   type quoteAssetInPair {
@@ -187,6 +189,7 @@ export const UserSchema = /* GraphQL */ `
     getSnapshotPerExchange(
       input: getSnapshotPerExchangeInput
     ): getSnapshotPerExchangeResponse
+    activeSessions: activeSessionsResponse
   }
   type Mutation {
     resetAccount(input: resetAccountInput!): resetAccountResponse
@@ -198,6 +201,8 @@ export const UserSchema = /* GraphQL */ `
     deleteExchange(input: deleteExchangeInput!): deleteExchangeResponse
     userSettings(input: userSettingsInput!): userSettingsResponse
     deleteToken: deleteTokenResponse
+    revokeSession(input: revokeSessionInput!): deleteTokenResponse
+    logoutOtherSessions: deleteTokenResponse
     updateProfilePicture(
       input: updateProfilePictureInput!
     ): updateProfilePictureResponse
@@ -584,6 +589,24 @@ export const UserSchema = /* GraphQL */ `
     status: Status
     reason: String
   }
+  type userSession {
+    id: String
+    source: String
+    device: String
+    ip: String
+    location: String
+    createdAt: String
+    expiredAt: String
+    current: Boolean
+  }
+  type activeSessionsResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [userSession]
+  }
+  input revokeSessionInput {
+    id: String!
+  }
   input userFeeInput {
     uuid: String!
     symbol: String!
@@ -765,6 +788,7 @@ export const BotSchema = /* GraphQL */ `
     moveDealToTerminal(
       input: moveDealToTerminalInput!
     ): moveDealToTerminalResponse
+    restoreDeal(input: restoreDealInput!): moveDealToTerminalResponse
     moveGridToTerminal(
       input: moveGridToTerminalInput!
     ): moveGridToTerminalResponse
@@ -898,6 +922,10 @@ export const BotSchema = /* GraphQL */ `
     botId: ID!
     dealId: ID!
     combo: Boolean!
+  }
+  input restoreDealInput {
+    botId: ID!
+    dealId: ID!
   }
   input moveGridToTerminalInput {
     gridId: ID!
@@ -2700,6 +2728,7 @@ export const BotSchema = /* GraphQL */ `
     userId: String
     status: BotStatus
     statusReason: String
+    coldArchived: Boolean
     showErrorWarning: String
     settings: botSettings
     exchange: Exchange
@@ -3443,6 +3472,7 @@ export const BotSchema = /* GraphQL */ `
     userId: String
     status: BotStatus
     statusReason: String
+    coldArchived: Boolean
     showErrorWarning: String
     settings: DCABotSettings
     exchange: Exchange
@@ -3548,6 +3578,7 @@ export const BotSchema = /* GraphQL */ `
     showErrorWarning: String
     status: BotStatus
     statusReason: String
+    coldArchived: Boolean
     userId: String
     workingShift: [botWorkingShift]
     bots: [fullComboBot]
@@ -3569,6 +3600,7 @@ export const BotSchema = /* GraphQL */ `
     userId: String
     status: BotStatus
     statusReason: String
+    coldArchived: Boolean
     showErrorWarning: String
     settings: ComboBotSettings
     exchange: Exchange
@@ -5430,6 +5462,9 @@ export const BotSchema = /* GraphQL */ `
   }
   input getPortfolioByUser {
     timezone: String
+    from: Float
+    to: Float
+    includeAssets: Boolean
   }
   type getProfitData {
     quote: Float

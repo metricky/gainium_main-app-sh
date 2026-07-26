@@ -291,6 +291,9 @@ const userSchema: Schema<UserSchema> = new Schema({
         default: null,
       },
       source: String,
+      // Device context captured at login, for the user's session list.
+      ip: String,
+      userAgent: String,
     },
   ],
   exchanges: [
@@ -421,6 +424,12 @@ const botCommon = {
     enum: BotStatusEnum,
   },
   statusReason: String,
+  // Cold-store (archived-bot → ClickHouse). Set true ONLY once a bot's
+  // orders/transactions have been copy-verify-deleted to CH (design phase 3).
+  // When true the bot is READ-ONLY / one-way (cannot be un-archived — clone to
+  // reuse) and its order/transaction drill-down reads route to CH, not Mongo.
+  // Absent/false = grandfathered (stays in Mongo, old reversible semantics).
+  coldArchived: Boolean,
   showErrorWarning: String,
   profit,
   funding,
@@ -820,6 +829,9 @@ const botMessageSchema: Schema<BotMessageSchema> = new Schema({
     default: false,
   },
   subType: String,
+  // Aggregate count for digest-style notices (e.g. one daily "auto-archived"
+  // notice summarising N bots) — the message text carries the human wording.
+  count: Number,
   paperContext: Boolean,
   terminal: Boolean,
   showUser: Boolean,
@@ -848,6 +860,11 @@ const pairsSchema: Schema<PairsSchema> = new Schema({
     maxAmount: RequiredNumber,
     step: RequiredNumber,
     name: RequiredString,
+    // Human-readable asset name (e.g. "Apple Inc.", "Bitcoin") resolved from a
+    // reference source (coins collection for crypto, logo.dev/curated map for
+    // stocks) by the `saveAssetNames` cron — exchanges don't return names.
+    // Optional & additive: absent until resolved, UI falls back to the ticker.
+    displayName: String,
     maxMarketAmount: Number,
     multiplier: Number,
   },
@@ -2833,6 +2850,15 @@ const streamWatchdogConfig = new Schema<StreamWatchdogConfigSchema>({
   ...CreatedUpdated,
 })
 
+/** Portfolio-snapshot Mongo TTL in seconds. Env-driven (SNAPSHOT_MONGO_TTL_DAYS,
+ *  default 365d): cloud sets a thin buffer (e.g. 7) once the ClickHouse mirror
+ *  serves long history; self-hosted / unset keeps the full 12 months in Mongo. */
+export const snapshotMongoTtlSeconds = (): number => {
+  const days = Number(process.env.SNAPSHOT_MONGO_TTL_DAYS)
+  const safe = Number.isFinite(days) && days > 0 ? days : 365
+  return Math.round(safe * 24 * 3600)
+}
+
 export const registerIndexes = () => {
   brokerCodes.index({ exchange: 1, zone: 1 }, { unique: true })
 
@@ -2853,6 +2879,21 @@ export const registerIndexes = () => {
   storeFilesSchema.index({ userId: 1 })
 
   botEventSchema.index({ botId: 1 })
+
+  // TTL indexes (created on prod 2026-07-03; replace the weekly cleanDb
+  // age-deletes). Expiry now runs continuously instead of a weekly bulk delete.
+  botEventSchema.index({ created: 1 }, { expireAfterSeconds: 2592000 }) // 30d
+  rateSchema.index({ created: 1 }, { expireAfterSeconds: 2592000 }) // 30d
+  // Portfolio snapshots. Retention is env-driven (SNAPSHOT_MONGO_TTL_DAYS,
+  // default 365) so cloud — which mirrors the long history to ClickHouse — can
+  // set a thin 7-day hot buffer, while self-hosted (flag unset) keeps the full
+  // 12 months in Mongo. NOTE: mongoose does NOT alter an existing TTL index's
+  // expireAfterSeconds; a change here needs the collMod migration to converge a
+  // deployed collection (phase4-snapshots-clickhouse.md §8).
+  snapshotsSchema.index(
+    { created: 1 },
+    { expireAfterSeconds: snapshotMongoTtlSeconds() },
+  )
 
   balancesSchema.index({ userId: 1 })
 
@@ -2890,8 +2931,15 @@ export const registerIndexes = () => {
   botMessageSchema.index({ botId: 1, isDeleted: 1 })
 
   botSchema.index({ userId: 1 })
+  // Bot-list resolvers filter by userId (+optional status) and default-sort by
+  // {created:-1}; compound indexes let Mongo serve the sort from the index
+  // instead of an in-memory sort over all of a user's bots.
+  botSchema.index({ userId: 1, status: 1, created: -1 })
+  botSchema.index({ userId: 1, created: -1 })
 
   comboBotSchema.index({ userId: 1 })
+  comboBotSchema.index({ userId: 1, status: 1, created: -1 })
+  comboBotSchema.index({ userId: 1, created: -1 })
 
   comboDealSchema.index({ userId: 1 })
   comboDealSchema.index({ botId: 1 })
@@ -2901,11 +2949,17 @@ export const registerIndexes = () => {
   comboProfitSchema.index({ userId: 1 })
 
   dcaBotSchema.index({ userId: 1 })
+  dcaBotSchema.index({ userId: 1, status: 1, created: -1 })
+  dcaBotSchema.index({ userId: 1, created: -1 })
   // Webhook path looks bots up by uuid (write-once/static) — was a COLLSCAN.
   dcaBotSchema.index({ uuid: 1 })
 
   hedgeComboBotSchema.index({ userId: 1 })
+  hedgeComboBotSchema.index({ userId: 1, status: 1, created: -1 })
+  hedgeComboBotSchema.index({ userId: 1, created: -1 })
   hedgeDcaBotSchema.index({ userId: 1 })
+  hedgeDcaBotSchema.index({ userId: 1, status: 1, created: -1 })
+  hedgeDcaBotSchema.index({ userId: 1, created: -1 })
 
   dcaDealSchema.index({ userId: 1 })
   dcaDealSchema.index({ botId: 1 })
@@ -2925,6 +2979,30 @@ export const registerIndexes = () => {
 
   orderSchema.index({ userId: 1 })
   orderSchema.index({ botId: 1 })
+
+  // Fill-failsafe resting-order lookup (src/fillFailsafe/registry.ts getOrdersFromDb).
+  // Without this the query COLLSCANs all ~16M orders every FF_ORDERS_REFRESH_MS (30s):
+  // measured on prod 2026-07-17 at p50 6.5s, 18.5M docsExamined -> 101 returned, and
+  // 66% of ALL slow-query time on the database.
+  //
+  // PARTIAL on purpose. `status` is MUTABLE, and indexing mutable order fields
+  // regressed writes badly once before (2026-07 audit), because the entry MOVES on
+  // every change. Here `status` is only in the partialFilterExpression, never in the
+  // key: it decides MEMBERSHIP of a tiny index (~101 resting orders) rather than
+  // POSITION in a 16M-entry one, and an entry simply leaves when the order fills.
+  // Validated on a throwaway mongod 8.0.26 (matching prod) before shipping:
+  // $in IS supported in partialFilterExpression on 8.0 and the planner selects this
+  // index; 50 entries / 20KB vs 20,050 / 242KB for a plain {status,type,created}.
+  orderSchema.index(
+    { created: 1 },
+    {
+      name: 'fillFailsafe_resting',
+      partialFilterExpression: {
+        status: { $in: ['NEW', 'PARTIALLY_FILLED'] },
+        type: 'LIMIT',
+      },
+    },
+  )
 
   pairsSchema.index({ exchange: 1 })
 

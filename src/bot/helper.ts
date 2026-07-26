@@ -2008,6 +2008,9 @@ function createBotHelper<
         await this.updateData({ funding: this.data?.funding })
       }
       const fundingSym = await this.toFundingSymbol(pair)
+      if (!fundingSym) {
+        return
+      }
       await this.subscribeFunding(fundingSym)
       await this.onFundingNotify(this.fundingChannelFor(fundingSym))
     }
@@ -2386,7 +2389,6 @@ function createBotHelper<
       }
       try {
         this.startPriceTimer()
-        this.startHyperliquidOrderPoll()
         this.startConsumerHeartbeat()
         const checkStartCondition = await this.checkPriceToStart()
         this.handleLog(`Check start condition: ${checkStartCondition}`)
@@ -4122,7 +4124,6 @@ function createBotHelper<
     }
     async afterBotStop() {
       this.stopPriceTimer()
-      this.stopHyperliquidOrderPoll()
       this.stopConsumerHeartbeat()
       this.stopQuantRulesRetries()
       return

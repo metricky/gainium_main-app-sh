@@ -1,5 +1,296 @@
 # Changelog
 
+## [1.37.5] - 2026-07-26
+
+### Fixed
+
+- The check-candle failure streak is now tracked per `symbol@interval@exchange` instead of per indicator Service, so one delisted pair costs a fixed 3 error lines + 1 mute line no matter how many Services ride it. `getId` keys a Service by type+config+exchange+symbol+interval, so a single pair carries one Service per distinct indicator setting subscribed on it — and each kept its own counter, multiplying the "log the first few" allowance by the instance count. `AERGOUSDT@binanceUsdm` (~86 stale bot docs, ~160 Services) was 97.5% of the indicator worker's error log, hiding every other error including real regressions on live symbols. A new Service for an already-muted pair now inherits the mute and the backoff instead of re-arming both. Completes 1.37.4, which stopped the streak re-arming over time but not the fan-out across Services.
+
+## [1.37.4] - 2026-07-26
+
+### Fixed
+
+- The delisted-symbol check-candle mute now actually holds. `updateCandle` cleared `consecutiveCandleFailures` unconditionally, and both "serve last candle" fallbacks call it with a fabricated flat candle (`lastCandle.close`, volume 0) — no new data arrived, but the streak reset anyway. For a delisted symbol those alternate with real failures, so the mute *and* the 15min backoff re-armed forever: `AERGOUSDT@binanceUsdm` re-logged "suppressing further errors" 1,930 times in 50h and accounted for 100% of the indicator worker's error output. Synthetic fills no longer clear the streak. Same bug class as the 1.36.2 ESUSDT fix, which only half-closed it.
+
+### Added
+
+- `InternalIndicatorsFactory.closeDeletedPairs()` tears down the indicator Services of a delisted pair. The `deletePairs` signal on `updateexchangeInfo` was consumed only by bot workers, so Services outlived their pair: they probed a dead symbol forever and — worse — kept publishing fabricated flat indicator values (volume 0 → VO -100, frozen ADX) to live subscribers as if they were real output. Wired up in main-app's indicators process.
+
+## [1.37.3] - 2026-07-25
+
+### Fixed
+
+- A transient `getExchangeInfo` miss no longer poisons the funding registry for the life of the bot. On Kraken and Hyperliquid `toFundingSymbol` fell back to the raw pair when the exchange code couldn't be resolved, and the subscription heartbeat then re-wrote that member every 60s so it never aged out of the cron's stale window — the hourly funding poll rejected it on every run, forever (4 Hyperliquid + 1 Kraken symbol on prod, ~5 guaranteed failures/hour). The lookup now retries forced before giving up, and an unresolved code skips the funding subscription instead of registering a symbol the exchange can't answer. Same transient-miss hazard as 1.37.2, different consumer.
+
+### Changed
+
+- The funding cron's provider-error log now carries the symbol and the reason. `[Funding] Provider X response error NOTOK` named neither, so a single poisoned symbol failing identically every hour was indistinguishable from provider-wide degradation, and log triage re-raised it every run with no way to converge.
+
+## [1.37.2] - 2026-07-20
+
+### Fixed
+
+- A DCA/Combo bot no longer auto-removes a pair from `settings.pair` (or force-closes/stops on it) while that pair still has an open deal. A transient `getExchangeInfo` miss (or a genuine delist) used to strip the pair and orphan the live position — desyncing settings from reality and breaking the deal's fee/price display. Open-deal pairs are now always kept; a delisted pair with an open deal simply has no live price (inherent), rather than being cancelled or dropped.
+
+## [1.37.1] - 2026-07-20
+
+### Changed
+
+- `restoreDeal` now reactivates a canceled deal **in place**, inside its own bot, instead of spawning a new terminal bot. It flips the canceled deal back to `open` as a bare position (no DCA/TP/SL, close markers cleared) and reloads the bot so its worker re-adopts the existing position. A deal that lived in a bot is restored in that bot; a terminal deal is restored in the terminal.
+
+## [1.37.0] - 2026-07-20
+
+### Added
+
+- `restoreDeal` mutation: re-activates a canceled DCA or terminal deal by re-adopting its existing (still on-exchange) position as a fresh bare terminal deal — no DCA, take profit or stop loss. Reuses the proven terminal-import path (`terminalDealType: import`) that `moveDealToTerminal` uses, minus the source-cancel step (the deal is already canceled). Rejects non-canceled deals.
+
+## [1.36.2] - 2026-07-18
+
+### Fixed
+
+- Indicator `checkCandle` no longer floods the log with per-candle `<symbol>@<tf>@<exchange> error: parameter … does not exist` for delisted / no-archive-data symbols (e.g. ESUSDT@bitget). It now logs the first few consecutive failures then falls silent, and backs the retry cadence off to ~15m; any successful candle (live stream or archive) re-arms logging and normal cadence. Tunable via `INDICATOR_CHECK_FAIL_LOG_LIMIT` / `INDICATOR_CHECK_FAIL_BACKOFF_AFTER` / `INDICATOR_CHECK_FAIL_BACKOFF_MS`.
+
+## [1.36.1] - 2026-07-17
+
+### Fixed
+
+- Fill-failsafe resting-order lookup no longer scans the whole `orders` collection: added a partial index on the resting LIMIT statuses. The query ran every 30s at ~6.5s, examining 18.5M documents to return ~101, and accounted for 66% of all slow-query time on production Mongo.
+
+## [1.36.0] - 2026-07-17
+
+### Added
+
+- Active-sessions API: `activeSessions` query lists a user's live login sessions (device, approx location, IP, login method, sign-in time), plus `revokeSession` and `logoutOtherSessions` mutations to sign out one or all other sessions. Admin-impersonation and demo sessions are filtered out of the list, and `logoutOtherSessions` preserves them. Each `tokens[]` entry now records `ip` + `userAgent` at login; device labels reuse a shared `describeUserAgent` helper and location reuses the per-IP cache already on the user doc.
+
+## [1.35.5] - 2026-07-16
+
+### Fixed
+
+- Bot permanent-delete no longer orphans deal/transaction ledgers. `premanenetlyDeleteBots` now purges `dcadeals`, `transactions` and `combotransactions` by `botId` in the per-bot cascade (alongside orders/events/messages), bounded to the bots being GC'd — previously these were left only to the weekly orphan-sweep, which never removed them (see next), so prod accumulated ~52–64% orphaned docs (~13.8M) from hard-deleted bots.
+- Combo orphan-sweeps (`combotransactions`/`comboMinigrid`/`comboProfit`) were no-ops: each `$lookup ... as: 'combobot'` but `$match`ed a non-existent `bot` field (`{$size:0}`), matching nothing. Corrected the match field to `combobot` so the sweeps actually flag orphans.
+
+## [1.35.4] - 2026-07-16
+
+### Added
+
+- `getPortfolioByUser` gains `includeAssets` (default true). When false, the CH read returns just `{updateTime,totalUsd}` from the `total_usd` column (no `raw` parse) — a much smaller payload for the common all-coins/all-exchanges chart line. The dashboard omits assets for the unfiltered line and requests them only when a coin/exchange filter is active.
+- Per-user cache on the snapshot CH read (`snapshotReadSeries`/`snapshotReadPerExchange`), Redis-backed, TTL `SNAPSHOT_CH_CACHE_TTL` (default 300s; 0 disables). The series is daily-immutable so a short TTL is safe; cache/RPC failures fall through to a direct read then Mongo.
+
+## [1.35.3] - 2026-07-16
+
+### Changed
+
+- Un-archiving a bot now resets its `updated` timestamp, giving it a fresh stopped-age window. Auto-archive keys off `updated` (the last-activity proxy), so without this a bot that had been long-stopped would be re-archived on the next hourly cron immediately after un-archiving. `setArchiveStatus` sets `updated` only on un-archive (no-op on archive), across all bot types.
+
+## [1.35.2] - 2026-07-16
+
+### Added
+
+- `botMessage` gains an optional `count` field for digest-style notices (the message text carries the wording; count is bookkeeping so a daily aggregate can be incremented).
+
+## [1.35.1] - 2026-07-15
+
+### Fixed
+
+- Snapshot ClickHouse read now returns the FULL snapshot doc (incl. `assets[]`) from the lossless `raw` column instead of only `updateTime`+`totalUsd`. The portfolio widget needs `assets` for per-coin/per-exchange filtering; the trimmed shape crashed it (`Cannot read properties of null (reading 'map')`).
+
+## [1.35.0] - 2026-07-15
+
+### Added
+
+- Portfolio-snapshot cloud ClickHouse mirror (dual-write). `userSnapshots` now also ships each snapshot + per-exchange point to a buffered, fire-and-forget `SnapshotClient` (no-op unless `SNAPSHOT_CH_ENABLED`); Mongo stays source-of-truth on both editions. New `snapshotTypes`/`snapshotClient`/`snapshotRead`/`snapshotBackfill` under `src/archive`. `getPortfolioByUser` + `getSnapshotPerExchange` read the series from the CH mirror when enabled (12-month retention) and fall back to Mongo on any failure; `getPortfolioByUser` gains optional `from`/`to` to reach beyond the default 30-day window. Account reset/GDPR purges the mirror (scoped by paperContext).
+
+### Changed
+
+- Snapshots Mongo TTL is now env-driven (`SNAPSHOT_MONGO_TTL_DAYS`, default 365d) instead of hardcoded 90d — cloud sets a thin 7-day hot buffer once the CH mirror serves history; self-hosted keeps the full 12 months in Mongo.
+
+## [1.34.6] - 2026-07-15
+
+### Added
+
+- Weekly clean job now trims `botprofitcharts` older than 12 months. The collection stores a numeric epoch-ms `time` (no Date field), so a TTL index is impossible and it was never pruned anywhere — it grew unbounded for every bot (open, stopped, and archived alike, since archiving does not move it to cold storage). The delete drains in 5,000-doc batches so the first run on a never-pruned collection can't become one lock-holding `deleteMany`.
+
+## [1.34.5] - 2026-07-15
+
+### Fixed
+
+- Archiving a bot with a very large order history (tens of thousands of orders) no longer silently fails to move that history to cold storage. The cold-store copy sent each page of up to 20,000 orders as a single RabbitMQ message (~14 MB for a big bot), which could close the RPC channel ("no response") and leave the bot's history in Mongo. The default page size is now 3,000 (≈2 MB/message); override with `COLD_STORE_PAGE`.
+
+## [1.34.4] - 2026-07-15
+
+### Fixed
+
+- Hedge archive hardening (defense-in-depth over v1.34.3). The `changeStatus` fallback that writes `closed` for a hedge bot not found in the orchestrator's in-memory list (`Bot.changeStatus`, hedgeCombo/hedgeDca branches) now filters on `status: { $ne: archive }`, so a stray close signal for an archived hedge bot can never silently un-archive it. Complements the worker-side `MetaBot.updateBotData` guard.
+
+## [1.34.3] - 2026-07-15
+
+### Fixed
+
+- Hedge bots can now be archived reliably. The hedge parent engine (`MetaBot.updateBotData`) no longer demotes a user-set `archive` status back to a runtime status: archiving a just-stopped hedge bot raced with the post-stop child-bot stop signals (`stopFromChildBot`/`setStatus` persisting `closed`/`open`), which landed after the archive write and silently un-archived the bot (it reverted to `closed` and reappeared in the active list). Any non-archive status write from the worker is now guarded with `status: { $ne: archive }` so it can't overwrite `archive`. (Worker-path change — takes effect after a hedge bot-worker restart.)
+
+## [1.34.2] - 2026-07-15
+
+### Changed
+
+- Bot collections (grid/DCA/combo/hedge) gained compound indexes `{userId, status, created}` and `{userId, created}` so the bot-list queries serve their default `created` sort from an index instead of an in-memory sort over all of a user's bots. Indexes build automatically on next connect via the existing `syncIndexes` boot path.
+- The bot-list functions skip the redundant per-request `countDocuments` when the caller isn't paginating and the result fits under the limit (`total` = result length); paginated calls and limit-hitting results still get a real count (now via a count-only query instead of a second full fetch).
+
+## [1.34.1] - 2026-07-14
+
+### Fixed
+
+- Cold-store un-archive (rehydrate) no longer re-validates restored docs against the Mongoose schema. `MongoCrud.bulkUpsertById` now passes `skipValidation: true` — a rehydrate is a FAITHFUL RESTORE of docs that were already valid when archived, not new data; re-validating would reject a legitimately-restored order/transaction if the schema had tightened (a required field added) after it was archived, breaking un-archive (and the retroactive backfill of older archived bots). Casting (`_id` string→ObjectId, ISO→Date) still runs. Caught by the full archive↔un-archive E2E against real Mongo+ClickHouse.
+
+## [1.34.0] - 2026-07-14
+
+### Added
+
+- Cold store PART 2 — archive is now **reversible**. New `ColdStoreRehydrator` (`archive/coldStoreRehydrator.ts`) is the inverse of the archiver: on un-archive of a cold bot it pages the bot's rows back from ClickHouse, upserts them into Mongo by original `_id` (new idempotent `MongoCrud.bulkUpsertById`), verifies the Mongo copy, clears `coldArchived`, then GCs the CH copies — fail-safe ordering (flag cleared before the CH delete, so a crash only ever leaves harmless CH orphans). `Bot.setArchiveStatus` no longer rejects un-archiving a cold bot; it rehydrates synchronously first (rejects only if the restore fails).
+- `ColdStoreArchiver.backfillArchivedBots()` — one-time, resumable/idempotent retroactive backfill over every already-archived grid/dca/combo bot not yet in CH (id-paged; failed bots retried next run).
+- `ColdStoreReconciler` (`archive/coldStoreReconciler.ts`) — periodic CH↔Mongo orphan sweep: GCs CH rows whose Mongo bot is gone or no longer `coldArchived`, and logs Mongo bots flagged `coldArchived` with no CH rows. Wired into the daily clean cron (flag-gated).
+- Cold RPC surface: `coldDeleteByUser` (whole-account CH purge, GDPR) and `coldListBots` (distinct (userId,botId) for the sweep), mirrored byte-identically in `market-archive/src/types.ts` (Danger List §6).
+
+### Changed
+
+- Every real-data delete path now purges CH too. `resetUser` (the shared chokepoint for the automatic inactive hard-reset, the settings-driven live/whole reset, and account deletion) `coldDelete`s the user's just-deleted botIds on live/whole resets — mirroring the Mongo delete (idempotent, non-fatal, no-op for paper/non-cold bots).
+
+## [1.33.1] - 2026-07-14
+
+### Fixed
+
+- Transient "Exchange info not found" ("Cannot find exchange for bot") no longer silently stops/closes live bots. `getExchangeInfo` can momentarily return undefined for a valid, listed pair during a resume herd (worker restart → many concurrent `pairs` reads, cold cache), and the `pairsNotFound` paths treated that as "pair gone" → dropped it from settings and stopped the bot. New `MainBot.confirmPairMissing()` re-verifies with forced reads + an active re-fill + backoff before a pair is declared missing; only genuinely-absent pairs are dropped. Wired into DCA `checkSettingsPairs`, the DCA deal-load loop, and the combo minigrid load. Fast per-tick skip paths (placeOrders/fee) are unchanged so they stay cheap.
+
+## [1.33.0] - 2026-07-13
+
+### Changed
+
+- Bot-error BEHAVIOUR is now data-driven. `handleErrors` no longer hardcodes per-subType branches for visibility / error-state / message; it consults the admin-managed `boterrorsubtypes` collection (via `errorRulesCache`) for `{showUser, errorsBot, userMessage}`. `errorsBot:false` keeps the bot running (warning, no error state), `showUser:false` suppresses the user message + bot event, `userMessage` rewrites the shown text. FAIL-SAFE: an unclassified subType keeps today's defaults (shown, errors bot, raw message); a static fallback mirrors the migrated hardcoded behaviours until the DB cache loads, so a restart never briefly flips a benign error into a hard error. The leverage-misconfig `Futures position` case stays a visible hard error (excluded from the suppression path); the `Indicators error:` prefix-strip stays a code transform.
+- `errorRulesCache` now also loads the `boterrorsubtypes` behaviour table and counts rule HITS at the write path (once per real error occurrence, batched + flushed on the TTL) so the admin page shows a meaningful fire count instead of always 0.
+
+## [1.32.7] - 2026-07-12
+
+### Changed
+
+- Indicator candle warmup now requests Bitget (spot + futures) in 1000-candle chunks instead of the default 200. Bitget's recent `/market/candles` serves up to 1000/call and the connector now pages spot at 1000, so a warmup that falls through to the exchange (archive miss) makes ~5x fewer exchange-balancer round-trips. Reads that hit the market-archive are unaffected (already served from ClickHouse).
+
+## [1.32.6] - 2026-07-12
+
+### Fixed
+
+- `withUsd` valuation now also applies to the **public** `/api/v2/user/balances` (v2/api.ts) — the prior 1.32.5 change only touched the legacy v1 `/api/user/balances` handler, which api.gainium.io does not serve.
+
+## [1.32.5] - 2026-07-12
+
+### Added
+
+- `/api/user/balances` optional `?withUsd=true` — adds `price` + `usdValue` per balance, valued via the same authoritative path the snapshot cron uses (cached `getAllPrices` rate table + tokenized-stock fallback off the `pairs` collection). Default response unchanged. New exported `priceBalancesUsd` in `utils/user`.
+
+## [1.32.4] - 2026-07-12
+
+### Fixed
+
+- Kraken spot order reconcile (`_handleUnknownOrder`) now resolves by the stored exchange txid instead of the Gainium client id, matching the central `getOrder` wrapper. Kraken has no native client-id lookup, so the connector resolves spot orders by `userref = parseInt(clientId.slice(0,8),16)`, which collapses every combo/grid/dca id to one shared userref (all `CMB-*` → 12) — a status/cancel poll by client id could then "not find" a live order or return a *different* order's fill data (ledger drift). `byId` now includes `ExchangeEnum.kraken` (spot only) so the reconcile path swaps the client id for the txid and routes through the connector's exact `isKrakenSpotTxid` lookup.
+
+## [1.32.3] - 2026-07-12
+
+### Changed
+
+- Benign transient bot errors are no longer shown to users or flipped into an error status — they're kept in `botmessages` (`showUser:false`) for our tracking only. Applies to Hyperliquid `unknownOid` (order status couldn't be read back; self-resolves) and the reduce/close-only rejections where the position is already gone/zero (`futuresPosition` subtype, excluding the still-user-facing "Leverage cannot exceed"). `unknownOid` is now classified as the `Order processing` subtype.
+
+### Fixed
+
+- Combo bots now self-clear a transient `error` status on a clean price tick, mirroring DCA (`restoreFromRangeOrError` on success). Previously the combo engine only restored from `range`, never `error`, so a benign error left the bot stuck wearing the error badge until a full reload even though it kept operating.
+
+## [1.32.2] - 2026-07-11
+
+### Added
+
+- Expose `coldArchived` on the `fullBot`/`fullDCABot`/`fullComboBot` (+ hedge) GraphQL types so the dashboard can render archived cold-store bots as read-only (hide un-archive). Additive nullable field; resolvers return it straight off the bot doc.
+
+## [1.32.1] - 2026-07-11
+
+### Fixed
+
+- Grid bot creation (`createBot`) now resolves `symbol.baseAsset`/`symbol.quoteAsset` from the authoritative `pairs` collection instead of trusting client-supplied strings. Dash-delimited Coinbase symbols (e.g. `SOL-EUR`) were being stored as `baseAsset:"SOLEUR"`/`quoteAsset:""`, causing intermittent "orders validation failed: quoteAsset is required" warnings and dropped grid orders. Falls back to the supplied values when the pair isn't found (mirrors `prepareDCABot`/`prepareComboBot`).
+
+## [1.32.0] - 2026-07-11
+
+### Added
+
+- Cold store (phase 3): archived bots' order/transaction history moves to ClickHouse. On archive, `Bot.setArchiveStatus` fires a per-bot copy-verify-delete pipeline (`ColdStoreArchiver`) that batches rows to market-archive over new `coldStore*` RPC queues, verifies parity, then deletes from Mongo. Drill-down reads (`getBotOrders`/`getDealOrders`/`getComboDealOrders`/`getBotTransactions`) route archived (cold) bots to CH with Mongo fallback; bot-delete GC batches a CH `DELETE WHERE botId IN(…)`. Gated on `COLD_STORE_ENABLED` (default off; self-hosted stays wholly in Mongo). New `coldArchived` bot flag makes newly-archived bots READ-ONLY / one-way (clone to reuse); existing archived bots are grandfathered. Grid/dca/combo only (hedge deferred). Canonical wire contract in `src/archive/coldTypes.ts` (mirrored in market-archive).
+
+## [1.31.0] - 2026-07-10
+
+### Added
+
+- Bot-error subType classification now consults the DB-backed `boterrorrules` collection first (seeded/owned by admin-app; extendable by admins and the Claus autonomous reclassifier). Rules relabel newly-stored errors with no deploy — a 5-min self-priming, non-blocking cache (`errorRulesCache`) refreshes in the background, falling through to the static `errorDict` until first load. Reduces `Uncategorized` and lets a mislabel be corrected from the admin side. NB: takes effect only after a bot-worker restart (ships the rules-aware code); rule *additions* thereafter need no restart.
+
+## [1.30.3] - 2026-07-10
+
+### Fixed
+
+- Kraken Futures rate-limit `apiLimitExceeded` is now categorized (`Exchange rate limit`) instead of falling through to `Uncategorized`. `handleErrors` treats it as a transient, non-erroring warning ("Exchange temporarily rate-limited our requests… retried automatically") so the bot no longer hard-errors/stops the deal on a rate-limit that the connector already retries.
+
+## [1.30.2] - 2026-07-04
+
+### Changed
+
+- Bot events (30d), rates (30d) and snapshots (90d) now expire via TTL indexes (declared in `registerIndexes()`, matching the indexes created on prod) instead of weekly bulk `deleteMany` age-scans in `cleanJob`. Expiry runs continuously in the background rather than as a weekly spike. The conditional cleanup steps (paper/balances/fees/orphaned-bot data) and the bot-*warning* 14d delete (a subset the 30d TTL can't express) are unchanged.
+
+## [1.30.1] - 2026-07-07
+
+### Fixed
+
+- Portfolio snapshot now values tokenized-stock holdings (Kraken xStocks, Bybit spot xstocks, Hyperliquid spot RWA) instead of dropping them at $0. The snapshot builder priced every balance off the bulk `getAllPrices` rate table, which carries no xStock; unpriceable holdings were skipped entirely, so they vanished from the portfolio. Now a holding whose (exchange, pair-base) matches a `stock`/`etf` pair is priced via that exchange's live `latestPrice` ticker (cached per pair per run). `normalizeStockTicker` also strips Kraken's tokenized-ledger `.T` suffix (`PGx.T` → `PG`), and a new `balanceAssetToPairBase` maps a ledger code to its tradeable pair base (`PGx.T` → `PGx`).
+
+## [1.30.0] - 2026-07-07
+
+### Added
+
+- In-memory RPC-latency counters in `Rabbit` (`getRpcLatencyStats()`): `sendWithCallback` tallies per-queue `{count,sumMs,maxMs,breaches,timeouts}` on completion (breach when round-trip > `RPC_LATENCY_BREACH_MS`, default 10000) and on hard-timeout rejection. Module-level (all instances aggregate), additive, never-throw; consumed by main-app's RPC-latency monitor. No existing method signature changed.
+
+## [1.29.1] - 2026-07-06
+
+### Changed
+
+- Pairs dedup in indicator service
+
+## [1.29.0] - 2026-07-06
+
+### Added
+
+- Pairs now carry an optional `baseAsset.displayName` (human-readable asset name, e.g. "Apple Inc." / "Bitcoin") — added to the `pairs` schema/type and exposed on the `baseAssetPair`/`baseAssetInPair` GraphQL types. Additive & optional: absent until the main-app `saveAssetNames` cron resolves it; consumers fall back to the ticker (`name`). Exchanges don't return names, so they're resolved from a reference source (coins collection for crypto, curated ticker→name map for stocks), mirroring the icon pipeline.
+
+## [1.28.3] - 2026-07-06
+
+### Fixed
+
+- Tokenized-stock (xStocks) icons: `normalizeStockTicker` now strips the `x`/`X` wrapper from dotted tickers (`BRK.Bx` → `BRK.B`) so the `/icons/stock/:ticker` route resolves the real brand logo instead of a monogram. Kept in lock-step with the main-dash-sh frontend copy.
+
+
+## [1.28.2] - 2026-07-06
+
+### Fixed
+
+- Kraken spot deal fills silently dropped (forum #4890). Kraken spot has no `cl_ord_id`, so user-stream execution reports carry the Kraken txid as their clientOrderId — the stream matcher (keyed by our `D-…`/`GRID-…` client id) never matched, so resting-limit fills never registered. `convertExecutionReportToOrder` now falls back to matching by exchange `orderId` (txid) for Kraken spot when the client-id lookups miss. Also `mergeCommonOrderWithOrder` now preserves the local order's `clientOrderId` instead of the exchange-echoed one (no-op for other exchanges; prevents rekey/DB corruption on the Kraken reconcile path, which resolves by txid). Pairs with exchange-connector core 1.14.3.
+
+## [1.28.1] - 2026-07-06
+
+### Added
+
+- streamWatchdog: actions carry a reason tag (stale vs catchRate) and main() accepts an onAction ops-visibility hook (fire-and-forget) so escalations can surface in the admin watchdog notifications feed
+
+## [1.28.0] - 2026-07-05
+
+### Added
+- Missed-fill failsafe escalation (spec §3.4) in the stream watchdog: a second, independent signal source alongside staleness. On each tick it groups recent `reconcilesweepcatches` by `exchangeUUID` over `FF_ESCALATE_WINDOW_MS` (default 24h, excludes paper) and, for chronic offenders, triggers a stream self-heal once (`FF_ESCALATE_SELFHEAL_N`, default 3) then INFORM USERS once (`FF_ESCALATE_INFORM_N`, default 3 more after the self-heal). Escalation state rides in the existing `watchdogState` hash via two new optional fields (`ffSelfHealAt`, `ffInformAt`); the decision is a pure function (`catchRateTick`) and never touches the staleness `failureCount`/backoff or emits a reconcile.
+
+### Changed
+- INFORM USERS bot error now links a troubleshooting article (`STREAM_TROUBLESHOOTING_URL`, default `https://docs.gainium.io/troubleshooting/exchange-connection-updates`) covering outdated API key formats and missing exchange IP whitelists.
+
+### Removed
+- Hyperliquid blunt order poller (`startHyperliquidOrderPoll` / `pollHyperliquidOrdersFn` / `maybeEmitHyperliquidPolledOrder` and the `HYPERLIQUID_POLL_ORDERS` gate) — superseded by the price-gated fill-failsafe detector.
+
 ## [1.27.0] - 2026-07-04
 
 ### Added

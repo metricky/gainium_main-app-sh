@@ -106,6 +106,12 @@ import {
   transactionDb,
   userDb as _userDb,
 } from '../db/dbInit'
+import ColdStoreArchiver, {
+  type ColdBotType,
+} from '../archive/coldStoreArchiver'
+import ColdStoreRehydrator from '../archive/coldStoreRehydrator'
+import ColdClient, { isColdStoreEnabled } from '../archive/coldClient'
+import { coldReadOrders, coldReadTransactions } from '../archive/coldRead'
 import {
   BOTS_PER_WORKER,
   BotServiceType,
@@ -301,6 +307,7 @@ class Bot<T extends UserSchema = UserSchema> {
     this.hedgeComboBots = []
     this.hedgeDcaBots = []
     this.closeDCADeal = this.closeDCADeal.bind(this)
+    this.restoreDeal = this.restoreDeal.bind(this)
     this.processWorkerMessage = this.processWorkerMessage.bind(this)
     this.handleWorkerTerminate = this.handleWorkerTerminate.bind(this)
     this.processBotClosedMessage = this.processBotClosedMessage.bind(this)
@@ -3244,6 +3251,19 @@ class Bot<T extends UserSchema = UserSchema> {
     if (!user.data.result) {
       return this.entityNotFound('User')
     }
+    // Resolve base/quote from the authoritative pairs collection rather than trusting the
+    // client-supplied strings. Some clients flatten dash-delimited symbols (e.g. Coinbase
+    // "SOL-EUR") into a malformed baseAsset "SOLEUR" with an empty quoteAsset, which then
+    // fails order validation ("quoteAsset is required") and drops grid orders. The pair doc
+    // is the source of truth (mirrors prepareDCABot/prepareComboBot).
+    const pairDoc = await this.pairsDb.readData(
+      { pair: settings.pair, exchange: settings.exchange },
+      { 'baseAsset.name': 1, 'quoteAsset.name': 1 },
+    )
+    const resolvedPair = pairDoc.data?.result
+    const baseAsset = resolvedPair?.baseAsset?.name || settings.baseAsset || ''
+    const quoteAsset =
+      resolvedPair?.quoteAsset?.name || settings.quoteAsset || ''
     const saveBotRequest = await this.botDb.createData({
       userId,
       status: BotStatusEnum.closed,
@@ -3253,8 +3273,8 @@ class Bot<T extends UserSchema = UserSchema> {
       initialPrice: 0,
       symbol: {
         symbol: settings.pair,
-        baseAsset: settings.baseAsset || '',
-        quoteAsset: settings.quoteAsset || '',
+        baseAsset,
+        quoteAsset,
       },
       levels: {
         active: {
@@ -5601,8 +5621,11 @@ class Bot<T extends UserSchema = UserSchema> {
           })
         } else {
           this.handleLog(`Hedge combo bot ${id} not found in changeStatus`)
+          // Never demote a user-set `archive` status: a stray close signal for
+          // an archived hedge bot (not in orchestrator memory) must be a no-op,
+          // not silently un-archive it. Guard the direct fallback write.
           await hedgeComboBotDb.updateData(
-            { _id: id, userId },
+            { _id: id, userId, status: { $ne: BotStatusEnum.archive } },
             { $set: { status: BotStatusEnum.closed } },
           )
         }
@@ -5620,8 +5643,11 @@ class Bot<T extends UserSchema = UserSchema> {
           })
         } else {
           this.handleLog(`Hedge dca bot ${id} not found in changeStatus`)
+          // Never demote a user-set `archive` status: a stray close signal for
+          // an archived hedge bot (not in orchestrator memory) must be a no-op,
+          // not silently un-archive it. Guard the direct fallback write.
           await hedgeDCABotDb.updateData(
-            { _id: id, userId },
+            { _id: id, userId, status: { $ne: BotStatusEnum.archive } },
             { $set: { status: BotStatusEnum.closed } },
           )
         }
@@ -7249,6 +7275,109 @@ class Bot<T extends UserSchema = UserSchema> {
     archive: boolean,
     paperContext?: boolean,
   ) {
+    // Cold-store un-archive (design §1, PART 2 — archive is REVERSIBLE): a
+    // cold-archived bot's history lives in ClickHouse and was deleted from Mongo.
+    // Before it can go live again we REHYDRATE it (CH→Mongo copy-verify) and clear
+    // its `coldArchived` flag. This runs synchronously here, BEFORE the status
+    // flip, so a subsequently-started bot rebuilds its state from Mongo. If the
+    // restore fails, reject the un-archive (the bot stays fully in CH, still
+    // read-routed there — the user just retries). Grandfathered / non-cold
+    // archived bots (coldArchived absent/false) skip this and un-archive as before.
+    if (!archive && isColdStoreEnabled()) {
+      const coldType: ColdBotType | null =
+        type === BotType.grid
+          ? 'grid'
+          : type === BotType.combo
+            ? 'combo'
+            : type === BotType.dca
+              ? 'dca'
+              : null
+      const dao = (
+        coldType === 'grid'
+          ? this.botDb
+          : coldType === 'combo'
+            ? this.comboBotDb
+            : coldType === 'dca'
+              ? this.dcaBotDb
+              : null
+      ) as { readData: (...args: any[]) => Promise<any> } | null
+      if (coldType && dao) {
+        const cold = await dao.readData(
+          { _id: { $in: botIds }, userId, coldArchived: true },
+          { _id: true },
+          undefined,
+          true,
+        )
+        const coldIds: string[] =
+          cold.status === StatusEnum.ok
+            ? (cold.data?.result ?? []).map((b: { _id: unknown }) => `${b._id}`)
+            : []
+        for (const botId of coldIds) {
+          const ok = await ColdStoreRehydrator.getInstance().rehydrateBot(
+            userId,
+            coldType,
+            botId,
+          )
+          if (!ok) {
+            return {
+              status: StatusEnum.notok,
+              reason:
+                'Could not restore this bot’s history from cold storage. Please try again.',
+              data: [],
+            }
+          }
+        }
+      }
+    }
+
+    const res = await this._setArchiveStatusImpl(
+      userId,
+      type,
+      botIds,
+      archive,
+      paperContext,
+    )
+
+    // On a successful archive, copy each newly-archived bot's order/transaction
+    // history to ClickHouse (fire-and-forget, off the response path). Part 1
+    // covers grid/dca/combo; hedge stays in Mongo. The archiver flips
+    // `coldArchived` only after a verified copy — until then reads stay on Mongo.
+    if (archive && res?.status === StatusEnum.ok && isColdStoreEnabled()) {
+      const coldType: ColdBotType | null =
+        type === BotType.grid
+          ? 'grid'
+          : type === BotType.combo
+            ? 'combo'
+            : type === BotType.dca
+              ? 'dca'
+              : null
+      if (coldType) {
+        const archivedIds = (
+          (res.data as Array<{ _id?: unknown; status?: BotStatusEnum }>) ?? []
+        )
+          .filter((b) => b.status === BotStatusEnum.archive)
+          .map((b) => `${b._id}`)
+        if (archivedIds.length) {
+          void ColdStoreArchiver.getInstance()
+            .enqueueArchive(userId, coldType, archivedIds)
+            .catch((e) =>
+              logger.error(
+                `[ColdStore] archive trigger failed: ${(e as Error).message}`,
+              ),
+            )
+        }
+      }
+    }
+    return res
+  }
+
+  private async _setArchiveStatusImpl(
+    userId: string,
+    type: BotType,
+    botIds: string[],
+    archive: boolean,
+    paperContext?: boolean,
+  ) {
     // Legacy rule: only stopped (`closed`) bots can be archived. Each branch
     // below filters the update on `status: closed`, so archiving a running
     // bot matches 0 docs — but updateMany still reports OK, so the API used
@@ -7297,6 +7426,10 @@ class Bot<T extends UserSchema = UserSchema> {
         {
           $set: {
             status: archive ? BotStatusEnum.archive : BotStatusEnum.closed,
+            // Un-archive resets `updated` so the bot gets a fresh stopped-age
+            // window — auto-archive keys off `updated`, so without this a
+            // long-idle bot would be re-archived on the next cron. No-op on archive.
+            ...(archive ? {} : { updated: new Date() }),
           },
         },
       )
@@ -7331,6 +7464,10 @@ class Bot<T extends UserSchema = UserSchema> {
         {
           $set: {
             status: archive ? BotStatusEnum.archive : BotStatusEnum.closed,
+            // Un-archive resets `updated` so the bot gets a fresh stopped-age
+            // window — auto-archive keys off `updated`, so without this a
+            // long-idle bot would be re-archived on the next cron. No-op on archive.
+            ...(archive ? {} : { updated: new Date() }),
           },
         },
       )
@@ -7375,6 +7512,10 @@ class Bot<T extends UserSchema = UserSchema> {
         {
           $set: {
             status: archive ? BotStatusEnum.archive : BotStatusEnum.closed,
+            // Un-archive resets `updated` so the bot gets a fresh stopped-age
+            // window — auto-archive keys off `updated`, so without this a
+            // long-idle bot would be re-archived on the next cron. No-op on archive.
+            ...(archive ? {} : { updated: new Date() }),
           },
         },
       )
@@ -7419,6 +7560,10 @@ class Bot<T extends UserSchema = UserSchema> {
         {
           $set: {
             status: archive ? BotStatusEnum.archive : BotStatusEnum.closed,
+            // Un-archive resets `updated` so the bot gets a fresh stopped-age
+            // window — auto-archive keys off `updated`, so without this a
+            // long-idle bot would be re-archived on the next cron. No-op on archive.
+            ...(archive ? {} : { updated: new Date() }),
           },
         },
       )
@@ -7462,6 +7607,10 @@ class Bot<T extends UserSchema = UserSchema> {
       {
         $set: {
           status: archive ? BotStatusEnum.archive : BotStatusEnum.closed,
+          // Un-archive resets `updated` so the bot gets a fresh stopped-age
+          // window — auto-archive keys off `updated`, so without this a
+          // long-idle bot would be re-archived on the next cron. No-op on archive.
+          ...(archive ? {} : { updated: new Date() }),
         },
       },
     )
@@ -7781,6 +7930,140 @@ class Bot<T extends UserSchema = UserSchema> {
         reason: null,
         data: 'Deal scheduled to be closed',
       }
+    }
+  }
+
+  /**
+   * Restore a canceled DCA or terminal deal IN PLACE — bring it back as an
+   * active bare position inside its own bot (no DCA, take profit or stop loss).
+   *
+   * Canceling a deal only cancels its open orders and marks it `canceled`; the
+   * filled base position and the deal document survive. So we flip the deal
+   * back to `open`, strip DCA/TP/SL at the deal level (deal settings override
+   * bot settings in getAggregatedSettings), clear the close markers, and reload
+   * the bot so its worker re-adopts the deal from the DB (the load path only
+   * pulls `open`/`error`/`start` deals, so a canceled deal is invisible until
+   * flipped). No new bot is created — the deal returns to the bot it lived in
+   * (a terminal deal's bot is a terminal bot, so terminal deals restore in the
+   * terminal).
+   */
+  public async restoreDeal(
+    userId: string,
+    _botId: string,
+    dealId: string,
+    paperContext?: boolean,
+  ) {
+    if (!this.useBots) {
+      return await this.callExternalBotService<BaseReturn<string>>(
+        BotType.dca,
+        'restoreDeal',
+        false,
+        userId,
+        _botId,
+        dealId,
+        paperContext,
+      )
+    }
+    const findDeal = await this.dcaDealsDb.readData({
+      _id: dealId,
+      status: DCADealStatusEnum.canceled,
+      userId,
+    })
+    if (findDeal.status === StatusEnum.notok) {
+      return findDeal
+    }
+    if (!findDeal.data.result) {
+      return this.entityNotFound('Deal')
+    }
+    const botId = findDeal.data.result.botId
+
+    // Reactivate the deal as a bare position: no DCA/TP/SL, close markers
+    // cleared, status back to open.
+    const restore = await this.dcaDealsDb.updateData({ _id: dealId, botId }, {
+      $set: {
+        status: DCADealStatusEnum.open,
+        'settings.useDca': false,
+        'settings.useTp': false,
+        'settings.useSl': false,
+        closeBySl: false,
+        closeByTp: false,
+        notCheckSl: false,
+        blockSl: false,
+      },
+      $unset: { closeTrigger: '', closeTime: '' },
+    } as any)
+    if (restore.status === StatusEnum.notok) {
+      return restore
+    }
+    await this.dcaBotDb.updateData(
+      { _id: botId },
+      { $inc: { 'deals.active': 1 } },
+    )
+    this.botEventDb.createData({
+      userId,
+      botId,
+      botType: BotType.dca,
+      event: 'Restore DCA deal',
+      description: `DCA deal restored as a bare active position (no DCA/TP/SL), id: ${dealId}`,
+      paperContext: !!paperContext,
+      deal: dealId,
+      symbol: findDeal.data.result.symbol.symbol,
+    })
+
+    const findLocal = this.dcaBots.find(
+      (d) => d.id === botId && d.userId === userId,
+    )
+    if (findLocal) {
+      // Bot worker is running — reload it so it re-adopts the now-open deal.
+      this.getWorkerById(findLocal.worker)?.postMessage({
+        do: 'method',
+        botType: BotType.dca,
+        botId: findLocal.id,
+        method: 'reloadBot',
+        args: [botId, false],
+      })
+      return {
+        status: StatusEnum.ok as StatusEnum.ok,
+        reason: null,
+        data: 'Deal scheduled to restore',
+      }
+    }
+
+    // Bot worker isn't running — start it so the load path picks up the deal.
+    const botData = await this.dcaBotDb.readData({
+      _id: botId,
+      userId,
+      isDeleted: { $ne: true },
+    })
+    if (botData.status === StatusEnum.notok) {
+      return botData
+    }
+    if (!botData.data.result) {
+      return this.entityNotFound('Bot')
+    }
+    await this.createNewBot(
+      botId,
+      BotType.dca,
+      userId,
+      botData.data.result.exchange,
+      botData.data?.result?.uuid || '',
+      [botId, botData.data.result.exchange, true, true],
+      (worker) => {
+        worker.postMessage({
+          do: 'method',
+          botType: BotType.dca,
+          botId,
+          method: 'start',
+          args: [true, undefined, BotStatusEnum.open],
+        })
+      },
+      !!paperContext,
+      botData.data.result.settings.type ?? DCATypeEnum.regular,
+    )
+    return {
+      status: StatusEnum.ok as StatusEnum.ok,
+      reason: null,
+      data: 'Deal scheduled to restore',
     }
   }
 
@@ -9515,6 +9798,28 @@ class Bot<T extends UserSchema = UserSchema> {
         sortModel,
         filterModel,
       })
+      // Cold-store read routing: an archived (cold) bot's orders live in
+      // ClickHouse, not Mongo. Hedge bots are never cold-archived (Part 1), so
+      // the child-bot fan-out below only applies to Mongo reads.
+      if (
+        isColdStoreEnabled() &&
+        (bot.data as { coldArchived?: boolean }).coldArchived
+      ) {
+        const cold = await coldReadOrders({
+          userId,
+          botId: id.toString(),
+          statuses: status === 'NEW' ? ['NEW', 'PARTIALLY_FILLED'] : ['FILLED'],
+          limit: rest.limit,
+          skip: rest.skip,
+        })
+        if (cold) {
+          return {
+            status: StatusEnum.ok,
+            data: { orders: cold.result, page, total: cold.count },
+          }
+        }
+        // cold read failed → fall through to Mongo (graceful fallback)
+      }
       const findOrderRequest = await this.orderDb.readData(
         {
           ...filter,
@@ -9567,6 +9872,22 @@ class Bot<T extends UserSchema = UserSchema> {
       shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
+      if (
+        isColdStoreEnabled() &&
+        (bot.data as { coldArchived?: boolean }).coldArchived
+      ) {
+        const cold = await coldReadOrders({
+          userId,
+          botId: id,
+          dealId,
+          statuses: all ? ['NEW', 'FILLED', 'PARTIALLY_FILLED'] : ['FILLED'],
+          typeOrderNotIn: [TypeOrderEnum.br],
+        })
+        if (cold) {
+          return { status: StatusEnum.ok, data: cold.result }
+        }
+        // cold read failed → fall through to Mongo (graceful fallback)
+      }
       const findOrderRequest = await this.orderDb.readData(
         {
           dealId,
@@ -9609,6 +9930,22 @@ class Bot<T extends UserSchema = UserSchema> {
       shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
+      if (
+        isColdStoreEnabled() &&
+        (bot.data as { coldArchived?: boolean }).coldArchived
+      ) {
+        const cold = await coldReadOrders({
+          userId,
+          botId: id,
+          dealId,
+          statuses: all ? ['NEW', 'FILLED', 'PARTIALLY_FILLED'] : ['FILLED'],
+          typeOrderNotIn: [TypeOrderEnum.br],
+        })
+        if (cold) {
+          return { status: StatusEnum.ok, data: cold.result }
+        }
+        // cold read failed → fall through to Mongo (graceful fallback)
+      }
       const findOrderRequest = await this.orderDb.readData(
         {
           dealId,
@@ -9734,6 +10071,29 @@ class Bot<T extends UserSchema = UserSchema> {
       shareId,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
+      if (
+        isColdStoreEnabled() &&
+        (bot.data as { coldArchived?: boolean }).coldArchived
+      ) {
+        const cold = await coldReadTransactions({
+          userId,
+          botId: id.toString(),
+          limit: 100,
+          skip: page * 100,
+          sort: 'desc',
+        })
+        if (cold) {
+          return {
+            status: StatusEnum.ok,
+            data: {
+              transactions: cold.result,
+              page,
+              total: cold.count,
+            },
+          }
+        }
+        // cold read failed → fall through to Mongo (graceful fallback)
+      }
       const findTransactionsRequest = await this.transactionDb.readData(
         {
           botId: id.toString(),
@@ -11053,24 +11413,40 @@ class Bot<T extends UserSchema = UserSchema> {
       skip = dataGridSkip
       sort = dataGridSort
     }
-    const request = await this.botDb.readData(
-      {
-        ...filter,
-        paperContext: paperContext ? { $eq: true } : { $ne: true },
-        isDeleted: { $ne: true },
-      },
-      undefined,
-      { sort, limit: limit ?? 500, skip },
-      true,
-      true,
-    )
+    const effectiveLimit = limit ?? 500
+    const search = {
+      ...filter,
+      paperContext: paperContext ? { $eq: true } : { $ne: true },
+      isDeleted: { $ne: true },
+    }
+    const options = { sort, limit: effectiveLimit, skip }
+    // When the caller isn't paginating (no dataGridInput, no skip) the total is
+    // just the returned length, unless we hit the limit exactly (can't infer).
+    // Skipping the extra countDocuments avoids a second full scan per request.
+    const skipCount =
+      Object.keys(dataGridInput).length === 0 &&
+      !(typeof skip === 'number' && skip > 0)
+    const request = skipCount
+      ? await this.botDb.readData(search, undefined, options, true, false)
+      : await this.botDb.readData(search, undefined, options, true, true)
     if (request.status === StatusEnum.notok) {
       return request
+    }
+    const result = request.data.result
+    let total: number
+    if (!skipCount) {
+      total = (request.data as unknown as { count: number }).count
+    } else if (result.length < effectiveLimit) {
+      total = result.length
+    } else {
+      const counted = await this.botDb.countData(search)
+      total =
+        counted.status === StatusEnum.ok ? counted.data.result : result.length
     }
     return {
       status: StatusEnum.ok,
       reason: null,
-      data: request.data.result.map((r) => ({
+      data: result.map((r) => ({
         ...r,
         workingTimeTotal:
           r.workingShift && r.workingShift.length > 0
@@ -11084,7 +11460,7 @@ class Bot<T extends UserSchema = UserSchema> {
               }, 0)
             : 0,
       })),
-      total: request.data.count,
+      total,
     }
   }
 
@@ -11126,20 +11502,37 @@ class Bot<T extends UserSchema = UserSchema> {
       skip = dataGridSkip
       sort = dataGridSort
     }
-    const request = await this.comboBotDb.readData(
-      { ...filter, isDeleted: { $ne: true }, parentBotId: { $exists: false } },
-      undefined,
-      { sort, limit: limit ?? 500, skip },
-      true,
-      true,
-    )
+    const effectiveLimit = limit ?? 500
+    const search = {
+      ...filter,
+      isDeleted: { $ne: true },
+      parentBotId: { $exists: false },
+    }
+    const options = { sort, limit: effectiveLimit, skip }
+    const skipCount =
+      Object.keys(dataGridInput).length === 0 &&
+      !(typeof skip === 'number' && skip > 0)
+    const request = skipCount
+      ? await this.comboBotDb.readData(search, undefined, options, true, false)
+      : await this.comboBotDb.readData(search, undefined, options, true, true)
     if (request.status === StatusEnum.notok) {
       return request
+    }
+    const result = request.data.result
+    let total: number
+    if (!skipCount) {
+      total = (request.data as unknown as { count: number }).count
+    } else if (result.length < effectiveLimit) {
+      total = result.length
+    } else {
+      const counted = await this.comboBotDb.countData(search)
+      total =
+        counted.status === StatusEnum.ok ? counted.data.result : result.length
     }
     return {
       status: StatusEnum.ok,
       reason: null,
-      data: request.data.result.map((d) => ({
+      data: result.map((d) => ({
         ...d,
         ...convertComboBotToArray(d),
         dealsInBot: d.deals,
@@ -11155,7 +11548,7 @@ class Bot<T extends UserSchema = UserSchema> {
               }, 0)
             : 0,
       })),
-      total: request.data.count,
+      total,
     }
   }
 
@@ -11208,20 +11601,32 @@ class Bot<T extends UserSchema = UserSchema> {
         sort = { status: -1 }
       }
     }
-    const request = await hedgeComboBotDb.readData(
-      { ...filter, isDeleted: { $ne: true } },
-      undefined,
-      { sort, limit: _limit, skip, populate: 'bots' },
-      true,
-      true,
-    )
+    const search = { ...filter, isDeleted: { $ne: true } }
+    const options = { sort, limit: _limit, skip, populate: 'bots' }
+    const skipCount =
+      Object.keys(dataGridInput).length === 0 &&
+      !(typeof skip === 'number' && skip > 0)
+    const request = skipCount
+      ? await hedgeComboBotDb.readData(search, undefined, options, true, false)
+      : await hedgeComboBotDb.readData(search, undefined, options, true, true)
     if (request.status === StatusEnum.notok) {
       return request
+    }
+    const result = request.data.result
+    let total: number
+    if (!skipCount) {
+      total = (request.data as unknown as { count: number }).count
+    } else if (result.length < _limit) {
+      total = result.length
+    } else {
+      const counted = await hedgeComboBotDb.countData(search)
+      total =
+        counted.status === StatusEnum.ok ? counted.data.result : result.length
     }
     return {
       status: StatusEnum.ok,
       reason: null,
-      data: request.data.result.map((d) => {
+      data: result.map((d) => {
         const longBot = d.bots.find(
           (b) => b.settings.strategy === StrategyEnum.long,
         )
@@ -11243,7 +11648,7 @@ class Bot<T extends UserSchema = UserSchema> {
         }
         return { ...d, ...convertHedgeComboBotToArray(d), bots: [long, short] }
       }),
-      total: request.data.count,
+      total,
     }
   }
 
@@ -11296,20 +11701,32 @@ class Bot<T extends UserSchema = UserSchema> {
         sort = { status: -1 }
       }
     }
-    const request = await hedgeDCABotDb.readData(
-      { ...filter, isDeleted: { $ne: true } },
-      undefined,
-      { sort, limit: _limit, skip, populate: 'bots' },
-      true,
-      true,
-    )
+    const search = { ...filter, isDeleted: { $ne: true } }
+    const options = { sort, limit: _limit, skip, populate: 'bots' }
+    const skipCount =
+      Object.keys(dataGridInput).length === 0 &&
+      !(typeof skip === 'number' && skip > 0)
+    const request = skipCount
+      ? await hedgeDCABotDb.readData(search, undefined, options, true, false)
+      : await hedgeDCABotDb.readData(search, undefined, options, true, true)
     if (request.status === StatusEnum.notok) {
       return request
+    }
+    const result = request.data.result
+    let total: number
+    if (!skipCount) {
+      total = (request.data as unknown as { count: number }).count
+    } else if (result.length < _limit) {
+      total = result.length
+    } else {
+      const counted = await hedgeDCABotDb.countData(search)
+      total =
+        counted.status === StatusEnum.ok ? counted.data.result : result.length
     }
     return {
       status: StatusEnum.ok,
       reason: null,
-      data: request.data.result.map((d) => {
+      data: result.map((d) => {
         const longBot = d.bots.find(
           (b) => b.settings.strategy === StrategyEnum.long,
         )
@@ -11331,7 +11748,7 @@ class Bot<T extends UserSchema = UserSchema> {
         }
         return { ...d, ...convertHedgeComboBotToArray(d), bots: [long, short] }
       }),
-      total: request.data.count,
+      total,
     }
   }
 
@@ -11375,20 +11792,37 @@ class Bot<T extends UserSchema = UserSchema> {
       skip = dataGridSkip
       sort = dataGridSort
     }
-    const request = await this.dcaBotDb.readData(
-      { ...filter, isDeleted: { $ne: true }, parentBotId: { $exists: false } },
-      undefined,
-      { sort, limit: limit ?? 500, skip },
-      true,
-      true,
-    )
+    const effectiveLimit = limit ?? 500
+    const search = {
+      ...filter,
+      isDeleted: { $ne: true },
+      parentBotId: { $exists: false },
+    }
+    const options = { sort, limit: effectiveLimit, skip }
+    const skipCount =
+      Object.keys(dataGridInput).length === 0 &&
+      !(typeof skip === 'number' && skip > 0)
+    const request = skipCount
+      ? await this.dcaBotDb.readData(search, undefined, options, true, false)
+      : await this.dcaBotDb.readData(search, undefined, options, true, true)
     if (request.status === StatusEnum.notok) {
       return request
+    }
+    const result = request.data.result
+    let total: number
+    if (!skipCount) {
+      total = (request.data as unknown as { count: number }).count
+    } else if (result.length < effectiveLimit) {
+      total = result.length
+    } else {
+      const counted = await this.dcaBotDb.countData(search)
+      total =
+        counted.status === StatusEnum.ok ? counted.data.result : result.length
     }
     return {
       status: StatusEnum.ok,
       reason: null,
-      data: request.data.result.map((d) => ({
+      data: result.map((d) => ({
         ...d,
         ...convertDCABotToArray(d),
         dealsInBot: d.deals,
@@ -11404,7 +11838,7 @@ class Bot<T extends UserSchema = UserSchema> {
               }, 0)
             : 0,
       })),
-      total: request.data.count,
+      total,
     }
   }
 
@@ -11927,7 +12361,29 @@ class Bot<T extends UserSchema = UserSchema> {
       ...trading.data.result.map((r) => r._id.toString()),
       ...combo.data.result.map((r) => r._id.toString()),
     ]
+    // Cold-archived bots have their orders/transactions in ClickHouse, not
+    // Mongo, so the Mongo cascade below deletes nothing for them — GC the CH
+    // rows too (design §1b). Batched: ONE DELETE WHERE botId IN(…), idempotent.
+    const coldBotIds = [
+      ...grid.data.result,
+      ...trading.data.result,
+      ...combo.data.result,
+    ]
+      .filter((r) => (r as { coldArchived?: boolean }).coldArchived)
+      .map((r) => `${r._id}`)
     if (grid.data.count > 0 || trading.data.count > 0 || combo.data.count > 0) {
+      if (isColdStoreEnabled() && coldBotIds.length) {
+        const cold = await ColdClient.getInstance().coldDelete(coldBotIds)
+        if (cold?.ok) {
+          result = `${result}ColdStore: removed ${coldBotIds.length} bot(s), `
+        } else {
+          // Non-fatal: the Mongo bot doc is deleted below regardless; orphaned
+          // CH rows linger harmlessly until a follow-up orphan sweep reconciles.
+          logger.error(
+            `[ColdStore] coldDelete failed for ${coldBotIds.length} bot(s); CH rows may linger`,
+          )
+        }
+      }
       const orders = await this.orderDb.deleteManyData({
         botId: {
           $in: botIds,
@@ -11956,6 +12412,42 @@ class Bot<T extends UserSchema = UserSchema> {
         return logger.error(botMessages.reason)
       }
       result = `${result}Bot messages: ${botMessages.reason}, `
+      // Deal/transaction ledgers are keyed by the executing bot's `_id`. Unlike
+      // orders/events/messages above, they were NEVER purged here — the only
+      // other cleaner is the weekly `!skip` orphan-sweep below, which fails at
+      // production scale (its unbatched `deleteMany({_id:{$in:[…]}})` exceeds
+      // Mongo's 16 MB command limit once orphans reach the millions, so it
+      // throws and returns before finishing). Result: `dcadeals`,
+      // `transactions` and `combotransactions` accumulated ~52–64% orphans on
+      // prod. Purge them per-bot here, bounded to the (few-thousand) botIds
+      // being GC'd this run, so the $in stays tiny and this never leaks again.
+      const dcaDeals = await this.dcaDealsDb.deleteManyData({
+        botId: {
+          $in: botIds,
+        },
+      })
+      if (dcaDeals.status !== StatusEnum.ok) {
+        return logger.error(dcaDeals.reason)
+      }
+      result = `${result}DCA deals: ${dcaDeals.reason}, `
+      const transactions = await this.transactionDb.deleteManyData({
+        botId: {
+          $in: botIds,
+        },
+      })
+      if (transactions.status !== StatusEnum.ok) {
+        return logger.error(transactions.reason)
+      }
+      result = `${result}Transactions: ${transactions.reason}, `
+      const comboTransactions = await this.comboTransactionDb.deleteManyData({
+        botId: {
+          $in: botIds,
+        },
+      })
+      if (comboTransactions.status !== StatusEnum.ok) {
+        return logger.error(comboTransactions.reason)
+      }
+      result = `${result}Combo transactions: ${comboTransactions.reason}, `
       if (trading.data.count > 0) {
         const tradingDelete = await this.dcaBotDb.deleteManyData(filter)
         if (tradingDelete.status !== StatusEnum.ok) {
@@ -12057,7 +12549,7 @@ class Bot<T extends UserSchema = UserSchema> {
           },
           {
             $match: {
-              bot: {
+              combobot: {
                 //@ts-ignore
                 $size: 0,
               },
@@ -12108,7 +12600,7 @@ class Bot<T extends UserSchema = UserSchema> {
         },
         {
           $match: {
-            bot: {
+            combobot: {
               //@ts-ignore
               $size: 0,
             },
@@ -12158,7 +12650,7 @@ class Bot<T extends UserSchema = UserSchema> {
         },
         {
           $match: {
-            bot: {
+            combobot: {
               //@ts-ignore
               $size: 0,
             },

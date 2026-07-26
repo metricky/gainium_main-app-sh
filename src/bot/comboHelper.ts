@@ -529,6 +529,15 @@ function createComboBotHelper<
           ? (settings.baseGridLevels ?? settings.gridLevel)
           : settings.gridLevel),
       )
+      if (!Number.isFinite(levels) || levels < 1) {
+        this.handleErrors(
+          `Cannot create minigrid: number of grid levels is not set for this bot. Please set grid levels in the bot settings and try again.`,
+          'createMinigrid()',
+          'create minigrid',
+        )
+        this.endMethod(_id)
+        return
+      }
       const fee =
         order.type === OrderTypeEnum.market
           ? ((await this.getUserFee(pair))?.taker ?? 0)
@@ -881,7 +890,7 @@ function createComboBotHelper<
                 `Cannot find exchange info for ${m.schema.symbol.symbol}`,
               )
               this.fillExchangeInfo(m.schema.symbol.symbol)
-              if (!(await this.getExchangeInfo(m.schema.symbol.symbol))) {
+              if (await this.confirmPairMissing(m.schema.symbol.symbol)) {
                 this.handleDebug(`Push ${m.schema.symbol.symbol} to not found`)
                 this.pairsNotFound.add(m.schema.symbol.symbol)
               }
@@ -3070,9 +3079,9 @@ function createComboBotHelper<
       this.usedOrderId = new Map()
     }
     override async afterBotStop() {
-      // super handles stopPriceTimer / stopHyperliquidOrderPoll /
-      // stopReconcileSweep / stopQuantRulesRetries — combo bots arm the
-      // price timer + reconcile sweep via the inherited DCA start().
+      // super handles stopPriceTimer / stopReconcileSweep /
+      // stopQuantRulesRetries — combo bots arm the price timer + reconcile
+      // sweep via the inherited DCA start().
       await super.afterBotStop()
       for (const m of this.allMinigrids) {
         await this.processCloseMinigrid(m.schema._id)
@@ -6010,6 +6019,17 @@ function createComboBotHelper<
         await this.checkDynamic(this.botId, msg.symbol, +msg.price)
       }
 
+      // Combo bots — unlike DCA — had no path to clear a transient `error`
+      // status on a clean tick, so a benign error (e.g. a since-suppressed
+      // `unknownOid`) left the bot wearing the error badge until a full reload.
+      // Mirror DCA: reaching here means the price update processed fine, so
+      // restore the bot out of error.
+      if (
+        this.data?.status === BotStatusEnum.error &&
+        this.data.previousStatus !== BotStatusEnum.closed
+      ) {
+        this.restoreFromRangeOrError()
+      }
       if (this.data?.status === 'range') {
         if (await this.checkInRange(msg.symbol, msg.price)) {
           this.restoreFromRangeOrError()

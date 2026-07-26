@@ -62,18 +62,15 @@ import logger from '../utils/logger'
 import { IdMute, IdMutex } from '../utils/mutex'
 import * as crypto from 'crypto'
 import {
-  apiError,
   convertComboBotToObject,
   convertDCABotToObject,
-  exchangeOrdersLimits,
-  exchangeProblems,
   exchangeRules,
   futuresLiquidation,
   futuresPosition,
   getErrorSubType,
   indicatorsError,
-  orderPrice,
 } from './utils'
+import { getSubTypeBehavior, noteErrorRuleHit } from './errorRulesCache'
 import QuantRulesGuard from './quantRulesGuard'
 import { paperExchanges } from '../exchange/paper/utils'
 import type { InitialGrid } from './helper'
@@ -280,13 +277,6 @@ class MainBot<T extends IMainBot> {
   blockPriceCheck = false
   priceTimeout = 2.5 * 60 * 1000
   priceTimer: NodeJS.Timeout | null = null
-  /** Hyperliquid order-status poller. HL's user-stream websocket has a
-   *  10-connection-per-IP cap and quirky reconnect behaviour; instead we
-   *  poll order status periodically for any limit order this bot is
-   *  tracking. Market orders surface as already-FILLED in the place-order
-   *  response, so they don't need polling. */
-  hyperliquidPollTimer: NodeJS.Timeout | null = null
-  hyperliquidPollInterval = 30 * 1000
   /** Periodic reconciliation-sweep timer (opt-in). See startReconcileSweep. */
   consumerHeartbeatTimer: NodeJS.Timeout | null = null
   /**
@@ -1106,8 +1096,11 @@ class MainBot<T extends IMainBot> {
         })
         .then((res) => {
           if ((res.data?.result ?? 0) > 0) {
+            const troubleshootingUrl =
+              process.env.STREAM_TROUBLESHOOTING_URL ??
+              'https://docs.gainium.io/troubleshooting/exchange-connection-updates'
             this.handleErrors(
-              `We're having trouble keeping your exchange connection up to date. Gainium is not receiving live updates for this account right now. We've attempted to reconnect automatically, but the issue is still present.`,
+              `We're having trouble keeping your exchange connection up to date. Gainium is not receiving live updates for this account right now. We've attempted to reconnect automatically, but the issue is still present. See ${troubleshootingUrl} for common causes and fixes (e.g. an outdated API key format or an exchange IP whitelist that's missing our servers).`,
               '',
               '',
             )
@@ -1259,6 +1252,40 @@ class MainBot<T extends IMainBot> {
       this.botId,
       force,
     )
+  }
+
+  /**
+   * Authoritative "is this pair genuinely missing?" check.
+   *
+   * {@link MainBot#getExchangeInfo} can transiently return undefined even for a
+   * valid, listed pair: the exchangeInfo store falls back to a `pairs` DB read
+   * on a cache miss, and on a worker restart / resume herd many bots hit that
+   * collection at once (cold cache) so an individual read can time out. Callers
+   * that feed {@link MainBot#pairsNotFound} treat a miss as "pair no longer
+   * exists" and then drop it from settings and silently stop/close the bot — so
+   * a transient blip closes live bots. Re-verify with forced reads (bypassing
+   * the cold/stale cache), an active re-fill, and a short backoff before
+   * concluding the pair is really gone. Only genuinely-absent pairs return true.
+   */
+  async confirmPairMissing(
+    symbol: string,
+    attempts = 3,
+    delayMs = 500,
+  ): Promise<boolean> {
+    for (let i = 0; i < attempts; i++) {
+      // force only on retries: the first read reuses whatever is already
+      // loaded; retries bypass the cache to re-read the authoritative record.
+      if (await this.getExchangeInfo(symbol, i > 0)) {
+        return false
+      }
+      if (i < attempts - 1) {
+        // Actively repopulate exchange info for this pair, then back off so a
+        // resume-herd DB blip has a chance to recover before the next read.
+        await this.fillExchangeInfo(symbol)
+        await utils.sleep(delayMs)
+      }
+    }
+    return true
   }
 
   public async unsubscribeFromExchangeInfo(symbol: string) {
@@ -1567,38 +1594,48 @@ class MainBot<T extends IMainBot> {
     if (message.indexOf('PERCENT_PRICE') !== -1) {
       return
     }
-    if (subType === exchangeOrdersLimits) {
-      messageToSet = 'Maximum number of orders for pair exceeded'
-    }
+
+    // Count this occurrence against its classification rule (once per real
+    // error) so the admin page shows a meaningful fire count. No-op when the
+    // subType came from the static errorDict rather than a DB rule.
+    noteErrorRuleHit(errorString)
+
+    // Dynamic message normalisation that cannot be expressed as a static
+    // userMessage: strip our internal "Indicators error: " prefix so the user
+    // sees the underlying indicator message.
     if (subType === indicatorsError) {
       messageToSet = messageToSet.replace('Indicators error: ', '')
     }
-    if (subType === apiError) {
-      messageToSet = `Check your API keys and try again.`
+
+    // Data-driven per-subType behaviour (boterrorsubtypes, admin-managed):
+    // whether the error is shown to the user, whether it flips the bot into an
+    // error state, and an optional user-facing message rewrite. This replaces
+    // the previously-hardcoded per-subType branches (exchangeProblems /
+    // orderPrice / orderProcessing / futuresPosition / exchangeRateLimit /
+    // exchangeRules / exchangeOrdersLimits / apiError …). FAIL-SAFE: an
+    // unclassified subType keeps today's defaults (shown, errors bot, raw
+    // message) — only explicitly-classified subTypes deviate.
+    //
+    // Leverage-misconfig surfaces as the benign 'Futures position' subType but
+    // IS user-actionable, so it must stay a visible hard error. Exclude it from
+    // the data-driven path (treat as unclassified) so it keeps the defaults.
+    const isLeverageFuturesPos =
+      subType === futuresPosition &&
+      errorString.toLowerCase().indexOf('leverage') !== -1
+    const behavior = isLeverageFuturesPos ? null : getSubTypeBehavior(subType)
+    if (behavior) {
+      if (behavior.errorsBot === false) {
+        setError = false
+      }
+      if (behavior.showUser === false) {
+        sendError = false
+        setEvent = false
+      }
+      if (behavior.userMessage) {
+        messageToSet = behavior.userMessage
+      }
     }
-    if (subType === futuresPosition) {
-      messageToSet = `Cannot place reduce order. Position doesn't exist or already closed`
-    }
-    if (subType === exchangeProblems) {
-      messageToSet = `We have noticed problems related to exchange connection. If problem persists try to restart the bot.`
-      setError = false
-      sendError = false
-      setEvent = false
-    }
-    if (subType === orderPrice) {
-      messageToSet = `Unable to place limit order due to exchange price rules, will retry again when price changes.`
-      setError = false
-      sendError = false
-    }
-    if (subType === exchangeRules) {
-      // Binance Futures Quantitative Rules (-4400): the account/symbol is in a
-      // temporary reduce-only cooldown. Don't error the bot or fail the deal —
-      // the guard delays new orders and retries after the cooldown expires.
-      // Keep it a user-visible warning so they know why orders paused; closing
-      // positions still works throughout.
-      messageToSet = `Binance temporarily restricted new orders on this account (Futures Quantitative Rules). New orders are paused and will resume automatically once the cooldown ends. Closing positions still works.`
-      setError = false
-    }
+
     const type = setError ? MessageTypeEnum.error : MessageTypeEnum.warning
     if (setEvent) {
       this.botEventDb
@@ -1992,11 +2029,27 @@ class MainBot<T extends IMainBot> {
    * Symbol used on the funding channel/registry/store. Kraken & Hyperliquid
    * pass the exchange code through their connectors, so we subscribe by code
    * (cheap lookup from shared exchange info); everyone else uses the pair.
+   *
+   * Returns `null` when the code can't be resolved. Falling back to the raw
+   * pair looks harmless but poisons the registry permanently: the subscription
+   * heartbeat re-writes that member every 60s, so it never ages out of the
+   * cron's stale window, and the connector rejects it on every hourly poll
+   * (Kraken `Argument invalid: symbol`, Hyperliquid unknown coin). Because
+   * {@link MainBot#getExchangeInfo} can miss transiently on a cold cache /
+   * resume herd, retry once forced before giving up.
    */
-  protected async toFundingSymbol(pair: string): Promise<string> {
+  protected async toFundingSymbol(pair: string): Promise<string | null> {
     if (this.isKraken || this.hyperliquid) {
-      const ed = await this.getExchangeInfo(pair)
-      return ed?.code ?? pair
+      const ed =
+        (await this.getExchangeInfo(pair)) ??
+        (await this.getExchangeInfo(pair, true))
+      if (!ed?.code) {
+        this.handleWarn(
+          `[funding] no exchange code for ${pair}; skipping funding subscription`,
+        )
+        return null
+      }
+      return ed.code
     }
     return pair
   }
@@ -3099,7 +3152,9 @@ class MainBot<T extends IMainBot> {
       const getCount = this.canceledMap.get(id) ?? 0
       this.canceledMap.set(id, getCount + 1)
       const byId =
-        this.data?.exchange === ExchangeEnum.coinbase || this.kucoinFullFutures
+        this.data?.exchange === ExchangeEnum.coinbase ||
+        this.data?.exchange === ExchangeEnum.kraken ||
+        this.kucoinFullFutures
       if ((this.canceledMap.get(id) ?? 0) > 5) {
         this.canceledMap.delete(id)
         const get = this.getOrderFromMap(id)
@@ -3385,6 +3440,34 @@ class MainBot<T extends IMainBot> {
         )
       }
     }
+    if (!find && this.krakenSpot && msg.orderId) {
+      // Kraken spot has no cl_ord_id: the user-stream execution report carries
+      // the Kraken txid as its clientOrderId, so the lookups above (keyed by our
+      // "D-…"/"GRID-…" client id) never match and the fill was silently dropped
+      // (forum #4890). Fall back to the exchange orderId (txid) — which we DO
+      // store on the local order — so resting-limit fills register in real time.
+      const byOrderId =
+        this.allOrders.find((o) => o.orderId && o.orderId === msg.orderId) ||
+        undefined
+      if (byOrderId) {
+        find = byOrderId
+      } else {
+        const findByOrderId = await this.ordersDb.readData({
+          orderId: msg.orderId,
+          botId: this.botId,
+          userId: this.userId,
+        })
+        if (
+          findByOrderId.status === StatusEnum.ok &&
+          findByOrderId.data.result
+        ) {
+          find = {
+            ...findByOrderId.data.result,
+            _id: `${findByOrderId.data.result._id}`,
+          }
+        }
+      }
+    }
     if (!find) {
       return null
     }
@@ -3469,6 +3552,13 @@ class MainBot<T extends IMainBot> {
     return {
       ...co,
       _id: o._id,
+      // Our local order id is authoritative — never let the exchange's echoed
+      // clientOrderId win. For most exchanges co.clientOrderId === o.clientOrderId
+      // so this is a no-op, but on Kraken spot the connector resolves orders by
+      // txid (there's no cl_ord_id), so co.clientOrderId is the txid; keeping it
+      // would rekey/duplicate the order in the map and corrupt the DB row on the
+      // reconcile path (forum #4890).
+      clientOrderId: o.clientOrderId,
       exchange: o.exchange,
       exchangeUUID: o.exchangeUUID,
       typeOrder: o.typeOrder,
@@ -3931,50 +4021,6 @@ class MainBot<T extends IMainBot> {
     }
   }
 
-  /**
-   * Start the Hyperliquid order-status poller. No-op for non-HL bots.
-   * Hyperliquid's user-stream WS has a 10-connection-per-IP cap and
-   * quirky reconnect behaviour; instead we poll order status periodically
-   * for any limit order this bot is tracking. Market orders surface as
-   * already-FILLED in the place-order response, so they don't need
-   * polling.
-   *
-   * Lives on MainBot so every helper subclass (grid / dca / combo /
-   * hedge) inherits it without each having to re-define it.
-   */
-  startHyperliquidOrderPoll() {
-    this.handleDebug('Starting HL order poll')
-    if (!this.hyperliquid) {
-      this.handleDebug('Not starting HL poll as this is not a Hyperliquid bot')
-      return
-    }
-    // Opt-in via env. The poll uses `getOrder` REST and is purely
-    // additive to the websocket user-stream — left disabled by
-    // default so deployments that haven't sized their HL rate-limit
-    // budget don't accidentally double-spend it.
-    if (process.env.HYPERLIQUID_POLL_ORDERS !== 'true') {
-      this.handleDebug(
-        'Not starting HL poll — HYPERLIQUID_POLL_ORDERS is not "true"',
-      )
-      return
-    }
-    if (this.hyperliquidPollTimer) {
-      clearInterval(this.hyperliquidPollTimer)
-    }
-    this.hyperliquidPollTimer = setInterval(
-      () => this.pollHyperliquidOrdersFn(this.botId),
-      this.hyperliquidPollInterval,
-    )
-  }
-
-  /** Stop the Hyperliquid order-status poller. */
-  stopHyperliquidOrderPoll() {
-    if (this.hyperliquidPollTimer) {
-      clearInterval(this.hyperliquidPollTimer)
-      this.hyperliquidPollTimer = null
-    }
-  }
-
   private async heartbeatConsumer() {
     try {
       if (!this.redisDb || !this.data) {
@@ -4147,136 +4193,6 @@ class MainBot<T extends IMainBot> {
           `reconcile-sweep record failed: ${(e as Error).message}`,
         ),
       )
-  }
-
-  /**
-   * Hyperliquid order-status poller body. Walks every limit order this
-   * bot is currently tracking that is still NEW or PARTIALLY_FILLED,
-   * calls `getOrder` per cloid, and synthesises a UserDataStreamEvent
-   * for the existing `accountCallback` path when the remote state has
-   * moved on from the local snapshot. Downstream callbacks (DCA / grid /
-   * combo) don't need to know whether the update came from the WS
-   * stream or the poller.
-   *
-   * Always uses one-by-one `getOrder` (weight 2 each). The alternative
-   * `getAllOpenOrders` is weight 20 per dex and the connector iterates
-   * every dex in `listDexNames()` regardless of whether the user has
-   * orders there, so the crossover for "all-open is cheaper" sits at
-   * roughly K = 80 open orders — far above what any normal bot tracks.
-   */
-  @IdMute(mutex, (botId: string) => `${botId}pollHyperliquidOrders`)
-  async pollHyperliquidOrdersFn(_botId: string) {
-    if (!this.exchange || !this.data || !this.hyperliquid || this.reload) {
-      this.handleDebug(
-        `HL poll skipped: exchange ${!!this.exchange}, data ${!!this.data}, hyperliquid ${this.hyperliquid}, reload ${this.reload}`,
-      )
-      return
-    }
-
-    const targets: { id: string; symbol: string }[] = []
-    for (const id of this.ordersKeys) {
-      // HL cloids are 0x-prefixed 32-byte hex (length 34 incl. 0x).
-      if (!id.startsWith('0x') || id.length !== 34) {
-        this.handleDebug(`HL poll skipping ${id} as not a valid HL cloid`)
-        continue
-      }
-      const order = this.orders.get(id)
-      if (!order) {
-        this.handleDebug(`HL poll skipping ${id} as not found in orders map`)
-        continue
-      }
-      if (order.type !== 'LIMIT') {
-        this.handleDebug(
-          `HL poll skipping ${id} as type ${order.type} is not LIMIT`,
-        )
-        continue
-      }
-      if (order.status !== 'NEW' && order.status !== 'PARTIALLY_FILLED') {
-        {
-          this.handleDebug(
-            `HL poll skipping ${id} as status ${order.status} is not NEW or PARTIALLY_FILLED`,
-          )
-          continue
-        }
-      }
-      targets.push({ id, symbol: order.symbol })
-    }
-    if (!targets.length) {
-      this.handleDebug(
-        `HL poll found no targets among ${this.ordersKeys.size} orders`,
-      )
-      return
-    }
-    this.handleDebug(
-      `HL poll checking ${targets.length} targets among ${this.ordersKeys.size} orders`,
-    )
-    for (const t of targets) {
-      if (!this.exchange) {
-        this.handleDebug(
-          `HL poll aborting before getOrder for ${t.id} as exchange is gone`,
-        )
-        return
-      }
-      this.handleDebug(`HL poll request ${t.id} ${t.symbol}`)
-      const result = await this.exchange.getOrder({
-        symbol: t.symbol,
-        newClientOrderId: t.id,
-      })
-      this.handleDebug(
-        `HL poll response ${t.id} status=${result.data?.status ?? result.reason ?? 'NOTOK'} executed=${result.data?.executedQty ?? '?'}`,
-      )
-      if (result.status !== StatusEnum.ok || !result.data) {
-        this.handleDebug(
-          `HL poll skipping ${t.id} as getOrder failed with reason: ${result.reason}`,
-        )
-        continue
-      }
-      await this.maybeEmitHyperliquidPolledOrder(result.data)
-    }
-  }
-
-  /**
-   * Compare a polled CommonOrder against the locally-cached order and,
-   * if the status or executed quantity has changed, synthesise the
-   * matching ExecutionReport and feed it through `accountCallback` —
-   * the same entry point the websocket userStream uses. Idempotent:
-   * if the local snapshot already matches the remote, no event fires.
-   */
-  protected async maybeEmitHyperliquidPolledOrder(
-    o: CommonOrder,
-  ): Promise<void> {
-    const cloid = `${o.clientOrderId ?? ''}`
-    if (!cloid) return
-    const local = this.orders.get(cloid)
-    if (!local) return
-
-    const isPartial = o.status === 'NEW' && +(o.executedQty ?? 0) > 0
-    const newStatus: OrderStatusType = isPartial ? 'PARTIALLY_FILLED' : o.status
-    const localExec = +(local.executedQty ?? 0)
-    const remoteExec = +(o.executedQty ?? 0)
-    if (local.status === newStatus && localExec === remoteExec) {
-      return
-    }
-
-    const evt: ExecutionReport = {
-      creationTime: o.transactTime ?? Date.now(),
-      eventTime: Date.now(),
-      eventType: 'executionReport',
-      newClientOrderId: cloid,
-      orderId: o.orderId,
-      orderStatus: newStatus,
-      orderTime: o.updateTime || o.transactTime || Date.now(),
-      orderType: o.type,
-      originalClientOrderId: cloid,
-      price: o.price,
-      quantity: o.origQty,
-      side: o.side,
-      symbol: o.symbol,
-      totalQuoteTradeQuantity: o.cummulativeQuoteQty ?? '0',
-      totalTradeQuantity: o.executedQty,
-    }
-    this.handleLog(`HL polled order ${cloid} emitting status=${newStatus}`)
-    await this.accountCallback(evt)
   }
 
   /**
@@ -4784,7 +4700,27 @@ class MainBot<T extends IMainBot> {
       order.status === 'FILLED' &&
       (+executedQty === 0 || isNaN(+executedQty) || !isFinite(+executedQty))
     ) {
-      executedQty = order.origQty
+      // A FILLED order whose executedQty is 0/NaN usually just means the exchange
+      // didn't echo the filled size, so historically we trusted origQty. But
+      // Hyperliquid can return a genuinely (near-)empty fill as FILLED — e.g. an
+      // IOC market buy that barely fills due to insufficient balance comes back
+      // status FILLED with executedQty 0 and fills []. Promoting that to origQty
+      // books a PHANTOM fill and silently inflates the deal's tracked position.
+      // So derive the REAL filled size from the actual fills first, and only fall
+      // back to origQty for other exchanges where FILLED reliably means filled.
+      const fillsQty = (order.fills ?? []).reduce(
+        (acc, f) => acc + (+f.qty || 0),
+        0,
+      )
+      if (fillsQty > 0) {
+        executedQty = `${fillsQty}`
+      } else if (!this.hyperliquid) {
+        executedQty = order.origQty
+      } else {
+        this.handleLog(
+          `HL ${order.type} order ${order.clientOrderId} came back FILLED with no real fill (executedQty 0, empty fills) — keeping real qty instead of booking origQty ${order.origQty} to avoid a phantom fill`,
+        )
+      }
     }
     return executedQty
   }
@@ -5812,6 +5748,10 @@ class MainBot<T extends IMainBot> {
 
   get kucoinSpot() {
     return this.data?.exchange === ExchangeEnum.kucoin
+  }
+
+  get krakenSpot() {
+    return this.data?.exchange === ExchangeEnum.kraken
   }
 
   /**

@@ -1,4 +1,5 @@
 import { botDb, comboBotDb, dcaBotDb, globalVarsDb, pairDb } from '../db/dbInit'
+import { matchErrorRuleSubType } from './errorRulesCache'
 import {
   BotType,
   BotVars,
@@ -463,12 +464,17 @@ export const apiError = 'API keys error'
 
 export const exchangeRules = 'Exchange rules'
 
+export const exchangeRateLimit = 'Exchange rate limit'
+
 const orderParams = 'Order params'
 
 export const indicatorsError = 'Indicators error'
 
+export const orderProcessing = 'Order processing'
+
 export const errorDict = {
   'Leverage cannot exceed': futuresPosition,
+  unknownOid: orderProcessing,
   'Indicators error: ': indicatorsError,
   'Exceeded the maximum allowable position at current leverage':
     'Futures position restriction',
@@ -606,6 +612,10 @@ export const errorDict = {
   'Your api key has expired.': apiError,
   'user or api wallet': apiError,
   'EAPI:Rate limit exceeded': 'Kraken ban',
+  // Kraken Futures rate-limit (HTTP 429). Distinct string from spot's EAPI above.
+  // The connector now backs off + retries it; if it still bubbles up, treat it as
+  // a transient warning (see handleErrors) rather than an uncategorized hard error.
+  apiLimitExceeded: exchangeRateLimit,
   'EService:Timeout': exchangeProblems,
   'EService:Unavailable': exchangeProblems,
   'EService:Busy': exchangeProblems,
@@ -634,6 +644,14 @@ export const errorDict = {
 }
 
 export const getErrorSubType = (string: string): string => {
+  // DB-backed rules (boterrorrules, seeded by admin-app; extendable by admins /
+  // the Claus reclassifier with no deploy) take precedence over the static
+  // dict, so a mislabel can be corrected without shipping code. Falls through
+  // to errorDict until the cache first loads. See errorRulesCache.
+  const fromRules = matchErrorRuleSubType(string)
+  if (fromRules) {
+    return fromRules
+  }
   for (const [key, value] of Object.entries(errorDict)) {
     if (string.toLowerCase().indexOf(key.toLowerCase()) !== -1) {
       return value
