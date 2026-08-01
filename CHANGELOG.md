@@ -1,5 +1,114 @@
 # Changelog
 
+## [1.40.1] - 2026-08-01
+
+### Fixed
+
+- `updateStatus` ran each connection's `verify` and `getHedge` serially and persisted a transport failure as a verdict, so one unreachable venue both stalled the accounts page and wrote `status:false`/`hedge:false` over healthy stored connections. Added `probeConnectionState` (concurrent pair, 30s cap, falls back to the stored reading) and an `unreachable` flag on `VerifyResponse` marking "no answer" as distinct from "bad keys".
+
+## [1.40.0] - 2026-08-01
+
+### Added
+
+- `rotationFlag` on a user's exchange connections, marking a credential an operator has asked the user to replace, and `rotationRequired` on the exchange GraphQL type so the dashboard can show it. The flag clears from `editExchange`'s existing `credentialsChanged` signal, so a rename or a re-verify never counts as a rotation. Unused unless an operator sets it.
+
+## [1.39.3] - 2026-08-01
+
+### Fixed
+
+- The API-key rejection message named the wrong capability. `withdrawalRejectionReason()` infers what to say from the `permissions` it is given, and the self-hosted add/edit-exchange resolvers never passed them — so every rejection read "permission to transfer funds between accounts" and offered a Bybit-specific instruction, even when the key was rejected for withdrawal on Kraken or Hyperliquid. Both resolvers now pass the observed permissions, and the message itself no longer infers one capability from the absence of the other: with no permissions it says only that the key can move funds, and the Bybit hint is offered on Bybit alone. The rejection log lines now record which capability was found.
+
+## [1.39.2] - 2026-07-31
+
+### Security
+
+- Reject new API keys that can move funds between accounts, not just keys that can withdraw. Bybit's Account/Subaccount Transfer can move balances between a user's own accounts with no withdrawal scope; Gainium calls no transfer endpoint on any exchange, so the permission is never needed. Existing connections are still only flagged, never rejected.
+- Rejection message now names the capability found and, for transfer, the exact exchange control to untick.
+
+## [1.39.1] - 2026-07-31
+
+### Fixed
+
+- Indicators service `serviceLog` listener no longer throws on messages without a `.restart` field. `serviceLog` is a shared bus, and `redisServiceLogListener` cast the payload to `{restart: string}` and called `.startsWith()` on it unchecked, so every `priceConnectorAlive` beacon (websocket-connector ≥ 1.13.7, once per beacon interval — deliberately omits `.restart`), `userStreamFlap` and `userStreamAuthReject` produced a "Failed to parse message … TypeError" error line. Now type-guarded before the string call, mirroring the other consumers (`src/indicators/service.ts:processServiceLog`, `src/bot/main.ts`). Behaviour for `botService*` restarts is unchanged; only the throw becomes a no-op. Backport of the cloud-side fix shipped in main-app 2.57.2, which never reached this repo. Noise only — no functionality was lost, but ~1 440 error lines/day/process buried real errors. (issue #222)
+
+## [1.39.0] - 2026-07-31
+
+### Added
+
+- Withdrawal-permission policy for exchange API keys (`src/exchange/keyPermissionPolicy.ts`). Gainium only ever needs read + trade, and withdrawal is never required by any feature; until now nothing verified that a stored key was actually limited that way. A key that can withdraw is now refused when it is newly supplied (add, or edit-with-new-credentials), and merely recorded on every other path — re-verification never rejects, so existing users' live bots are unaffected.
+- `ExchangeInUser.keyPermissions` persists the last observed withdrawal / internal-transfer / IP-allowlist state (plus its timestamp) and is exposed on the `exchangeResponseData` GraphQL type. Declared in the Mongoose user schema — without that, every write would be silently dropped.
+- `fetchKeyPermissions()` calls the connector's read-only `GET /keyPermissions` so a periodic audit can refresh the flags without running a verification that could alter a connection's status.
+
+
+## [1.38.1] - 2026-07-31
+
+### Fixed
+
+- `verifyNormal` and `bybitAccountType` now carry a 30s axios timeout. Both go out with `sendtoall=true`, and the balancer fans those over its connector hosts serially at 5 minutes each, so with no timeout on our side one wedged connector could park an interactive `addExchange` for minutes. A verify timeout now returns a curated "the exchange did not respond in time" reason rather than falling through to the caller's generic "API keys not valid" text.
+
+## [1.38.0] - 2026-07-30
+
+### Added
+
+- OKX Europe X-Perp futures (Phase 2 of the OKX-EU work): `getAccountFuturesExchangeInfo()` exchange-client counterpart, `updateOkxEuPerpPairs()` keyless cron refresh of the X-Perp universe into `pairs` as `source: 'my'` (real + paper ids), and `updateOkxEuSpotApproxPairs()` — a keyless EUR/USDC spot approximation that seeds EU spot until a real my.okx.com account connects (tracked via the new `approx` pair flag, never overwrites real data). EU futures adds now create only the Linear leg (the EU venue has no inverse product). Contributed by community member discord2020 (forum topic 4925).
+
+### Fixed
+
+- X-Perp pair symbols (`BASE-QUOTE_UM_XPERP`) no longer get torn apart by legacy `BASE_QUOTE` split parsing in deal-start pair validation, bot pair checks, the v2 create-bot validators, and server-side backtest pair resolution (fix by discord2020).
+- `updateOkxEuPairs()` now takes plaintext keys and encrypts internally — passing already-encrypted keys corrupted the passphrase on decrypt (fix by discord2020).
+
+## [1.37.12] - 2026-07-30
+
+### Fixed
+
+- **The notifications feed still took up to 18 seconds for accounts with a very large message history, even after the index added in 1.37.9.** That index removed the in-memory sort but left `paperContext` and `isDeleted` as filters Mongo could only apply after loading each document, so the feed still read every message the account had ever received — and then read them all a second time to produce the total. On a seeded 801,949-message account the live feed examined all 801,949 documents to return 2 rows (11.0s), and the paper feed returned 793,679 rows / 308MB of JSON in 22.7s to fill a panel that shows 20. Both filters are now written as exact value lists rather than "not equal" / "does not exist" tests, which lets a new index cover them while still supplying the newest-first order: the live feed drops to 2 documents examined and about 10ms, the paper feed to ~250ms.
+- The feed's default load, which the dashboard sends with no paging parameters at all (including the navbar mount that only wants unread counts), was **unbounded** — it fetched and serialised the account's entire message history. It is now capped well above what the panel can display, so smaller accounts are byte-for-byte unchanged.
+- The accompanying total is capped the same way instead of counting every matching message, which was on its own about a third of the delay. Accounts above the cap now report the cap rather than an exact figure; the current dashboard does not display this value, and the legacy notifications page uses it only to size its pager.
+
+## [1.37.11] - 2026-07-30
+
+### Fixed
+
+- **Live indicators stopped receiving realtime candles after every price-connector restart and only recovered when the indicators process itself restarted.** Candle subscriptions live only in the connector's memory, so it broadcasts `{restart:'priceConnector'}` on `serviceLog` to make consumers re-request them — but that publish never actually went out (fixed connector-side in websocket-connector-sh 1.13.7), and even when it does, Redis pub/sub gives no delivery guarantee. A consumer that misses it stays subscribed to a channel nobody publishes to, invisibly: `checkCandle` keeps back-filling each close from the archive, so indicator values still look plausible while realtime intra-candle updates are gone. `processServiceLog` now also tracks the connector's boot id from its repeating `priceConnectorAlive` beacon and re-requests when the id changes, so a lost broadcast self-heals within a beacon interval. A first-seen beacon only adopts the id — the subscription was just armed, and `candlesRequests` is a durable queue, so a request sent while the connector was down is delivered on its return. The boot id also rides on the broadcast itself so the broadcast and the beacon that follows it don't both re-request.
+
+## [1.37.10] - 2026-07-29
+
+### Fixed
+
+- **The "latest orders" list took seconds to load for accounts with a long trading history.** `getLatestOrders` asks for the 10 newest filled orders — `{userId, status:'FILLED', paperContext}` sorted newest-first — but the only usable index was `userId` alone, so Mongo read every order the account had ever filled (up to 4.2M on prod) and sorted them in memory to hand back 10 rows. On a seeded 1.38M-document collection that is a 3.6s blocking sort examining 1,140,000 documents; on prod it produced 8 slow-query warnings in 4 hours, worst 9.6s. A `{userId, updateTime:-1}` index restricted to `status:'FILLED'` lets the sort come straight from the index: 12 documents examined and ~15ms. The index is deliberately partial — `updateTime` moves while an order is still working, but an order is frozen once it fills, so entries are written once and never shuffle, and the busy `NEW`/`PARTIALLY_FILLED` writes never touch the index at all (measured no write cost versus having no index at all). `paperContext` is intentionally not part of the key — the live-context filter is `{$ne: true}`, a range rather than an equality, which would stop `updateTime` from supplying the sort order.
+- The same list also counted **every** filled order on the account just to show a total that is capped at 100 — on its own a 3-8s query, and the larger half of the delay. `countData` now takes an optional ceiling, and the count runs alongside the page fetch rather than after it.
+
+## [1.37.9] - 2026-07-29
+
+### Fixed
+
+- **The notifications feed took seconds to load for accounts with a lot of bot messages.** `getMessageBot` filters bot messages by `{userId, showUser}` and always sorts newest-first, but the only usable index was `userId` alone — so Mongo fetched every message the account had ever received and sorted them in memory. On a 914k-document collection with a 45.7k-message account that is a 643ms blocking sort for the default feed, and 531ms to return a single 20-row page (all 45.7k documents are read to produce 20 rows). A `{userId, showUser, created:-1}` index lets the sort come straight from the index: the default feed drops to 153ms and a 20-row page to ~1ms / 25 documents examined. `paperContext` is intentionally not part of the key — the live-context filter is `{$ne: true}`, a range rather than an equality, which would stop `created` from supplying the sort order.
+- Searching the notifications feed with "unread only" active also returned already-deleted messages: the search filter overwrote the `$or` holding the unread clause instead of being combined with it. Both clauses are now `$and`-ed together.
+
+## [1.37.8] - 2026-07-28
+
+### Fixed
+
+- **Hyperliquid indicators on live bots silently received no candle data.** For HL exchanges the indicator service subscribed to Redis — and asked websocket-connector — by the pair's *wire code* (`BTC@hyperliquidLinear@1hCandle`), a dialect the connector stopped speaking in Jul 2026 when it normalized candle channels to display pairs: the `candlesRequests` payload failed symbol translation and was dropped, and nothing publishes on wire-code channels (on prod, 11 of 14 live HL candle channels had subscribers and no publisher). Paper HL bots were unaffected — the pairs-map lookup misses on the paper exchange key, so they always fell back to the display pair, which works. Indicators now always subscribe and request by display pair; `symbolCode` is kept for delisted-pair matching and state dumps only.
+
+## [1.37.7] - 2026-07-28
+
+### Changed
+
+- On-demand balance refresh now fetches a user's exchanges through a bounded worker pool instead of one at a time. Sequentially, a 15-exchange live account paid the sum of every venue round trip (~590ms each, ~9.8s total); the pool collapses that to roughly the slowest venue per wave. Concurrency is `BALANCE_FETCH_CONCURRENCY` (default 8, set to 1 to restore the old sequential behaviour). The all-users snapshot cron deliberately stays sequential per user — it already runs every user in parallel, so fanning out there would multiply peak load on exchange-balancer.
+- A venue that throws mid-refresh no longer aborts the remaining exchanges; the failure is logged per exchange and the rest still update.
+
+## [1.37.6] - 2026-07-28
+
+### Fixed
+
+- Portfolio "refresh balances" / paper top-up no longer takes 30-40s. The snapshot's per-exchange zero-out loop iterated every balance doc the user owns (all exchanges, both contexts) and issued a sequential no-op `updateOne` for each nonzero doc belonging to a *different* exchange — ~11k wasted round trips for a 35-exchange account. The loop now only considers the current exchange's docs, and the reported-asset lookup is a Set instead of a per-doc array scan.
+
+### Added
+
+- `updateBalance` GraphQL query accepts an optional `uuid` to re-fetch only one exchange's balances from the venue (snapshot totals still recompute from stored balances). Used by the dashboard's per-exchange refresh and the paper top-up dialog.
+- Compound index `{userId, exchangeUUID, asset}` on `balances` — every balance write filters on exactly these keys and previously scanned all of a user's docs via the bare `userId` index.
+
 ## [1.37.5] - 2026-07-26
 
 ### Fixed

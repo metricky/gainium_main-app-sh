@@ -1595,6 +1595,69 @@ export enum OKXSource {
   com = 'com',
 }
 
+/** Tri-state: "we could not find out" must never be read as "no". */
+export type KeyPermissionState = 'yes' | 'no' | 'unknown'
+
+/**
+ * What the exchange says a connection's API key is allowed to do, as last
+ * observed. Mirrors `KeyPermissions` in exchange-connector's core — the
+ * connector reports, main-app decides and stores.
+ *
+ * Recorded because Gainium only ever needs read + trade and never withdrawal,
+ * yet nothing used to verify that a stored key was actually limited that way.
+ * This is the record that turns that assumption into something we can report
+ * on and act on.
+ */
+export type ExchangeKeyPermissions = {
+  /** Can this key move funds off the exchange? Gainium never needs this. */
+  withdraw: KeyPermissionState
+  /** Internal (same-exchange) transfers. Gainium never calls one. */
+  transfer: KeyPermissionState
+  /** Whether the key is pinned to an IP allowlist. */
+  ipRestricted: KeyPermissionState
+  ips?: string[]
+  /** Raw permission text for admin forensics. Never contains the key. */
+  detail?: string
+  /**
+   * ms epoch of the observation. Load-bearing, not decorative: a user can
+   * enable withdrawal on a key that already passed verification, so a reading
+   * is only meaningful together with its age.
+   */
+  checkedAt: number
+}
+
+/**
+ * Marks a credential the operator has asked the user to replace, and tracks the
+ * in-app notice that asks for it. Set once by an out-of-band backfill, cleared
+ * the moment the stored key/secret actually changes.
+ *
+ * Deliberately NOT derived at read time: the flag records an operator decision
+ * plus the fact that the user has (or has not) acted on it, and neither is
+ * recoverable from the connection itself. `lastUpdated` cannot stand in for the
+ * latter — `updateStatus` and `setHedge` bump it without touching the
+ * credential.
+ */
+export type ExchangeRotationFlag = {
+  /** ms epoch the backfill flagged this connection. Written once, never again. */
+  flaggedAt: number
+  /**
+   * ms epoch the stored credential actually changed. Absent = still on the
+   * exposed key. Presence, not truthiness of any other field, is what stops
+   * the nudge.
+   */
+  clearedAt?: number
+  /**
+   * How many nudges this user has been shown, 0..5. Kept in lockstep across
+   * every still-flagged connection of the user (the nudge is per USER, not per
+   * connection — one key is commonly stored as up to 6 per-market legs), so the
+   * per-user value is the MAX over them. Writing all of them keeps a partial
+   * write safe.
+   */
+  noticesSent?: number
+  /** ms epoch of the last nudge. Same per-user lockstep as `noticesSent`. */
+  lastNoticeAt?: number
+}
+
 export type ExchangeInUser = {
   provider: ExchangeEnum
   name: string
@@ -1613,6 +1676,18 @@ export type ExchangeInUser = {
   subaccount?: boolean
   bybitHost?: BybitHost
   affiliate?: boolean
+  /**
+   * Last observed key permissions. Absent on connections added before this
+   * existed and on any key we could not read — absence means "never checked",
+   * which is NOT the same as "safe".
+   */
+  keyPermissions?: ExchangeKeyPermissions
+  /**
+   * Set only on credentials an operator has flagged for replacement and which
+   * have not been replaced since. Absent unless a backfill set it — no
+   * self-hosted install has one.
+   */
+  rotationFlag?: ExchangeRotationFlag
 }
 
 export interface FavoritePairsSchema extends SchemaI {
@@ -2307,6 +2382,17 @@ export interface PairsSchema extends SchemaI {
    * bot form serves an account its pairs by matching (exchange, source=okxSource).
    */
   source?: OKXSource
+  /**
+   * True when this `source: 'my'` row came from the keyless spot approximation
+   * (`updateOkxEuSpotApproxPairs`: public global instruments filtered to
+   * quoteCcy ∈ {EUR, USDC} and baseCcy ≠ USDT — verified 2026-07 to match the
+   * real, authenticated `/account/instruments` list exactly) rather than a
+   * real connected my.okx.com account. Lets the approximation cron detect
+   * genuine authoritative data (any row with `approx` absent/false) and skip
+   * itself so it never overwrites a real account's data. Absent/false for
+   * every non-approximated row (including every non-OKX-EU pair).
+   */
+  approx?: boolean
   baseAsset: {
     minAmount: number
     maxAmount: number

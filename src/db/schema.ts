@@ -317,6 +317,30 @@ const userSchema: Schema<UserSchema> = new Schema({
       affiliate: Boolean,
       waitingForConfirmation: Boolean,
       bybitHost: { type: String, enum: BybitHost },
+      // Last observed API-key permissions — above all, whether the key can
+      // withdraw (Gainium only ever needs read + trade). Written at add time
+      // and refreshed by the periodic re-check. Without this declaration
+      // Mongoose would silently drop the field on every write. Absent = never
+      // checked, which is NOT the same as "safe".
+      keyPermissions: {
+        withdraw: String,
+        transfer: String,
+        ipRestricted: String,
+        ips: [String],
+        detail: String,
+        checkedAt: Number,
+      },
+      // Credential flagged for replacement, plus the bookkeeping for the
+      // in-app "please replace this key" notice. Declared here for the same
+      // reason keyPermissions is — core writes user docs too, and an undeclared
+      // field is silently dropped on every one of those writes. Set only by an
+      // out-of-band backfill; no self-hosted install has one.
+      rotationFlag: {
+        flaggedAt: Number,
+        clearedAt: Number,
+        noticesSent: Number,
+        lastNoticeAt: Number,
+      },
     },
   ],
   timezone: RequiredString,
@@ -855,6 +879,11 @@ const pairsSchema: Schema<PairsSchema> = new Schema({
   // authoritative USDC/EUR spot universe). Unset for the global feed + all other
   // exchanges. Bot form matches (exchange, source) to the account's okxSource.
   source: { type: String, enum: OKXSource },
+  // True when a `source: 'my'` row came from the keyless OKX-EU spot
+  // approximation (public list filtered to EUR/USDC) rather than a real
+  // connected my.okx.com account. Lets the approximation cron detect genuine
+  // authoritative data and never overwrite it. Absent for every other row.
+  approx: Boolean,
   baseAsset: {
     minAmount: RequiredNumber,
     maxAmount: RequiredNumber,
@@ -2896,6 +2925,10 @@ export const registerIndexes = () => {
   )
 
   balancesSchema.index({ userId: 1 })
+  // Every balance write (bot fills, snapshot refresh, zero-out) filters on
+  // {userId, exchangeUUID, asset}; with only the userId index each such op
+  // scans every doc the user owns (1.5k+ for dust-heavy accounts).
+  balancesSchema.index({ userId: 1, exchangeUUID: 1, asset: 1 })
 
   dcaBacktestingResult.index({ userId: 1 })
   dcaBacktestingResult.index({ shareId: 1 })
@@ -2918,6 +2951,36 @@ export const registerIndexes = () => {
 
   botMessageSchema.index({
     userId: 1,
+  })
+  // Notifications feed (`getMessageBot` → getBotMessage): filters by
+  // {userId, showUser} and always sorts by {created:-1}. The userId-only index
+  // above forces a blocking in-memory SORT over every message the user has ever
+  // had (45k+ docs for heavy users), which is what made the resolver take
+  // seconds. Both leading fields are equality predicates, so `created` supplies
+  // the sort order straight from the index and a paginated page-1 read stops
+  // after ~pageSize keys.
+  botMessageSchema.index({ userId: 1, showUser: 1, created: -1 })
+  // …but {userId, showUser} alone leaves paperContext and isDeleted as residual
+  // FETCH filters, so the index only removed the blocking SORT — every one of the
+  // account's messages was still fetched to produce the page, then fetched again
+  // for the unbounded `total` count. The comment above deliberately kept
+  // paperContext out of the key because the live filter was `{$ne: true}`, a
+  // range; getBotMessage now expresses paperContext AND isDeleted as point-sets
+  // ($in over the only values a Boolean-or-absent field can hold), which is what
+  // makes them indexable here. Mongo explodes the point intervals into a
+  // SORT_MERGE that still yields {created:-1} from the index, so there is no
+  // blocking sort. Measured on a seeded 801,949-message account in the reporter's
+  // shape: the live feed went from 801,949 keys + 801,949 docs examined (11.0s)
+  // to 2 keys + 2 docs (~10ms).
+  // NOTE: the {userId, showUser, created:-1} index above is NOT redundant — the
+  // two extra equality fields sit between showUser and created, so it is still
+  // the only index that can sort a {userId, showUser}-only query.
+  botMessageSchema.index({
+    userId: 1,
+    showUser: 1,
+    paperContext: 1,
+    isDeleted: 1,
+    created: -1,
   })
 
   botMessageSchema.index({
@@ -2979,6 +3042,36 @@ export const registerIndexes = () => {
 
   orderSchema.index({ userId: 1 })
   orderSchema.index({ botId: 1 })
+
+  // Latest-orders list (getLatestOrders resolver: find({userId,status:'FILLED',
+  // paperContext}).sort({updateTime:-1}).limit(10)). With only {userId:1} the planner
+  // does SORT <- FETCH <- IXSCAN(userId_1): it pulls EVERY order the user ever filled
+  // (up to 4.2M on prod) and blocking-sorts them to return 10. Measured on a seeded
+  // 1.38M-doc collection: 1,140,000 docsExamined, 3.6s (prod: 8 SlowGraphQL hits in 4h,
+  // worst 9.6s). With this index: 12 docsExamined, ~15ms.
+  //
+  // PARTIAL on purpose, same reasoning as fillFailsafe_resting below. `updateTime` IS
+  // mutable while an order is working (NEW -> PARTIALLY_FILLED bumps it on every fill
+  // event), and indexing mutable order fields regressed writes badly once before
+  // (2026-07 audit) because the entry MOVES in the btree on every change. Restricting
+  // membership to status:'FILLED' makes that impossible: updateOrderOnDb
+  // (core/src/bot/main.ts) refuses to update an order once it is FILLED or CANCELED, so
+  // an entry is inserted ONCE at the terminal transition and never moves again, and the
+  // churny NEW/PARTIALLY_FILLED writes never touch this index at all. Measured over
+  // 20k full order lifecycles: partial 2567ms vs 3141ms with NO index at all, vs 3321ms
+  // for a plain {userId,updateTime} — i.e. no write cost, unlike the plain variant.
+  //
+  // paperContext is deliberately NOT in the key: it is queried as {$ne:true} for real
+  // money, and putting it in the key made the planner abandon this index and fall back
+  // to the blocking SORT (verified). Left as a residual filter it costs 2 extra doc
+  // fetches (12 examined -> 10 returned).
+  orderSchema.index(
+    { userId: 1, updateTime: -1 },
+    {
+      name: 'latestOrders_filled',
+      partialFilterExpression: { status: 'FILLED' },
+    },
+  )
 
   // Fill-failsafe resting-order lookup (src/fillFailsafe/registry.ts getOrdersFromDb).
   // Without this the query COLLSCANs all ~16M orders every FF_ORDERS_REFRESH_MS (30s):
