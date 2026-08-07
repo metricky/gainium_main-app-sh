@@ -278,6 +278,27 @@ class Exchange extends AbstractExchange {
     return result.data
   }
 
+  /**
+   * USD margin available on a pooled-collateral futures account. Returns `null`
+   * for every venue that doesn't pool collateral — and also whenever the call
+   * fails, because "no opinion" must degrade to the existing quote-asset check
+   * rather than block a deal. See `getMarginAvailableUsd` in the connector.
+   */
+  async getMarginAvailableUsd(
+    timeProfile = this.getEmptyTimeProfile('getMarginAvailableUsd'),
+  ): Promise<BaseReturn<number | null>> {
+    const result = await this.apiCall<number | null>(
+      {
+        endpoint: 'marginAvailableUsd',
+        method: 'get',
+        isPrivate: true,
+      },
+      timeProfile,
+    ).catch(this.handleError(this.getMarginAvailableUsd, timeProfile))
+    this.saveTimeProfile(result.timeProfile)
+    return result.data
+  }
+
   async getExchangeInfo(
     symbol: string,
     timeProfile = this.getEmptyTimeProfile('getExchangeInfo'),
@@ -872,6 +893,14 @@ class Exchange extends AbstractExchange {
     timeProfile: ExchangeRequestTimeProfile,
     count = 0,
   ): Promise<{ data: BaseReturn<R>; timeProfile: ExchangeRequestTimeProfile }> {
+    // Credentials this instance could not resolve in its constructor are
+    // resolved here, before anything reads them into the auth headers below.
+    // No-op unless a resolver is registered and owns one of the values.
+    if (this.hasPendingCredentials()) {
+      const credentialStart = Date.now()
+      await this.ensureCredentials()
+      timeProfile.credentialResolveMs = Date.now() - credentialStart
+    }
     const { endpoint, params, body, method } = request
     const authHeaders: Record<string, string> = {
       'Content-type': 'application/json',

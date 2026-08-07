@@ -15,7 +15,7 @@ import {
   FuturesStrategyEnum,
   BotType,
 } from '../../types'
-import MainBot from './main'
+import MainBot, { isDefinitiveOrderNotFound } from './main'
 
 import type {
   BotData,
@@ -889,6 +889,9 @@ function createBotHelper<
               },
             )
           } else {
+            // Not a service restart — the user started or restarted this bot,
+            // which is the manual escape hatch from order quarantine.
+            await this.clearAllOrderQuarantine('bot started by user')
             this.limitOrders(
               this.botId,
               this.lastFilled
@@ -1239,6 +1242,7 @@ function createBotHelper<
       }
       const _id = this.startMethod('checkOrders')
       this.blockCheck = true
+      this.beginOrderCheckRun()
       try {
         if (this.serviceRestart) {
           if (!this.data) {
@@ -1412,18 +1416,30 @@ function createBotHelper<
                 await this.cancelGridOnExchange(c)
               }
             }
+            // Armed here rather than at the top of the method: everything
+            // above probes at most one order, this loop is the only unbounded
+            // one, and scoping it this tightly keeps every early return above
+            // free of teardown.
+            this.beginRestartProbeBudget()
             for (const o of activeRegularOrders.filter(
               (ao) =>
                 !diff.cancel
                   .map((c) => c.newClientOrderId)
                   .includes(ao.clientOrderId),
             )) {
+              if (this.isOrderQuarantined(o)) continue
+              if (this.restartProbeExhausted()) continue
               const exchangeData = await this.getOrder(
                 o.clientOrderId,
                 pair,
                 true,
               )
-              if (!exchangeData || !exchangeData.data) {
+              if (isDefinitiveOrderNotFound(exchangeData)) {
+                this.handleWarn(
+                  `Order ${o.clientOrderId} not found on exchange: ${exchangeData?.reason}`,
+                )
+                this.noteOrderNotFound(o, `${exchangeData?.reason}`)
+              } else if (!exchangeData || !exchangeData.data) {
                 this.handleWarn(
                   `Not enough data to get order ${o.clientOrderId}`,
                 )
@@ -1431,6 +1447,7 @@ function createBotHelper<
                 if (exchangeData.status === StatusEnum.notok) {
                   this.handleWarn(`Cannot get order ${exchangeData.reason}`)
                 } else {
+                  this.clearOrderStrikes(o)
                   const updatedOrder = await this.mergeCommonOrderWithOrder(
                     exchangeData.data,
                     o,
@@ -1473,6 +1490,8 @@ function createBotHelper<
                 }
               }
             }
+            this.endRestartProbeBudget('checkOrders')
+            this.endOrderCheckRun()
             if (filledOrders.length > 0) {
               const [lastFilled] = filledOrders.sort(
                 (a, b) => b.updateTime - a.updateTime,
@@ -2960,15 +2979,18 @@ function createBotHelper<
         true,
       )
       if (orders.status === StatusEnum.notok) {
-        return this.processError(
-          this.botId,
+        // Via handleErrors, not processError directly: calling processError
+        // skips getErrorSubType, so this wrote rows under the ad-hoc subType
+        // `readorders`, which exists in no rule and no behaviour row. The admin
+        // owner filter could not classify it and no log policy could ever apply
+        // to it. Same visibility as before (hidden, non-erroring, no bot event).
+        return this.handleErrors(
+          `Cannot read orders: ${orders.reason}`,
+          'checkBalances',
           'readorders',
           false,
           false,
           false,
-          `Cannot read orders: ${orders.reason}`,
-          +new Date(),
-          orders.reason,
         )
       }
       if (orders.data.count === 0) {
@@ -2996,15 +3018,14 @@ function createBotHelper<
         )
       const last = order
       if (!last) {
-        return this.processError(
-          this.botId,
-          `noelem`,
-          false,
-          false,
-          false,
+        // See the note above — `noelem` was the same unclassifiable bypass.
+        return this.handleErrors(
           `Cannot find last order in Diff`,
-          +new Date(),
-          'Cannot find last order in Diff',
+          'checkBalances',
+          'noelem',
+          false,
+          false,
+          false,
         )
       }
 

@@ -1,5 +1,294 @@
 # Changelog
 
+## [1.51.1] - 2026-08-07
+
+### Fixed
+
+- A stop loss that "move SL" had already pushed into profit no longer closes a deal at a loss. Once the move fires, the deal's stop sits on the profit side of the average entry and can only be reached on the way back from profit — but the check only compared the price to the stop level, so as soon as the market ran past that level the wrong way (safety orders pulling the average through it), the very next tick closed the deal at market. Two BTCUSDT deals on one short bot were closed 3.8% down this way. The stop now only triggers while the deal is still on the profit side of its entry; ordinary loss-side stops are unaffected.
+
+## [1.51.0] - 2026-08-07
+
+### Added
+
+- An application embedding this package can now own how a stored credential is written, not only how it is read. With nothing registered, credentials are written exactly as before.
+
+## [1.50.3] - 2026-08-06
+
+### Fixed
+
+- Orders that never received an exchange order id are no longer looked up on the exchange. On Coinbase, Kraken and KuCoin full futures an order can only be fetched by the id the venue assigns it, and until that id arrives the order carries a placeholder — which was being sent as if it were a real id. Every check of such an order cost two futile exchange calls and an error line; one grid bot re-checking 17 of them on each stream reconnect produced 39 exchange errors in a minute. The checks now answer immediately, with the same verdict the exchange was giving.
+
+## [1.50.2] - 2026-08-06
+
+### Fixed
+
+- Recognise two more ways an exchange says a position is already closed, so those deals finish instead of being retried on every restart. Rejections are now matched on letters and digits alone, so a venue wording the same condition as a code rather than a sentence is still understood.
+
+## [1.50.1] - 2026-08-06
+
+### Fixed
+
+- Order quarantine could count a freshly-placed order against itself. Some exchanges answer "unknown order id" for an order they were handed moments ago — that is the exchange describing its own propagation lag, not a missing order. A not-found now only counts once the order has gone untouched for `BOT_ORDER_QUARANTINE_MIN_AGE_MS` (default 24h); an order with no usable timestamp is never counted at all.
+- Quarantine strikes are now genuinely consecutive, as documented. A successful lookup clears them, including on the common path where a resting order comes back unchanged and is not written back — previously strikes accumulated for the life of an order, so three unrelated blips months apart could quarantine a live one.
+
+### Added
+
+- Hyperliquid's `unknownOid` is now recognised as a definitive not-found, so its stale orders stop being re-probed on every restart. Safe only in combination with the age floor above, because Hyperliquid uses that same answer for both a long-gone order and a just-placed one.
+
+## [1.50.0] - 2026-08-06
+
+### Added
+
+- Orders the exchange repeatedly reports as non-existent are now put in a polling quarantine instead of being re-checked forever. An order that has been gone for months used to cost a failed lookup on every single restart — on venues that sleep-and-retry before admitting an order is missing, that is tens of seconds each. After `BOT_ORDER_QUARANTINE_STRIKES` (default 3) separate checks each get a definitive "no such order" from the exchange, the bot stops asking. Set `0` to disable.
+- Quarantine only ever stops the bot *asking* about an order — it never stops the bot *hearing* about one. A quarantined order stays subscribed to the live order stream, stays in the bot's order list, and is still cancelled when the bot stops. If the exchange mentions it again for any reason, the quarantine is dropped immediately. Restarting the bot re-checks everything, so there is always a way back.
+
+### Fixed
+
+- A failed order lookup no longer discards the exchange's explanation. "This order does not exist", "the request timed out" and "you are rate limited" were all collapsed into the same message, because the branch that read the reason was unreachable — which is why nothing could tell a genuinely missing order from a temporarily unreachable exchange. Only the first of those now counts towards quarantine.
+
+## [1.49.4] - 2026-08-06
+
+### Fixed
+
+- A single bot can no longer stretch a service restart by minutes. The restart-time order check asks the exchange about each open order one at a time, so a bot holding orders the venue no longer recognises paid the full failed-lookup cost for every one of them while the rest of the fleet waited. That check now has a per-bot time budget (`BOT_RESTART_PROBE_BUDGET_MS`, default 60s, `0` disables): once it is spent the bot stops probing and the orders are left to the user stream, the reconcile sweep and the fill-failsafe, which already own that job. Normal running behaviour is unchanged — the budget only arms during a service restart.
+
+## [1.49.3] - 2026-08-06
+
+### Fixed
+
+- Cancelling a Combo deal no longer discards the profit it had already made. A Combo deal banks profit as each minigrid round-trip completes, but cancelling one credited nothing to the bot's total or to the profit history — the amount stayed visible on the deal and was counted nowhere else. Cancelling a deal that never traded is unchanged.
+
+## [1.49.2] - 2026-08-06
+
+### Fixed
+
+- A deal that started closing and did not finish stayed frozen after a restart: the "closing now" markers were restored from the cache as if the close were still running, so the bot refused to place orders for that deal and the close was never retried. They are now cleared on load, matching what the database load path already did.
+
+## [1.49.1] - 2026-08-06
+
+### Fixed
+
+- Hedge bots now look their sibling leg up through an index instead of walking the whole bot collection, on every start, restart and close.
+
+## [1.49.0] - 2026-08-06
+
+### Changed
+
+- Stored exchange and API credentials are now recovered through a single asynchronous module rather than at each call site, so an installation can keep them in a format only the host application is able to unwrap.
+
+## [1.48.2] - 2026-08-06
+
+### Fixed
+
+- Reading a host-managed stored value through the synchronous path now fails loudly instead of returning an empty string. It previously fell through to AES, which does not signal failure on that input — the caller received `''` and used it as the credential, producing an authentication failure at the exchange with no exception anywhere.
+
+## [1.48.4] - 2026-08-06
+
+### Fixed
+
+- An order held back by one of the local safeguards no longer leaves a cancelled-order record behind. Each attempt is issued under its own order id, so every held-back retry was filing a fresh record for an order that was never placed anywhere — on production these accounted for roughly a third of all stored orders. Orders that genuinely reached the exchange are recorded exactly as before.
+
+## [1.48.3] - 2026-08-06
+
+### Fixed
+
+- The marker recording which scheme a bot's not-enough-balance counters were written under was not declared on the stored bot, so it was silently dropped every time the bot saved. The one-time clean-up it guards therefore ran again on every restart, clearing the counters and making the safeguard re-arm from scratch — which costs a handful of pointless exchange calls per stuck order each time a worker restarts. Confirmed against production, where the marker read as absent on a bot whose counters had plainly been migrated.
+
+## [1.48.2] - 2026-08-06
+
+### Fixed
+
+- A hedge bot whose paired bot had been deleted crashed while restarting, silently: it never came back, never reported in, and failed the same way on every subsequent restart.
+
+## [1.48.1] - 2026-08-06
+
+### Fixed
+
+- The count of bots that failed to come back after a restart was measured at the wrong moment and from the wrong place, so it reported every bot as missing even when all of them returned. It is now measured once the restart has had time to settle, and counts what the bot workers actually reported.
+
+## [1.48.0] - 2026-08-06
+
+### Changed
+
+- A repeating bot error now updates one message and counts the repeats, instead of writing a new message every time it happens. The error list shows how many times a condition fired and when it first did, rather than the same error over and over.
+- How often a given error is allowed to write a new message is now set per error type from the admin Bot Errors page, and takes effect within five minutes without restarting anything.
+- Errors that are suppressed from users were being recorded on every single occurrence — they are now recorded once an hour by default, as they always should have been.
+- Notifications and alerts for a repeating error are sent when it first happens, not on every repeat.
+
+### Fixed
+
+- Bot messages that a user has dismissed are now cleaned up after 30 days instead of being kept forever.
+- Two internal error paths recorded messages under names that the classification system did not know about, so they could not be categorised or configured. They now go through the normal path.
+
+## [1.47.0] - 2026-08-06
+
+### Fixed
+
+- A bot service that could not finish bringing every bot back after a restart would never begin accepting commands again, for as long as it kept running. Start, stop and edit requests for that bot type then sat unanswered until they timed out. The service now starts accepting commands once the bots are back, and also when the restart has clearly stopped making progress — in which case it says so loudly rather than going quiet.
+
+### Added
+
+- Restart telemetry: how long the bot lookup took, how long each bot took to come back, the slowest bots of the restart, and which bots never reported back — so a slow restart can be explained instead of guessed at.
+- The wait for a reply from a bot service is now configurable rather than fixed at five minutes.
+
+## [1.46.0] - 2026-08-05
+
+### Changed
+
+- The two separate cooldowns added for rejections that cannot succeed on retry — a permanent jurisdiction restriction, and an order the account cannot fund — now share one mechanism. Both hold the order back for a spell that widens each time the exchange rejects again, and both reset the moment the order goes through. Previously only one of them backed off, and the other kept its state in memory, so it was lost whenever a bot moved between workers or restarted; the shared version keeps it where every worker can see it.
+- A jurisdiction restriction that the account holder resolves is now picked up within about five minutes instead of up to an hour, while one that is never resolved settles at the same hourly re-check as before.
+
+## [1.45.1] - 2026-08-05
+
+### Fixed
+
+- Bots that could not fund an order kept asking the exchange to place it, over and over, instead of backing off. The safeguard meant to stop this counted failures per order price, but most orders are market orders carrying the live price, so consecutive retries were each filed under a new price and the count never built up to the point where the safeguard engaged. Failures are now counted per asset and direction — which is what a balance shortfall actually applies to — so the safeguard arms as intended. Once it does, the bot re-checks with the exchange on a widening interval rather than continuously, so a shortfall that clears is picked up quickly while one that persists stops generating traffic.
+- The failure count is now capped. It previously grew without limit, and since a recovered balance only walks it back one step at a time, a long-running shortfall could leave a bot unable to clear the count and resume on its own.
+- Counters recorded under the previous scheme are discarded the first time a bot records a new one, so stale entries no longer accumulate on the bot indefinitely.
+
+## [1.45.0] - 2026-08-05
+
+### Fixed
+
+- A bot whose exchange account is barred from trading a pair for compliance reasons (for example Kraken refusing USDT pairs to residents of certain countries) kept re-sending the same order to the exchange every few minutes — one account produced 82 rejected attempts in four hours. That block is permanent until the account holder resolves it, so the order is now held back for up to an hour after each rejection instead of being retried. Nothing else changes: the bot reports the same error and the same status as before, and orders that close a position are never held back.
+
+## [1.44.2] - 2026-08-05
+
+### Fixed
+
+- Hedge bots stayed silent after their first warning or error of a given kind. Recovering from an error clears a bot's active messages so the next occurrence can be shown again, but for hedge bots that clean-up looked under the individual leg while the messages are filed under the parent, so it never found them and the bot never spoke up again. Completes the fix in 1.43.4, which stopped the opposite problem — the same message repeating without end. Existing stuck messages clear themselves the next time the bot recovers from an error.
+
+## [1.44.1] - 2026-08-05
+
+### Fixed
+
+- Exchange requests no longer pay a scheduling delay when no credential resolver is registered. The resolution step was awaited unconditionally, and awaiting a function that returns immediately still yields to the event loop, so every request paid for a step that had nothing to do — and any timing measured around it reported event-loop lag rather than real work.
+
+## [1.44.0] - 2026-08-05
+
+### Added
+
+- Optional hook letting the host application supply its own way of reading a stored credential, for value formats this package does not define. Nothing is registered by default, so every existing installation is unaffected.
+- Exchange request telemetry now records how long resolving that request's credentials took, so the cost is attributable instead of showing up as unexplained drift in the total.
+
+### Fixed
+
+- Reading a stored value whose format this package does not recognise now fails loudly instead of returning an empty string. It previously fell through to AES under the fallback key, which does not signal failure — the caller received `''` and used it as the credential, surfacing as an authentication failure at the exchange with no exception anywhere.
+
+## [1.43.4] - 2026-08-05
+
+### Fixed
+
+- Hedge bots no longer repeat the same warning or error indefinitely. Every message a hedge bot's legs raise is filed under the parent bot, but the check that decides "this one is already showing, don't post it again" looked under the leg instead, so it never found the existing message and posted every occurrence. A single repeating condition could therefore bury a user in identical notifications. Non-hedge bots were unaffected.
+
+## [1.43.3] - 2026-08-05
+
+### Fixed
+
+- Broker-code indexes no longer fail to rebuild when several services start at the same time. Each process dropped the collection's indexes before rebuilding them, so a process starting a moment later wiped an index another one was still building and that build aborted. The drop was a leftover from a one-off migration that has since completed; the index sync that follows it already reconciles any change on its own, so indexes are now left alone unless they actually differ.
+
+## [1.43.2] - 2026-08-05
+
+### Changed
+
+- Connecting Hyperliquid without an approved builder fee now explains which approval is missing and how to grant it, instead of asking the user to "follow the instructions" without naming them.
+
+## [1.43.1] - 2026-08-05
+
+### Added
+
+- Once a self-hosted installation has an encryption key of its own, the credentials already stored under the previous key are re-encrypted automatically. The api notices on startup that values are still under the old key and moves them in the background; it serves traffic throughout, does nothing once there is nothing left to move, and only ever runs in the api process. The manual command is unchanged and still available — set `ENCRYPT_KEY_AUTO_BACKFILL=false` to use it instead.
+
+## [1.43.0] - 2026-08-05
+
+### Added
+
+- Bots on pooled-collateral futures accounts can now open deals funded by collateral held in another currency. Kraken Futures pools every collateral currency into one cross-margin account, so a wallet funded in EUR shows no USD balance at all — and since order sizing reads the pair's quote asset, such an account was rejected with "Not enough balance to start new deal ... available: 0 USD" even though the venue would have margined the position off the EUR without complaint. When, and only when, the ordinary quote-asset check has already failed, the balance check now asks the connector for the account's pooled USD margin and sizes off that instead. The common path is unchanged and costs no extra request; a venue reporting no pooled margin — every non-pooled exchange, the paper simulator, and any failed call — keeps the previous behaviour exactly, and the pooled figure is trusted only when USD really is the quote asset. Applies to DCA and combo bots.
+
+## [1.42.0] - 2026-08-04
+
+### Added
+
+- Self-hosted installations can now use their own encryption key for the exchange API credentials their users store. Setting `ENCRYPT_KEY` makes new credentials encrypt under it; a new `cli:rotate-encrypt-key` command re-encrypts what is already stored, is safe to run while bots trade, and resumes if interrupted. Values written under the previous key stay readable throughout, so an installation can upgrade first and migrate later.
+- The application now says so at startup when no encryption key of its own is configured, and tells the operator how to set one.
+- The API can report whether an encryption key is configured, so the dashboard can recommend setting one. It answers yes or no and nothing else.
+
+## [1.41.7] - 2026-08-05
+
+### Fixed
+
+- DCA bots could fail to build their deal orders instead of skipping the attempt. Two cases: when the exchange price lookup failed the price arrived as 0, which made the base quantity infinite — the bot logged a "Big number error" and still produced a take-profit order with an unusable quantity. And a bot scaling its safety orders by ATR/ADR with no "start DCA" indicator configured crashed outright while calculating the second safety order. Both now stop cleanly: a missing price is reported as "Latest price is 0" and no orders are generated, and the ATR/ADR case simply produces no safety orders as it already intended.
+
+## [1.41.6] - 2026-08-04
+
+### Fixed
+
+- Using "reduce funds" more than once on the same DCA deal could close the whole deal instead of shrinking it. Each completed reduction is already recorded on the deal, and the take-profit sizing was subtracting it a second time from the filled sell orders it also counted — so the remaining position it calculated shrank twice as fast as the real one and eventually went negative. Once that number fell below the amount being withdrawn, the bot decided the withdrawal was larger than the position and closed the deal at market. On a reported deal of 813 base with 437 already withdrawn, the remaining position was computed as -61 instead of 376. Completed reductions are now counted once, so repeated reductions size correctly and the deal stays open. Deals that never used reduce funds are unaffected.
+
+## [1.41.5] - 2026-08-04
+
+### Added
+
+- Exchange request timing can now record which connector instance served the request
+
+## [1.41.4] - 2026-08-03
+
+### Fixed
+
+- Disconnecting an exchange connection could hang the request for minutes, and when it did, the account's fee, balance and per-exchange snapshot records were left behind with no way to clear them. Telling the running bots to close waited for each worker to acknowledge, using a one-shot listener that fired on whatever the worker said next — and a worker runs up to a hundred bots, all reporting on the same channel, so an unrelated bot's event consumed the acknowledgement and the wait never ended; a bot whose worker had already been restarted never returned either. The wait now matches the reply it is actually waiting for, gives up after a bounded time across the whole disconnect instead of stalling on one bot, and the close is still delivered either way. The sweep that finds those bots is also now scoped to the account being disconnected, so it uses an index instead of reading every bot on the platform (measured on 150,000 bots: 150,000 records examined and 264ms became 50 examined and 2ms, same bots matched). Finally, a bot service that fails to answer no longer aborts the rest of the disconnect: the connection's fees, balances and snapshots are cleaned up regardless, and the failure is logged.
+
+## [1.41.3] - 2026-08-03
+
+### Fixed
+
+- The admin Bot Errors page read every bot message in the database on each load. It is the only fleet-wide reader of that collection — it filters by a date range and sorts newest-first without narrowing to a single user or bot — and no index covered the message timestamp, so the query had no usable plan and fell back to scanning all 2.58M records before joining usernames onto the handful it actually returned. The scan had climbed to roughly 2.5 minutes per load and was the second-heaviest query on the database, slow enough that a wide date range could also exhaust the sort memory limit and leave the page empty. Adding a timestamp index lets the query seek straight to the requested window and read the rows already in sort order: measured on a 2,580,000-record collection in the reported shape, 2,580,000 records examined and 3.4s became 79 examined and 12ms, with an identical result set. The one index serves both the default view and the "include hidden" view, and the results the page shows are unchanged.
+
+## [1.41.2] - 2026-08-03
+
+### Fixed
+
+- Zero-priced markets in an exchange's ticker table silently forced a balance to $0.00, which left 1.41.1's fiat rates unreachable on the venue that motivated them. Exchanges list inactive markets at price 0 — Kraken Futures publishes `EUR-USD` at 0 — and `findUSDRate` takes the first pair matching the base/quote it wants, so that dead entry shadowed every later source: the fiat rate, the BTC cross, and the tokenized-stock fallback all became unreachable, and the holding valued at zero. Both valuation paths now drop non-positive and non-finite prices when building the rate table, so a dead market is treated as absent rather than as an authoritative price of nothing.
+
+## [1.41.1] - 2026-08-03
+
+### Fixed
+
+- Fiat held as collateral (EUR, GBP, CHF, JPY, CAD, AUD) valued at $0.00 in the portfolio. Balances are priced in USD from the exchange's own ticker table, but a multi-collateral venue such as Kraken Futures publishes only its perpetual contracts (`PF_*`) there — no fiat pair exists to price against, so the lookup scored the holding zero. An account funded entirely in fiat therefore reported a total portfolio value of $0.00 and empty allocation charts, which reads as a broken exchange connection even though the balance itself was fetched correctly. The twice-daily rate job now also caches fiat→USD rates from Kraken's public ticker (the same source already used for USDT→USD) and both valuation paths — the portfolio snapshot cron and the on-request pricing helper — expose them under the `all` exchange, so fiat is valued like any other asset. Rates are stored pre-normalized to "1 unit = X USD", so pairs Kraken quotes with USD as the base (USD/JPY, USD/CHF, USD/CAD) are inverted once at write time rather than at every read; a pair that fails to fetch keeps its previous rate instead of dropping to zero until the next run.
+
+## [1.41.0] - 2026-08-03
+
+### Changed
+
+- User passwords are now stored as bcrypt hashes instead of the reversible AES helper in `utils/crypto`. Previously a password could be decrypted back to plaintext with the shared key, so anyone who obtained a copy of the database obtained every password; a bcrypt hash cannot be reversed. The change is dual-read and needs no flag day: existing accounts still sign in normally and are silently rehashed on their next successful login, while sign-up, password change and the `cli:reset-password` utility write bcrypt from the start. An installation converts itself as its users log in — no downtime, no forced reset. New helper at `utils/password.ts`; adds a `bcryptjs` dependency (pure JavaScript, so it needs no native build step in the container image).
+
+### Fixed
+
+- `changePassword`'s "your new password is the same as your current one" check compared by decrypting the stored value, which cannot work once a password is a one-way hash. It now compares correctly, and does so for both stored formats.
+
+## [1.40.5] - 2026-08-02
+
+### Fixed
+
+- `deleteExchange` awaited seven independent cleanup legs one at a time and filtered three of them so they could not use an index. The `linkedTo` clear, `stopBotByExchange`, `unassignBotByExchange`'s three `updateMany`s and the fee/balance/snapshot `deleteMany`s each waited for the one before it; `feeDb`/`balanceDb`/the bot collections were filtered on `exchangeUUID` alone, but those collections are indexed `{userId, exchangeUUID, …}`, so every disconnect COLLSCANned `fees`, `balances`, `dcaBots`, `comboBots` and `bots` in full — cost scaling with the platform, not the account. The independent legs now run under `Promise.all` (the shape `resetAccount` already uses) and every sweep carries `userId`, which is index-seekable and matches the same rows. Serial depth 7 → 2; `unassignBotByExchange` takes an optional `userId`.
+
+## [1.40.4] - 2026-08-02
+
+### Fixed
+
+- `npm run lint` failed on a clean checkout, so husky's pre-commit hook rejected every commit. `getLatestOrders`' order filter was hoisted into a `const` so the page read and the count could share it, which dropped its contextual type and widened `status: 'FILLED'` to `string`; that broke `readData`'s `isArray` overload resolution and cascaded into 5 `tsc` errors. Annotated the literal with `OrderStatusType`.
+
+## [1.40.3] - 2026-08-02
+
+### Fixed
+
+- `probeConnectionState`'s `PROBE_TIMEOUT_MS` was aliased to `VERIFY_TIMEOUT_MS`, so the accounts page's live re-probe of an ALREADY-STORED connection got `addExchange`'s full 30s budget. Every one of its timeouts resolves to the stored reading, so a wedged venue held `updateStatus` (which fans the probes out with `Promise.all`) for 30s to return a value it already had. Decoupled to its own 6s cap, and the timeout warn now names the connection's `provider` and `uuid` so the wedged venue is identifiable.
+
+## [1.40.2] - 2026-08-02
+
+### Fixed
+
+- Every orphan sweep in `premanenetlyDeleteBots` converted `botId` with `$toObjectId`, which throws on the `'system'` sentinel platform notices use, so the aggregation failed and — because each step returns on its first error — aborted every remaining cleanup after it. The sweeps now start from a `$convert`/`onError: null` guard that both keeps the aggregation alive and keeps sentinel rows out of the orphan set.
+
 ## [1.40.1] - 2026-08-01
 
 ### Fixed

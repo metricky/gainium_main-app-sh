@@ -2,6 +2,7 @@ import ExchangeChooser from '../exchange/exchangeChooser'
 import { paperExchanges } from '../exchange/paper/utils'
 import {
   Prices,
+  RateSchema,
   SnapshotSchema,
   UserDataStreamEvent,
   ExchangeInUser,
@@ -25,7 +26,7 @@ import {
 } from '../../types'
 import type { Socket } from 'socket.io-client'
 import utils from '.'
-import { decrypt } from './crypto'
+import { resolveConnection } from './credentials'
 import logger from './logger'
 import {
   botEventDb,
@@ -636,9 +637,7 @@ const connectUserBalance = async (
         }
 
         const data = {
-          key: decrypt(e.key),
-          secret: decrypt(e.secret),
-          passphrase: e.passphrase ? decrypt(e.passphrase) : '',
+          ...(await resolveConnection(e)),
           provider: e.provider,
           keysType: e.keysType,
           okxSource: e.okxSource,
@@ -905,6 +904,34 @@ export interface PricedBalanceInput {
 }
 
 /**
+ * A rate table entry is only usable if it carries a real price. Exchanges list
+ * inactive markets at 0 — Kraken Futures publishes `EUR-USD` priced 0 — and
+ * because `findUSDRate` takes the FIRST pair matching base/quote, one such
+ * entry shadows every later (working) source for that asset and the balance
+ * silently values at $0.00. Dropping them lets the fiat rates below, the BTC
+ * cross and the tokenized-stock fallback actually be reached.
+ */
+const usablePrice = (p: { price: number }) =>
+  Number.isFinite(p.price) && p.price > 0
+
+/**
+ * Fiat collateral (EUR/GBP/CHF/… posted as margin on a multi-collateral venue
+ * such as Kraken Futures) appears in no exchange's `getAllPrices` table — Kraken
+ * Futures only publishes its `PF_*` perpetual tickers — so `findUSDRate` scores
+ * it 0 and the holding renders as $0.00 across the whole portfolio. Surface the
+ * cron-cached fiat rates under exchange `all`, the same mechanism the USDT→USD
+ * rate already rides on. Rates are stored pre-normalized to "1 unit = X USD".
+ */
+const fiatRateEntries = (fiatRates: RateSchema['fiatRates']): Prices =>
+  (fiatRates ?? [])
+    .filter((f) => f?.asset && f.usdRate > 0)
+    .map((f) => ({
+      pair: `${f.asset}USD`,
+      price: f.usdRate,
+      exchange: 'all',
+    }))
+
+/**
  * Value a set of balances in USD using the SAME authoritative path the portfolio
  * snapshot cron uses ({@link userSnapshots}): the connector's Redis-cached
  * `getAllPrices` rate table + the USDT→USD rate, then a per-exchange tokenized-
@@ -935,7 +962,12 @@ export const priceBalancesUsd = async (
     try {
       const prices = await factory('', '').getAllPrices()
       if (prices.status === StatusEnum.ok) {
-        rates = [...rates, ...prices.data.map((p) => ({ ...p, exchange: e }))]
+        rates = [
+          ...rates,
+          ...prices.data
+            .filter(usablePrice)
+            .map((p) => ({ ...p, exchange: e })),
+        ]
       } else {
         logger.error(`priceBalancesUsd | getAllPrices ${e}: ${prices.reason}`)
       }
@@ -949,7 +981,11 @@ export const priceBalancesUsd = async (
   })
   if (usdRequest.status === StatusEnum.ok) {
     const price = usdRequest.data.result?.usdRate ?? 1
-    rates = [...rates, { pair: 'USDTZUSD', price, exchange: 'all' }]
+    rates = [
+      ...rates,
+      { pair: 'USDTZUSD', price, exchange: 'all' },
+      ...fiatRateEntries(usdRequest.data.result?.fiatRates),
+    ]
   }
 
   // 2) Tokenized-stock fallback map (venue-agnostic; keyed off `pairs`).
@@ -1064,7 +1100,12 @@ const userSnapshots = async (
         const exchange = provider('', '')
         const prices = await exchange.getAllPrices()
         if (prices.status === StatusEnum.ok) {
-          rates = [...rates, ...prices.data.map((p) => ({ ...p, exchange: e }))]
+          rates = [
+            ...rates,
+            ...prices.data
+              .filter(usablePrice)
+              .map((p) => ({ ...p, exchange: e })),
+          ]
         } else {
           logger.error(`Snapshot | Cannot get price ${e} ${prices.reason}`)
         }
@@ -1076,7 +1117,11 @@ const userSnapshots = async (
     })
     if (usdRequest.status === StatusEnum.ok) {
       const price = usdRequest.data.result?.usdRate ?? 1
-      rates = [...rates, { pair: 'USDTZUSD', price, exchange: 'all' }]
+      rates = [
+        ...rates,
+        { pair: 'USDTZUSD', price, exchange: 'all' },
+        ...fiatRateEntries(usdRequest.data.result?.fiatRates),
+      ]
     } else {
       logger.error(`Snapshot | Cannot get user rates ${usdRequest.reason}`)
     }
@@ -1743,9 +1788,11 @@ export const resetUser = async (
       })
       /** Paper */
       if (isAll || isPaper) {
-        const userPaperExchanges = user.exchanges
-          .filter((e) => paperExchanges.includes(e.provider))
-          .map((e) => decrypt(e.key))
+        const userPaperExchanges = await Promise.all(
+          user.exchanges
+            .filter((e) => paperExchanges.includes(e.provider))
+            .map(async (e) => (await resolveConnection(e)).key),
+        )
         const paperUsers =
           (
             await paperUserDb.readData(

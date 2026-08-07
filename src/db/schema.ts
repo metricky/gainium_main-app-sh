@@ -504,6 +504,11 @@ const botCommon = {
     orders: Schema.Types.Map,
     thresholdPassed: Boolean,
     thresholdPassedTime: Number,
+    // Key-scheme version of `orders`. Without it declared here Mongoose strips
+    // the field on write (strict mode), the one-time migration in
+    // `updateNotEnoughBalanceErrors` re-runs on every bot load, and the guard
+    // re-arms from scratch after each worker restart. Additive-only field.
+    keyVersion: Number,
   },
   cost: Number,
   ...CreatedUpdated,
@@ -745,6 +750,21 @@ const orderSchema: Schema<OrderSchema> = new Schema({
   acBefore: Number,
   acAfter: Number,
   leverage: Number,
+  // Polling quarantine — see `OrderQuarantine` in core/types.ts. Purely
+  // additive and absent on every existing row; readers that don't know about
+  // it are unaffected.
+  quarantine: {
+    type: {
+      strikes: Number,
+      firstAt: Number,
+      lastAt: Number,
+      reason: String,
+      runId: String,
+      since: Number,
+    },
+    required: false,
+    default: undefined,
+  },
   ...CreatedUpdated,
 })
 
@@ -855,7 +875,19 @@ const botMessageSchema: Schema<BotMessageSchema> = new Schema({
   subType: String,
   // Aggregate count for digest-style notices (e.g. one daily "auto-archived"
   // notice summarising N bots) — the message text carries the human wording.
+  // ALSO the occurrence counter for coalesced bot errors: `processError` upserts
+  // on the key below and `$inc`s this, so a condition that fires 40,000 times is
+  // one row that says 40,000 instead of 40,000 rows.
   count: Number,
+  // Coalescing key. `time` moves to the LATEST occurrence (the admin page sorts
+  // and filters on it, and "when did this last fire" is the useful question);
+  // this keeps the first, so a row still says how long the condition has run.
+  firstTime: Number,
+  // Window index for the log policy — see `botMessageCoalesceKey` below and
+  // `getSubTypeLogPolicy` in core/src/bot/errorRulesCache.ts. Absent on
+  // `always`-mode rows and on everything written before this shipped, which is
+  // exactly what keeps them out of the unique index.
+  bucket: Number,
   paperContext: Boolean,
   terminal: Boolean,
   showUser: Boolean,
@@ -867,6 +899,13 @@ const botMessageSchema: Schema<BotMessageSchema> = new Schema({
 
 const rateSchema: Schema<RateSchema> = new Schema({
   usdRate: RequiredNumber,
+  fiatRates: [
+    {
+      _id: false,
+      asset: RequiredString,
+      usdRate: RequiredNumber,
+    },
+  ],
   ...CreatedUpdated,
 })
 
@@ -2992,6 +3031,81 @@ export const registerIndexes = () => {
   // subType:{$ne}; the userId-leading indexes above can't serve a botId-first
   // predicate. botId is write-once (static); isDeleted is one-way/low-cardinality.
   botMessageSchema.index({ botId: 1, isDeleted: 1 })
+  // RETENTION. `isDeleted` on this collection is a tombstone that nothing ever
+  // collected: on prod 2,689,136 of 2,702,725 rows (99.5%, ~1.8GB) are
+  // isDeleted:true, the oldest from 2022-12-24, and only 13,589 are live. Both
+  // producers of tombstones — "mark all read" and the per-bot clear on recovery —
+  // are one-way, so a deleted row can never come back and there is nothing to
+  // read it. `botEvents` next door has had a 30-day TTL all along; this had none.
+  //
+  // PARTIAL, on `isDeleted:true`, deliberately: a blanket TTL over `created`
+  // would also reap LIVE messages, and a live row is one the user has not
+  // dismissed and can still see in the notifications feed. Age is not consent to
+  // hide it. This reaps only what is already invisible.
+  //
+  // Expiry is measured from `created`, so a row soft-deleted long after it was
+  // written is reaped on the next TTL pass rather than 30 days later. That is the
+  // intent — the clock that matters is how long the row has existed, and it is
+  // unreadable either way.
+  //
+  // NB: run `src/db/scripts/purgeBotMessages.ts` BEFORE this index reaches a
+  // host carrying the backlog. The TTL monitor deletes in unbounded per-minute
+  // passes; letting it discover 2.69M expired docs at once is a self-inflicted
+  // delete storm on the oplog. The script does the same work in bounded batches.
+  botMessageSchema.index(
+    { created: 1 },
+    {
+      name: 'botMessageTombstoneTtl',
+      expireAfterSeconds: 2592000, // 30d
+      partialFilterExpression: { isDeleted: true },
+    },
+  )
+  // COALESCING KEY — what actually caps the write rate, by construction rather
+  // than by a check that can be wrong. `processError` upserts on this key and
+  // `$inc`s `count`, so a repeating condition can only ever own ONE row per
+  // window: uniqueness is enforced by the database, not by a preceding count
+  // whose answer is stale the moment it returns and which read a failed query as
+  // "nothing on file" and wrote anyway.
+  //
+  // PARTIAL on `bucket: {$exists: true}` for two reasons. It excludes every one
+  // of the 2.7M rows written before this shipped, so building the index on prod
+  // cannot fail on a duplicate. And it excludes `always`-mode rows, which opt out
+  // of coalescing and must stay free to write one row per occurrence.
+  //
+  // `showUser` is in the key because a subType's visibility can be flipped from
+  // the admin table at any time, and a hidden row must never coalesce onto the
+  // visible row a user is currently looking at.
+  //
+  // NB: the soft-delete paths (`deleteBotMessage`, and the per-bot clear on
+  // recovery) `$unset` `bucket`. That is load-bearing: it drops the dismissed row
+  // out of this index so the next occurrence inserts a fresh, visible row instead
+  // of silently incrementing a tombstone the user can no longer see.
+  botMessageSchema.index(
+    { userId: 1, botId: 1, subType: 1, showUser: 1, bucket: 1 },
+    {
+      name: 'botMessageCoalesceKey',
+      unique: true,
+      partialFilterExpression: { bucket: { $exists: true } },
+    },
+  )
+  // Admin Bot Errors page (admin-app `getBotErrors` → GET /bot/error/all): the
+  // ONLY fleet-wide reader of this collection — it has no userId/botId predicate
+  // at all, filters on a `time` RANGE (the page's date picker) and sorts by
+  // {time:-1}. Every index above is userId- or botId-leading and none contains
+  // `time`, so that query had no usable plan and COLLSCANned all 2.58M docs on
+  // every load, then blocking-sorted the survivors. `time` is the sole selective
+  // predicate and supplies the sort order straight from the index; leaving it
+  // unindexed is what put this shape at #2 in the slow-query profile at ~153s per
+  // execution. Measured on a seeded 2,580,000-doc collection in the reported
+  // shape: 2,580,000 docs examined / 3.4s -> 79 examined / 12ms, with an
+  // identical (ordered) result set.
+  // NOTE: deliberately NOT {showUser:1, time:-1}. showUser is ~70% true, so as a
+  // leading equality field it buys only ~1.4x fewer fetches on the default view
+  // (7,072 -> 4,946 docs over a 24h window) while making the index useless for the
+  // `includeHidden` view, which drops straight back to a COLLSCAN. A single
+  // {time:-1} serves BOTH views and costs this very high-write collection one
+  // index instead of two.
+  botMessageSchema.index({ time: -1 })
 
   botSchema.index({ userId: 1 })
   // Bot-list resolvers filter by userId (+optional status) and default-sort by
@@ -3003,6 +3117,9 @@ export const registerIndexes = () => {
   comboBotSchema.index({ userId: 1 })
   comboBotSchema.index({ userId: 1, status: 1, created: -1 })
   comboBotSchema.index({ userId: 1, created: -1 })
+  // Hedge-sibling lookup — see the dcaBotSchema note below; identical shape,
+  // same call sites (`core/src/bot/main.ts` picks comboBotDb for combo bots).
+  comboBotSchema.index({ parentBotId: 1 })
 
   comboDealSchema.index({ userId: 1 })
   comboDealSchema.index({ botId: 1 })
@@ -3016,6 +3133,19 @@ export const registerIndexes = () => {
   dcaBotSchema.index({ userId: 1, created: -1 })
   // Webhook path looks bots up by uuid (write-once/static) — was a COLLSCAN.
   dcaBotSchema.index({ uuid: 1 })
+  // Hedge bots: every child leg looks its sibling up by the shared parent with
+  // `{parentBotId, _id: {$ne: self}}` — on load (`core/src/bot/main.ts:2506`,
+  // per start/restart) and on close (`:521`). `parentBotId` had no index, so the
+  // planner fell back to IXSCAN {_id:1} and walked the whole collection on every
+  // call. That is worst exactly where it is hottest: a hedge child whose sibling
+  // leg is gone matches nothing, so the scan runs to the end — 44,999 docs
+  // examined for 0 returned, which is the ~43,900 examined:returned ratio this
+  // shape shows in the prod slow-query profile. `parentBotId` is write-once (set
+  // when the hedge pair is created) and present on ~1% of bots, so the index is
+  // tiny and costs the write path nothing. NOT compound with `_id`: the `$ne` is
+  // an anti-predicate that cannot bound an index scan, and a hedge pair is 2 docs
+  // — the equality on `parentBotId` alone already takes the scan to those 2 keys.
+  dcaBotSchema.index({ parentBotId: 1 })
 
   hedgeComboBotSchema.index({ userId: 1 })
   hedgeComboBotSchema.index({ userId: 1, status: 1, created: -1 })

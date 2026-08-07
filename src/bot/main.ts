@@ -8,6 +8,7 @@ import type {
   FreeAsset,
   Grid,
   Order,
+  OrderQuarantine,
   OrderTypeT,
   UserDataStreamEvent,
   CommonOrder,
@@ -57,11 +58,12 @@ import ExchangeChooser from '../exchange/exchangeChooser'
 import Exchange from '../exchange'
 import { MathHelper } from '../utils/math'
 import utils, { isPaper } from '../utils'
-import { decrypt } from '../utils/crypto'
+import { resolveConnection } from '../utils/credentials'
 import logger from '../utils/logger'
 import { IdMute, IdMutex } from '../utils/mutex'
 import * as crypto from 'crypto'
 import {
+  complianceRestriction,
   convertComboBotToObject,
   convertDCABotToObject,
   exchangeRules,
@@ -70,8 +72,16 @@ import {
   getErrorSubType,
   indicatorsError,
 } from './utils'
-import { getSubTypeBehavior, noteErrorRuleHit } from './errorRulesCache'
+import {
+  getSubTypeBehavior,
+  getSubTypeLogPolicy,
+  logPolicyBucket,
+  noteErrorRuleHit,
+} from './errorRulesCache'
 import QuantRulesGuard from './quantRulesGuard'
+import ComplianceGuard from './complianceGuard'
+import AuthFailureGuard, { isHardAuthFailure } from './authGuard'
+import RetryBackoff from './retryBackoff'
 import { paperExchanges } from '../exchange/paper/utils'
 import type { InitialGrid } from './helper'
 import { updateUserSteps } from '../utils/user'
@@ -229,6 +239,150 @@ export const eventMap: { [x: string]: string } = {
 }
 const maxLogs = 30
 const maxMethods = 30
+/**
+ * Wall-clock a single bot may spend probing the exchange inside the
+ * restart-time order check before it stops asking and lets the normal
+ * reconcile path finish the job. `0` disables the budget entirely.
+ *
+ * Why this exists: `checkOrders` walks a bot's open orders and does one
+ * serial `getOrder()` per order, so its cost is unbounded in the number of
+ * orders the exchange will not resolve. Re-hydration is the one moment where
+ * that cost is paid by everybody, because a restart's wall-clock is set by
+ * its slowest bot — one bot holding a long tail of orders that no longer
+ * exist on the venue can stretch a restart by minutes on its own.
+ *
+ * Two things make the tail expensive. Orders can sit in a local `NEW` state
+ * indefinitely once their venue-side counterpart is gone, and some venue
+ * clients deliberately sleep-and-retry on "order not found" — correct when
+ * confirming an order that was just placed, very wrong when reconciling a
+ * months-old one. The budget does not fix either; it is the guarantee that
+ * no single bot, for any reason, can set the restart's wall-clock.
+ */
+const restartProbeBudgetMs = Number(
+  process.env.BOT_RESTART_PROBE_BUDGET_MS ?? 60_000,
+)
+
+/**
+ * Consecutive order-check runs that must each produce a *definitive* not-found
+ * before an order is quarantined. `0` disables quarantine entirely.
+ *
+ * Strikes are counted per run, not per lookup, deliberately: an order probed
+ * three times inside one loop has told us one thing once. Requiring distinct
+ * runs means a venue outage — however long it lasts — contributes at most one
+ * strike per restart, and a real order that the venue is merely being slow
+ * about is never quarantined by a single bad afternoon.
+ */
+const orderQuarantineStrikes = Number(
+  process.env.BOT_ORDER_QUARANTINE_STRIKES ?? 3,
+)
+
+/**
+ * How old an order must be before a not-found is allowed to count against it.
+ *
+ * This is the guard against the case that matters most: **an exchange that has
+ * just been handed an order does not always know about it yet.** Ask for it a
+ * second later and some venues answer "unknown order id" — that is the venue
+ * describing its own propagation lag, not the order. Hyperliquid is explicit
+ * about this: its client retries `unknownOid` up to four times with a sleep
+ * when it knows an order was just placed. The reconcile path does not get that
+ * retry, so without an age floor a freshly-placed, entirely real order could
+ * take a strike.
+ *
+ * An order that has been sitting untouched for a day and is *still* unknown to
+ * the venue is a different claim entirely. That asymmetry is what makes the
+ * ambiguous venue answers safe to act on.
+ */
+const orderQuarantineMinAgeMs = Number(
+  process.env.BOT_ORDER_QUARANTINE_MIN_AGE_MS ?? 24 * 60 * 60 * 1000,
+)
+
+/**
+ * Does this failed lookup mean "the venue says this order does not exist", as
+ * opposed to "the call did not succeed"?
+ *
+ * This distinction is the whole safety argument for quarantine, and it was
+ * being thrown away: every venue reports a missing order as
+ * `{status: notok, reason: '<venue> order not found…', data: null}`, but every
+ * call site tested `!res.data` first and `returnBad` always nulls `data`, so
+ * the `status === notok` branch that reads `reason` was unreachable. A timeout,
+ * a rate-limit and a genuinely absent order all arrived as the same
+ * "Not enough data" warning.
+ *
+ * Matching is deliberately narrow. `Symbol not found`, `Fee not found`,
+ * `Account not found` and `Balances not found` are all real reason strings on
+ * these paths and none of them says anything about the order — quarantining on
+ * those would be exactly the "transient failure rendered as a definitive
+ * negative" mistake, with money attached.
+ */
+export function isDefinitiveOrderNotFound(res?: {
+  status: StatusEnum
+  reason?: string | null
+  data?: unknown
+}) {
+  if (!res || res.status !== StatusEnum.notok) return false
+  const reason = `${res.reason ?? ''}`.toLowerCase()
+  if (!reason) return false
+  // Coinbase: "Coinbase order not found after execution."
+  // OKX / Bitget: "Order not found"   Bybit: "Order not found after execution"
+  // Kraken: "Order not found in active orders" / "in history" / "in open orders"
+  // Binance passes through -2013 "Order does not exist".
+  // Hyperliquid: the raw `unknownOid` status, via `HyperliquidError`.
+  //
+  // `unknownOid` is the ambiguous one, and it is only safe to act on because of
+  // the age floor: Hyperliquid returns it both for an order that never existed
+  // and for one placed moments ago that has not propagated yet. Its own client
+  // retries `unknownOid` four times when it knows an order was just placed; the
+  // reconcile path gets no such retry, so age is what separates the two cases.
+  // Matched exactly rather than as a substring — it is a bare status token.
+  return (
+    /\border not found\b/.test(reason) ||
+    /\border does not exist\b/.test(reason) ||
+    reason === 'unknownoid'
+  )
+}
+/**
+ * The placeholder an {@link Order} carries in `orderId` from the moment it is
+ * constructed until the venue hands back a real exchange order id. Already
+ * guarded on the duplicate / not-found branches of `sendOrderToExchange`; the
+ * `byId` lookup branches did not, which is what this constant names.
+ *
+ * Module-level rather than a static member — see `notEnoughBalanceKeyVersion`.
+ */
+const noExchangeOrderId = '-1'
+/**
+ * The answer for an order on a venue that can only be queried BY exchange
+ * order id (coinbase / kraken / kucoin full futures) when we never received
+ * one. Asking is guaranteed to fail — `'-1'` is not an id, so kraken burns a
+ * `getOpenOrders` + a `getClosedOrders` (userref `parseInt('-1', 16)` = NaN)
+ * and logs an ERROR, per order, per poll. A grid bot re-probing 17 such orders
+ * on every user-stream reconnect produced 39 connector errors in 63s.
+ *
+ * The reason is worded so {@link isDefinitiveOrderNotFound} still matches it:
+ * every venue in that branch answers an unresolvable id with a definitive
+ * not-found today, so callers see exactly what they saw before — minus the
+ * round trip.
+ */
+const orderNeverReachedExchange = 'Order not found: no exchange order id'
+/** Key-scheme version for `MainBot.getNotEnoughOrdersIdByOrder`. Bump when the
+ *  key shape changes so counters written under the old scheme are discarded.
+ *  Module-level rather than a static member: adding statics to `MainBot`
+ *  changes `typeof MainBot` and breaks the mixin casts in helper.ts/dcaHelper.ts. */
+const notEnoughBalanceKeyVersion = 2
+/**
+ * Cooldown for orders the account cannot fund. Shares its mechanism with
+ * {@link ComplianceGuard} — same shape of problem: the venue keeps rejecting
+ * for a reason that will not change in the next few seconds, and nothing in the
+ * engine gates the next attempt.
+ *
+ * A transient shortfall recovers within `minMs`; a chronically unfundable order
+ * (the common case — a deal whose base left the account months ago) settles at
+ * one attempt per `maxMs` instead of ~15/min.
+ */
+const notEnoughBalanceBackoff = new RetryBackoff({
+  namespace: 'nb',
+  minMs: 5 * 60 * 1000,
+  maxMs: 60 * 60 * 1000,
+})
 type LastLog = {
   time: number
   message: string
@@ -293,6 +447,17 @@ class MainBot<T extends IMainBot> {
   math: MathHelper
   /** Service restart flag */
   serviceRestart = false
+  /** When the current restart-time order check started probing the exchange.
+   *  `0` = no budget running, so every non-restart path is unaffected. */
+  private restartProbeStartedAt = 0
+  /** Orders skipped because the budget ran out, reported once at the end. */
+  private restartProbeSkipped = 0
+  /** Identifies the current order-check run so repeat strikes within it count once. */
+  private orderCheckRunId = ''
+  /** Orders newly quarantined in this run — coalesced into one user message. */
+  private newlyQuarantined: string[] = []
+  /** Quarantined orders skipped in this run, reported once at the end. */
+  private quarantineSkipped = 0
   secondRestart = false
   reload = false
   /** Array to store list of orders that in work */
@@ -405,6 +570,185 @@ class MainBot<T extends IMainBot> {
     this.updateExchangeCredentials = this.updateExchangeCredentials.bind(this)
     this.botUpdateGlobalVars = this.botUpdateGlobalVars.bind(this)
     this.connectRedisSub()
+  }
+
+  /**
+   * Arm the restart-time exchange-probe budget. No-op outside a service
+   * restart, so normal running behaviour is byte-identical.
+   */
+  protected beginRestartProbeBudget() {
+    this.restartProbeStartedAt =
+      this.serviceRestart && restartProbeBudgetMs > 0 ? +new Date() : 0
+    this.restartProbeSkipped = 0
+  }
+
+  /**
+   * True once this bot has spent its whole budget asking the exchange about
+   * orders during re-hydration. Callers skip the remaining lookups; the
+   * orders keep their local state and are picked up by the mechanisms that
+   * already own that job — the user stream, the reconcile sweep and the
+   * fill-failsafe. Nothing is lost that was not already being lost: the
+   * lookups this trips on are the ones returning no data anyway.
+   */
+  protected restartProbeExhausted() {
+    if (!this.restartProbeStartedAt) return false
+    if (+new Date() - this.restartProbeStartedAt < restartProbeBudgetMs) {
+      return false
+    }
+    this.restartProbeSkipped += 1
+    return true
+  }
+
+  /** Disarm the budget and report the shortfall, if any, exactly once. */
+  protected endRestartProbeBudget(context: string) {
+    if (this.restartProbeStartedAt && this.restartProbeSkipped) {
+      this.handleWarn(
+        `Restart order check gave up after ${restartProbeBudgetMs}ms in ${context}: ${this.restartProbeSkipped} order(s) left unprobed — reconcile will pick them up`,
+      )
+    }
+    this.restartProbeStartedAt = 0
+    this.restartProbeSkipped = 0
+  }
+
+  /**
+   * Open an order-check run. Everything quarantine-related is scoped to a run:
+   * strikes are counted once per run, and the end-of-run summary is what the
+   * user sees, rather than one message per order.
+   */
+  protected beginOrderCheckRun() {
+    this.orderCheckRunId = v4()
+    this.newlyQuarantined = []
+    this.quarantineSkipped = 0
+  }
+
+  /** Close the run and report both halves once. */
+  protected endOrderCheckRun() {
+    if (this.quarantineSkipped) {
+      this.handleLog(
+        `Skipped ${this.quarantineSkipped} quarantined order(s) — not polled. Restart the bot to re-check them.`,
+      )
+    }
+    if (this.newlyQuarantined.length) {
+      const n = this.newlyQuarantined.length
+      this.handleWarn(
+        `Quarantined ${n} order(s) the exchange reports as non-existent after ${orderQuarantineStrikes} checks: ${this.newlyQuarantined
+          .slice(0, 10)
+          .join(', ')}${n > 10 ? ' …' : ''}`,
+      )
+      // `cbEmit` is the core-safe user-alert hook (main-app maps it to a bot
+      // warning). Grid's override suppresses alerts before `finishLoad`, so on
+      // a restart the log line above is the reliable half.
+      this.cbEmit(
+        false,
+        `${n} order${
+          n === 1 ? '' : 's'
+        } could not be found on the exchange after ${orderQuarantineStrikes} checks and will no longer be polled. Trading is unaffected — the bot still receives live updates for them. Restarting the bot re-checks them.`,
+      )
+    }
+    this.orderCheckRunId = ''
+    this.newlyQuarantined = []
+    this.quarantineSkipped = 0
+  }
+
+  /** Should this order be skipped by the polling loops? */
+  protected isOrderQuarantined(order: Order) {
+    if (!orderQuarantineStrikes) return false
+    if (!order.quarantine?.since) return false
+    this.quarantineSkipped += 1
+    return true
+  }
+
+  /**
+   * Record one definitive not-found for an order and quarantine it once the
+   * strikes add up. Called only when {@link isDefinitiveOrderNotFound} is true
+   * — never on a timeout, a rate-limit or any other transient failure.
+   */
+  protected noteOrderNotFound(order: Order, reason: string) {
+    if (!orderQuarantineStrikes) return
+    const now = +new Date()
+    const runId = this.orderCheckRunId || `${now}`
+    // Too young to judge. A venue that says "unknown order id" about an order
+    // placed minutes ago is describing its own propagation lag. Use the most
+    // recent timestamp we have, and refuse to judge at all when we have none —
+    // both choices err towards leaving the order alone.
+    const lastKnownAt = Math.max(order.transactTime ?? 0, order.updateTime ?? 0)
+    if (!lastKnownAt || now - lastKnownAt < orderQuarantineMinAgeMs) return
+    const current = order.quarantine
+    // Already quarantined, or already struck in this run: nothing new was learned.
+    if (current?.since || (current && current.runId === runId)) return
+    const next: OrderQuarantine = {
+      strikes: (current?.strikes ?? 0) + 1,
+      firstAt: current?.firstAt ?? now,
+      lastAt: now,
+      reason,
+      runId,
+    }
+    if (next.strikes >= orderQuarantineStrikes) {
+      next.since = now
+      this.newlyQuarantined.push(order.clientOrderId)
+    }
+    order.quarantine = next
+    this.setOrder(order)
+    this.updateOrderOnDb(order)
+  }
+
+  /**
+   * Drop quarantine for every order this bot holds. Called on a user-initiated
+   * start — the manual escape hatch, so a user who believes their orders are
+   * real can always force a fresh look without an operator.
+   */
+  protected async clearAllOrderQuarantine(why: string) {
+    if (!orderQuarantineStrikes) return
+    const cleared = this.allOrders.filter((o) => o.quarantine)
+    if (!cleared.length) return
+    for (const o of cleared) {
+      delete o.quarantine
+      this.setOrder(o, false)
+    }
+    this.setOrdersToRedis(this.botId, false)
+    // Explicit `$unset`, not `updateOrderOnDb`: that spreads the order into a
+    // `$set`, so a key deleted from the JS object is merely absent from the
+    // update and Mongo keeps the old value. The flag would then come back the
+    // next time orders were loaded from the DB — an escape hatch that only
+    // worked until the next restart is worse than none.
+    await this.ordersDb
+      .updateData(
+        { clientOrderId: { $in: cleared.map((o) => o.clientOrderId) } },
+        { $unset: { quarantine: '' } },
+      )
+      .catch((e) =>
+        this.handleWarn(`Cannot clear order quarantine in DB: ${e}`),
+      )
+    this.handleLog(
+      `Cleared order quarantine on ${cleared.length} order(s) (${why}) — they will be polled again`,
+    )
+  }
+
+  /**
+   * The venue answered for this order, so whatever we had counted against it is
+   * void. Strikes are documented as *consecutive* not-founds and this is what
+   * makes that true: without it they accumulate for the life of the order, so
+   * three unrelated propagation blips months apart would quarantine a live
+   * order. The merge path drops the flag on its own, but only on the branches
+   * that write the order back — an order that resolves *unchanged* takes
+   * neither `setOrder` nor `updateOrderOnDb`, which is the common case for a
+   * resting limit order and exactly where strikes would go stale.
+   */
+  protected clearOrderStrikes(order: Order) {
+    if (!order.quarantine) return
+    delete order.quarantine
+    this.setOrder(order, false)
+    this.ordersDb
+      .updateData(
+        { clientOrderId: order.clientOrderId },
+        { $unset: { quarantine: '' } },
+      )
+      .catch(() => undefined)
+  }
+
+  /** How many of this bot's orders are currently not being polled. */
+  get quarantinedOrderCount() {
+    return this.allOrders.filter((o) => o.quarantine?.since).length
   }
 
   startMethod(name: string) {
@@ -975,10 +1319,7 @@ class MainBot<T extends IMainBot> {
     }
     const { uuid, keysType, provider, okxSource, bybitHost, subaccount } =
       exchange
-    let { key, secret, passphrase } = exchange
-    key = decrypt(key)
-    secret = decrypt(secret)
-    passphrase = passphrase ? decrypt(passphrase) : ''
+    const { key, secret, passphrase } = await resolveConnection(exchange)
     return {
       uuid,
       key,
@@ -1442,87 +1783,148 @@ class MainBot<T extends IMainBot> {
         this.data?.statusReason === subType
       )
     ) {
-      const lookAfter = +new Date() - 24 * 60 * 60 * 1000
-      const notDeleted = await this.messagesDb.countData({
-        botId: this.botId,
-        userId: this.userId,
-        subType,
-        isDeleted: { $ne: true },
-        showUser: true,
-      })
-      const notDeletedCount = notDeleted.data?.result ?? 0
-      if (!force && notDeletedCount > 0) {
-        return
-      }
-      let save = true
+      // How many rows this occurrence is allowed to occupy — see
+      // `getSubTypeLogPolicy`. This REPLACES the count-then-insert gate that used
+      // to live here. That gate asked "does a live visible row already exist?",
+      // which is the right question asked in a way that cannot hold: the answer
+      // is stale the moment it returns, it read a failed query as "no" and wrote
+      // anyway, and it filtered on `showUser:true` so no hidden row was ever
+      // covered by it. Uniqueness is now the database's job
+      // (`botMessageCoalesceKey`), and repeats become a `count` instead of a row.
+      let policy = getSubTypeLogPolicy(subType, sendError)
       if (
-        !force &&
+        !getSubTypeBehavior(subType)?.logMode &&
         (subType === 'Not enough balance' ||
           (subType === 'Uncategorized' && isMaxDeals))
       ) {
-        const notDeletedBalance = await this.messagesDb.countData({
-          botId: this.data?.parentBotId || this.botId,
-          userId: this.userId,
-          subType,
-          time: { $gt: lookAfter },
-          showUser: true,
-        })
-        const notDeletedBalanceCount = notDeletedBalance.data?.result ?? 0
-        const getLast = this.errorsMap.get(subType)
-        save = notDeletedBalanceCount === 0 || !((getLast ?? 0) >= lookAfter)
+        // These two carried a bespoke "at most one per 24h" branch. Expressed as
+        // a policy it is just a daily coalesce window, and an admin can now
+        // change it without a deploy. The window is calendar-aligned where the
+        // old branch was rolling — one row per UTC day rather than one per 24h
+        // since the last — which is the only behaviour change here.
+        policy = { mode: 'coalesce', windowMs: 24 * 60 * 60 * 1000 }
+      }
+      const bucket = logPolicyBucket(policy, time)
+
+      if (!debug) {
+        if (setError) {
+          this.handleError(errorText)
+        } else {
+          this.handleWarn(errorText)
+        }
+      }
+      this.errorsMap.set(subType, +new Date())
+
+      const messageBotId = this.data?.parentBotId || this.botId
+      const messageType = setError
+        ? MessageTypeEnum.error
+        : MessageTypeEnum.warning
+      const symbol = this.data?.settings.pair[0]
+      const exchange = this.data?.exchange
+      // Immutable identity of the row, applied only when one is created.
+      const onInsert = {
+        userId: this.userId,
+        botId: messageBotId,
+        botType: this.data?.parentBotId
+          ? this.botType === BotType.dca
+            ? BotType.hedgeDca
+            : BotType.hedgeCombo
+          : this.botType,
+        subType,
+        showUser: sendError,
+        // A suppressed message is born dismissed: it is kept only so the admin
+        // Bot Errors page can count it, and the tombstone TTL reaps it on age.
+        isDeleted: !sendError,
+        paperContext: !!this.data?.paperContext,
+        terminal,
+        firstTime: time,
+        created: new Date(),
+      }
+      // Refreshed on every occurrence, so a coalesced row reports the LATEST
+      // state of the condition rather than a snapshot of the first time it fired.
+      const onEvery = {
+        botName,
+        type: messageType,
+        message: messageToSet,
+        fullMessage: message,
+        time,
+        symbol,
+        exchange,
+        updated: new Date(),
       }
 
-      if (save) {
-        if (!debug) {
-          if (setError) {
-            this.handleError(errorText)
-          } else {
-            this.handleWarn(errorText)
+      let firstOccurrence = true
+      let savedId: string | null = null
+
+      if (bucket === null) {
+        const savedMessage = await this.messagesDb.createData({
+          ...onInsert,
+          ...onEvery,
+        })
+        if (savedMessage.status === StatusEnum.ok && savedMessage.data) {
+          savedId = `${savedMessage.data._id}`
+        }
+      } else {
+        const key = {
+          userId: this.userId,
+          botId: messageBotId,
+          subType,
+          showUser: sendError,
+          bucket,
+        }
+        // `$inc` makes "is this the first occurrence in this window?" a property
+        // of the write itself rather than of a separate read: count===1 means
+        // this call created the row. Nothing else can observe a different answer.
+        const upserted = await this.messagesDb.updateData(
+          key,
+          {
+            // `bucket` rides in $setOnInsert rather than the key spread so the
+            // `always` path above can share `onInsert` without carrying a null.
+            $setOnInsert: { ...onInsert, bucket },
+            $set: onEvery,
+            $inc: { count: 1 },
+          },
+          true,
+          false,
+          true,
+        )
+        if (upserted.status === StatusEnum.ok && upserted.data) {
+          savedId = `${upserted.data._id}`
+          firstOccurrence = (upserted.data.count ?? 1) <= 1
+        } else {
+          // Two legs of the same bot can reach an unset key together and one
+          // loses on E11000. The row it wanted now exists, so fold into it —
+          // never re-raise, or a race would become the notification the whole
+          // coalescing exists to prevent.
+          firstOccurrence = false
+          const folded = await this.messagesDb.updateData(key, {
+            $set: onEvery,
+            $inc: { count: 1 },
+          })
+          if (folded.status === StatusEnum.notok) {
+            this.handleWarn(
+              `Cannot record bot message ${subType} | ${upserted.reason}`,
+            )
           }
         }
-        this.errorsMap.set(subType, +new Date())
-        const savedMessage = await this.messagesDb.createData({
-          userId: this.userId,
-          botId: this.data?.parentBotId || this.botId,
+      }
+
+      if (savedId && sendError && firstOccurrence) {
+        _id = savedId
+        this.emit('bot message', {
           botName,
-          botType: this.data?.parentBotId
-            ? this.botType === BotType.dca
-              ? BotType.hedgeDca
-              : BotType.hedgeCombo
-            : this.botType,
-          type: setError ? MessageTypeEnum.error : MessageTypeEnum.warning,
+          _id,
+          type: messageType,
           message: messageToSet,
           time,
-          subType,
-          paperContext: !!this.data?.paperContext,
           terminal,
-          isDeleted: !sendError,
-          showUser: sendError,
-          fullMessage: message,
-          symbol: this.data?.settings.pair[0],
-          exchange: this.data?.exchange,
+          symbol,
+          exchange,
+          // Additive: lets the dashboard recognise e.g. a Quantitative Rules
+          // cooldown warning without parsing the message text. No event rename.
+          subType,
         })
-        if (
-          savedMessage.status === StatusEnum.ok &&
-          savedMessage.data &&
-          sendError
-        ) {
-          _id = `${savedMessage.data._id}`
-          this.emit('bot message', {
-            botName,
-            _id,
-            type: setError ? MessageTypeEnum.error : MessageTypeEnum.warning,
-            message: messageToSet,
-            time,
-            terminal,
-            symbol: this.data?.settings.pair[0],
-            exchange: this.data?.exchange,
-            // Additive: lets the dashboard recognise e.g. a Quantitative Rules
-            // cooldown warning without parsing the message text. No event rename.
-            subType,
-          })
-          this.cbEmit(setError, messageToSet)
-        }
+        this.cbEmit(setError, messageToSet)
       }
     }
 
@@ -1716,6 +2118,11 @@ class MainBot<T extends IMainBot> {
       )
       this.data.notEnoughBalance.thresholdPassed = true
       this.data.notEnoughBalance.thresholdPassedTime = +new Date()
+      // Persist + broadcast this transition too. It previously relied on the
+      // caller's earlier `updateData` happening to flush the same mutated
+      // object, so the arming edge was never announced to subscribers the way
+      // the disarming edge was.
+      needUpdate = true
     }
     if (needUpdate) {
       this.updateData({
@@ -1729,11 +2136,28 @@ class MainBot<T extends IMainBot> {
     }
   }
 
+  /**
+   * Counter key for the not-enough-balance guard.
+   *
+   * Keyed on the RESOURCE that is actually exhausted — the (asset, side) pair —
+   * not on the individual order. A spot balance is shared by every deal and
+   * every grid level on that symbol, so if one sell is unfundable they all are.
+   *
+   * The previous scheme included `order.price`, which defeated the guard
+   * entirely: ~88% of spot orders are MARKET and carry the live market price,
+   * so consecutive retries each landed on a fresh counter starting at 0 and
+   * never reached `notEnoughBalanceThreshold`. Measured on prod, that was 3.3
+   * attempts per key against a threshold of 10 — 75% of retries reached the
+   * exchange with the guard permanently disarmed. It also made the map
+   * unbounded (one entry per price tick ever seen; one prod bot held 1,110
+   * keys accumulated over 10 months).
+   *
+   * Blocking is still gated on a real balance check at the call site, so
+   * collapsing distinct orders onto one counter cannot wrongly reject a
+   * fundable order — it only decides when the check is worth doing.
+   */
   private getNotEnoughOrdersIdByOrder(order: Order) {
-    const price = `${order.price}`.replace('.', '')
-    return this.botType === BotType.grid
-      ? `${price}@${order.side}`
-      : `${order.dealId}@${order.side}@${price}`
+    return `${order.symbol}@${order.side}`
   }
 
   @IdMute(mutex, (order: Order) => `notEnoughBalance${order.botId}`)
@@ -1756,12 +2180,37 @@ class MainBot<T extends IMainBot> {
     if (!this.data.notEnoughBalance.orders) {
       this.data.notEnoughBalance.orders = {}
     }
+    // Counters written under an older key scheme can never be matched by the
+    // current one, so they would sit in the doc forever (and keep
+    // `thresholdPassed` latched on evidence that no longer applies). Drop them
+    // the first time a bot writes under the new scheme.
+    if (this.data.notEnoughBalance.keyVersion !== notEnoughBalanceKeyVersion) {
+      this.data.notEnoughBalance.orders = {}
+      this.data.notEnoughBalance.thresholdPassed = false
+      this.data.notEnoughBalance.thresholdPassedTime = 0
+      this.data.notEnoughBalance.keyVersion = notEnoughBalanceKeyVersion
+    }
     if (!this.data.notEnoughBalance.orders[id] && inc > 0) {
       this.data.notEnoughBalance.orders[id] = 0
     }
     this.data.notEnoughBalance.orders[id] += inc
+    // Cap the counter. It is a trip-wire, not a tally: without a ceiling a
+    // stuck order reaches five figures (16,987 was observed on prod), and the
+    // `-1` decrement on a recovered balance would then need thousands of
+    // successes to fall back under the threshold — the guard could never
+    // disarm itself.
+    if (
+      this.data.notEnoughBalance.orders[id] >
+      this.notEnoughBalanceThreshold + 1
+    ) {
+      this.data.notEnoughBalance.orders[id] = this.notEnoughBalanceThreshold + 1
+    }
     if (this.data.notEnoughBalance.orders[id] <= 0 || reset) {
       delete this.data.notEnoughBalance.orders[id]
+      // The constraint is gone (an order filled, or the balance covered it), so
+      // drop the cooldown too — the next shortfall should start a fresh window
+      // at `minMs` rather than resume a wide one.
+      notEnoughBalanceBackoff.clear([this.botId, id])
     }
     this.updateData({
       notEnoughBalance: this.data.notEnoughBalance,
@@ -2382,15 +2831,26 @@ class MainBot<T extends IMainBot> {
                         parentBotId: this.data.parentBotId,
                         _id: { $ne: new Types.ObjectId(this.botId) },
                       })
-                if (findOther.status === StatusEnum.ok) {
+                // `readData` is a findOne: a miss returns `status: ok` with
+                // `result: undefined`, so gating on the status alone is not
+                // enough. A hedge child whose sibling leg has been deleted
+                // dereferenced undefined here and threw out of loadData() —
+                // and start() awaits loadData() OUTSIDE its try/catch, so the
+                // rejection escaped the bot entirely: no `restartFinished` to
+                // the parent (silent restart straggler), `locked` never
+                // cleared, bot inert until the next restart, which failed
+                // identically. Two orphaned combo bots were the recurring
+                // "N-2" combo shortfall on every restart up to 2026-08-06.
+                const other =
+                  findOther.status === StatusEnum.ok
+                    ? findOther.data.result
+                    : undefined
+                if (other) {
                   shouldCheck =
-                    this.data.exchangeUUID ===
-                      findOther.data.result.exchangeUUID &&
+                    this.data.exchangeUUID === other.exchangeUUID &&
                     [this.data.settings.pair]
                       .flat()
-                      .some((p) =>
-                        findOther.data.result.settings.pair.includes(p),
-                      )
+                      .some((p) => [other.settings?.pair].flat().includes(p))
                 }
                 if (shouldCheck) {
                   if (!this.hedge) {
@@ -2816,9 +3276,43 @@ class MainBot<T extends IMainBot> {
         }
       }
       if (!finish) {
+        // Hard-auth short-circuit. An expired / revoked key is a PERMANENT
+        // account condition, but `BotStatusEnum.error` is a soft status the
+        // price-update path clears via `restoreFromRangeOrError()`, so nothing
+        // gated the next attempt: one bot re-asked a dead Bybit key ~2/min for
+        // 2.2h+ while sitting at `status: 'open'`. Serve the exchange's OWN
+        // last rejection from a short Redis cooldown instead of calling the
+        // venue again. Downstream is unchanged — callers already handle the
+        // empty/undefined result an auth failure produces today.
+        const authUUID = `${this.data?.exchangeUUID ?? ''}`
+        if (authUUID) {
+          const cooldown = await AuthFailureGuard.check(authUUID)
+          if (cooldown.failed && cooldown.reason) {
+            // debug, not info: the actionable error is already reported on
+            // every re-probe, so a per-tick line here would just move the
+            // flood from the error log to the out log.
+            this.handleDebug(
+              `Balance check skipped, exchange auth cooldown until ${new Date(
+                cooldown.until ?? 0,
+              ).toISOString()}: ${cooldown.reason}`,
+            )
+            if (returnData) {
+              return asset
+            }
+            return
+          }
+        }
         const balances = await this.exchange.getBalance()
         this.handleDebug('Get balance')
         if (balances.status === StatusEnum.notok) {
+          // Open/widen the cooldown only for a real, venue-returned hard-auth
+          // rejection. Everything else stays exactly as transient as it is now.
+          if (authUUID && isHardAuthFailure(`${balances.reason}`)) {
+            await AuthFailureGuard.record({
+              exchangeUUID: authUUID,
+              reason: `${balances.reason}`,
+            })
+          }
           this.handleErrors(balances.reason, 'checkAssets()', 'getBalance')
           if (returnData) {
             return asset
@@ -3093,6 +3587,12 @@ class MainBot<T extends IMainBot> {
       ) {
         const local = this.getOrderFromMap(id)
         if (local) {
+          if (local.orderId === noExchangeOrderId) {
+            this.endMethod(_id)
+            return this.exchange.returnBad()(
+              new Error(orderNeverReachedExchange),
+            )
+          }
           id = `${local.orderId}`
         }
       }
@@ -3186,6 +3686,7 @@ class MainBot<T extends IMainBot> {
         return null
       }
 
+      let neverReachedExchange = false
       if (byId) {
         let find = this.getOrderFromMap(id)
         if (!find) {
@@ -3193,13 +3694,16 @@ class MainBot<T extends IMainBot> {
             ?.result
         }
         if (find) {
+          neverReachedExchange = find.orderId === noExchangeOrderId
           id = `${find.orderId}`
         }
       }
-      const request = await this.exchange.getOrder({
-        symbol,
-        newClientOrderId: id,
-      })
+      const request = neverReachedExchange
+        ? this.exchange.returnBad()(new Error(orderNeverReachedExchange))
+        : await this.exchange.getOrder({
+            symbol,
+            newClientOrderId: id,
+          })
       if (request.status === StatusEnum.notok) {
         this.handleLog(
           `${request.reason}, handleUnknownOrder(), Send get order request ${origId}, ${symbol}, ${id}`,
@@ -3492,6 +3996,14 @@ class MainBot<T extends IMainBot> {
       return null
     }
     const order = { ...find }
+    // The venue just told us about this order, so it demonstrably exists and
+    // any decision to stop polling it is void. This is the push half of the
+    // quarantine invariant, and it has to be explicit: `{ ...find }` copies the
+    // whole order, so without this a quarantined order that started filling
+    // would keep its flag and stay unpolled while it was visibly alive.
+    // (The pull half is free — `mergeCommonOrderWithOrder` rebuilds from the
+    // exchange payload and never re-adds `quarantine`.)
+    delete order.quarantine
     if (
       msg.orderStatus === 'CANCELED' ||
       msg.orderStatus === 'FILLED' ||
@@ -3870,6 +4382,23 @@ class MainBot<T extends IMainBot> {
       order.clientOrderId.indexOf('4b1c2ba2186cBCDEDSR') === -1 &&
       order.typeOrder !== TypeOrderEnum.fee &&
       order.typeOrder !== TypeOrderEnum.stab
+    )
+  }
+  /**
+   * Is this order eligible for the `Compliance restriction` cooldown gate?
+   *
+   * Only orders that OPEN/INCREASE exposure are ever suppressed. Closing orders
+   * (TP, grid stop, liquidation, anything reduceOnly) always go to the exchange
+   * — a jurisdiction block that lifts must never leave a position stranded
+   * behind a cooldown of ours. Same principle as the Quantitative Rules gate.
+   */
+  protected isComplianceGateable(order: Order): boolean {
+    return (
+      this.needToSendOrder(order) &&
+      !order.reduceOnly &&
+      order.typeOrder !== TypeOrderEnum.dealTP &&
+      order.typeOrder !== TypeOrderEnum.stop &&
+      order.typeOrder !== TypeOrderEnum.liquidation
     )
   }
   /**
@@ -4551,13 +5080,27 @@ class MainBot<T extends IMainBot> {
       }
       this.data.workingShift = this.trimWorkingShift(this.data.workingShift)
       if (this.data.status === BotStatusEnum.error) {
+        // Same key as processError writes and counts under. Clearing by
+        // `this.botId` never matched a hedge bot's rows (they are filed under the
+        // parent), so recovery could not reopen the per-subType throttle and the
+        // bot fell silent on that subType for good. The message stream is
+        // parent-scoped by construction — every leg files into it — so a leg
+        // recovering clears the parent's set; a leg still in error simply
+        // re-raises on its next occurrence, which is the non-hedge behaviour too.
+        // The futuresLiquidation exemption below is deliberate — leave it.
         this.messagesDb.updateManyData(
           {
-            botId: this.botId,
+            botId: this.data?.parentBotId || this.botId,
             isDeleted: false,
             subType: { $ne: futuresLiquidation },
           },
-          { $set: { isDeleted: true } },
+          // `$unset bucket` drops these rows out of `botMessageCoalesceKey`, so
+          // the next occurrence inserts a fresh visible row. Without it the
+          // recovery clear would hide the row while leaving it as the coalescing
+          // target, and the error could never be raised again — exactly the
+          // "bot fell silent on that subType for good" failure this clear exists
+          // to prevent.
+          { $set: { isDeleted: true }, $unset: { bucket: '' } },
         )
         const update = { showErrorWarning: 'none' }
         this.updateData(update)
@@ -4956,6 +5499,17 @@ class MainBot<T extends IMainBot> {
       if (!processedOrder) {
         let request: BaseReturn<CommonOrder> | undefined
         const notEnoughBalanceId = this.getNotEnoughOrdersIdByOrder(order)
+        // Armed = the failure counter has tripped and the balance really is
+        // short, so this order is in the suppression regime. Only rejections
+        // from that regime widen the cooldown: the counter trips within seconds
+        // (the engine retries fast), so escalating on every raw rejection would
+        // reach the ceiling before the guard ever engaged and a shortfall that
+        // clears in a minute would still be held for an hour.
+        let notEnoughBalanceArmed = false
+        // Set when THIS attempt was served from the local cooldown rather than
+        // the venue. A suppressed attempt must never widen the window, or it
+        // would slide forever and the bot could not self-heal.
+        let notEnoughBalanceShortCircuit = false
         if (this.data.notEnoughBalance?.thresholdPassed) {
           if (
             (this.data.notEnoughBalance.orders?.[notEnoughBalanceId] ?? 0) >
@@ -4967,13 +5521,35 @@ class MainBot<T extends IMainBot> {
             const { balance, required } =
               await this.getAssetBalanceAndRequiredByOrder(order)
             if ((balance?.free ?? 0) < required) {
-              this.handleDebug(
-                `${this.notEnoughBalanceLogPrefix} Not enough balance for order id ${notEnoughBalanceId} ${order.clientOrderId}. Balance: ${balance?.free}, required: ${required}`,
-              )
-              request = {
-                status: StatusEnum.notok,
-                reason: `Not enough balance`,
-                data: null,
+              notEnoughBalanceArmed = true
+              // Suppress on a widening window rather than continuously. The
+              // block decision above reads `checkAssets` WITHOUT `direct`, i.e.
+              // the cached `balances` collection, which can lag badly (two
+              // weeks was observed on prod for a thinly-traded asset). Letting
+              // one attempt through per window makes the exchange — the only
+              // authority — break the tie, so an under-reporting cache can
+              // never latch a bot off permanently.
+              const cooldown = await notEnoughBalanceBackoff.check([
+                this.botId,
+                notEnoughBalanceId,
+              ])
+              if (cooldown.suppressed) {
+                notEnoughBalanceShortCircuit = true
+                this.handleDebug(
+                  `${this.notEnoughBalanceLogPrefix} Not enough balance for order id ${notEnoughBalanceId} ${order.clientOrderId}. Balance: ${balance?.free}, required: ${required}. Suppressed until ${new Date(cooldown.until).toISOString()} (attempt ${cooldown.attempt})`,
+                )
+                request = {
+                  status: StatusEnum.notok,
+                  reason: `Not enough balance`,
+                  data: null,
+                }
+              } else {
+                // Window elapsed (or never opened): let this one reach the
+                // exchange. If it is rejected, the error path widens the
+                // window; if it fills, the success path clears it.
+                this.handleDebug(
+                  `${this.notEnoughBalanceLogPrefix} Probing exchange for order id ${notEnoughBalanceId} ${order.clientOrderId}. Cached balance: ${balance?.free}, required: ${required}`,
+                )
               }
             } else {
               this.handleDebug(
@@ -5034,7 +5610,66 @@ class MainBot<T extends IMainBot> {
             }
           }
         }
+        // Compliance / jurisdiction restriction short-circuit. A
+        // `Compliance restriction` rejection (e.g. Kraken
+        // "EAccount:Invalid permissions:USDT trading restricted for DE.") is a
+        // PERMANENT account condition — no retry can ever succeed. The engine
+        // still re-attempts every few minutes because BotStatusEnum.error is a
+        // soft status that placeOrders clears via restoreFromRangeOrError(), so
+        // one account produced 82 openOrder calls in 4h. Replay the exchange's
+        // OWN last rejection from a short Redis cooldown instead of calling the
+        // venue again: everything downstream (bot status, user message, order
+        // cleanup) runs exactly as before — only the pointless REST call is gone.
+        let complianceShortCircuit = false
+        if (!request && this.isComplianceGateable(order)) {
+          const cooldown = await ComplianceGuard.check(
+            `${this.data.exchangeUUID}`,
+            requestData.symbol,
+          )
+          if (cooldown.restricted && cooldown.reason) {
+            complianceShortCircuit = true
+            this.handleLog(
+              `Order ${order.clientOrderId} not sent: ${
+                requestData.symbol
+              } is under a compliance restriction cooldown until ${new Date(
+                cooldown.until ?? 0,
+              ).toISOString()}. Exchange reason: ${cooldown.reason}`,
+            )
+            request = {
+              status: StatusEnum.notok,
+              reason: cooldown.reason,
+              data: null,
+            }
+          }
+        }
         request = request ?? (await this.exchange.openOrder(requestData))
+        if (
+          request.status === StatusEnum.notok &&
+          notEnoughBalanceArmed &&
+          !notEnoughBalanceShortCircuit &&
+          this.isErrorNotEnoughBalance(request.reason)
+        ) {
+          // A REAL rejection of a probe opens/widens the window. Suppressed
+          // attempts are excluded so the window can always expire.
+          await notEnoughBalanceBackoff.record(
+            [this.botId, notEnoughBalanceId],
+            request.reason,
+          )
+        }
+        if (
+          request.status === StatusEnum.notok &&
+          !complianceShortCircuit &&
+          this.isComplianceGateable(order) &&
+          this.getErrorSubType(request.reason) === complianceRestriction
+        ) {
+          // A REAL rejection from the venue (never a replayed one, or the window
+          // would slide forever and never self-heal) opens/refreshes the window.
+          await ComplianceGuard.record({
+            exchangeUUID: `${this.data.exchangeUUID}`,
+            symbol: requestData.symbol,
+            reason: request.reason,
+          })
+        }
         if (
           request.status === StatusEnum.notok &&
           request.reason === 'Order not found after execution'
@@ -5205,7 +5840,17 @@ class MainBot<T extends IMainBot> {
           }
           if (this.orders && this.orders.size > 0) {
             this.deleteOrder(order.clientOrderId)
-            this.updateOrderOnDb({ ...order, status: 'CANCELED' })
+            // Only persist a CANCELED record for an order that actually
+            // reached the venue. When a local guard served the rejection the
+            // order never existed anywhere but in this process, and
+            // `updateOrderOnDb` UPSERTS on a clientOrderId that is freshly
+            // minted per attempt — so every suppressed retry created a brand
+            // new row describing an order that never was. Production carried
+            // ~6.6k-10.7k such rows/hour, and 2.5M of them from ten bots
+            // accounted for 20.3% of the whole `orders` collection.
+            if (!notEnoughBalanceShortCircuit && !complianceShortCircuit) {
+              this.updateOrderOnDb({ ...order, status: 'CANCELED' })
+            }
           }
           if (returnError) {
             this.endMethod(_id)
@@ -5586,20 +6231,27 @@ class MainBot<T extends IMainBot> {
     if (force) {
       delete filter.$and
     }
-    await this.ordersDb
-      .updateData(filter, { ...o }, false, true)
-      .then((res) => {
-        if (res.status === StatusEnum.notok) {
-          return this.handleErrors(
-            res.reason,
-            'limitOrders()',
-            `Error saving order ${o.clientOrderId}`,
-            false,
-            false,
-            false,
-          )
-        }
-      })
+    // An order whose in-memory copy has no quarantine must not keep one in the
+    // DB. Both paths that clear it — `mergeCommonOrderWithOrder` rebuilding
+    // from a successful lookup, and the user-stream converter — produce an
+    // object with the key simply absent, which a `$set`-shaped update leaves
+    // untouched. Without the explicit `$unset`, an order that recovered would
+    // be re-quarantined the next time orders were loaded from Mongo.
+    const update = o.quarantine
+      ? { ...o }
+      : { ...o, $unset: { quarantine: '' as const } }
+    await this.ordersDb.updateData(filter, update, false, true).then((res) => {
+      if (res.status === StatusEnum.notok) {
+        return this.handleErrors(
+          res.reason,
+          'limitOrders()',
+          `Error saving order ${o.clientOrderId}`,
+          false,
+          false,
+          false,
+        )
+      }
+    })
   }
   /** Map order to grid */
 
@@ -5698,6 +6350,35 @@ class MainBot<T extends IMainBot> {
       totalTradeQuantity: order.executedQty,
       quantity: order.executedQty,
     }
+  }
+
+  /**
+   * Some venues pool every collateral currency into ONE cross-margin account
+   * (Kraken Futures' flex account), so the quote asset can read 0 while the
+   * account is perfectly able to open the deal — a wallet funded only in EUR
+   * still margins a USD-quoted perpetual off that EUR. Sizing off the quote
+   * balance alone rejects those deals with "available: 0 USD".
+   *
+   * Consulted ONLY after the plain quote-balance check has already failed, so
+   * the common path costs no extra request. Returns `available` unchanged for
+   * every non-pooled venue and on any error: a venue with no opinion must
+   * never widen or block sizing. The pooled figure is USD-denominated, so it
+   * is trusted only when USD actually is the quote asset.
+   */
+  protected async pooledMarginOrKeep(
+    quoteAsset: string,
+    available: number,
+  ): Promise<number> {
+    if (!this.futures || this.coinm || quoteAsset !== 'USD' || !this.exchange) {
+      return available
+    }
+    const res = await this.exchange.getMarginAvailableUsd()
+    if (res.status !== StatusEnum.ok || typeof res.data !== 'number') {
+      return available
+    }
+    // The venue already nets margin committed to open positions, so this is
+    // what can actually be committed now. Never shrink what the caller found.
+    return Math.max(available, res.data)
   }
 
   get futures() {

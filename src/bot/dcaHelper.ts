@@ -85,7 +85,7 @@ import {
   LWConditionEnum,
 } from '../../types'
 import { MathHelper } from '../utils/math'
-import MainBot, { notEnoughErrors } from './main'
+import MainBot, { notEnoughErrors, isDefinitiveOrderNotFound } from './main'
 import utils from '../utils'
 import {
   gt,
@@ -169,6 +169,28 @@ const mutexPriceConcurrently = new IdMutex(30)
 const mutexOpenDealBySignal = new IdMutex(15)
 
 const notionalReasons = ['The order funds should be more than', 'NOTIONAL']
+
+/**
+ * Exchange rejections that mean "there is nothing left to close" — the position
+ * is already flat (or on the other side), so a reduce-only closing order can
+ * never be accepted. Retrying is pointless; the deal must be booked closed.
+ */
+const positionAlreadyClosedReasons = [
+  // Hyperliquid
+  'reduce only order would increase position',
+  // Binance -2022
+  'ReduceOnly Order is rejected',
+  // Bybit
+  'current position is zero, cannot fix reduce-only order qty',
+  'reduce-only order has same side with current position',
+  // OKX 51169 / 51023
+  "You don't have any positions in this contract",
+  'Position does not exist',
+  // dYdX — camelCase; matched via the normalisation in
+  // isPositionAlreadyClosedReason, not literally
+  'wouldNotReducePosition',
+  'no position to close',
+]
 
 const maxTimeout = 2 ** 31 - 1
 
@@ -990,6 +1012,15 @@ function createDCABotHelper<
                     ...d,
                     initialOrders,
                     currentOrders,
+                    // `closeBySl` / `closeByTp` mean "a close is in flight in
+                    // this process". Nothing is in flight at load, so a value
+                    // restored from Redis is stale by definition — and a stale
+                    // `true` is a one-way latch: the deal is skipped by
+                    // `checkPlaceOrders` and by the close-recovery, so a close
+                    // that failed once freezes the deal permanently. The DB
+                    // load path below already resets both; this one did not.
+                    closeBySl: false,
+                    closeByTp: false,
                   },
                   false,
                 )
@@ -4895,6 +4926,20 @@ function createDCABotHelper<
       return false
     }
 
+    private isPositionAlreadyClosedReason(text: string): boolean {
+      // Venues word the same condition as prose or as a camelCase code
+      // ("no position to close" vs "wouldNotReducePosition"), so compare on
+      // letters and digits only — one entry then covers both spellings.
+      const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+      const haystack = normalize(text)
+      for (const r of positionAlreadyClosedReasons) {
+        if (haystack.indexOf(normalize(r)) !== -1) {
+          return true
+        }
+      }
+      return false
+    }
+
     async prepareTpOrder(
       findDeal: FullDeal<ExcludeDoc<Deal>>,
       slSource = false,
@@ -5163,8 +5208,35 @@ function createDCABotHelper<
             : DCADealStatusEnum.canceled
         findDeal.deal.status = status
         findDeal.deal.closeTrigger = closeTrigger
+        // A combo deal books realized profit as each minigrid round-trip
+        // completes, so a deal being cancelled can already carry real profit.
+        // `closeDeal()` is what credits the bot aggregate and the profit
+        // history, and this path never reaches it — without this the profit
+        // stays visible on the deal but is counted nowhere. A deal that never
+        // traded has zero here, so the ordinary cancel is unaffected.
+        const realized = findDeal.deal.profit
+        if (this.data && (realized.total || realized.totalUsd)) {
+          const profitBase = await this.profitBase(findDeal.deal)
+          const rate = await this.getUsdRate(findDeal.deal.symbol.symbol)
+          const commDeal = await this.getCommDeal(findDeal.deal)
+          const commUsd =
+            commDeal * (!profitBase ? 1 : findDeal.deal.lastPrice) * rate
+          realized.total -= commDeal
+          realized.totalUsd -= commUsd
+          findDeal.deal.commission = commDeal
+          this.data.profit.total += realized.total
+          this.data.profit.totalUsd += realized.totalUsd
+          this.saveProfitToDb(
+            realized.totalUsd,
+            findDeal.deal.closeTime ?? +new Date(),
+          )
+          this.updateData({ profit: this.data.profit })
+          this.emit('bot settings update', { profit: this.data.profit })
+        }
         this.saveDeal(findDeal, {
           status,
+          profit: findDeal.deal.profit,
+          commission: findDeal.deal.commission,
           closeTrigger: findDeal.deal.closeTrigger,
         })
         stop = await this.processDealClose(
@@ -5397,6 +5469,20 @@ function createDCABotHelper<
                         closeTrigger,
                         count + 1,
                       )
+                    } else if (this.isPositionAlreadyClosedReason(result)) {
+                      // The exchange says there is no position left to reduce,
+                      // so the closing order can never be placed. Without this
+                      // the deal stays open forever with no orders — see the
+                      // combo base-minigrid case, where completing the base
+                      // minigrid means the position is already flat.
+                      this.handleLog(
+                        `Close order for deal ${dealId} rejected because the position is already closed (${result}). Closing deal without order`,
+                      )
+                      if (fastClose) {
+                        await closeBuy()
+                      }
+                      this.endMethod(_id)
+                      return await this.closeDeal(this.botId, dealId)
                     } else {
                       this.handleOrderErrors(
                         result,
@@ -8708,6 +8794,8 @@ function createDCABotHelper<
       }
       const _id = this.startMethod('checkOrders')
       this.blockCheck = true
+      this.beginRestartProbeBudget()
+      this.beginOrderCheckRun()
       if (this.serviceRestart || partiallyFilled) {
         const dealOrders: Map<string, Order[]> = new Map()
         const all = this.allOrders.filter((o) =>
@@ -8739,18 +8827,33 @@ function createDCABotHelper<
           const forTPCheck = deal && (await this.isDealForTPLevelCheck(deal))
           if (activeTPSLOrders.length && deal && !forTPCheck) {
             for (const activeTPSLOrder of activeTPSLOrders) {
+              if (this.isOrderQuarantined(activeTPSLOrder)) continue
+              if (this.restartProbeExhausted()) continue
               const tpslOrderData = await this.getOrder(
                 activeTPSLOrder.clientOrderId,
                 activeTPSLOrder.symbol,
                 true,
               )
-              if (!tpslOrderData || !tpslOrderData.data) {
+              // `notok` is tested BEFORE `!data`: every failed lookup nulls
+              // `data`, so testing `!data` first made this branch unreachable
+              // and discarded the venue's reason — the one thing that separates
+              // "this order does not exist" from "the call failed".
+              if (isDefinitiveOrderNotFound(tpslOrderData)) {
+                this.handleWarn(
+                  `Order ${activeTPSLOrder.clientOrderId} not found on exchange: ${tpslOrderData?.reason}`,
+                )
+                this.noteOrderNotFound(
+                  activeTPSLOrder,
+                  `${tpslOrderData?.reason}`,
+                )
+              } else if (tpslOrderData?.status === StatusEnum.notok) {
+                this.handleWarn(`Cannot get order ${tpslOrderData.reason}`)
+              } else if (!tpslOrderData || !tpslOrderData.data) {
                 this.handleWarn(
                   `Not enough data to get order ${activeTPSLOrder.clientOrderId}`,
                 )
-              } else if (tpslOrderData.status === StatusEnum.notok) {
-                this.handleWarn(`Cannot get order ${tpslOrderData.reason}`)
               } else {
+                this.clearOrderStrikes(activeTPSLOrder)
                 const updatedOrder = await this.mergeCommonOrderWithOrder(
                   tpslOrderData.data,
                   activeTPSLOrder,
@@ -8884,12 +8987,19 @@ function createDCABotHelper<
                 newOrders = diff.new
               }
               for (const o of activeRegularOrders) {
+                if (this.isOrderQuarantined(o)) continue
+                if (this.restartProbeExhausted()) continue
                 const exchangeData = await this.getOrder(
                   o.clientOrderId,
                   o.symbol,
                   true,
                 )
-                if (!exchangeData || !exchangeData.data) {
+                if (isDefinitiveOrderNotFound(exchangeData)) {
+                  this.handleWarn(
+                    `Order ${o.clientOrderId} not found on exchange: ${exchangeData?.reason}`,
+                  )
+                  this.noteOrderNotFound(o, `${exchangeData?.reason}`)
+                } else if (!exchangeData || !exchangeData.data) {
                   this.handleWarn(
                     `Not enough data to get order ${o.clientOrderId}`,
                   )
@@ -8897,6 +9007,7 @@ function createDCABotHelper<
                   if (exchangeData.status === StatusEnum.notok) {
                     this.handleWarn(`Cannot get order ${exchangeData.reason}`)
                   } else {
+                    this.clearOrderStrikes(o)
                     const updatedOrder = await this.mergeCommonOrderWithOrder(
                       exchangeData.data,
                       o,
@@ -9043,6 +9154,8 @@ function createDCABotHelper<
           this.serviceRestart = false
         }
       }
+      this.endRestartProbeBudget('checkOrders')
+      this.endOrderCheckRun()
       this.blockCheck = false
       this.endMethod(_id)
     }
@@ -9242,6 +9355,10 @@ function createDCABotHelper<
       if (serviceRestart) {
         await this.checkOrders(this.botId)
       } else {
+        // Not a service restart — the user started or restarted this bot, which
+        // is the manual escape hatch from order quarantine: whatever we decided
+        // to stop polling, look again now.
+        await this.clearAllOrderQuarantine('bot started by user')
         await this.cancelAllOrder()
         await this.checkOrders(this.botId, true)
       }
@@ -10935,7 +11052,7 @@ function createDCABotHelper<
           : +base.origQty +
             usedGrids.reduce((acc, g) => acc + g.qty, 0) +
             additionalValue
-      const available =
+      let available =
         (this.futures
           ? this.coinm
             ? (balance?.get(ed.baseAsset.name)?.free ?? 0)
@@ -10943,6 +11060,9 @@ function createDCABotHelper<
           : this.isLong
             ? (balance?.get(ed.quoteAsset.name)?.free ?? 0)
             : balance?.get(ed.baseAsset.name)?.free) ?? 0
+      if (requiredAmount / leverage > available) {
+        available = await this.pooledMarginOrKeep(ed.quoteAsset.name, available)
+      }
       if (requiredAmount / leverage > available) {
         return {
           status: false,
@@ -12126,8 +12246,15 @@ function createDCABotHelper<
         const filledOrders = [
           ...orders.filter((o) => o.typeOrder === TypeOrderEnum.dealRegular),
         ]
+        // Reduce-funds TP orders are excluded on purpose: their quantity is
+        // already subtracted below via `reduceFundsBase` (deal.reduceFunds is
+        // appended on fill, see updateDeal dealTP/isReduce). Counting them here
+        // too subtracted the same base twice, driving the TP qty negative on
+        // deals that used reduce funds more than once.
         const filledCloseOrders = [
-          ...orders.filter((o) => o.typeOrder === TypeOrderEnum.dealTP),
+          ...orders.filter(
+            (o) => o.typeOrder === TypeOrderEnum.dealTP && !o.reduceFundsId,
+          ),
         ]
         const findDeal = this.getDeal(dealId)
         const pendingReduceFunds = findDeal
@@ -12840,6 +12967,21 @@ function createDCABotHelper<
         const minimumDeviation = +(settings.minimumDeviation ?? '0') / 100
         const volumeScale = +(settings.volumeScale ?? '1')
         const latestPrice = this.math.round(price, symbol.priceAssetPrecision)
+        // getLatestPrice() returns 0 when the exchange call fails, and callers
+        // pass that straight through. Without this bail baseQty becomes
+        // Infinity (baseOrderSize / 0), new Big() throws "Invalid number" and
+        // we still return a bogus TP order with an Infinity qty.
+        if (!latestPrice || !Number.isFinite(latestPrice)) {
+          this.handleErrors(
+            `Latest price is 0`,
+            'createInitialDealOrders',
+            'Get latest price',
+            false,
+            false,
+            false,
+          )
+          return []
+        }
         const useDca = settings.useDca
         const ordersSide = this.isLong ? OrderSideEnum.buy : OrderSideEnum.sell
         const scaleAr = this.scaleAr && settings?.useDca
@@ -12977,7 +13119,9 @@ function createDCABotHelper<
                 ? 1
                 : volumeScale ** (i - 1)
             let price = this.math.round(
-              (i === 1 ? latestPrice : orders[orders.length - 1].price) -
+              (i === 1
+                ? latestPrice
+                : (orders[orders.length - 1]?.price ?? 0)) -
                 (this.isLong ? 1 : -1) * gridStep * stepVal,
               symbol.priceAssetPrecision,
             )
@@ -12989,7 +13133,9 @@ function createDCABotHelper<
                   )[i - 1]?.minPercFromLast ?? '100'
                 ) / 100
               price = this.math.round(
-                (i === 1 ? latestPrice : orders[orders.length - 1].price) *
+                (i === 1
+                  ? latestPrice
+                  : (orders[orders.length - 1]?.price ?? 0)) *
                   (settings.strategy === StrategyEnum.long
                     ? 1 - indicatorValue
                     : 1 + indicatorValue),
@@ -13000,7 +13146,9 @@ function createDCABotHelper<
               const dcaCustomValue =
                 +((settings.dcaCustom ?? [])[i - 1]?.step ?? '1') / 100
               price = this.math.round(
-                (i === 1 ? latestPrice : orders[orders.length - 1].price) *
+                (i === 1
+                  ? latestPrice
+                  : (orders[orders.length - 1]?.price ?? 0)) *
                   (settings.strategy === StrategyEnum.long
                     ? 1 - dcaCustomValue
                     : 1 + dcaCustomValue),
@@ -13060,9 +13208,9 @@ function createDCABotHelper<
               }
             }
             if (i > 1) {
-              if (price === orders[orders.length - 1].price) {
+              if (price === (orders[orders.length - 1]?.price ?? 0)) {
                 price = this.math.round(
-                  orders[orders.length - 1].price +
+                  (orders[orders.length - 1]?.price ?? 0) +
                     (this.isLong ? -1 : 1) *
                       Number(`${1}e-${symbol.priceAssetPrecision}`),
                   symbol.priceAssetPrecision,
@@ -14404,6 +14552,20 @@ function createDCABotHelper<
       )
     }
 
+    /**
+     * The price a percentage stop loss is measured from — the deal average or
+     * its initial price, per `baseSlOn`. Single source of truth so the level
+     * and the checks that compare against it cannot drift apart.
+     */
+    private async getDealSlRefPrice(
+      deal: ExcludeDoc<Deal>,
+      avgPrice?: number,
+    ): Promise<number> {
+      return (await this.baseSlOn(deal)) === BaseSlOnEnum.avg
+        ? (avgPrice ?? deal.avgPrice)
+        : deal.initialPrice
+    }
+
     async getDealStopLossPrice(d: FullDeal<ExcludeDoc<Deal>>): Promise<number> {
       const settings = await this.getAggregatedSettings(d.deal)
       const {
@@ -14501,10 +14663,7 @@ function createDCABotHelper<
               : ((await this.getUserFee(d.deal.symbol.symbol))?.taker ?? 0) * 2)
 
           if (!isNaN(sl) && slPerc !== undefined) {
-            const ref =
-              (await this.baseSlOn(d.deal)) === BaseSlOnEnum.avg
-                ? (avgPrice ?? d.deal.avgPrice)
-                : d.deal.initialPrice
+            const ref = await this.getDealSlRefPrice(d.deal, avgPrice)
             const price = this.isLong ? ref * (sl + 1) : ref * (1 - sl)
             if (get !== price) {
               this.handleDebug(
@@ -15889,14 +16048,32 @@ function createDCABotHelper<
           multiTp,
           slPerc,
           moveSLValue,
+          avgPrice,
         } = await this.getAggregatedSettings(d.deal)
         const dealId = d.deal._id
         let closeBySl = true
         let notCheckSl = false
         let closeByMulti = false
+        // Once moveSL has fired, `slPerc` is the move value — and a positive one
+        // puts the stop on the PROFIT side of the entry, so it can only be hit
+        // coming BACK from profit. When the market is already past it on the
+        // losing side (safety orders dragged the average through it, or the
+        // check resumes after the price ran away), the bare level test below is
+        // true from the very first tick and closes the deal at a loss — the
+        // opposite of what "move SL to +N%" is for.
+        const slMovedIntoProfit =
+          !!moveSL &&
+          !!d.deal.moveSlActivated &&
+          +(slPerc ?? 0) === +(moveSLValue ?? 0) &&
+          +(slPerc ?? 0) > 0
+        const slRef = slMovedIntoProfit
+          ? await this.getDealSlRefPrice(d.deal, avgPrice)
+          : 0
         const close =
-          (this.isLong && last <= priceToClose) ||
-          (!this.isLong && last >= priceToClose)
+          ((this.isLong && last <= priceToClose) ||
+            (!this.isLong && last >= priceToClose)) &&
+          (!slMovedIntoProfit ||
+            (this.isLong ? last >= slRef : last <= slRef))
         let trailing = false
         if (
           close &&

@@ -119,9 +119,26 @@ import {
   PaperExchangeType,
   topUpUserBalance,
 } from '../exchange/paper/utils'
-import { decrypt, encrypt } from '../utils/crypto'
+import { encrypt, isEncryptKeyConfigured } from '../utils/crypto'
+import {
+  findMatchingConnection,
+  resolveConnection,
+  sealApiSecret,
+  sealConnection,
+} from '../utils/credentials'
 import logger from '../utils/logger'
 import { verifyPassword } from './handlers/password'
+// ⚠️ Note the two similarly-named helpers now in scope. `verifyPassword`
+// directly above is the SYNCHRONOUS strength/format validator and takes ONE
+// argument. `verifyPasswordHash` below is the ASYNCHRONOUS bcrypt comparison
+// and takes TWO (plaintext, stored). It is imported under a distinct name so
+// the two can never be swapped at a call site — doing so would be an
+// authentication bypass, not a type error.
+import {
+  hashPassword,
+  isBcryptHash,
+  verifyPassword as verifyPasswordHash,
+} from '../utils/password'
 import { createOrUpdateUser, findUser as _findUser } from './handlers/user'
 import { resetUser } from '../utils/user'
 import { mapDataGridOptionsToMongoOptions } from '../db/utils'
@@ -136,8 +153,11 @@ import {
   getAllOpenPositions,
   placeOrderOnExchange,
 } from './handlers/orders.handler'
-import { isCoinm } from '../utils'
-import { sendServerSideRequest } from './handlers/backtest'
+import { isCoinm, isServiceUnreachable } from '../utils'
+import {
+  BACKTEST_SERVICE_TARGET,
+  sendServerSideRequest,
+} from './handlers/backtest'
 import { MathHelper } from '../utils/math'
 import fs from 'fs'
 import Rabbit from '../db/rabbit'
@@ -212,6 +232,27 @@ const resolvers = <
       return {
         ...user,
         data: !!user.data?.result,
+      }
+    },
+    /**
+     * Whether this deployment is configured the way we recommend. Only
+     * booleans leave this resolver: the dashboard needs to know *that* a
+     * setting is missing to suggest fixing it, and nothing more. Behind auth
+     * so the answer is not readable by anyone who can reach the endpoint.
+     */
+    deploymentSecurity: async (
+      _parent: any,
+      _args: any,
+      { token }: InputRequest,
+    ) => {
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+
+      return {
+        status: StatusEnum.ok,
+        data: { encryptionKeyConfigured: isEncryptKeyConfigured() },
       }
     },
     compareBalances: async (
@@ -361,24 +402,30 @@ const resolvers = <
         return user
       }
       const { uuid } = input
+      // One connection is asked for by uuid, so find it and unwrap that one.
+      // Mapping over the filtered list would unwrap every connection the
+      // filter let through, which is the thing this path must not do.
+      const found = user.data.exchanges.find(
+        (e) =>
+          e.uuid === uuid &&
+          (paperContext
+            ? paperExchanges.includes(e.provider)
+            : !paperExchanges.includes(e.provider)),
+      )
+      if (!found) {
+        return { status: StatusEnum.ok, data: null }
+      }
+      const resolved = await resolveConnection(found)
       return {
         status: StatusEnum.ok,
-        data:
-          user.data.exchanges
-            .filter(
-              (e) =>
-                e.uuid === uuid &&
-                (paperContext
-                  ? paperExchanges.includes(e.provider)
-                  : !paperExchanges.includes(e.provider)),
-            )
-            .map((e) => ({
-              ...e,
-              key: decrypt(e.key),
-              secret: decrypt(e.secret),
-              passphrase: e.passphrase ? decrypt(e.passphrase) : e.passphrase,
-              rotationRequired: needsRotation(e),
-            }))[0] || null,
+        data: {
+          ...found,
+          key: resolved.key,
+          secret: resolved.secret,
+          // Stored falsy value preserved — see the note in `user` above.
+          passphrase: found.passphrase ? resolved.passphrase : found.passphrase,
+          rotationRequired: needsRotation(found),
+        },
       }
     },
     getUserPeriods: async (_parent: any, {}, { token, req }: InputRequest) => {
@@ -492,11 +539,12 @@ const resolvers = <
               ? paperExchanges.includes(e.provider)
               : !paperExchanges.includes(e.provider)
           ) {
-            const key = decrypt(e.key)
-            const secret = decrypt(e.secret)
-            const passphrase = e.passphrase
-              ? decrypt(e.passphrase)
-              : e.passphrase
+            // `passphrase` keeps its stored falsy value rather than the
+            // normalised '' — this shape is returned to the dashboard, and a
+            // connection with no passphrase must not start reporting one.
+            const resolved = await resolveConnection(e)
+            const { key, secret } = resolved
+            const passphrase = e.passphrase ? resolved.passphrase : e.passphrase
 
             const snapshot = resultSnapshots.data?.result?.exchangesTotal.find(
               (s) => (e.linkedTo ? s.uuid === e.linkedTo : s.uuid === e.uuid),
@@ -665,11 +713,12 @@ const resolvers = <
               ? paperExchanges.includes(e.provider)
               : !paperExchanges.includes(e.provider)
           ) {
-            const key = decrypt(e.key)
-            const secret = decrypt(e.secret)
-            const passphrase = e.passphrase
-              ? decrypt(e.passphrase)
-              : e.passphrase
+            // `passphrase` keeps its stored falsy value rather than the
+            // normalised '' — this shape is returned to the dashboard, and a
+            // connection with no passphrase must not start reporting one.
+            const resolved = await resolveConnection(e)
+            const { key, secret } = resolved
+            const passphrase = e.passphrase ? resolved.passphrase : e.passphrase
             const exchangeInstance = ExchangeChooser.chooseExchangeFactory(
               e.provider,
             )(
@@ -688,8 +737,9 @@ const resolvers = <
             // Worse, a 502ing connector made both answer "false", which this
             // resolver then PERSISTED: a Hyperliquid outage marked every
             // holder's connection broken and flipped their stored `hedge`.
-            // probeConnectionState runs the pair concurrently under a 30s cap
-            // and falls back to the stored reading on any non-answer.
+            // probeConnectionState runs the pair concurrently under
+            // PROBE_TIMEOUT_MS and falls back to the stored reading on any
+            // non-answer.
             const probe = await verify.probeConnectionState(
               e,
               () =>
@@ -3118,9 +3168,13 @@ const resolvers = <
         const res = await userDb.aggregate(agg)
         return res
       }
+      // Hoisted out of the call so `readData` and `countData` share one filter.
+      // Without a contextual type the literal widens `status` to `string`, which
+      // no longer satisfies `QueryFilter<ExcludeDoc<OrderSchema>>` and breaks
+      // `readData`'s isArray overload resolution — keep the enum type explicit.
       const ordersSearch = {
         userId: user.data._id,
-        status: 'FILLED',
+        status: 'FILLED' as OrderStatusType,
         paperContext: paperContext ? { $eq: true } : { $ne: true },
       }
       // `total` below is clamped to 100, so counting every FILLED order the user has
@@ -4813,8 +4867,8 @@ const resolvers = <
         }
       } catch (e: any) {
         let message = `${(e as Error)?.message || e}`
-        if (message.includes('ECONNREFUSED') || message.includes('connect')) {
-          message = 'Server is not available. Please try again later'
+        if (isServiceUnreachable(e, message)) {
+          message = `Backtest service at ${BACKTEST_SERVICE_TARGET} is not available. Please try again later`
         }
         return {
           status: StatusEnum.notok,
@@ -5154,10 +5208,20 @@ const resolvers = <
         findUser.data &&
         findUser.data.result
       ) {
-        const _password = decrypt(findUser.data.result.password)
-        if (_password === password) {
+        const stored = findUser.data.result.password
+        if (await verifyPasswordHash(password, stored)) {
+          // Transparent migration: if the stored value is still legacy AES
+          // ciphertext, the password just matched via the decrypt fallback —
+          // rehash it with bcrypt and persist, so the account upgrades on this
+          // login and never decrypt-compares again.
+          if (!isBcryptHash(stored)) {
+            await userDb.updateData(
+              { username },
+              { $set: { password: await hashPassword(password) } },
+            )
+          }
           return await createOrUpdateUser(
-            { email: username, password: _password },
+            { email: username, password },
             userAgent,
             ip,
           )
@@ -5509,13 +5573,12 @@ const resolvers = <
                 data: null,
               }
             }
-            const find = user.data.exchanges.find(
-              (e) =>
-                decrypt(e.key) === key &&
-                decrypt(e.secret) === secret &&
-                (e.passphrase ? decrypt(e.passphrase) : e.passphrase) ===
-                  passphrase &&
-                e.provider === provider,
+            // Provider is checked first, so connections of another provider
+            // are never unwrapped at all.
+            const find = await findMatchingConnection(
+              user.data.exchanges,
+              { key, secret, passphrase },
+              (e) => e.provider === provider,
             )
             if (find) {
               return {
@@ -5686,7 +5749,22 @@ const resolvers = <
                 if (!affiliate) {
                   return {
                     status: StatusEnum.notok,
-                    reason: `To use ${e} exchange you need to follow the instructions.`,
+                    // The old text ("you need to follow the instructions")
+                    // named neither the check that failed nor the instructions
+                    // it meant, so a user who had just completed the wallet
+                    // flow had nothing to act on and simply retried forever.
+                    // Say which approval is missing and how to grant it.
+                    reason:
+                      `Hyperliquid builder fee not approved for this wallet. ` +
+                      `On the free plan Gainium is paid through Hyperliquid ` +
+                      `builder fees (0.07% spot / 0.045% perps) instead of ` +
+                      `credits, so your main wallet has to approve Gainium as ` +
+                      `a builder before the account can be connected. ` +
+                      `Reconnect with "Free (approve builder fees)" and ` +
+                      `confirm BOTH wallet prompts — the agent wallet and the ` +
+                      `builder fee. If your wallet only prompted once, the ` +
+                      `builder-fee approval did not go through. On a paid ` +
+                      `plan you can connect with "Regular" instead.`,
                     data: null,
                   }
                 }
@@ -5696,6 +5774,13 @@ const resolvers = <
                 )
               }
             }
+            // Sealed before the write rather than inside the object literal:
+            // producing the stored form is asynchronous now, and an object
+            // literal cannot await.
+            const sealedNew = await sealConnection(
+              { userId: user.data._id.toString(), provider: e, uuid },
+              { key, secret, passphrase },
+            )
             const saveDataRequest = await userDb.updateData(
               { _id: user.data._id },
               {
@@ -5826,14 +5911,14 @@ const resolvers = <
                                             : 'Spot'
                                         })`
                                       : name,
-                      key: encrypt(key),
-                      secret: encrypt(secret),
+                      key: sealedNew.key,
+                      secret: sealedNew.secret,
                       uuid,
                       keysType,
                       okxSource,
                       bybitHost,
                       affiliate,
-                      passphrase: passphrase ? encrypt(passphrase) : undefined,
+                      passphrase: sealedNew.passphrase,
                       status: true,
                       lastUpdated: +new Date(),
                       hedge: isFutures(e)
@@ -5869,22 +5954,23 @@ const resolvers = <
               e.toLowerCase().indexOf('bybit') !== -1 &&
               !paperExchanges.includes(e)
             ) {
-              const findTheSameKeys = saveDataRequest.data.exchanges.find(
+              // No passphrase in the candidate: these leg-linking checks
+              // match on key+secret and let the provider rules decide the
+              // rest, exactly as before.
+              const findTheSameKeys = await findMatchingConnection(
+                saveDataRequest.data.exchanges,
+                { key, secret },
                 (u) =>
-                  decrypt(u.key) === key &&
-                  decrypt(u.secret) === secret &&
-                  ((u.provider === ExchangeEnum.bybit &&
+                  (u.provider === ExchangeEnum.bybit &&
                     [ExchangeEnum.bybitCoinm, ExchangeEnum.bybitUsdm].includes(
                       e,
                     )) ||
-                    (u.provider === ExchangeEnum.bybitUsdm &&
-                      [ExchangeEnum.bybit, ExchangeEnum.bybitCoinm].includes(
-                        e,
-                      )) ||
-                    (u.provider === ExchangeEnum.bybitCoinm &&
-                      [ExchangeEnum.bybit, ExchangeEnum.bybitUsdm].includes(
-                        e,
-                      ))),
+                  (u.provider === ExchangeEnum.bybitUsdm &&
+                    [ExchangeEnum.bybit, ExchangeEnum.bybitCoinm].includes(
+                      e,
+                    )) ||
+                  (u.provider === ExchangeEnum.bybitCoinm &&
+                    [ExchangeEnum.bybit, ExchangeEnum.bybitUsdm].includes(e)),
               )
               if (findTheSameKeys) {
                 const accountType = await bybitAccountType(
@@ -5912,20 +5998,18 @@ const resolvers = <
               e.toLowerCase().indexOf('okx') !== -1 &&
               !paperExchanges.includes(e)
             ) {
-              const findTheSameKeys = saveDataRequest.data.exchanges.find(
+              const findTheSameKeys = await findMatchingConnection(
+                saveDataRequest.data.exchanges,
+                { key, secret },
                 (u) =>
-                  decrypt(u.key) === key &&
-                  decrypt(u.secret) === secret &&
-                  ((u.provider === ExchangeEnum.okx &&
+                  (u.provider === ExchangeEnum.okx &&
                     [ExchangeEnum.okxInverse, ExchangeEnum.okxLinear].includes(
                       e,
                     )) ||
-                    (u.provider === ExchangeEnum.okxLinear &&
-                      [ExchangeEnum.okxInverse, ExchangeEnum.okx].includes(
-                        e,
-                      )) ||
-                    (u.provider === ExchangeEnum.okxInverse &&
-                      [ExchangeEnum.okx, ExchangeEnum.okxLinear].includes(e))),
+                  (u.provider === ExchangeEnum.okxLinear &&
+                    [ExchangeEnum.okxInverse, ExchangeEnum.okx].includes(e)) ||
+                  (u.provider === ExchangeEnum.okxInverse &&
+                    [ExchangeEnum.okx, ExchangeEnum.okxLinear].includes(e)),
               )
               if (findTheSameKeys) {
                 await userDb.updateData(
@@ -6030,9 +6114,11 @@ const resolvers = <
       }
       const find = user.data.exchanges.find((e) => e.uuid === uuid)
       if (find) {
-        const oldKey = decrypt(find.key)
-        const oldSecret = decrypt(find.secret)
-        const oldPassphrase = find.passphrase ? decrypt(find.passphrase) : ''
+        const {
+          key: oldKey,
+          secret: oldSecret,
+          passphrase: oldPassphrase,
+        } = await resolveConnection(find)
         const oldKeysType = find.keysType
         const oldOkxSource = find.okxSource
         const oldBybitHost = find.bybitHost
@@ -6138,9 +6224,41 @@ const resolvers = <
               )
             }
           }
-          key = key ? encrypt(key) : key
-          secret = secret ? encrypt(secret) : secret
-          passphrase = passphrase ? encrypt(passphrase) : undefined
+          // Held on to before re-encryption. The change detection and the
+          // open-stream payload below used to recover these by decrypting what
+          // this block had just encrypted — a round-trip that can only ever
+          // return what is already in hand, and one more stored-credential
+          // read to keep working forever.
+          const plainKey = key
+          const plainSecret = secret
+          const plainPassphrase = passphrase
+          // Which fields the CALLER supplied, captured before sealing rewrites
+          // them. The stream-restart condition below keys off this and must not
+          // start seeing a sealed value as "the caller changed the key".
+          const suppliedKey = !!key
+          const suppliedSecret = !!secret
+          if (key || secret || passphrase) {
+            // A credential is being replaced. Seal all three under ONE data key
+            // — falling back to the stored plaintext for any field the caller
+            // did not supply — so the connection keeps costing one unwrap to
+            // read. A metadata-only edit takes none of this: every field stays
+            // falsy and the `|| find.key` below leaves the stored value alone.
+            const sealedUpdate = await sealConnection(
+              {
+                userId: user.data._id.toString(),
+                provider: find.provider,
+                uuid,
+              },
+              {
+                key: key || oldKey,
+                secret: secret || oldSecret,
+                passphrase: passphrase || oldPassphrase || undefined,
+              },
+            )
+            key = sealedUpdate.key
+            secret = sealedUpdate.secret
+            passphrase = sealedUpdate.passphrase
+          }
           const saveDataRequest = await userDb.updateData(
             { _id: user.data._id },
             {
@@ -6183,12 +6301,12 @@ const resolvers = <
             )
           userUtils.updateUserFee(user.data._id.toString(), uuid)
           if (
-            key &&
-            secret &&
+            suppliedKey &&
+            suppliedSecret &&
             !paperExchanges.includes(find.provider) &&
-            (oldKey !== decrypt(key) ||
-              oldSecret !== decrypt(secret) ||
-              oldPassphrase !== decrypt(passphrase ?? '') ||
+            (oldKey !== plainKey ||
+              oldSecret !== plainSecret ||
+              oldPassphrase !== (plainPassphrase || '') ||
               keysType !== oldKeysType ||
               okxSource !== oldOkxSource ||
               bybitHost !== oldBybitHost ||
@@ -6201,9 +6319,9 @@ const resolvers = <
             rabbitClient?.send(rabbitUsersStreamKey, {
               event: 'open stream',
               data: {
-                key: key ? decrypt(key) : '',
-                secret: secret ? decrypt(secret) : '',
-                passphrase: passphrase ? decrypt(passphrase) : '',
+                key: plainKey || '',
+                secret: plainSecret || '',
+                passphrase: plainPassphrase || '',
                 provider: find.provider,
                 keysType,
                 okxSource,
@@ -6251,9 +6369,10 @@ const resolvers = <
             return saveDataRequest
           }
           if (stablecoinBalance && stablecoinBalance > 0) {
+            const paperCreds = await resolveConnection(find)
             const save = await topUpUserBalance({
-              key: decrypt(find.key),
-              secret: decrypt(find.secret),
+              key: paperCreds.key,
+              secret: paperCreds.secret,
               stablecoinBalance,
               exchange: mapPaperToReal(find.provider as PaperExchangeType),
               coinToTopUp: coinToTopUp || 'USDT',
@@ -6328,7 +6447,12 @@ const resolvers = <
             reason: `Error while deleting exchange ${find.provider} ${find.uuid}`,
           }
         }
-        await userDb
+        const userId = `${user.data._id}`
+        // Clearing the now-dangling `linkedTo` pointers needs nothing from the
+        // bot teardown below, and nothing below needs it — but the user waited
+        // for it before any of that even started. Start it here and collect it
+        // at the end.
+        const unlinkRequest = userDb
           .updateManyData(
             { 'exchanges.linkedTo': uuid },
             { $set: { 'exchanges.$.linkedTo': null } },
@@ -6338,45 +6462,76 @@ const resolvers = <
               `Resolver Exchange | Delete ${uuid} Update linkedTo ${res.reason}`,
             ),
           )
-        await Bot.stopBotByExchange(uuid)
-        const unassign = await Bot.unassignBotByExchange(uuid)
+        // These two stay ordered on purpose: the live bots have to be told to
+        // close before their docs are stamped closed/unassigned, or the
+        // workers' own write can overtake the stamp.
+        //
+        // The stop leg is best-effort though. It fans out to the bot services
+        // over RabbitMQ and `sendWithCallback` REJECTS when one of them misses
+        // its 5-minute budget — which threw straight out of this resolver, so a
+        // wedged bot service left the user with the connection already pulled
+        // off their account but its fees, balances and per-exchange snapshots
+        // still there — and no way to retry, the uuid is gone from the user
+        // doc. Log it and finish the cascade.
+        try {
+          await Bot.stopBotByExchange(uuid, userId)
+        } catch (e) {
+          logger.error(
+            `Resolver Exchange | Delete ${uuid} stop bots failed: ${
+              (e as Error)?.message ?? e
+            }`,
+          )
+        }
+        const unassign = await Bot.unassignBotByExchange(uuid, userId)
         if (unassign) {
+          await unlinkRequest
           return unassign
         }
-        const deleteFees = await feeDb
-          .deleteManyData({
-            exchangeUUID: uuid,
-          })
-          .then((res) => {
-            logger.debug(
-              `Delete exchange for ${user.data._id} ${uuid}: fee ${res.reason}`,
-            )
-            return res
-          })
+        // Fees, balances and per-exchange snapshots live in three separate
+        // collections keyed on this one connection, so no leg needs another
+        // leg's answer — yet each was awaited before the next was even issued.
+        // Drain them together, the same shape resetAccount already uses for its
+        // own cleanup (core/src/utils/user.ts).
+        //
+        // The fee and balance filters now also carry `userId`. Those
+        // collections are indexed {userId, exchangeUUID} and
+        // {userId, exchangeUUID, asset}, so a filter on `exchangeUUID` alone
+        // could not use either index and every disconnect COLLSCANned the whole
+        // of `fees` and the whole of `balances` — a cost that grows with the
+        // size of the platform, not with the account being deleted. `uuid` is a
+        // v4 minted per connection, so the rows matched are the same ones.
+        const [deleteFees, deleteBalances, deleteSnapshotsByExchange] =
+          await Promise.all([
+            feeDb.deleteManyData({ userId, exchangeUUID: uuid }).then((res) => {
+              logger.debug(
+                `Delete exchange for ${user.data._id} ${uuid}: fee ${res.reason}`,
+              )
+              return res
+            }),
+            balanceDb
+              .deleteManyData({ userId, exchangeUUID: uuid })
+              .then((res) => {
+                logger.debug(
+                  `Delete Exchange for ${user.data._id} ${uuid}: balances ${res.reason}`,
+                )
+                return res
+              }),
+            snapshotPerExchangeDb
+              .deleteManyData({ userId, uuid })
+              .then((res) => {
+                logger.debug(
+                  `Delete Exchange for ${user.data._id} ${uuid}: snaphost ${res.reason}`,
+                )
+                return res
+              }),
+          ])
+        await unlinkRequest
         if (deleteFees.status !== StatusEnum.ok) {
           return deleteFees
         }
-        const deleteBalances = await balanceDb
-          .deleteManyData({
-            exchangeUUID: uuid,
-          })
-          .then((res) => {
-            logger.debug(
-              `Delete Exchange for ${user.data._id} ${uuid}: balances ${res.reason}`,
-            )
-            return res
-          })
         if (deleteBalances.status !== StatusEnum.ok) {
           return deleteBalances
         }
-        const deleteSnapshotsByExchange = await snapshotPerExchangeDb
-          .deleteManyData({ userId: `${user.data._id}`, uuid })
-          .then((res) => {
-            logger.debug(
-              `Delete Exchange for ${user.data._id} ${uuid}: snaphost ${res.reason}`,
-            )
-            return res
-          })
         if (deleteSnapshotsByExchange.status !== StatusEnum.ok) {
           return deleteSnapshotsByExchange
         }
@@ -8056,12 +8211,24 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const secret = encrypt(v4())
+      // Kept alongside the ciphertext rather than recovered from it below. The
+      // round-trip only ever returned what this line already had, and reading
+      // a stored credential back is what the envelope layer makes expensive.
+      const plaintextSecret = v4()
+      // The subdocument id is generated HERE rather than left to Mongo, because
+      // the sealed form is bound to it: the identity has to exist before the
+      // value is sealed, and `$push` would not hand it back until after.
+      const apiKeyId = new Types.ObjectId()
+      const secret = await sealApiSecret(
+        { userId: user.data._id.toString(), id: apiKeyId.toString() },
+        plaintextSecret,
+      )
       const saveDataRequest = await userDb.updateData(
         { _id: user.data._id },
         {
           $push: {
             apiKeys: {
+              _id: apiKeyId,
               name: 'New API Key',
               secret: secret,
               created: new Date().getTime(),
@@ -8090,7 +8257,7 @@ const resolvers = <
       return {
         status: StatusEnum.ok,
         reason: null,
-        data: { ...find, secret: decrypt(secret) },
+        data: { ...find, secret: plaintextSecret },
       }
     },
     renewAPIKeys: async (
@@ -8490,13 +8657,16 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      if (decrypt(user.data.password) === input.password) {
+      // Async bcrypt comparison (two arguments). It dual-reads, so the guard
+      // works whether the stored value is a bcrypt hash or still legacy AES.
+      if (await verifyPasswordHash(password, user.data.password)) {
         return {
           status: StatusEnum.notok,
           reason: 'Current password is the same as new',
           data: null,
         }
       }
+      // Synchronous strength/format check (one argument) — a different helper.
       if (!verifyPassword(password)) {
         return {
           status: StatusEnum.notok,
@@ -8506,7 +8676,7 @@ const resolvers = <
       }
       const result = await userDb.updateData(
         { _id: user.data._id.toString() },
-        { $set: { password: encrypt(password) } },
+        { $set: { password: await hashPassword(password) } },
       )
       if (result.status === StatusEnum.notok) {
         return result

@@ -1923,6 +1923,10 @@ export interface MainBot<T = BaseSettings> extends SchemaI {
     orders?: Record<string, number>
     thresholdPassed?: boolean
     thresholdPassedTime?: number
+    /** Key-scheme version of `orders`. Bumped when
+     *  `getNotEnoughOrdersIdByOrder` changes shape so stale counters keyed by
+     *  the old scheme are discarded instead of lingering forever. */
+    keyVersion?: number
   }
   share?: boolean
   shareId?: string
@@ -2353,6 +2357,7 @@ export interface BotMessageSchema extends SchemaI {
   time: number
   isDeleted?: boolean
   subType: string
+  /** Occurrences folded into this row by the log policy (see `bucket`). */
   count?: number
   terminal?: boolean
   paperContext?: boolean
@@ -2360,12 +2365,28 @@ export interface BotMessageSchema extends SchemaI {
   fullMessage?: string
   symbol?: string
   exchange?: string
+  /** First occurrence in this row's window; `time` tracks the latest. */
+  firstTime?: number
+  /**
+   * Coalescing window index. Absent on `always`-mode rows, on rows written
+   * before the log policy shipped, and on rows the user has dismissed — all of
+   * which are thereby outside `botMessageCoalesceKey`.
+   */
+  bucket?: number
 }
 
 export type ClearBotErrorSchema = ExcludeDoc<BotMessageSchema>
 
 export interface RateSchema extends SchemaI {
   usdRate: number
+  /**
+   * Fiat collateral → USD rates (1 unit of `asset` = `usdRate` USD), normalized
+   * so the caller never has to care which way Kraken quotes the pair. Fiat is
+   * held as collateral on multi-collateral venues (e.g. Kraken Futures) but is
+   * absent from every exchange's `getAllPrices` table, so without this the
+   * holding values at $0. See `priceBalancesUsd` / `userSnapshots`.
+   */
+  fiatRates?: { asset: string; usdRate: number }[]
 }
 
 export type ClearRateSchema = ExcludeDoc<RateSchema>
@@ -3088,11 +3109,40 @@ export type CommonOrder = {
   }[]
 }
 
+/**
+ * Polling quarantine for an order the venue keeps saying does not exist.
+ *
+ * This is a statement about **our polling policy**, not about the order. It
+ * deliberately does not mark the order CANCELED: that would assert something
+ * about venue state we do not know. Quarantine asserts only "stop asking", and
+ * it is reversible.
+ *
+ * The invariant that makes it safe: **quarantine suppresses the poll, never the
+ * push.** A quarantined order stays subscribed on the user stream, stays in the
+ * order map, and stays in `cancelAllOrder()`. If the venue ever mentions it
+ * again — a fill, a cancel, a successful lookup — the order is rebuilt from
+ * that truth and the quarantine goes with it.
+ */
+export type OrderQuarantine = {
+  /** Definitive not-founds seen, at most one per order-check run. */
+  strikes: number
+  firstAt: number
+  lastAt: number
+  /** The venue's own words, kept for triage. */
+  reason: string
+  /** Run id of the most recent strike, so repeats within one run count once. */
+  runId: string
+  /** Set once `strikes` reaches the threshold. Absent = counting, not yet quarantined. */
+  since?: number
+}
+
 export type Order = CommonOrder & {
   _id?: string
   exchange: ExchangeEnum
   exchangeUUID: string
   typeOrder: TypeOrder
+  /** @see OrderQuarantine — absent for every order that behaves normally. */
+  quarantine?: OrderQuarantine
   botId: string
   userId: string
   dealId?: string
@@ -4707,6 +4757,20 @@ export type BotParentEventsDto =
   | BotParentUnsubscribeIndicatorEventDto
   | BotParentProcessStatsEventDto
   | BotParentBotClosed
+  | BotParentRestartFinishedEventDto
+
+/**
+ * A bot has finished re-hydrating after a service restart.
+ *
+ * The restart-stats writer runs inside the worker thread, so the parent — which
+ * owns the restart window and knows which bots were expected — otherwise has no
+ * way to learn which of them actually came back. This carries that one fact
+ * across the boundary.
+ */
+export type BotParentRestartFinishedEventDto = {
+  event: 'restartFinished'
+  botId: string
+}
 
 export type ParentIndicatorMessage = {
   event: 'indicatorData'
@@ -4774,6 +4838,20 @@ export type BalancerTimeProfile = Partial<ExchangeTimeProfile> & {
 }
 
 export type ExchangeRequestTimeProfile = Partial<BalancerTimeProfile> & {
+  /**
+   * Time spent resolving this request's credentials before it could be sent,
+   * and whether that was served from memory.
+   *
+   * Optional because most builds never populate it.
+   *
+   * Recorded per request as a duration rather than as a hit/miss flag: the flag
+   * would have to come from a process-wide resolver, and under concurrency one
+   * request could read another's result. The duration is unambiguous and the
+   * distribution is sharply bimodal anyway — a cached resolve is sub-millisecond
+   * and an uncached one is a network round trip — so the hit rate falls out of
+   * the data without anything having to assert it.
+   */
+  credentialResolveMs?: number
   appIncomingTime: number
   appOutcomingTime: number
   appRequestStartTime: number
@@ -4783,6 +4861,20 @@ export type ExchangeRequestTimeProfile = Partial<BalancerTimeProfile> & {
   requestName: string
   exchangeBalancerDiff?: number
   balanacerAppDiff?: number
+  /**
+   * Connector instance that served the request — its `SERVER_ALIAS`
+   * (e.g. `http://10.0.0.1:7507`). Set by the balancer, which is the only
+   * component that knows the routing decision; the connector never sets it.
+   *
+   * Optional because responses that never went through the balancer (paper
+   * trading, cached paths) have no serving instance.
+   *
+   * Exists so request timing can be grouped per instance. Without it every
+   * instance blends into one average, which hides a per-instance difference
+   * entirely — the fleet runs one instance per egress IP, and they need not
+   * be equivalent.
+   */
+  server?: string
 }
 
 export interface ExchangeRequestTimeProfileSchema

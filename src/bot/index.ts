@@ -114,6 +114,11 @@ import ColdStoreRehydrator from '../archive/coldStoreRehydrator'
 import ColdClient, { isColdStoreEnabled } from '../archive/coldClient'
 import { coldReadOrders, coldReadTransactions } from '../archive/coldRead'
 import {
+  BOT_RESTART_ARM_CAP_MS,
+  BOT_RESTART_ARM_FALLBACK,
+  BOT_RESTART_ARM_STALL_MS,
+  BOT_RESTART_STRAGGLER_DELAY_MS,
+  BOT_SERVICE_RPC_TIMEOUT_MS,
   BOTS_PER_WORKER,
   BotServiceType,
   COMBO_PER_WORKER,
@@ -145,11 +150,55 @@ export type WebhookData = {
 
 const defaultBotsPerWorker = 100
 
+/**
+ * Why the bot service started consuming its command queue.
+ *
+ * `parity` is the healthy path: every bot the boot query found has been
+ * re-hydrated. `no-bots` is the trivially-empty service. The other two are
+ * fallbacks and are always a warning — they mean re-hydration did not finish,
+ * and some bots are live-but-unrestarted while the service takes commands.
+ */
+export type RestartArmReason = 'parity' | 'no-bots' | 'stalled' | 'cap'
+
+const botServiceRpcTimeoutMs = Number(BOT_SERVICE_RPC_TIMEOUT_MS) || 5 * 60_000
+
+const armFallbackEnabled = `${BOT_RESTART_ARM_FALLBACK}` !== 'false'
+const armStallMs = Number(BOT_RESTART_ARM_STALL_MS) || 120_000
+const armCapMs = Number(BOT_RESTART_ARM_CAP_MS) || 30 * 60_000
+const armWatchdogTickMs = 15_000
+const stragglerDelayMs = Number(BOT_RESTART_STRAGGLER_DELAY_MS) || 10 * 60_000
+
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 
 const notAvailable = 'Bots service is unavailable, please try again later'
 
 const webhookQueue = 'webhookQueue'
+
+/**
+ * First stage of every orphan sweep in `premanenetlyDeleteBots`.
+ *
+ * `botId` is a plain string on these collections and not every value is a bot
+ * id: platform-level notices are written against the `'system'` sentinel so the
+ * dashboard renders them without a bot link. The `$toObjectId: '$botId'` in the
+ * `$lookup`s below throws on any value that isn't 24 hex chars, which fails the
+ * whole aggregation — and each step of `premanenetlyDeleteBots` returns on its
+ * first error, so a single such document silently aborts every remaining
+ * cleanup step after it (orphan messages, deals, orders, transactions).
+ *
+ * Restricting the pipeline to convertible ids fixes both halves of that: the
+ * aggregation no longer throws, and the sentinel rows stay out of the orphan
+ * set — they have no bot by design, so an unguarded sweep would delete them.
+ */
+const botIdIsObjectId: PipelineStage = {
+  $match: {
+    $expr: {
+      $ne: [
+        { $convert: { input: '$botId', to: 'objectId', onError: null } },
+        null,
+      ],
+    },
+  },
+}
 
 type BotServicePayload = {
   method: string
@@ -157,6 +206,16 @@ type BotServicePayload = {
 }
 
 const bosServiceType = BotServiceType
+
+/**
+ * Total time `stopBotByExchange` will spend waiting for workers to acknowledge
+ * the closes it posted, across ALL the bots on the connection. It is a budget
+ * for the whole sweep, not per bot, so a user with many bots cannot stretch the
+ * disconnect without bound. Well under the 5-minute bot-service RPC timeout in
+ * `callExternalBotService`, which is what the user's `deleteExchange` request
+ * used to sit on when a reply never came.
+ */
+const stopByExchangeReplyBudget = 60 * 1000
 
 class Bot<T extends UserSchema = UserSchema> {
   protected ec = ExchangeChooser
@@ -297,6 +356,16 @@ class Bot<T extends UserSchema = UserSchema> {
 
   protected estimatedRestart = 0
   private restarted = 0
+  // Command-listener arming state — see `beginRestartWindow` / `armCommandListener`.
+  private commandListenerArmed = false
+  private restartWindowStartedAt = 0
+  private lastRestartProgressAt = 0
+  private armWatchdog: ReturnType<typeof setInterval> | undefined
+  // Straggler accounting. Both sets live in the PARENT: the restart-stats writer
+  // runs in the worker thread, so anything tracked there is invisible here.
+  private restartExpectedIds = new Set<string>()
+  private restartFinishedIds = new Set<string>()
+  private stragglerTimer: ReturnType<typeof setTimeout> | undefined
 
   public constructor(
     protected useBots?: boolean,
@@ -565,6 +634,9 @@ class Bot<T extends UserSchema = UserSchema> {
     }
     if (data.event === 'response' && data.responseId) {
       this.processReponseBotMessage(data.responseId, data.response)
+    }
+    if (data.event === 'restartFinished' && data.botId) {
+      this.restartFinishedIds.add(`${data.botId}`)
     }
   }
 
@@ -3433,7 +3505,7 @@ class Bot<T extends UserSchema = UserSchema> {
           await this.rabbit.sendWithCallback<BotServicePayload, R>(
             this.getRabbitQueueName(t),
             { method, params: payload },
-            5 * 60 * 1000,
+            botServiceRpcTimeoutMs,
           )
         }),
       )
@@ -3451,7 +3523,7 @@ class Bot<T extends UserSchema = UserSchema> {
           await this.rabbit.sendWithCallback<BotServicePayload, R>(
             this.getRabbitQueueName(t),
             { method, params: payload },
-            5 * 60 * 1000,
+            botServiceRpcTimeoutMs,
           )
         }),
       )
@@ -3460,7 +3532,7 @@ class Bot<T extends UserSchema = UserSchema> {
     const result = await this.rabbit.sendWithCallback<BotServicePayload, R>(
       this.getRabbitQueueName(type),
       { method, params: payload },
-      5 * 60 * 1000,
+      botServiceRpcTimeoutMs,
     )
     if (!result) {
       throw new Error(notAvailable)
@@ -6714,16 +6786,75 @@ class Bot<T extends UserSchema = UserSchema> {
     return bots
   }
 
-  public async stopBotByExchange(uuid: string) {
+  /**
+   * Wait for one worker's `{ event: 'response', responseId }` reply, bounded.
+   *
+   * The stop legs below used `worker.once('message', …)`. `once` fires on the
+   * FIRST message the worker sends — whatever it is — and node drops the
+   * listener before running the callback, so an unrelated `createBot` /
+   * `botClosed` / other-request `response` (one worker hosts up to
+   * BOTS_PER_WORKER bots, all reporting on the same port) consumed the listener
+   * and the promise never settled. `worker?.once` on an undefined worker — a
+   * `this.bots` entry left behind by a terminated worker — never settled
+   * either. Both stalls surface as the user's `deleteExchange` hanging until
+   * the bot-service RPC gives up five minutes later.
+   *
+   * Same `on` + `removeListener` + timer idiom as `compareBalances`, except a
+   * lapsed wait resolves rather than rejects: the close has already been posted
+   * to the worker, and the rest of the sweep still has to run.
+   */
+  private waitForWorkerResponse(
+    worker: Worker | undefined,
+    responseId: string,
+    label: string,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    if (!worker) {
+      this.handleWarn(`${loggerPrefix} ${label} | worker gone, not waiting`)
+      return Promise.resolve(null)
+    }
+    const wait = Math.max(0, timeoutMs)
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | null = null
+      const cb = (msg: { responseId?: string }) => {
+        if (msg && msg.responseId === responseId) {
+          worker.removeListener('message', cb)
+          if (timer) {
+            clearTimeout(timer)
+          }
+          resolve(msg)
+        }
+      }
+      timer = setTimeout(() => {
+        worker.removeListener('message', cb)
+        this.handleWarn(
+          `${loggerPrefix} ${label} | no reply within ${wait}ms, moving on`,
+        )
+        resolve(null)
+      }, wait)
+      worker.on('message', cb)
+    })
+  }
+
+  public async stopBotByExchange(uuid: string, userId?: string) {
     if (!this.useBots) {
       return await this.callExternalBotService(
         'allWithHedge',
         'stopBotByExchange',
         false,
         uuid,
+        userId,
       )
     }
-    const filter = { exchangeUUID: uuid }
+    // Same reasoning as `unassignBotByExchange`: every bot collection is
+    // indexed {userId, …}, so a filter on `exchangeUUID` alone can use none of
+    // them and each sweep COLLSCANs the collection twice — once for the find,
+    // once for `readData`'s countDocuments. A connection belongs to exactly one
+    // user, so scoping by owner matches the same bots.
+    const filter = userId
+      ? { userId, exchangeUUID: uuid }
+      : { exchangeUUID: uuid }
+    const replyDeadline = +new Date() + stopByExchangeReplyBudget
     const grid =
       BotServiceType === BotType.grid ? await this.findActiveGrid(filter) : []
     const dca =
@@ -6759,13 +6890,12 @@ class Bot<T extends UserSchema = UserSchema> {
           ],
           responseId,
         })
-        await new Promise((resolve) => {
-          worker?.once('message', (msg) => {
-            if (msg.responseId === responseId) {
-              resolve(msg)
-            }
-          })
-        })
+        await this.waitForWorkerResponse(
+          worker,
+          responseId,
+          `stopBotByExchange ${BotType.grid} ${find.id}`,
+          replyDeadline - +new Date(),
+        )
       }
     }
     for (const d of dca ?? []) {
@@ -6787,13 +6917,12 @@ class Bot<T extends UserSchema = UserSchema> {
           ],
           responseId,
         })
-        await new Promise((resolve) => {
-          worker?.once('message', (msg) => {
-            if (msg.responseId === responseId) {
-              resolve(msg)
-            }
-          })
-        })
+        await this.waitForWorkerResponse(
+          worker,
+          responseId,
+          `stopBotByExchange ${BotType.dca} ${find.id}`,
+          replyDeadline - +new Date(),
+        )
       }
     }
     for (const d of combo ?? []) {
@@ -6815,13 +6944,12 @@ class Bot<T extends UserSchema = UserSchema> {
           ],
           responseId,
         })
-        await new Promise((resolve) => {
-          worker?.once('message', (msg) => {
-            if (msg.responseId === responseId) {
-              resolve(msg)
-            }
-          })
-        })
+        await this.waitForWorkerResponse(
+          worker,
+          responseId,
+          `stopBotByExchange ${BotType.combo} ${find.id}`,
+          replyDeadline - +new Date(),
+        )
       }
     }
     for (const d of hedgeDca ?? []) {
@@ -6837,13 +6965,12 @@ class Bot<T extends UserSchema = UserSchema> {
           args: [find.id, BotStatusEnum.closed, CloseDCATypeEnum.cancel],
           responseId,
         })
-        await new Promise((resolve) => {
-          worker?.once('message', (msg) => {
-            if (msg.responseId === responseId) {
-              resolve(msg)
-            }
-          })
-        })
+        await this.waitForWorkerResponse(
+          worker,
+          responseId,
+          `stopBotByExchange ${BotType.hedgeDca} ${find.id}`,
+          replyDeadline - +new Date(),
+        )
       }
     }
     for (const d of hedgeCombo ?? []) {
@@ -6859,36 +6986,45 @@ class Bot<T extends UserSchema = UserSchema> {
           args: [find.id, BotStatusEnum.closed, CloseDCATypeEnum.cancel],
           responseId,
         })
-        await new Promise((resolve) => {
-          worker?.once('message', (msg) => {
-            if (msg.responseId === responseId) {
-              resolve(msg)
-            }
-          })
-        })
+        await this.waitForWorkerResponse(
+          worker,
+          responseId,
+          `stopBotByExchange ${BotType.hedgeCombo} ${find.id}`,
+          replyDeadline - +new Date(),
+        )
       }
     }
   }
 
-  public async unassignBotByExchange(uuid: string) {
-    const dca = await this.dcaBotDb.updateManyData(
-      { exchangeUUID: uuid },
-      { $set: { exchangeUnassigned: true, status: BotStatusEnum.closed } },
-    )
+  /**
+   * `userId` is optional only so existing callers keep compiling — pass it.
+   * The bot collections are indexed {userId, …}, so a filter on `exchangeUUID`
+   * alone cannot use any of them and this sweep COLLSCANs `dcaBots`, `comboBots`
+   * and `bots` in full. An exchange connection belongs to exactly one user and
+   * `uuid` is a v4, so scoping by owner matches the same docs.
+   */
+  public async unassignBotByExchange(uuid: string, userId?: string) {
+    const filter = userId
+      ? { userId, exchangeUUID: uuid }
+      : { exchangeUUID: uuid }
+    const update = {
+      $set: { exchangeUnassigned: true, status: BotStatusEnum.closed },
+    }
+    // Three different collections, one filter — no sweep needs another's
+    // answer, but each used to wait for the one before it, so disconnecting an
+    // account paid three serial bulk writes back to back. The notok checks below
+    // keep reporting them in the original order.
+    const [dca, combo, grid] = await Promise.all([
+      this.dcaBotDb.updateManyData(filter, update),
+      this.comboBotDb.updateManyData(filter, update),
+      this.botDb.updateManyData(filter, update),
+    ])
     if (dca.status === StatusEnum.notok) {
       return dca
     }
-    const combo = await this.comboBotDb.updateManyData(
-      { exchangeUUID: uuid },
-      { $set: { exchangeUnassigned: true, status: BotStatusEnum.closed } },
-    )
     if (combo.status === StatusEnum.notok) {
       return combo
     }
-    const grid = await this.botDb.updateManyData(
-      { exchangeUUID: uuid },
-      { $set: { exchangeUnassigned: true, status: BotStatusEnum.closed } },
-    )
     if (grid.status === StatusEnum.notok) {
       return grid
     }
@@ -7103,11 +7239,152 @@ class Bot<T extends UserSchema = UserSchema> {
 
   private updateRestart() {
     this.restarted++
-    if (this.restarted === this.estimatedRestart) {
-      this.handleDebug(`Restarted equal to estimated restart. Set listener`)
-      this.setListener()
+    this.lastRestartProgressAt = Date.now()
+    // `>=`, not `===`: the counter can overshoot (a worker that terminates
+    // mid-boot re-restarts its bots through the same callback), and an exact
+    // match that is stepped over never arms the listener at all.
+    if (this.restarted >= this.estimatedRestart) {
+      this.armCommandListener('parity')
     }
   }
+
+  /**
+   * Open the restart window: record how many bots we expect to re-hydrate and
+   * start the arming fallback.
+   *
+   * The bot service deliberately does not consume its command queue until every
+   * bot is back (a command processed before its bot is recreated used to start
+   * the bot twice — ClickUp 86eqmqjxg). That ordering is correct, but it was
+   * gated on an exact count with no escape hatch: if one bot never finished
+   * re-hydrating, the listener never armed **for the life of the process**, and
+   * every user start/stop/edit for that bot type sat in the durable queue until
+   * the caller's RPC deadline expired — silently, indefinitely.
+   *
+   * The fallback arms the listener anyway when re-hydration has clearly stopped
+   * making progress (`stalled`) or has run past an absolute ceiling (`cap`).
+   * Both are logged as warnings and surfaced through `onCommandListenerArmed`,
+   * because they mean some bots are live but unrestarted. Kill switch:
+   * `BOT_RESTART_ARM_FALLBACK=false` restores the strict (deaf-on-stall) behaviour.
+   */
+  protected beginRestartWindow(estimated: number, expectedIds: string[] = []) {
+    this.estimatedRestart = estimated
+    this.restartWindowStartedAt = Date.now()
+    this.lastRestartProgressAt = this.restartWindowStartedAt
+    this.restartExpectedIds = new Set(expectedIds)
+    this.restartFinishedIds = new Set()
+    if (this.stragglerTimer) clearTimeout(this.stragglerTimer)
+    if (!estimated) {
+      this.armCommandListener('no-bots')
+      return
+    }
+    if (!armFallbackEnabled) {
+      this.handleWarn(
+        `${loggerPrefix} Restart arm fallback DISABLED — a stalled re-hydration will leave this service deaf to commands`,
+      )
+      return
+    }
+    this.armWatchdog = setInterval(() => {
+      if (this.commandListenerArmed) return
+      const now = Date.now()
+      if (now - this.lastRestartProgressAt >= armStallMs) {
+        this.armCommandListener('stalled')
+        return
+      }
+      if (now - this.restartWindowStartedAt >= armCapMs) {
+        this.armCommandListener('cap')
+      }
+    }, armWatchdogTickMs)
+    this.armWatchdog.unref?.()
+  }
+
+  /** Single-shot: start consuming the command queue, whatever got us here. */
+  protected armCommandListener(reason: RestartArmReason) {
+    if (this.commandListenerArmed) return
+    this.commandListenerArmed = true
+    if (this.armWatchdog) {
+      clearInterval(this.armWatchdog)
+      this.armWatchdog = undefined
+    }
+    const elapsedMs = this.restartWindowStartedAt
+      ? Date.now() - this.restartWindowStartedAt
+      : 0
+    const msg = `${loggerPrefix} Command listener armed (${reason}): ${this.restarted}/${this.estimatedRestart} bots restarted in ${elapsedMs}ms`
+    if (reason === 'stalled' || reason === 'cap') {
+      this.handleWarn(
+        `${msg} — re-hydration did not complete; ${
+          this.estimatedRestart - this.restarted
+        } bot(s) are live but unrestarted`,
+      )
+    } else {
+      this.handleLog(msg)
+    }
+    this.onCommandListenerArmed(
+      reason,
+      this.restarted,
+      this.estimatedRestart,
+      elapsedMs,
+    )
+    this.scheduleStragglerCheck()
+    this.setListener()
+  }
+
+  /**
+   * Stragglers can only be judged AFTER the restart has had time to settle.
+   *
+   * Arming happens at *dispatch* parity — every bot has been handed to a worker
+   * — which is not the same as every bot having reported back. On a fast type
+   * the two coincide (hedgeCombo: all 30 finished inside 7.3s), but DCA takes
+   * minutes, so measuring at arm time would report almost the entire fleet as
+   * missing. That is exactly the bug this replaces: the first version computed
+   * the difference at arm time, from a set the parent could never populate.
+   *
+   * So: wait, then compare what the workers reported against what we expected.
+   */
+  private scheduleStragglerCheck() {
+    if (!this.restartExpectedIds.size) return
+    if (this.stragglerTimer) clearTimeout(this.stragglerTimer)
+    this.stragglerTimer = setTimeout(() => {
+      const missing = [...this.restartExpectedIds].filter(
+        (id) => !this.restartFinishedIds.has(id),
+      )
+      const finished = this.restartFinishedIds.size
+      const expected = this.restartExpectedIds.size
+      if (missing.length) {
+        this.handleWarn(
+          `${loggerPrefix} Restart stragglers: ${missing.length}/${expected} bot(s) never reported finished — ${missing
+            .slice(0, 10)
+            .join(', ')}${missing.length > 10 ? ' …' : ''}`,
+        )
+      } else {
+        this.handleLog(
+          `${loggerPrefix} Restart complete: all ${expected} bots reported finished`,
+        )
+      }
+      this.onRestartStragglers(missing, finished, expected)
+    }, stragglerDelayMs)
+    this.stragglerTimer.unref?.()
+  }
+
+  /**
+   * Telemetry hook for the delayed straggler verdict. Core keeps no stats of its
+   * own; main-app overrides this to persist onto the restart-progress doc.
+   */
+  protected onRestartStragglers(
+    _missingBotIds: string[],
+    _finished: number,
+    _expected: number,
+  ): void {}
+
+  /**
+   * Telemetry hook. Core stays free of the stats collection; main-app overrides
+   * this to persist the arm reason + shortfall onto the restart-progress doc.
+   */
+  protected onCommandListenerArmed(
+    _reason: RestartArmReason,
+    _restarted: number,
+    _estimated: number,
+    _elapsedMs: number,
+  ): void {}
 
   protected setServiceListener() {
     if (!!bosServiceType) {
@@ -7140,12 +7417,13 @@ class Bot<T extends UserSchema = UserSchema> {
         : []
     const findHedgeDcaBotsData =
       BotServiceType === BotType.hedgeDca ? await this.findActiveHedgeDca() : []
-    this.estimatedRestart =
+    this.beginRestartWindow(
       (findBotsData ?? []).length +
-      (findDCABotsData ?? []).length +
-      (findComboBotsData ?? []).length +
-      (findHedgeComboBotsData ?? []).length +
-      (findHedgeDcaBotsData ?? []).length
+        (findDCABotsData ?? []).length +
+        (findComboBotsData ?? []).length +
+        (findHedgeComboBotsData ?? []).length +
+        (findHedgeDcaBotsData ?? []).length,
+    )
     if (findDCABotsData && findDCABotsData.length > 0) {
       this.handleLog(`Found ${findDCABotsData.length} active DCA bots`)
       for (const bot of findDCABotsData) {
@@ -7245,8 +7523,10 @@ class Bot<T extends UserSchema = UserSchema> {
         )
       }
     }
+    // The empty-service case is armed by `beginRestartWindow('no-bots')`; this
+    // is the belt-and-braces path for a service that found nothing to restart.
     if (!this.estimatedRestart) {
-      this.setListener()
+      this.armCommandListener('no-bots')
     }
     this.handleLog('End finding open bots')
   }
@@ -12481,6 +12761,7 @@ class Bot<T extends UserSchema = UserSchema> {
     }
     if (!skip) {
       const comboDealWOutBots = await this.comboDealsDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'combobots',
@@ -12531,6 +12812,7 @@ class Bot<T extends UserSchema = UserSchema> {
       }
       const comboTransactionsWOutBots = await this.comboTransactionDb.aggregate(
         [
+          botIdIsObjectId,
           {
             $lookup: {
               from: 'combobots',
@@ -12582,6 +12864,7 @@ class Bot<T extends UserSchema = UserSchema> {
         result = `${result}Combo transactions without bot ${comboTransactionsDeleteResult.reason}, `
       }
       const comboMinigridsWOutBots = await this.comboMinigridDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'combobots',
@@ -12632,6 +12915,7 @@ class Bot<T extends UserSchema = UserSchema> {
         result = `${result}Combo minigrids without bot ${comboMinigridDeleteResult.reason}, `
       }
       const comboProfitWOutBots = await this.comboProfitDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'combobots',
@@ -12681,6 +12965,7 @@ class Bot<T extends UserSchema = UserSchema> {
         result = `${result}Combo profit without bot ${comboProfitDeleteResult.reason}, `
       }
       const eventsWOutBots = await this.botEventDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'bots',
@@ -12788,6 +13073,7 @@ class Bot<T extends UserSchema = UserSchema> {
         result = `${result}Events without bot ${eventsDeleteResult.reason}, `
       }
       const messagesWOutBots = await this.botMessageDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'bots',
@@ -12895,6 +13181,7 @@ class Bot<T extends UserSchema = UserSchema> {
         result = `${result}Messages without bot ${messagesDeleteResult.reason}, `
       }
       const dealWOutBots = await this.dcaDealsDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'dcabots',
@@ -12945,6 +13232,7 @@ class Bot<T extends UserSchema = UserSchema> {
         result = `${result}Deals without bot ${deleteResult.reason}, `
       }
       const ordersWOutBots = await this.orderDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'bots',
@@ -13052,6 +13340,7 @@ class Bot<T extends UserSchema = UserSchema> {
         result = `${result}Orders without bot ${ordersDeleteResult.reason}, `
       }
       const transactionsWOutBots = await this.transactionDb.aggregate([
+        botIdIsObjectId,
         {
           $lookup: {
             from: 'bots',

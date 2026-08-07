@@ -825,41 +825,6 @@ function createComboBotHelper<
         const filteredMinigrids = minigridData.data.result.filter(
           (m) => m.status !== ComboMinigridStatusEnum.closed,
         )
-        const closedMinigrids = minigridData.data.result.filter(
-          (m) => m.status === ComboMinigridStatusEnum.closed,
-        )
-        for (const c of closedMinigrids) {
-          const deal = this.getDeal(c.dealId)
-          const order = this.getOrderFromMap(c.dcaOrderId)
-          if (
-            order &&
-            deal &&
-            order.typeOrder === TypeOrderEnum.dealStart &&
-            deal.deal.status === DCADealStatusEnum.open
-          ) {
-            if (!deal.closeBySl) {
-              this.handleLog(
-                `Found closed base order minigrid ${c._id} for deal ${deal?.deal._id}`,
-              )
-              deal.closeBySl = true
-
-              this.saveDeal(deal)
-              this.closeDealById(
-                this.botId,
-                deal.deal._id,
-                CloseDCATypeEnum.closeByMarket,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                DCACloseTriggerEnum.base,
-              )
-            }
-          }
-        }
         this.handleLog(`Found ${filteredMinigrids.length} active minigrids`)
         if (filteredMinigrids.length > 0) {
           const openMinigrids = [...filteredMinigrids].filter((m) =>
@@ -962,11 +927,86 @@ function createComboBotHelper<
       }
       this.endMethod(_id)
     }
+    /**
+     * A deal whose base minigrid has completed must be closed — see the
+     * `DCACloseTriggerEnum.base` path in {@link processMinigridOrder}. If that
+     * close never lands (process died mid-flight, or the exchange refused the
+     * closing order), the deal is left open with no orders and nothing ever
+     * retries it: the minigrid is already persisted as `closed`, so no further
+     * order event re-enters the close path.
+     *
+     * This runs on every start, deliberately outside {@link loadMinigrids}'
+     * branches — that method serves minigrids from Redis on a service restart
+     * and drops closed ones on the way in, so a recovery living there would
+     * never see the minigrid that matters.
+     */
+    private async recoverClosedBaseMinigrids() {
+      if (!this.deals.size) {
+        return
+      }
+      const _id = this.startMethod('recoverClosedBaseMinigrids')
+      const closed = await this.minigridDb.readData(
+        {
+          botId: this.botId,
+          dealId: { $in: [...this.deals.keys()] },
+          status: ComboMinigridStatusEnum.closed,
+        } as any,
+        undefined,
+        {},
+        true,
+      )
+      if (closed.status === StatusEnum.notok) {
+        this.endMethod(_id)
+        return this.handleWarn(
+          `Error getting closed minigrids from DB: ${closed.reason}`,
+        )
+      }
+      for (const c of closed.data.result ?? []) {
+        const deal = this.getDeal(c.dealId)
+        if (!deal || deal.deal.status !== DCADealStatusEnum.open) {
+          continue
+        }
+        const order =
+          this.getOrderFromMap(c.dcaOrderId) ??
+          (
+            await this.ordersDb.readData<{ typeOrder: TypeOrderEnum }>(
+              { clientOrderId: c.dcaOrderId },
+              { typeOrder: 1 },
+            )
+          ).data?.result
+        if (!order || order.typeOrder !== TypeOrderEnum.dealStart) {
+          continue
+        }
+        if (deal.closeBySl) {
+          continue
+        }
+        this.handleLog(
+          `Found closed base order minigrid ${c._id} for still-open deal ${deal.deal._id}, closing deal`,
+        )
+        deal.closeBySl = true
+        this.saveDeal(deal)
+        this.closeDealById(
+          this.botId,
+          deal.deal._id,
+          CloseDCATypeEnum.closeByMarket,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          DCACloseTriggerEnum.base,
+        )
+      }
+      this.endMethod(_id)
+    }
     override async loadOrders(): Promise<void> {
       const _id = this.startMethod('loadOrders')
       await super.loadOrders()
       await this.loadMinigrids()
       await this.loadTransactions()
+      await this.recoverClosedBaseMinigrids()
       this.endMethod(_id)
     }
     get futuresStrategy(): FuturesStrategyEnum | undefined {
@@ -4217,7 +4257,7 @@ function createComboBotHelper<
                     '1'
                   ))
 
-      const available =
+      let available =
         (this.futures
           ? this.coinm
             ? (balance?.get(ed.baseAsset.name)?.free ?? 0)
@@ -4225,6 +4265,9 @@ function createComboBotHelper<
           : this.isLong
             ? (balance?.get(ed.quoteAsset.name)?.free ?? 0)
             : balance?.get(ed.baseAsset.name)?.free) ?? 0
+      if (requiredAmount / leverage > available) {
+        available = await this.pooledMarginOrKeep(ed.quoteAsset.name, available)
+      }
       if (requiredAmount / leverage > available) {
         return {
           status: false,
@@ -6181,6 +6224,10 @@ function createComboBotHelper<
         }
         await this.checkOrders(this.botId)
       } else {
+        // Not a service restart — the user started or restarted this bot, which
+        // is the manual escape hatch from order quarantine: whatever we decided
+        // to stop polling, look again now.
+        await this.clearAllOrderQuarantine('bot started by user')
         await this.cancelAllOrder()
         await this.checkOrders(this.botId, true)
       }
