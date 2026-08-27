@@ -509,6 +509,16 @@ const botCommon = {
     // `updateNotEnoughBalanceErrors` re-runs on every bot load, and the guard
     // re-arms from scratch after each worker restart. Additive-only field.
     keyVersion: Number,
+    // Smallest `required` the venue has refused per counter key. Persisted for
+    // the same reason as `keyVersion`: bot workers restart every few hours and
+    // a chronic shortfall outlives them, so holding it only in memory would
+    // hand the guard back its size-blindness after every restart.
+    // Additive-only field.
+    refusedRequired: Schema.Types.Map,
+    // Largest `required` the venue has refused per counter key — the size a
+    // success has to match before it may retire the guard. Persisted for the
+    // same reason as `refusedRequired`. Additive-only field.
+    refusedRequiredMax: Schema.Types.Map,
   },
   cost: Number,
   ...CreatedUpdated,
@@ -981,6 +991,9 @@ const balancesSchema: Schema<BalancesSchema> = new Schema({
   userId: RequiredString,
   free: RequiredNumber,
   locked: RequiredNumber,
+  // Optional on purpose: absent means the venue publishes no such figure, which
+  // is not the same as zero. See `BalancesSchema.venueAvailable`.
+  venueAvailable: Number,
   paperContext: Boolean,
   ...CreatedUpdated,
 })
@@ -1874,7 +1887,27 @@ const filledFunds = [
   },
 ]
 
+/**
+ * Why a created deal has never opened — see `DealStartBlock` in `types.ts`.
+ * `_id: false` because it is a plain value object, not a sub-document.
+ */
+const startBlocked = {
+  type: {
+    reason: String,
+    subType: String,
+    since: Number,
+    lastAttempt: Number,
+    attempts: Number,
+    retryAfter: Number,
+    scope: String,
+    level: Number,
+  },
+  _id: false,
+  required: false,
+}
+
 const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
+  startBlocked,
   closeTrigger: { type: String, enum: DCACloseTriggerEnum },
   flags: [String],
   note: String,
@@ -1889,6 +1922,7 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
   feeBalance: Number,
   newBalance: Boolean,
   moveSlActivated: Boolean,
+  moveSlArmed: Boolean,
   initialPrice: Number,
   lastPrice: Number,
   profit: profit,
@@ -2054,6 +2088,7 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
 })
 
 const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
+  startBlocked,
   closeTrigger: { type: String, enum: DCACloseTriggerEnum },
   action: { type: String, enum: ActionsEnum },
   note: String,
@@ -2068,6 +2103,7 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
   feeBalance: Number,
   newBalance: Boolean,
   moveSlActivated: Boolean,
+  moveSlArmed: Boolean,
   initialPrice: Number,
   lastPrice: Number,
   profit: profit,
@@ -3027,16 +3063,25 @@ export const registerIndexes = () => {
     botId: 1,
     subType: 1,
   })
-  // Bot-error bulk soft-delete filters (botId, isDeleted) with a residual
-  // subType:{$ne}; the userId-leading indexes above can't serve a botId-first
-  // predicate. botId is write-once (static); isDeleted is one-way/low-cardinality.
+  // Added for the per-bot bulk soft-delete on recovery, which filtered
+  // (botId, isDeleted) with a residual subType:{$ne} and which the userId-leading
+  // indexes above cannot serve. That clear has since been removed (see
+  // `restoreFromRangeOrError`), so this now only serves botId-first admin reads.
+  // Kept because dropping an index is a separate, deliberate prod operation —
+  // not a side effect of deleting its original caller.
   botMessageSchema.index({ botId: 1, isDeleted: 1 })
   // RETENTION. `isDeleted` on this collection is a tombstone that nothing ever
   // collected: on prod 2,689,136 of 2,702,725 rows (99.5%, ~1.8GB) are
-  // isDeleted:true, the oldest from 2022-12-24, and only 13,589 are live. Both
-  // producers of tombstones — "mark all read" and the per-bot clear on recovery —
-  // are one-way, so a deleted row can never come back and there is nothing to
-  // read it. `botEvents` next door has had a 30-day TTL all along; this had none.
+  // isDeleted:true, the oldest from 2022-12-24, and only 13,589 are live. A
+  // tombstone is one-way, so a deleted row can never come back and there is
+  // nothing to read it. `botEvents` next door has had a 30-day TTL all along;
+  // this had none.
+  //
+  // Tombstones now come only from the user dismissing a message ("mark all read"
+  // or a single dismiss) and from a suppressed occurrence being born hidden. The
+  // second producer — a per-bot clear that ran whenever a bot left `error`
+  // status — was removed: it was tombstoning LIVE conditions the user had never
+  // seen, which is the same rule the paragraph below states.
   //
   // PARTIAL, on `isDeleted:true`, deliberately: a blanket TTL over `created`
   // would also reap LIVE messages, and a live row is one the user has not

@@ -1350,6 +1350,14 @@ export interface DCADealsSchema extends SchemaI {
   isDeleted?: boolean
   feeBalance?: number
   moveSlActivated?: boolean
+  /**
+   * A moved stop loss only closes on a real crossing, so the engine has to
+   * remember where the price was last seen relative to the moved level. True
+   * once a tick has been observed on the profit side of it; the close fires on
+   * the tick that crosses back. Persisted so a bot worker restart cannot turn a
+   * profit lock into a market close at an arbitrary price.
+   */
+  moveSlArmed?: boolean
   newBalance?: boolean
   sizes?: Sizes
   fullFee?: number
@@ -1365,6 +1373,55 @@ export interface DCADealsSchema extends SchemaI {
   hundredSent?: number
   sellRemainder?: boolean
   parentBotId?: string
+  /**
+   * Why a deal that exists has never been opened.
+   *
+   * A deal row is created BEFORE its opening (base) order reaches the venue, so
+   * a venue refusal leaves the deal sitting in `start` with no orders and
+   * nothing at all on it saying why. The only trace was a
+   * bot-level warning in the notification bell, which names neither the deal nor
+   * the symbol and is coalesced across hours, so a user looking at the stuck
+   * deal could not connect the two. See `markDealStartBlocked` in `dcaHelper`.
+   *
+   * Set whenever the venue (or one of our own pre-send guards standing in for
+   * it) refuses the opening order; cleared the moment one is accepted. Purely
+   * descriptive — it never changes deal status, and must not: the Binance
+   * Quantitative Rules (-4400) path is deliberately non-erroring because
+   * re-hitting the venue during a restriction escalates the penalty.
+   */
+  startBlocked?: DealStartBlock
+}
+
+/**
+ * The reason a created deal's opening order has not been accepted by the venue.
+ * Descriptive only — see `DCADealsSchema['startBlocked']`.
+ */
+export type DealStartBlock = {
+  /**
+   * User-facing reason. The venue's own text, replaced by the subType's
+   * `userMessage` when an operator has configured a clearer one
+   * (`boterrorsubtypes`, admin-managed) so this reads the same as the
+   * notification for the same condition.
+   */
+  reason: string
+  /** Bot-error subType the reason classified as, e.g. `Exchange rules`. */
+  subType?: string
+  /** ms epoch of the first refusal in this run of refusals. */
+  since: number
+  /** ms epoch of the most recent refusal. */
+  lastAttempt: number
+  /** How many opening attempts have been refused since `since`. */
+  attempts: number
+  /**
+   * ms epoch when the restriction is expected to lift, where the venue grades
+   * it and we can compute it (Binance Quantitative Rules cooldowns). Absent for
+   * refusals with no known end.
+   */
+  retryAfter?: number
+  /** Restriction scope where the venue distinguishes one, e.g. `account`. */
+  scope?: string
+  /** Restriction level where the venue grades one (Binance QR 1 | 2 | 3). */
+  level?: number
 }
 
 export enum AddFundsTypeEnum {
@@ -1927,6 +1984,23 @@ export interface MainBot<T = BaseSettings> extends SchemaI {
      *  `getNotEnoughOrdersIdByOrder` changes shape so stale counters keyed by
      *  the old scheme are discarded instead of lingering forever. */
     keyVersion?: number
+    /** Smallest order size (in the same `required` units the guard compares)
+     *  the VENUE has actually refused for funds on each counter key. The key
+     *  is `symbol@side`, which deliberately collapses orders of very different
+     *  notionals onto one counter, so affordability has to be carried
+     *  separately: a 5 USD grid order succeeding says nothing about the 35 USD
+     *  safety order the venue keeps refusing. */
+    refusedRequired?: Record<string, number>
+    /** LARGEST order size the VENUE has refused for funds on each counter key.
+     *  `refusedRequired` (the smallest) is the right floor for deciding what to
+     *  SUPPRESS — anything at least that big is suspect. It is the wrong floor
+     *  for deciding what may CLEAR the guard, because the smallest refusal is
+     *  itself just a transient dip: once a ~37 USD grid order has been refused
+     *  once, every ordinary ~37 USD grid fill on that key clears a counter that
+     *  only the 262 USD safety order can raise. Retiring the guard takes proof
+     *  at the size that is actually being refused, so that decision reads this
+     *  one. Additive-only field. */
+    refusedRequiredMax?: Record<string, number>
   }
   share?: boolean
   shareId?: string
@@ -2490,6 +2564,19 @@ export interface BalancesSchema extends SchemaI {
   asset: string
   free: number
   locked: number
+  /**
+   * The venue's OWN figure for how much of this asset is spendable, when it
+   * publishes one. Absent for every venue that reports no such figure — read it
+   * as "unknown", never as zero.
+   *
+   * `free`/`locked` cannot describe a pooled cross-collateral account: on Kraken
+   * Futures' flex account every currency margins every contract, so `free`
+   * carries the wallet quantity and `locked` stays 0. `free - venueAvailable` is
+   * then the margin the venue has actually committed, which is the only
+   * continuously-available signal that the account holds a position the engine
+   * is not tracking — otherwise invisible until an order is rejected.
+   */
+  venueAvailable?: number
   paperContext?: boolean
 }
 
@@ -3199,10 +3286,6 @@ export enum WebhookActionEnum {
   reduceFunds = 'reduceFunds',
   /** Change pairs */
   changePairs = 'changePairs',
-  enterLong = 'enterLong',
-  enterShort = 'enterShort',
-  exitLong = 'exitLong',
-  exitShort = 'exitShort',
 }
 
 export enum PairsToSetMode {
@@ -3217,6 +3300,14 @@ export interface AssetBalance {
   asset: string
   free: string
   locked: string
+  /**
+   * The venue's own spendable figure for this asset, when the producing stream
+   * publishes one. Mirrors `AssetBalance.venueAvailable` in
+   * websocket-connector-sh — optional on both sides, so a producer that omits it
+   * and a consumer that ignores it both keep working. Persisted to
+   * {@link BalancesSchema.venueAvailable}.
+   */
+  venueAvailable?: string
 }
 
 export interface OutboundAccountPosition {
@@ -3418,6 +3509,28 @@ export type TradeResponse = {
   firstId: number
   lastId: number
   timestamp: number
+}
+
+/**
+ * One execution on the ACCOUNT — not a public market trade (`TradeResponse`).
+ * Mirrors `AccountFill` in exchange-connector-sh; keep the two in step.
+ *
+ * `clientOrderId` is the id WE supplied when placing the order, which is what
+ * makes this reconcilable: a fill the venue reports against one of our ids, for
+ * an order we recorded as cancelled-and-unfilled, is a fill we lost — provable
+ * per fill, with no inference about margin or position size. A trade the user
+ * placed by hand carries no id of ours and drops out by construction.
+ */
+export type AccountFill = {
+  fillId: string
+  orderId: string
+  clientOrderId: string
+  symbol: string
+  side: 'BUY' | 'SELL'
+  price: string
+  quantity: string
+  timestamp: number
+  fillType?: string
 }
 
 export type FundingRateResponse = {

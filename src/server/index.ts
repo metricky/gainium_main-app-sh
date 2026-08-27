@@ -20,7 +20,8 @@ import swaggerUi from 'swagger-ui-express'
 import { apiReference } from '@scalar/express-api-reference'
 import cookieParser from 'cookie-parser'
 import logger from '../utils/logger'
-import saveFileHelper from '../utils/files'
+import saveFileHelper, { isInsideUserFiles } from '../utils/files'
+import { checkToken } from '../backtest/utils/token'
 import { ExchangeEnum } from '../../types'
 import RedisClient from '../db/redis'
 import { filesDb, userDb } from '../db/dbInit'
@@ -49,6 +50,63 @@ declare global {
     }
   }
 }
+
+/**
+ * SECURITY (GHSA-whmj-5f67-9f3w): `apiLimiter` below covers only the `/api`
+ * REST routes. The GraphQL endpoint is mounted at `/` with no limiter at all,
+ * so the `token` login mutation could be brute-forced or credential-stuffed
+ * without any throttling, lockout or backoff.
+ *
+ * Rate-limiting ALL of GraphQL would throttle the dashboard, which issues many
+ * queries per page view, so this limiter throttles only documents that carry a
+ * credential-bearing operation. Everything else skips it untouched.
+ */
+const AUTH_OPERATION_RE =
+  /\b(?:mutation\s+)?(?:token|register|changePassword|setNewPassword|resetPassword|requestPasswordReset)\s*[({]/
+
+const isAuthOperation = (req: express.Request): boolean => {
+  const body = req.body as
+    | { query?: unknown; operationName?: unknown }
+    | undefined
+  if (!body) return false
+  const name = typeof body.operationName === 'string' ? body.operationName : ''
+  if (
+    /^(token|register|changePassword|setNewPassword|resetPassword|requestPasswordReset)$/.test(
+      name,
+    )
+  ) {
+    return true
+  }
+  const query = typeof body.query === 'string' ? body.query : ''
+  // Cheap bound: a real auth document is short. Skipping the regex on a huge
+  // document keeps this off the hot path for dashboard batch queries.
+  if (!query || query.length > 4000) return false
+  return AUTH_OPERATION_RE.test(query)
+}
+
+/**
+ * Deliberately much tighter than `apiLimiter` (50/min): ten credential
+ * attempts a minute from one address is already far more than a person does,
+ * and anything above it is a script. Override with `AUTH_RATE_LIMIT_MAX`.
+ */
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max:
+    Number(process.env.AUTH_RATE_LIMIT_MAX) > 0
+      ? Number(process.env.AUTH_RATE_LIMIT_MAX)
+      : 10,
+  standardHeaders: false,
+  legacyHeaders: true,
+  skip: (req) => !isAuthOperation(req as express.Request),
+  keyGenerator: (req) => {
+    return ipKeyGenerator(
+      (req.headers['x-forwarded-for'] as string) ||
+        req.socket.remoteAddress ||
+        req.ip ||
+        'unknown',
+    )
+  },
+})
 
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -402,7 +460,11 @@ async function start() {
   })
 
   app.post('/api/serverSideBacktest', async (req, res) => {
-    const { userId, backtestData } = req.body
+    const { userId, backtestData, encryptedToken } = req.body
+    if (!checkToken(encryptedToken)) {
+      res.sendStatus(403)
+      return
+    }
     if (backtestData.shareId) {
       const data = {
         shareId: backtestData.shareId,
@@ -419,7 +481,11 @@ async function start() {
   })
 
   app.post('/api/serverSideBacktestSaveFile', async (req, res) => {
-    const { data, name, resolution, path } = req.body
+    const { data, name, resolution, path, encryptedToken } = req.body
+    if (!checkToken(encryptedToken)) {
+      res.sendStatus(403)
+      return
+    }
 
     try {
       const fileResult = saveFileHelper(
@@ -469,13 +535,25 @@ async function start() {
       res.status(400).send('File not found')
       return
     }
-    const path = file.data.result.path
-    const exist = fs.existsSync(path)
+    // SECURITY: `path` is read back from the database and handed straight to
+    // sendFile. saveFile bounds what it writes today, but rows stored before
+    // that guard existed are still here, and the shadowed local `path` above
+    // masks the imported `path` module — the exact footgun reported in
+    // main-app-sh PR #12. Re-check containment at the point of serving.
+    const storedPath = file.data.result.path
+    if (!isInsideUserFiles(storedPath)) {
+      logger.error(
+        `Refusing to serve a backtest file outside user-files: ${storedPath}`,
+      )
+      res.status(400).send('File not found')
+      return
+    }
+    const exist = fs.existsSync(storedPath)
     if (!exist) {
       res.status(400).send('File not found')
       return
     }
-    res.status(200).sendFile(path)
+    res.status(200).sendFile(storedPath)
   })
 
   if (!JWT_SECRET) {
@@ -533,6 +611,10 @@ async function start() {
       }
       next()
     },
+    // Runs after the body is parsed (bodyParser is mounted on '/' above) so it
+    // can tell an auth document from ordinary dashboard traffic, and before
+    // Apollo so a throttled attempt never reaches the resolver.
+    authLimiter,
     expressMiddleware(apolloServer, {
       context: async ({ req }) => {
         return {

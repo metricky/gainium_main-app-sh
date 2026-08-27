@@ -1,5 +1,390 @@
 # Changelog
 
+## [1.54.2] - 2026-08-27
+
+### Fixed
+
+- **A Kraken DCA deal opened with no safety orders on the exchange at all.** `placeOrders` looks the pair up with `getExchangeInfo`, which is keyed on the platform form (`ETH-EUR`), but callers that take the symbol off an exchange ORDER pass the venue's own spelling — on Kraken `ETHEUR`, `XBTUSD`, `XRPUSD`. The lookup missed, and the method returned before placing anything. Since the ladder is built when the base order fills and handed straight to `placeOrders` as `orderBo.symbol`, it was dropped on every deal open: the deal ran with only its base order, and the ladder reached the exchange only if something later reloaded the bot (a settings save, a restart, a worker recycle), because the restore path passes the deal's own symbol. Silent — the miss is a warning in the service log, with no bot message and nothing on the deal, so a user could only find it by looking at their exchange. Present daily in production as `Exchange info not found for XBTUSD` / `XRPUSD`. The pair is now resolved from the deal, with the argument kept as the fallback when the deal is not in memory; two combo callers carried the identical defect and are fixed by the same change. Venues whose native symbol already matches the platform form (most of them) were never affected.
+
+## [1.54.1] - 2026-08-27
+
+### Fixed
+
+- Cancelling a Kraken **spot** order no longer cancels a different order. `cancelOrderOnExchange` addressed the venue by our client order id, and Kraken spot has no client-id lookup — the connector falls back to `userref = parseInt(clientOrderId.substring(0, 8), 16)`, which stops at the first non-hex char, so every `D-*` id collapses to userref 13 and every `CMB-*` to 12. `getOrder` then returned whichever same-userref order the account listed first and we cancelled that one, reporting success. Kraken spot now uses the stored `orderId` (the Kraken txid), routing through the connector's exact `isKrakenSpotTxid` → `getSpotOrderByTxid` path — the swap `_handleUnknownOrder` already made in 1.32.4 for the same reason. In production 232 Kraken txids were shared by more than one client order id across 1,992 order rows, on 63 of 79 Kraken-spot bots.
+
+## [1.54.0] - 2026-08-27
+
+### Added
+
+- `getBotDcaUsage` / `getComboBotDcaUsage` — DCA-usage histogram folded in Mongo over all of a bot's deals, for the dashboard's DCA Analysis widget
+
+## [1.53.14] - 2026-08-26
+
+### Fixed
+
+- Bot notifications now name the pair that actually errored. `processError` labelled every message with `settings.pair[0]`, so on a multi-pair bot each notification claimed the bot's first pair no matter which one failed — a row could read `BTC-USDC` above a message about AIOZ. The occurrence's own symbol is now threaded through `handleErrors` / `handleOrderErrors` (`order.symbol`, or the deal's symbol), and `settings.pair[0]` stays the fallback only for bot-level conditions that have no erroring pair, such as a revoked API key. Over 30 days of production `Not enough balance` messages, 453 of 8,255 machine-checkable rows named a pair contradicted by their own message text, across 45 users and 78 bots. The same value feeds the realtime `bot message` socket payload, so the notification bell is corrected too.
+
+## [1.53.13] - 2026-08-26
+
+### Changed
+
+- The base-order fallback notice added in 1.53.12 now logs at debug level for the `nominal` case and keeps log level for the two that are worth reading. Measured on prod right after the fix went live: the `nominal` branch is the routine one — every deal whose opening order has not landed yet passes through it, ~650 lines/min across the DCA fleet and 1% of the worker's whole stdout — and it is the case with nothing to diagnose. `deal` and `accounted` say something about a deal's books and stay visible. The line also prints `(new)` rather than an empty id for a deal that does not exist yet.
+
+## [1.53.12] - 2026-08-26
+
+### Fixed
+
+- **A DCA take-profit was sized from the NOMINAL base order size instead of the position the deal actually held.** `getTPOrder` builds the close as `sum(entry fills) + base order`, and when the base order's row was not in the order map it re-derived one from `baseOrderSize`. Two things put it in that state and both are now closed.
+
+  First, a base order that partially fills and is then CANCELED is a terminal row, and `loadOrders` filtered `status: CANCELED` out of its query — so after a worker restart `findBaseOrderByDeal`, which is written for precisely this case (`['CANCELED','FILLED']` plus `executedQty > 0`), could never find it. A Coinbase AIOZ deal's base order executed 345.3 of 1790.1 before being cancelled; the nominal put 1788.4 back, and the deal asked the venue to sell 5147.9 against 3711.30 held. The venue rejected it, which leaves a deal with no take-profit at all. Open deals now load their partially-executed cancelled entry orders back, scoped by deal id so the query examines the same documents as before. The same rows are what the deal fee split and `updateUsage`'s filled base were already written to read.
+
+  Second, deals restored from the Redis snapshot had their orders — take-profit included — generated *before* `_loadOrders` populated the order book, so the sizing saw no fills whatsoever and the nominal became the entire take-profit: 1786.1 against the same 3711.30, and a still-resting 2226 against 103,547 on another deal. The restored deals are now seeded first and their orders generated after the load. That also fixes a second-order case: generating and setting a deal in one pass meant `getDeal` could not see the deal whose orders it was generating, and `findBaseOrderByDeal` returns nothing without it.
+
+  The base order size is now taken from the deal's own books when its row is missing — the volume the counted fills do not explain IS the base order, exactly, with no reference to settings. The settings-derived fallback is kept for the case it was written for, a deal whose opening order has not landed yet, and is no longer reachable once the deal holds anything.
+- A safety order that partially filled and was then cancelled now counts toward the take-profit size. It was matched `status: FILLED` only, so every one of them under-stated the position by whatever it had already executed — the same omission as the base order, on the orders that outnumber it.
+- The settings-derived base order fallback now converts `usd` sizes through the USD rate and treats an unset `orderSizeType` as quote, matching `getBaseOrder`. `percFree`/`percTotal` are a percentage of a live balance the take-profit path cannot see, so they fall to the venue minimum rather than being read as a coin quantity — a `percTotal` BTC deal had rested a 0.537 BTC take-profit against 0.105 BTC held.
+
+## [1.53.11] - 2026-08-26
+
+### Fixed
+
+- **A keep-orders reload rebuilt the bot's order book from a stale Redis snapshot and silently lost every order created since that snapshot was written.** `setOrdersToRedis` is `@RunWithDelay`'d and the timer resets on every order mutation, so under churn the snapshot is not one debounce interval stale — it is as old as the last quiet gap in the bot's order activity, seconds or more. A keep-orders reload (a settings save, a deal restore) sets `serviceRestart` *and* `secondRestart`, then `clearClassProperties` wipes `orders`/`ordersKeys` and refills them from `_loadOrders`, which gated its Redis shortcut on bare `serviceRestart` and so took the snapshot. Orders newer than it were not marked stale, they were gone: no entry in `orders`, none in `ordersKeys`. `accountCallback` then dropped every later stream event for them at its `ordersKeys` guard and logged nothing at any level, so a fill that really happened on the venue was discarded and the deal sat holding a position the bot did not know about until a REST reconcile happened to notice hours later — and where the lost order was a resting safety order, the reload re-placed the same price level moments after, duplicating it on the exchange. `_loadOrders` now uses the same `serviceRestart && !secondRestart` cold-start guard as the deals snapshot beside it and as the rest of the engine; a reload reads the DB, which is one bot and cheap, and a mass restart still gets the snapshot it exists for. Grid was never affected (it passes `skipRedis`); DCA, combo and hedge shared the path.
+- A fill or partial fill delivered for an order the bot is not tracking is now reported as `STREAM-DESYNC` instead of being dropped in silence. `SharedStream` routes these to one bot specifically, so the bot's book disagreeing with the router is a real desync and, on a fill, money about to go unbooked — it was the same silent `return` that kept the loss above invisible.
+
+## [1.53.10] - 2026-08-26
+
+### Fixed
+
+- Booking a partial fill off a canceled take-profit now requires a usable `updateTime`. Cancel records written from a REST response rather than a stream event can carry a bogus `executedQty` next to `updateTime: -1`; production holds such a row, and it looks exactly like a 1.29 partial fill on an order the venue never filled. Trusting it would invent a sale and under-size every later take-profit by the phantom amount — a silent failure in the opposite direction to the one 1.53.8 fixed. Stream events always carry a real timestamp, so nothing legitimate is lost.
+
+## [1.53.9] - 2026-08-26
+
+### Fixed
+
+- A keep-orders reload — a settings save, or a deal restore — no longer re-places a running deal's take-profit. 1.53.8 left this path alone because `placeOrders` has its own take-profit guard, but that guard only covers one of the three ways the recompute can land. `currentOrders` is rebuilt from the deal's current price, so the recomputed take-profit sits at a different price and often a different size than the one already resting: a larger one makes `placeOrders` cancel the resting take-profit and send a replacement, and one of equal size makes it place a second take-profit on top (the price differs, so `isOrderExistInDeal` finds no counterpart and neither quantity branch fires). Only a smaller one was skipped. The first two reach every open deal in a single pass, so a 50-pair bot re-placed ~50 take-profits inside two minutes with the entries hours in the past — which Binance Futures scores as ~50 orders placed against no fills in the same 10-minute cycle, an unfilled ratio of 1.0 against a 0.99 ban threshold, and restricts the whole account for. A running deal keeps the settings and the orders it started with, so its resting take-profit is the correct one and a save has no business touching it; one is now placed only when the deal has none resting. The two legitimate cancels are unchanged, both being scoped to a single deal: a deal closing cancels its own take-profit, and a position that changes size has its take-profit resized by the fill path.
+
+## [1.53.8] - 2026-08-26
+
+### Fixed
+
+- A partially-filled take-profit that was later canceled no longer loses the part that executed. `updatePartiallyFilledTP` records it off the PARTIALLY_FILLED event, but not every venue emits one — Coinbase keeps such an order OPEN — and `processCanceledOrder` was an empty stub even though the cancel report carries the executed quantity. The deal went on counting base the account no longer held, so every later take-profit was sized above the free balance, rejected by the venue, and the deal was left with no take-profit and no way to close it. The record keys on `clientOrderId`, so seeing both events books the quantity once.
+- A keep-orders reload — a settings save, or a deal restore — no longer stacks a second ladder of safety orders on the live one. The reload deliberately leaves the deal's orders resting, but still re-placed a full set: `currentOrders` is rebuilt from the deal's current price, so its levels sit at prices and sizes that `isOrderExistInDeal` (which matches on price+qty+side) finds no counterpart for, and the deal ended up with twice the resting exposure the user configured. A take-profit cannot duplicate this way — `placeOrders` has its own guard — so that path is unchanged.
+
+## [1.53.7] - 2026-08-25
+
+### Fixed
+
+- A DCA deal whose 35s enter-market fallback was refused by the venue is no longer stranded without an order. `checkBaseOrder` cancels the resting limit base order to make room for the market entry and used to latch `enterMarketPrice` before sending it, so a refusal — a Coinbase book in limit-only mode — left the deal in `start` with nothing on the book and the latch permanently suppressing any further attempt. The latch now records the venue's answer rather than our intent, and a limit-only refusal re-places the base order as a limit instead of abandoning the entry. Such deals still counted as an active pair on the Bots tab while showing no trade, which is the count mismatch users reported.
+
+## [1.53.6] - 2026-08-25
+
+### Changed
+
+- `priceBalancesUsd` now builds its tokenized-stock fallback map lazily. `pairs` has no index on `assetCategory`, so that lookup is a collection scan, and it is only ever read for an asset the crypto rate table could not price — but it ran on every call, including the all-crypto portfolios that are the overwhelming majority. With `getBalances(includeUsdValues)` this path is now on every dashboard portfolio view, so the scan is skipped unless something actually needs it.
+
+## [1.53.5] - 2026-08-25
+
+### Added
+
+- `getBalances` can value each holding in USD server-side (`includeUsdValues`), reusing the same `priceBalancesUsd` per-venue path the portfolio snapshot cron and the public REST balances endpoint already use. The dashboard previously had to derive a price by matching an exchange ticker against the screener's coin symbols, which silently rendered `$0.00` for anything the screener could not match — a coin renamed upstream (Coinbase still lists Toncoin as `TON`; the screener carries CoinGecko's `gram`) or a long-tail listing the screener does not carry at all. An asset the venue publishes no rate for now returns `null` rather than a confident zero, so a consumer can tell "worth nothing" apart from "we could not price this". Off by default; existing callers are byte-for-byte unchanged.
+
+## [1.53.4] - 2026-08-24
+
+### Fixed
+
+- Backtest files are served only from inside the `user-files` directory. `loadBacktestDetails` read a path back from the database and handed it straight to `sendFile`, trusting whatever was stored. The writer bounds what it creates today, but rows written before that guard are still in the database, so the serving side now re-checks containment against the same root rather than trusting the stored value. Reported on `main-app-sh` PR #12 by M1ch43lV.
+
+## [1.53.3] - 2026-08-24
+
+### Fixed
+
+- Combo futures bots now refuse to start when the symbol already holds a position on the opposite side, the same rule DCA and Grid bots have always had. On a one-way (non-hedge) account the venue keeps a single net position per symbol, so two opposing combo bots fought over it: the second bot's reduce-only exits were rejected by the exchange and its deal could only be closed by hand. Hedge legs are unaffected.
+
+## [1.53.2] - 2026-08-24
+
+### Fixed
+
+- A DCA bot-settings save really does leave running deals their orders now. 1.53.0 stopped re-deriving each open deal's settings — that part held — but it removed only one of **two** teardowns, and not the one users were hitting. `restoreWork`, which runs further down `start()`, cancels every resting order for any reload it does not classify as a cold service restart, and the reload flags deliberately make a settings save not look like one. So the cancel moved instead of going away: one 50-pair bot had all 300 of its orders pulled and re-placed about two minutes after an edit, with the user watching it happen for the second time. A reload that must keep the book now says so explicitly, and `restoreWork` reconciles against the venue instead of tearing it down. Combo was never affected — its own `restoreWork` override tests `serviceRestart` alone — and that asymmetry is now pinned by a test rather than left as a coincidence.
+
+## [1.53.1] - 2026-08-24
+
+### Fixed
+
+- A bot reload no longer replays stale signal deals. `restoreWork` walks every deal still in `start` and re-placed its opening order regardless of why the deal existed — so a deal created by a TradingView webhook that was refused at the time (for example under a Binance Quantitative Rules restriction) could be executed hours later by a reload, opening a trade at a moment the signal never described. One production account had a reload replay a 21-hour-old webhook deal into a long the strategy had since flipped short on. The sweep now applies the same rule as the Quantitative Rules give-up path: only an ASAP deal — whose start carries no timing — is re-attempted; a deal opened by a webhook, indicator, timer or manual click is cancelled instead, and its own trigger opens the next one.
+
+## [1.53.0] - 2026-08-24
+
+### Changed
+
+- A bot-settings save now applies to **new deals only**. Deals that are already running keep the settings they opened with and keep their resting orders. Previously every save re-derived each open deal's settings from the new bot settings and then cancelled and re-placed the bot's whole order book — take-profits included — so an edit that could not possibly affect an open deal still re-targeted live take-profits, cost every order its place in the exchange queue, and left open deals with no TP or SL resting on the exchange for the width of the cancel/re-place window. Changing a Deal Start filter, which only ever decides whether a *new* deal opens, tore down and rebuilt the orders of every deal already running. This applies to DCA, Combo and both Hedge types; a Grid bot has no per-deal settings and still rebuilds its ladder on save. A running deal is still editable on its own, from that deal's menu. Combo's TP/SL-only shortcut, which pushed the new target onto open deals without the full reload, is gone for the same reason. The bot worker still reloads on save so the next deal uses the new settings, and it now rebuilds its indicator subscriptions when it does: the keep-orders reload path reconciles indicators by symbol alone, so swapping one indicator for another on the same pair would otherwise have left the old one subscribed and never subscribed the new one.
+
+## [1.52.11] - 2026-08-23
+
+### Fixed
+
+- A deal we decline to re-open is now released instead of holding its symbol. A deal is written before its opening order reaches the venue, so an order refused under Binance's Quantitative Rules leaves the deal in `start` with nothing on the exchange. While the retry loop existed something eventually opened or failed it; now that we correctly stop retrying, nothing did — and an abandoned deal still counts against `max deals per pair`, so it silently swallowed every later signal for that symbol. One account had a deal created during an account-wide restriction hold XTZUSDT for four hours and eat a TradingView signal that arrived long after the restriction had cleared; 42 deals on that account were sitting in the same state. Only a deal still in `start` is released — one that has opened, closed or been cancelled is left exactly as it is, so this can never abandon a real position.
+
+## [1.52.10] - 2026-08-23
+
+### Fixed
+
+- A Binance Quantitative Rules restriction no longer re-opens itself. Every order refused during one restriction was scheduled to retry at that restriction's expiry plus one second — the same instant for all of them — so the moment an account-wide window lifted, everything it had blocked fired together: one account saw 39 opening orders retry, fill and place 39 take-profits inside a single minute across 39 symbols. Binance measures the unfilled ratio per symbol in 10-minute buckets, so a burst of that shape lands placed quantity on dozens of symbols with nothing executed against it, records a violation on each, and ten symbols at once re-opens the account-wide restriction the burst was waiting out — 69 seconds after the previous one expired, in that account's case. Retries are now spread across a jitter window, backed off per attempt, capped, and refused outright once a symbol is within a few violations of the level-2 threshold, since our own refused retry is itself a violation. Only a deal started ASAP is retried at all: every other start condition is a point in time, so re-sending it after a restriction lifts opens a trade the original signal never described, and its own trigger will fire again anyway.
+
+## [1.52.9] - 2026-08-22
+
+### Fixed
+
+- A Kraken Futures duplicate-order rejection no longer writes off an order the venue is actually holding. Kraken spells it `clientOrderIdAlreadyExist` with no spaces, so it matched none of the duplicate-recovery variants (OKX's spaced `Client order ID already exists` already did) and fell through to the terminal write-off — which also unregisters the id from the shared stream, so the venue's later fills reach no bot at all. One combo bot on krakenUsdm had a reduce-only SELL written off 1.7s after it went live on the venue, then filled 34 @ 1.4219 an hour later — a fill the deal never saw. Both spellings now also classify as `Duplicate order ID` instead of Uncategorized.
+
+## [1.52.8] - 2026-08-22
+
+### Fixed
+
+- The pre-start position check no longer treats a reported leverage of 0 as a mismatch. A connector that cannot state a position's leverage reports 0 — Kraken Futures has no per-position leverage at all (it is a per-contract account preference), and exchange-connector core 1.19.14 reports `'0'` for cross/dynamic or an unreadable preference where it used to hardcode `'1'`. Compared literally, that hardcoded 1 refused to start every Kraken futures bot above 1x into an existing position ("Leverage in active position is 1, but in settings 2") — 119 live bots across 54 users — and users worked around it by dropping bots to 1x. Unknown is not a mismatch; a real isolated leverage still is.
+
+## [1.52.7] - 2026-08-22
+
+### Fixed
+
+- A deal abandoned with an open position is no longer reported as "Deal closed". Stopping a bot whose `stopType` is `leave` cancels the deal's resting orders and deliberately leaves whatever already filled on the exchange, but the bot event still read `Deal closed, id: …, profit: 0$` — so a user who read their event log correctly concluded the deal was finished. It was not: the position stayed on the venue, unmanaged, with no take profit and no stop loss. A 125 XRP Kraken futures short was left that way on Aug 18, went unwatched for three days, and was liquidated by the venue on Aug 21. A `canceled` deal that still holds volume now names the outcome, the size left behind and that the bot no longer manages it.
+- The explicit `leave` close path recorded nothing at all. It cancels the resting orders and returns before `processDealClose`, so a deal left open produced no event and no message anywhere. It now reports the abandoned position as a warning (never an error — leaving a position is what the user asked for, and it must not flip the bot into `error`), under its own `Position left open` subtype so the admin rules can tune it without touching real errors. The throttle is bypassed: stopping two bots in a row has to report both positions.
+- A bot blocked by the pre-start position check no longer goes quiet. When `loadData` refuses to start (leverage, margin type or side of an existing venue position disagrees with the settings) the bot is stopped, but no status event was written — the event log's last line stayed `open status is set` while the bot sat closed and never retried. A hedge long leg blocked this way opened zero deals for ten days and looked merely idle; the user attributed it to an unrelated stop-loss deal on the other leg. The transition is now recorded, and says the bot will not retry on its own.
+
+## [1.52.6] - 2026-08-22
+
+### Fixed
+
+- A bot error the user never saw is no longer deleted before they can see it. `restoreFromRangeOrError()` tombstoned every undismissed message on a bot whenever it left `error` status, on the premise that leaving that status meant the condition was gone — but `BotStatusEnum.error` is soft and the bot returns to `open` on the very next cycle whether or not anything was fixed, so the clear ran against live conditions, every cycle. The notifications feed filters on `isDeleted`, so the row vanished from the panel seconds after it was written: an OKX key that could not place an order for three days produced 12 visible messages, 12 tombstoned, and nothing at all in Notifications — the only surviving trace was the bot's Events tab (community #5041). Recovery now clears the bot's error badge and nothing else; a repeat `$inc`s the one row the user is looking at, as `logMode: 'once'` always intended, and dismissal remains what re-arms the subType.
+
+## [1.52.5] - 2026-08-21
+
+### Fixed
+
+- `getDataByPriority` now falls back to the OAuth/top-level value when a field is absent from the partial `userDefined` override, so a surname saved to Settings → Personal data survives a reload instead of reading back empty (bug #471). The `userSettings` mutation also mirrors `lastName` into `userDefined` alongside `name`, and no longer drops `name`/`lastName` when they are deliberately cleared.
+
+## [1.52.4] - 2026-08-21
+
+### Fixed
+
+- `getBalances` for a futures leg that is `linkedTo` its spot leg (OKX / Bybit unified accounts) now returns the shared balance pool, tagged with the requested leg — the bot form showed "BAL 0" for every such account because balances are only stored under the source leg (reported on OKX Europe X-Perps, forum topic 4925).
+
+## [1.52.3] - 2026-08-21
+
+### Fixed
+
+- API-key signatures can no longer be replayed. The `time` header is part of the signed material but was never compared to the clock, so a captured request stayed valid indefinitely and could be replayed verbatim. Requests whose timestamp sits more than five minutes from server time are now rejected before the signature is even computed; `API_SIGNATURE_WINDOW_MS` widens or (at `0`) disables the check. The signature comparison is also constant-time now, so it no longer leaks through timing how many leading bytes a guess got right (GHSA-whmj-5f67-9f3w).
+- Session tokens expire. `jsonwebtoken` reads a numeric `expiresIn` as seconds, and this was handed a millisecond epoch — signing an `exp` roughly 56,000 years out, so no session ever expired and any leaked token was permanent access. Minting now goes through a shared `signSessionToken` helper that takes seconds and derives the persisted `expiredAt` from the token's own claims, so the stored row and the enforced expiry cannot disagree. Override the 30-day default with `SESSION_TTL_SECONDS` (GHSA-7gxr-ppgj-jjg8).
+- Failed logins return one generic message. The login mutation answered "Password not correct" for a real account and "Sign up Error" for an unknown one, which let anyone sort addresses into those that have accounts and those that do not (GHSA-whmj-5f67-9f3w).
+- Credential-bearing GraphQL operations are rate limited. The `/api` REST routes had a limiter; the GraphQL endpoint had none, so the login mutation could be brute-forced at full speed. Ten attempts per minute per address now, applied only to auth operations so ordinary dashboard traffic is untouched — `AUTH_RATE_LIMIT_MAX` adjusts it (GHSA-whmj-5f67-9f3w).
+
+## [1.52.2] - 2026-08-21
+
+### Fixed
+
+- `cli:reset-password` now signs the account out everywhere as well as changing the password. It only rewrote the password before, so every session stayed valid — and on a self-hosted install this command is the recovery path an operator reaches for when an account looks compromised, which meant the intruder stayed logged in through the very reset meant to evict them. Same reasoning as the `changePassword` fix in 1.52.0.
+
+## [1.52.1] - 2026-08-21
+
+### Fixed
+
+- A closed futures deal now reports the quantity it actually closed. `size` means the live position while a deal is open, but once the position is gone there is nothing left to read it from, so it was back-derived from the deal's usage instead — a different quantity, in the same field. Whether the derived value or the real one ended up stored depended on whether a usage update happened to land after the deal's status flipped, so roughly half of closed futures deals showed one basis and half the other, and `Size × Average Price` did not reconcile with `Notional Value`. The real closed amount — the closing fill plus any earlier partial take-profits — is now recorded when the deal closes and preserved afterwards. Display only: nothing in the engine reads this field.
+
+
+## [1.52.0] - 2026-08-21
+
+### Changed
+
+- **Changing your password now requires your current password.** `changePasswordInput` gains a required `currentPassword` field, so a session alone is no longer sufficient to set a new password (GHSA-4m6h-m5mj-733x). **This is a breaking API change** — update the dashboard to main-dash-sh 2.45.0 or later in the same upgrade, or the change-password form will stop working.
+- Changing your password now signs out every other session on the account, keeping only the one you changed it from. Previously all existing sessions survived a password change.
+
+### Fixed
+
+- The Socket.IO user stream now requires `userId` and `userToken` to be strings before they are used to look a user up, and no longer registers the legacy inbound bot-relay events unless `STREAM_ACCEPT_LEGACY_SOCKET_RELAY=true` is set (GHSA-hmxp-q7gj-rr88). Live updates travel over Redis (`STREAM_TYPE=redis`, the default in `.env.sample`), so the relay events are unused in a standard deployment.
+
+## [1.51.30] - 2026-08-21
+
+### Fixed
+
+- The not-enough-balance guard is no longer wiped by an ordinary small fill on the same pair, so a recovery order the exchange keeps refusing is finally allowed to back off. The guard counts refusals per (symbol, side), which deliberately puts a combo bot's routine grid orders and its much larger safety/recovery order on one counter, and it retired that counter on any success at least as big as the *smallest* order the venue had ever refused on the key. That floor screens out nothing: once a grid order has been refused a single time during a dip, it sits at grid-order size forever, and every grid fill a few minutes later cleared both the counter and the retry cooldown that only the big order had built. One Kraken combo bot re-sent the same 262 USD recovery order — identical symbol, side, quantity and price, a fresh order id each time — for seventeen days, arming and losing the guard six times in six hours. Retiring the guard now takes a success at the *largest* size the venue has refused, and the same rule stops a small affordable order from decaying the counter before it is sent. Suppression still starts at the smallest refused size, so nothing that was being held back is let through.
+
+## [1.51.29] - 2026-08-21
+
+### Fixed
+
+- Combo futures deals now record the funding they accrue, and their take profit accounts for it. Combo's `createDeal` never seeded the funding cursor its DCA counterpart does, and the per-deal funding write is a compare-and-swap on that cursor — so on a combo deal it matched no document and every write was silently dropped, while closing the deal still subtracted the in-memory funding from the reported profit. Users were left with a profit figure reduced by a real cost and no line anywhere explaining it. Deals already open adopt the cursor on their next settlement instead of having to be reopened, and a combo deal started on a pair the bot was not already holding subscribes to that symbol's funding straight away rather than waiting for the next bot start.
+- Combo take-profit and stop-loss targets now include accrued funding. The target is a percentage of the deal's usage, and it previously ignored funding entirely, so a perpetual held long enough for funding to rival that percentage could reach its take profit and still close at a loss. The two directions of the equation — the price that hits a target, and the percentage at a price — had been maintained as two hand-written copies; they now share one implementation, with a test pinning their round-trip and their agreement with the previous formulas when funding is zero.
+
+## [1.51.28] - 2026-08-21
+
+### Fixed
+
+- A deal whose opening order the exchange refused under a Binance Quantitative Rules cooldown now re-attempts as soon as the cooldown ends, instead of waiting for the periodic order sweep. The retry timer that exists for exactly this — the exchange never saw the order, so nothing in normal running re-places it — was skipped for any caller that asks for the rejection reason back, which is every deal-opening order. One deal spent 2h28m between its refusal and its next attempt, most of it after the restriction had already expired. The re-attempt re-runs the whole deal-opening sequence rather than re-sending the bare order, because that is what starts the deal on an immediate fill and arms the limit-reposition timers on one that rests; it is keyed on the deal, so repeated refusals collapse onto the single re-open the deal needs instead of accumulating one pending retry per attempt. An opening order held back this way is also no longer left behind as an order the exchange has never heard of. Safety orders and take-profits retry exactly as before.
+
+## [1.51.27] - 2026-08-21
+
+### Fixed
+
+- A DCA or combo bot whose DCA order spacing scales on ATR or ADR now always carries the ATR/ADR indicator that spacing is computed from, and says so plainly if it ever does not. That indicator is what prices the safety-order ladder, and until now it was only ever created as a side-effect of switching the "Base scaling on" selector in the interface — so a bot saved through the public API, a clone, an AI agent tool, or a form submit that never touched that selector could be stored set to ATR with no indicator behind it. Such a bot could not open a single deal, on any pair, for its entire life: the engine found no levels to place orders at and returned without opening anything, writing no error, no bot message and no event. The bot log simply stopped after "Balance check skipped", the deal never appeared, and because the interface hides the ATR panel when the indicator is missing, the owner could not see or repair the cause either. The indicator is now filled in whenever a bot is created or saved with ATR/ADR scaling, so the combination cannot be stored broken from any path. If a bot still reaches that state, the deal attempt now reports that the ATR/ADR indicator is missing instead of failing silently — while a bot whose indicator is merely still warming up stays quiet, as before.
+
+## [1.51.26] - 2026-08-21
+
+### Fixed
+
+- A `startDeal`, `closeDeal`, `addFunds` or `reduceFunds` webhook sent to a multi-pair DCA bot now accepts the pair written the way the platform itself writes it. The webhook only ever recognised the `BASE_QUOTE` form, so `AAVE_USDT` worked but `AAVEUSDT` and `AAVE-USDT` were both refused with "Symbol AAVE-USDT format is incorrect" and no deal was opened — even though those are exactly the identifiers the bot stores in its own pair list and shows in the interface, compact on Binance and dashed on KuCoin. Users copying a pair out of their own bot settings therefore got a webhook that returned HTTP 200, was logged as received, and then quietly did nothing. The pair is now resolved by matching it against the bot's own configured pairs ignoring separators and case, so the underscore, dashed, compact, slashed and lower-case forms all reach the same pair. The quote asset is never guessed from the text: only pairs already configured on the bot can match, an exact `BASE_QUOTE` match still takes precedence, and a pair that is genuinely not on the bot is still refused.
+
+## [1.51.25] - 2026-08-20
+
+### Fixed
+
+- An order whose response was lost on the way back is no longer either placed twice or written off while it is still live on the exchange. Sending an order could fail with a timeout, a dropped connection or a server error — none of which say whether the exchange actually received it — and the order was then re-sent with the same client order id up to six times. On an exchange that does not reject a repeated client order id, such as Hyperliquid, each re-send opened another real order. The opposite case was worse: when the send finally gave up, the order was recorded as cancelled without ever asking the exchange, and because that also unhooks it from the live fill feed, the exchange's later fills for it reached no bot at all — so the position moved on the exchange and never in the deal, silently, with the take-profit ladder then sized off the wrong position. An order is now sent once, and on any outcome that does not tell us what happened the exchange is asked what it has: if the order is there it is adopted rather than re-sent, and it is only re-sent when the exchange confirms it never arrived. The same question is asked before an order is written off, so an order the exchange is still holding is kept. Genuine exchange rejections — minimum notional, tick size, insufficient funds — are unaffected and still fail immediately.
+
+## [1.51.24] - 2026-08-20
+
+### Added
+
+- A deal that was created but whose opening order the exchange refused now records why, on the deal itself. The deal row is written before that order reaches the exchange, so a refusal left the deal listed with no orders and nothing explaining it; the only trace was a bot-level warning that names neither the deal nor the pair. The deal now carries the exchange's reason, when the restriction is expected to lift where the exchange grades it, and whether it covers one pair or the whole account — available over GraphQL, over `/api/v2/deals/*` at the `standard` field preset, and pushed live to an open dashboard. It is cleared the moment the exchange accepts an opening order, and it changes nothing else: the deal keeps its status and the bot is not put into an error state. That matters most for the Binance Quantitative Rules (-4400) cooldown this was built for, where the whole point of the existing handling is that we stop sending orders rather than escalate the restriction, and the deal opens by itself once the cooldown ends.
+
+## [1.51.23] - 2026-08-18
+
+### Fixed
+
+- `addExchange` no longer persists one trade type's connections before the next one has been verified. A "Spot & Futures" add whose key lacked the Futures permission saved the Spot leg and then returned an error, so the account kept a connection the user was told had not been created — and the duplicate check then refused every retry with that key. All requested trade types are verified up front, anything a failed attempt already wrote is rolled back, and the duplicate reason names the existing connection and how to clear it.
+
+## [1.51.22] - 2026-08-18
+
+### Fixed
+
+- The terminal-deal position pre-check no longer skips paper connections. It was written to skip them on the assumption that the engine does; the engine does not. Its `paperExchanges` exclusion guards the margin-type rule and the grid branch only — the side rule fires for `botType === dca` outright, and a terminal deal is a DCA bot. The pre-check was therefore a no-op for exactly the accounts most likely to be driven by an automation on a loop, which is the case it was built for. Paper connections are now checked like any other futures connection.
+
+## [1.51.21] - 2026-08-18
+
+### Fixed
+
+- Take profit and percentage stop loss are fee-compensated on futures again. Both prices are derived from the deal's average entry and then pushed out far enough to clear the round trip — but the fee that displacement reads is deliberately zeroed on futures, because there the fee is charged against margin and never taken out of the position, so the *quantity* leg must ignore it. The two uses were folded into one value in 1.14.17, and the price leg has been reading the zeroed one since: every futures TP and percentage SL was placed at exactly the configured percentage from average entry, with no allowance for fees. Nothing about that is visible from the outside — the deal closes cleanly and the reported profit is accurate, it is simply smaller than the configured percentage implies, by roughly one round trip. It goes unnoticed at ordinary targets and dominates at small ones, where a tenth of a percent is most of the target. The price leg now reads the venue's real fee, the quantity leg still ignores it on futures, and both are pinned by tests.
+
+## [1.51.20] - 2026-08-18
+
+### Fixed
+
+- The re-raise cooldown no longer misses one-bot-per-deal patterns. It is keyed per (bot, subType), which is what makes the window mean anything for a bot the user keeps — but a terminal deal is one bot per deal, created by the request that starts it, so the bot id is never the same twice and the cooldown could suppress nothing at all: every occurrence was the first for its bot, and a caller looping on a condition that would not clear collected one notification per attempt. Terminal deals now key the cooldown on the user, the subType and the symbol, which is what identifies the constraint and is stable across the bots.
+
+### Added
+
+- A repeated-refusal breaker on `POST /api/v2/deals/terminal`. The `400` for a position conflict tells an honest caller why, but does nothing about an automation that ignores the answer and re-sends — and each attempt still pays for a credentialed position read on the way to the same refusal, spending the same exchange rate-limit budget as real trading. After three consecutive refusals of the same (user, connection, symbol, kind), the refusal is replayed from Redis as a `429` with `Retry-After` and the read is skipped. The window widens per refusal, caps at 15 minutes, expires on its own, and is cleared by the first deal that goes through, so a user who closes the position recovers with no intervention. Fed only by refusals the endpoint decides itself — never by the engine's asynchronous start failures, some of which are ours.
+
+## [1.51.19] - 2026-08-18
+
+### Fixed
+
+- `POST /api/v2/deals/terminal` no longer answers `200` for a deal the engine is about to refuse. The endpoint created the bot and dispatched it to a worker, where `loadData` rejected the start because a position was already open on the symbol in the opposite direction — after the response had been sent. The caller was told the deal had been created and scheduled, had no object to watch, and never learned otherwise; the abandoned bot was left behind, closed and without deals, once per attempt. The same question is now asked before anything is created, and a conflict comes back as a `400` naming the side already open. The check is conservative by design: only a conflict it can establish rejects, while unreadable positions, a symbol it cannot line up, a hedge account that may legitimately hold both sides, spot deals and paper exchanges all fall through to the engine's own check unchanged.
+
+## [1.51.18] - 2026-08-18
+
+### Security
+
+- DataGrid `contains` / `startsWith` / `endsWith` filters now match the user's value as a literal string. `mapDataGridOptionsToMongoOptions` ran the value through `encodeURIComponent` and fed the result straight to `new RegExp`, but `encodeURIComponent` leaves `.`, `*`, `(` and `)` intact — so the value reached the engine as a pattern rather than a literal. A bare `(` threw a `SyntaxError` and failed the whole query, and a value such as `.*` silently matched every document instead of the substring the operator names promise. Every metacharacter is now escaped. Reported as GHSA-cc5x-49gv-35wr; note the report's denial-of-service impact does not apply — the pattern is serialised into the MongoDB query and evaluated by `mongod`, never matched on the Node event loop.
+
+## [1.51.17] - 2026-08-17
+
+### Fixed
+
+- A bot error the user alone can resolve (an unsigned exchange agreement, a dead API key, a venue restriction) was re-raised on every bot cycle. `logMode: 'once'` caps such a condition at one visible bot message per bot only while that message stays the coalescing target, and for any subType with `errorsBot: true` it never does: `BotStatusEnum.error` is a soft status, so `restoreFromRangeOrError()` clears the bot's messages and `$unset`s their bucket before the next attempt. The condition re-failed, inserted a fresh row, and every occurrence looked like a first occurrence — a new dashboard message and alert each cycle. `processError` now consults a Redis-backed exponential re-raise cooldown per (bot, subType) — same mechanism and 5min→1h ceiling as the compliance/auth/balance guards — and while it is open writes the occurrence into the hidden lane instead. Hidden rows are born `isDeleted`, which is what the recovery clear filters on, so their bucket survives and they coalesce; the admin Bot Errors page keeps a counted record. User-initiated (`force`) reports are never suppressed, and a Redis failure re-raises as before.
+
+## [1.51.16] - 2026-08-14
+
+### Fixed
+
+- Futures deal take profit placed as a zero-quantity order after a bot worker restart
+
+## [1.51.15] - 2026-08-13
+
+### Fixed
+
+- Reducing a deal's funds by 100% told the user "Reduce funds order qty 1222 NEAR is more than closed order qty 1222 NEAR. Order size will be reduced" — an inequality between two equal numbers, followed by a promise the bot does not keep. When the requested reduction covers the whole remaining position there is nothing left to keep, so the deal is closed at market and no reduce order is placed. The warning now says the deal will be closed, and distinguishes a reduction that exactly covers the position from one that exceeds it. Behaviour is unchanged — only the wording.
+
+## [1.51.14] - 2026-08-13
+
+### Fixed
+
+- `/trade_signal` rejects a webhook it can't act on instead of answering 200. `singleWebhookProcess` returned `undefined` whenever no branch matched — an unknown action name, or a known action whose required parameters or bot state were missing — and `webhookProcess` turned that into `StatusEnum.ok`. The caller got a success for a signal that did nothing. It now returns `{status: notok, reason}`, which the route already maps to HTTP 400, naming the action and listing the supported ones.
+
+### Removed
+
+- `enterLong`, `enterShort`, `exitLong` and `exitShort` dropped from `WebhookActionEnum`. No handler was ever written for them, so they were the silent-200 case above in its purest form: advertised by the dashboard, discarded by the engine.
+
+## [1.51.13] - 2026-08-12
+
+### Fixed
+
+- RPC-latency counters now expose a per-window max (`windowMaxMs`) alongside the cumulative one, so a monitor can report the worst round-trip of a sample window rather than a since-boot high-water mark
+
+## [1.51.12] - 2026-08-12
+
+### Fixed
+
+- Changing a DCA bot's profit currency no longer re-bases the deals that are already running. A running deal keeps the profit currency it entered with; only deals opened after the change use the new one. Combo bots already behaved this way.
+
+## [1.51.11] - 2026-08-12
+
+### Fixed
+
+- The backtest callback routes (`/api/serverSideBacktest`, `/api/serverSideBacktestSaveFile`) now authenticate the caller. They sit above the global JWT middleware — deliberately, since the backtest worker calls them host-to-host with no user token — which left them reachable by anyone who could reach the port. Cloud already guards the equivalent routes with a shared token compiled into its private source; that could not be copied here, because this repo is public and a literal would be both published and identical across every install, so the token is derived per-install from `JWT_SECRET` (override with `INTERNAL_API_SECRET`). Fails closed: with no secret configured, no caller is accepted.
+
+## [1.51.10] - 2026-08-12
+
+### Fixed
+
+- `saveFile` now refuses to write outside `user-files`. The name, extension and subdirectory it receives all arrive from a request body and are all concatenated into a path, so any one of them could walk out of the directory with `../` — the extension included, since it is appended after a dot. Rather than filtering each argument, the resolved directory and the resolved file path are both checked to still be under the root, which also covers whatever argument gets threaded through here next.
+
+## [1.51.9] - 2026-08-10
+
+### Fixed
+
+- The not-enough-balance guard is now aware of order SIZE, so a bot that keeps a small order filling on the same pair and side as one the exchange refuses no longer hammers the venue forever. The guard counts failures per (symbol, side), but affordability depends on the order's notional: a combo bot's 4.83 USD grid order filled every few minutes on Kraken SOL-USD BUY while its 35.10 USD safety order on the same key was refused, and each of those fills wiped the failure counter and the cooldown the safety order had built up. The counter never survived long enough to engage, so every single retry reached the exchange and raised a "Not enough balance" alert — 48 in 12h on one bot, with the guard disarmed for 12.2h at a stretch. Orders below the size the venue has actually refused now pass through the guard untouched (the grid keeps trading), and only a success at or above that size clears it. The failure counter's arm and trip thresholds were also one apart, which let every second attempt slip past the guard.
+
+## [1.51.8] - 2026-08-10
+
+### Fixed
+
+- An order the exchange never accepted is no longer re-checked against the exchange five times before the bot gives up on it. Such an order carries a placeholder instead of an exchange order id, so "the exchange does not know this order" is the final answer the first time it is given — waiting ~15 seconds to ask four more times cannot change it. A Kraken Futures combo bot was holding 37 grid orders that had been refused for insufficient funds days earlier, and re-checking them after a restart cost 222 exchange calls and eleven minutes of errors. Checks that fail for any other reason — a timeout, a rate limit — still get the full retry ladder, as do orders that do hold a real exchange order id.
+
+## [1.51.7] - 2026-08-10
+
+### Fixed
+
+- The not-enough-balance cooldown now opens on any real venue rejection once the failure counter has tripped, instead of only when our own balance figures also agreed the order was unaffordable. `required` is one order's bare notional while the venue prices the whole safety-order ladder plus its fees, so the two disagree — a Kraken Futures bot was refused `insufficientAvailableFunds` for a 12.75 USD order while the venue's OWN available margin read 13.40 USD, and that disagreement was the one case that never backed off. The cooldown is also consulted whichever way the balance comparison falls, so the window it opens actually suppresses. 22 rejected orders in 1.4h becomes 3.
+
+## [1.51.6] - 2026-08-10
+
+### Fixed
+
+- `getActiveOrders()` now honours the exchange auth-failure cooldown, like `checkAssets()` already did. Gating only the balance call left the combo open-a-deal path re-asking a dead API key once per minute — 236 rejections in 3.9h on one bot — while the balance path was correctly backed off to hourly.
+
+## [1.51.5] - 2026-08-10
+
+### Fixed
+
+- `setStatus(..., ignoreErrors)` now forwards the flag to `stop()`. `stop()` assigns `this.ignoreErrors = ignoreErrors` (default `false`) as its first statement, so calling it without the argument wiped the flag `setStatus` had just set and every caller asking to close a bot quietly was ignored. Both the DCA/combo and the grid helper are affected.
+- `resetUser` marks its own bot teardown as errors-to-ignore, except for `softLive` which deletes nothing. It closes the account's bots and then deletes their paper user milliseconds later, while the workers are still cancelling — paper-trading answers `400 User not found` and the bot filed it as a user-visible error on a bot that no longer exists. `changeStatus` carries the new `input.ignoreErrors` through to the grid/DCA/combo workers.
+
+## [1.51.4] - 2026-08-08
+
+### Added
+
+- `getAccountFills()` on the exchange layer — read-only access to the venue's own execution history, for reconciling what a venue actually did against what we recorded. Distinct from `getTrades`, which is the public tape for a symbol. Returns an empty list for every venue publishing no such feed and for the paper simulator, whose fills we already own in full.
+
+## [1.51.3] - 2026-08-08
+
+### Added
+
+- Balance records now keep `venueAvailable`, the venue's own figure for how much of an asset is spendable, whenever the user stream publishes one. The field is optional and stays **absent** when the venue reports nothing — absent means unknown, not zero, and a stored zero would read as "none of this balance is spendable". On a pooled cross-collateral account (Kraken Futures' flex account) `free`/`locked` cannot express what the venue has committed, so `free - venueAvailable` is the only continuously-available signal that an account holds a position the engine is not tracking — which is otherwise invisible until an order is rejected.
+
+## [1.51.2] - 2026-08-08
+
+### Fixed
+
+- Kraken USDⓈ-M Futures bots no longer latch into "Not enough balance" on an account that has funds. Kraken's flex account pools every collateral currency into one cross-margin pool, so the per-asset `free`/`locked` split in the cached `balances` doc cannot represent anything the venue enforces — and its two writers derived one anyway, in opposite directions, so the stored figure meant whichever write landed last. The not-enough-balance latch read that figure and broke both ways: on the wallet-quantity convention it cleared the latch and sent an order the venue then refused for insufficient funds; on the other it suppressed every order from then on, with no way back, because the cached number could never rise above the required amount. The latch now confirms against the venue's own `availableMargin` before clearing, and the error message reports that same figure instead of a wallet total the venue will not let the bot spend. The venue is consulted only for a bot that is already in the failing regime — never on the healthy order path — and every non-pooled venue keeps the existing cached-balance behaviour unchanged.
+
 ## [1.51.1] - 2026-08-07
 
 ### Fixed

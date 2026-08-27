@@ -85,7 +85,6 @@ import {
   isXperpPair,
   updateRelatedBotsInVar,
 } from './utils'
-import DCAUtils from './dca/utils'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { mapDataGridOptionsToMongoOptions } from '../db/utils'
 import RabbitClient from '../db/rabbit'
@@ -131,6 +130,7 @@ import {
   HEDGE_PER_WORKER,
 } from '../config'
 import { applyGridFuturesConstraints } from '../server/v2/helpers'
+import { ensureDynamicArIndicator } from '../utils/dynamicArIndicator'
 
 const PER_PAGE = 20
 
@@ -173,6 +173,26 @@ const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 const notAvailable = 'Bots service is unavailable, please try again later'
 
 const webhookQueue = 'webhookQueue'
+
+/**
+ * The actions `singleWebhookProcess` actually dispatches. Kept as an explicit
+ * list rather than `Object.values(WebhookActionEnum)` because the enum having a
+ * member is exactly what does NOT make an action work — four position-control
+ * values sat in the enum with no handler and answered 200 for months.
+ * Used only to word the rejection; the rejection itself keys off whether
+ * anything was dispatched, so forgetting to add a new action here degrades the
+ * message, never the behaviour.
+ */
+const implementedWebhookActions: WebhookActionEnum[] = [
+  WebhookActionEnum.start,
+  WebhookActionEnum.close,
+  WebhookActionEnum.closeSl,
+  WebhookActionEnum.startBot,
+  WebhookActionEnum.stopBot,
+  WebhookActionEnum.addFunds,
+  WebhookActionEnum.reduceFunds,
+  WebhookActionEnum.changePairs,
+]
 
 /**
  * First stage of every orphan sweep in `premanenetlyDeleteBots`.
@@ -3631,7 +3651,11 @@ class Bot<T extends UserSchema = UserSchema> {
     },
     paperContext: boolean,
   ) {
-    const { vars, ...settings } = _settings
+    const { vars, ...rest } = _settings
+    // Same invariant as changeDCABot: a bot that scales DCA on atr/adr needs
+    // the startDca indicator that prices its ladder, or it can never open a
+    // deal. Seed it at creation so no client can produce one without. Bug #463.
+    const settings = ensureDynamicArIndicator(rest)
     if (
       (isPaper(settings.exchange) && !paperContext) ||
       (!isPaper(settings.exchange) && paperContext)
@@ -3757,7 +3781,10 @@ class Bot<T extends UserSchema = UserSchema> {
     _settings: CreateComboBotInput,
     paperContext: boolean,
   ) {
-    const { vars, ...settings } = _settings
+    // Combo settings extend DCA settings and comboHelper extends dcaHelper, so
+    // the atr/adr ladder — and its silent-no-deal failure — applies here too.
+    const { vars, ...rest } = _settings
+    const settings = ensureDynamicArIndicator(rest)
     if (
       (isPaper(settings.exchange) && !paperContext) ||
       (!isPaper(settings.exchange) && paperContext)
@@ -4592,7 +4619,10 @@ class Bot<T extends UserSchema = UserSchema> {
     input: Partial<DCABotSettings> & { id: string; vars?: BotVars | null },
     userId: string,
     paperContext: boolean,
-    replaceOrders = true,
+    // Default OFF: a settings save must not touch the orders of deals that are
+    // already running. Only callers that genuinely re-own a running deal's
+    // TP/SL — the hedge wrapper flipping externalTp/externalSl — pass true.
+    replaceOrders = false,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<typeof this.getBot>>(
@@ -4602,6 +4632,7 @@ class Bot<T extends UserSchema = UserSchema> {
         input,
         userId,
         paperContext,
+        replaceOrders,
       )
     }
     const { id, vars, ...settings } = input
@@ -4644,7 +4675,14 @@ class Bot<T extends UserSchema = UserSchema> {
           settings.maxNumberOfOpenDeals)
     const settingKeys = Object.keys(settings)
     if (settingKeys.length > 0) {
-      set.$set.settings = { ...oldSettings.settings, ...settings }
+      // Seed the ATR/ADR startDca indicator when the merged result scales on
+      // atr/adr without one. A save that never touched the "Base scaling on"
+      // field skips the dashboards' own seeding and would otherwise persist a
+      // bot that can never open a deal. Bug #463.
+      set.$set.settings = ensureDynamicArIndicator({
+        ...oldSettings.settings,
+        ...settings,
+      })
     }
     if (settings.pair && !oldSettings.settings.useMulti) {
       return {
@@ -4687,49 +4725,16 @@ class Bot<T extends UserSchema = UserSchema> {
       }
     }
 
-    const deals = await this.dcaDealsDb.readData(
-      {
-        botId: id,
-        'settings.changed': false,
-        userId,
-        status: {
-          $in: [
-            DCADealStatusEnum.error,
-            DCADealStatusEnum.open,
-            DCADealStatusEnum.start,
-          ],
-        },
-      },
-      undefined,
-      undefined,
-      true,
-    )
-    if (deals.status === StatusEnum.ok) {
-      for (const d of deals.data.result) {
-        const merged = { ...oldSettings.settings, ...settings }
-        const dealSettings = new DCAUtils().getInitalDealSettings(
-          BotType.dca,
-          merged,
-        )
-        dealSettings.avgPrice = d.settings.avgPrice
-        dealSettings.slChangedByUser = d.settings.slChangedByUser
-        dealSettings.orderSizePercQty = d.settings.orderSizePercQty
-        dealSettings.updatedComboAdjustments =
-          d.settings.updatedComboAdjustments
-        const dealUpdate: Record<string, unknown> = { settings: dealSettings }
-        if (d.moveSlActivated) {
-          if (merged.moveSL && merged.moveSLValue) {
-            dealSettings.slPerc = merged.moveSLValue
-          } else {
-            dealUpdate.moveSlActivated = false
-          }
-        }
-        await this.dcaDealsDb.updateData(
-          { _id: d._id.toString(), userId },
-          { $set: dealUpdate },
-        )
-      }
-    }
+    // A bot-settings save applies to NEW deals only. Every deal that is
+    // already running keeps the settings snapshot it opened with, and keeps
+    // its resting orders untouched. We used to re-derive each open deal's
+    // settings from the new bot settings here and then cancel + re-place the
+    // whole order book; that re-targeted live TPs, cost every order its
+    // exchange queue position, and left open deals with no TP/SL resting on
+    // the exchange for the width of the cancel/re-place window — all for
+    // saves (a Deal Start filter, say) that cannot affect an open deal at all.
+    // A running deal is still editable individually via updateDealSettings.
+    // Forum #5044.
 
     const saveBotRequest = await this.dcaBotDb.updateData(
       { _id: id, userId },
@@ -4755,7 +4760,9 @@ class Bot<T extends UserSchema = UserSchema> {
               botType: BotType.dca,
               botId: id,
               method: 'reloadBot',
-              args: [id, replaceOrders],
+              // rebuildIndicators: the settings that define the indicator set
+              // are exactly what just changed.
+              args: [id, replaceOrders, true],
             })
           }
         }
@@ -4884,7 +4891,11 @@ class Bot<T extends UserSchema = UserSchema> {
     }
     const settingKeys = Object.keys(settings)
     if (settingKeys.length > 0) {
-      set.$set.settings = { ...oldSettings.settings, ...settings }
+      // See changeDCABot — combo inherits the same atr/adr ladder. Bug #463.
+      set.$set.settings = ensureDynamicArIndicator({
+        ...oldSettings.settings,
+        ...settings,
+      })
     }
     if (settings.pair && !oldSettings.settings.useMulti) {
       return {
@@ -4927,44 +4938,9 @@ class Bot<T extends UserSchema = UserSchema> {
       }
     }
 
-    const deals = await this.comboDealsDb.readData(
-      {
-        botId: id,
-        'settings.changed': false,
-        userId,
-        status: {
-          $in: [
-            DCADealStatusEnum.error,
-            DCADealStatusEnum.open,
-            DCADealStatusEnum.start,
-          ],
-        },
-      },
-      undefined,
-      undefined,
-      true,
-    )
-    if (deals.status === StatusEnum.ok) {
-      for (const d of deals.data.result) {
-        const dealSettings = new DCAUtils().getInitalDealSettings(
-          BotType.combo,
-          {
-            ...oldSettings.settings,
-            ...settings,
-          },
-        )
-        dealSettings.profitCurrency = d.settings.profitCurrency
-        dealSettings.avgPrice = d.settings.avgPrice
-        dealSettings.slChangedByUser = d.settings.slChangedByUser
-        dealSettings.orderSizePercQty = d.settings.orderSizePercQty
-        dealSettings.comboActiveMinigrids = d.settings.comboActiveMinigrids
-        dealSettings.useActiveMinigrids = d.settings.useActiveMinigrids
-        await this.comboDealsDb.updateData(
-          { _id: d._id.toString(), userId },
-          { $set: { settings: dealSettings } },
-        )
-      }
-    }
+    // New deals only — a running combo deal keeps the settings snapshot it
+    // opened with and keeps its resting orders. Same rule as changeDCABot.
+    // Forum #5044.
 
     const saveBotRequest = await this.comboBotDb.updateData(
       { _id: id, userId },
@@ -4990,57 +4966,37 @@ class Bot<T extends UserSchema = UserSchema> {
           ) ||
           forceRestart
         ) {
-          const changedTp =
-            (settingKeys.filter((k) => k !== 'dcaCustom' && k !== 'indicators')
-              .length === 1 &&
-              (settingKeys.includes('tpPerc') ||
-                settingKeys.includes('slPerc'))) ||
-            (settingKeys.filter((k) => k !== 'dcaCustom' && k !== 'indicators')
-              .length === 2 &&
-              settingKeys.includes('tpPerc') &&
-              settingKeys.includes('slPerc'))
+          // A TP/SL-only save used to route to setNewTp, which walks the open
+          // deals and re-points their tpPerc/slPerc. That is the same
+          // apply-to-running-deals behaviour as the full reload, just cheaper,
+          // so it goes too: the worker soft-reloads to pick the new settings up
+          // for the NEXT deal and every live deal keeps its own target.
           if (find) {
-            if (changedTp) {
-              this.getWorkerById(find.worker)?.postMessage({
-                do: 'method',
-                botType: BotType.combo,
-                botId: id,
-                method: 'setNewTp',
-                args: [settings.tpPerc, settings.slPerc],
-              })
-            } else {
-              this.getWorkerById(find.worker)?.postMessage({
-                do: 'method',
-                botType: BotType.combo,
-                botId: id,
-                method: 'reloadBot',
-                args: [id],
-              })
-            }
+            this.getWorkerById(find.worker)?.postMessage({
+              do: 'method',
+              botType: BotType.combo,
+              botId: id,
+              method: 'reloadBot',
+              args: [id, forceRestart, true],
+            })
           } else {
             this.handleWarn(`Bot ${id} not found in changeComboBot`)
           }
         }
-        if (
-          settingKeys.length > 0 &&
-          settingKeys.length === 1 &&
-          settingKeys[0] === 'name'
-        ) {
-          if (
-            ['open', 'range', 'error', 'monitoring'].includes(
-              oldSettings.status,
-            )
-          ) {
-            if (find) {
-              this.getWorkerById(find.worker)?.postMessage({
-                do: 'method',
-                botType: BotType.combo,
-                botId: id,
-                method: 'changeName',
-                args: [settings.name],
-              })
-            }
-          }
+      }
+      if (
+        settingKeys.length === 1 &&
+        settingKeys[0] === 'name' &&
+        ['open', 'range', 'error', 'monitoring'].includes(oldSettings.status)
+      ) {
+        if (find) {
+          this.getWorkerById(find.worker)?.postMessage({
+            do: 'method',
+            botType: BotType.combo,
+            botId: id,
+            method: 'changeName',
+            args: [settings.name],
+          })
         }
       }
       this.botEventDb.createData({
@@ -8867,6 +8823,11 @@ class Bot<T extends UserSchema = UserSchema> {
     } = data
     if (action && uuid) {
       let call: (() => unknown) | undefined
+      // The cold-start path posts to the worker directly instead of setting
+      // `call`, so it has to say so explicitly — otherwise the
+      // nothing-was-dispatched guard at the end would reject a success.
+      let dispatched = false
+      let failReason: string | undefined
       let findBot = this.dcaBots.find((b) => b.uuid === uuid)
       if (!findBot) {
         //@ts-ignore
@@ -9015,6 +8976,7 @@ class Bot<T extends UserSchema = UserSchema> {
               event.botType = type
               event.metadata = JSON.stringify({ action })
               event.paperContext = !!botData.data.result.paperContext
+              dispatched = true
             } else {
               this.handleWarn(
                 `Received ${action} signal for ${uuid}, but bot not found`,
@@ -9025,6 +8987,7 @@ class Bot<T extends UserSchema = UserSchema> {
             this.handleWarn(
               `Received ${action} signal for ${uuid}, but bot is terminal`,
             )
+            failReason = `Action "${action}" is not available for a terminal bot`
           }
         }
       }
@@ -9073,6 +9036,7 @@ class Bot<T extends UserSchema = UserSchema> {
           this.handleWarn(
             `Received ${action} signal for ${uuid}, but bot is terminal`,
           )
+          failReason = `Action "${action}" is not available for a terminal bot`
         }
         findBot = this.dcaBots.find((b) => b.uuid === uuid)
       }
@@ -9203,6 +9167,26 @@ class Bot<T extends UserSchema = UserSchema> {
               pairsToSet,
               pairsToSetMode,
             ))
+        }
+      }
+      // Nothing matched — an unknown action name, or a known one whose
+      // required params/bot state were missing. Both used to fall through to
+      // `return undefined`, which webhookProcess turned into StatusEnum.ok and
+      // the /trade_signal route answered 200: a silent no-op that reads as
+      // success. Say what happened instead.
+      if (!call && !dispatched) {
+        const reason =
+          failReason ??
+          (implementedWebhookActions.includes(action)
+            ? `Action "${action}" could not be executed for bot ${uuid}. Check that the bot supports it and that all required parameters are present.`
+            : `Unknown action "${action}". Supported actions: ${implementedWebhookActions.join(', ')}`)
+        this.handleWarn(
+          `Received ${action} signal for ${uuid}, but nothing was dispatched: ${reason}`,
+        )
+        return {
+          status: StatusEnum.notok as const,
+          reason,
+          data: null,
         }
       }
       if (event.botId) {
@@ -10601,6 +10585,146 @@ class Bot<T extends UserSchema = UserSchema> {
         }
       }
       return stats
+    }
+    return bot
+  }
+
+  /**
+   * DCA-usage histogram for ONE bot, folded in Mongo over EVERY one of its
+   * deals.
+   *
+   * The dashboard's DCA Analysis widget used to derive this client-side from
+   * the deals it happened to have loaded: `getBotDeals` pages of 100 full deal
+   * documents (~600 selected GraphQL fields each), capped at 5 pages by the
+   * display loader. So a bot past 500 deals was silently analysed on a subset,
+   * and the whole payload existed to read ONE integer per deal.
+   *
+   * What comes back is deliberately raw — the count of DCA (safety) orders
+   * each deal actually filled, bucketed. Clamping those buckets to the bot's
+   * CURRENT configured DCA count stays on the client, because that count comes
+   * from the example-orders projection engine (which needs pair metadata and a
+   * live price) and not from anything in this collection. Keeping that seam
+   * means the numbers the widget renders are unchanged; only their coverage is.
+   *
+   * `levels.complete` counts the base order too, hence the -1: a deal that
+   * filled nothing but its base order used 0 DCAs.
+   *
+   * No status filter, so one pass serves both halves of the widget — `finished`
+   * is closed|canceled, `active` is everything else (open/start/error), exactly
+   * the two groups `getBotDeals` splits on. The existing `{botId: 1}` index
+   * bounds the scan; deals are not cold-store archived (only their orders and
+   * transactions are), so this sees the bot's entire history.
+   */
+  private async dcaUsageHistogram(
+    db: Pick<typeof dcaDealsDb, 'aggregate'>,
+    match: PipelineStage.Match['$match'],
+    /** Combo deals carry `transactions.buy`; DCA deals have only `levels`. */
+    useTransactions: boolean,
+  ) {
+    const filled = useTransactions
+      ? { $ifNull: ['$transactions.buy', '$levels.complete'] }
+      : '$levels.complete'
+    const agg = await db.aggregate<{
+      _id: { finished: boolean; dcas: number; configured: number }
+      deals: number
+    }>([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            finished: {
+              $in: [
+                '$status',
+                [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
+              ],
+            },
+            dcas: {
+              $max: [0, { $subtract: [{ $ifNull: [filled, 0] }, 1] }],
+            },
+            // The ladder THIS deal ran under. Only used when the caller has no
+            // projected count for the bot's current settings — the client-side
+            // fold this replaced fell back to the deal's own `levels.all` there,
+            // so carrying it keeps that path exact rather than approximating it
+            // with a bot-wide maximum.
+            configured: {
+              $max: [0, { $subtract: [{ $ifNull: ['$levels.all', 0] }, 1] }],
+            },
+          },
+          deals: { $sum: 1 },
+        },
+      },
+    ])
+    if (agg.status !== StatusEnum.ok) {
+      return agg
+    }
+    type Bucket = { dcas: number; deals: number; configured: number }
+    const finished: Bucket[] = []
+    const active: Bucket[] = []
+    let maxConfiguredDcas = 0
+    for (const row of agg.data?.result ?? []) {
+      const bucket = {
+        dcas: Math.max(0, Math.floor(row._id?.dcas ?? 0)),
+        deals: row.deals ?? 0,
+        configured: Math.max(0, Math.floor(row._id?.configured ?? 0)),
+      }
+      ;(row._id?.finished ? finished : active).push(bucket)
+      maxConfiguredDcas = Math.max(maxConfiguredDcas, bucket.configured)
+    }
+    const byDcas = (a: Bucket, b: Bucket) => a.dcas - b.dcas
+    return {
+      status: StatusEnum.ok as StatusEnum.ok,
+      data: {
+        finished: finished.sort(byDcas),
+        active: active.sort(byDcas),
+        maxConfiguredDcas,
+      },
+    }
+  }
+
+  public async getBotDcaUsage(
+    userId: string,
+    id: string,
+    shareId?: string,
+    publicBot = false,
+    paperContext?: boolean,
+  ) {
+    const bot = await this.getDCABotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
+    if (bot.status === StatusEnum.ok && bot.data) {
+      return await this.dcaUsageHistogram(
+        this.dcaDealsDb,
+        { botId: id.toString() },
+        false,
+      )
+    }
+    return bot
+  }
+
+  public async getComboBotDcaUsage(
+    userId: string,
+    id: string,
+    shareId?: string,
+    publicBot = false,
+    paperContext?: boolean,
+  ) {
+    const bot = await this.getComboBotFromDb(
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )
+    if (bot.status === StatusEnum.ok && bot.data) {
+      return await this.dcaUsageHistogram(
+        this.comboDealsDb,
+        { botId: id.toString() },
+        true,
+      )
     }
     return bot
   }

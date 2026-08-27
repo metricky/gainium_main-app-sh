@@ -398,6 +398,8 @@ export const UserSchema = /* GraphQL */ `
   }
   input changePasswordInput {
     password: String!
+    "The caller's CURRENT password. Required: without it, anyone holding a session token can take the account over (GHSA-4m6h-m5mj-733x)."
+    currentPassword: String!
   }
   type changePasswordResponse implements BasicResponse {
     status: Status
@@ -706,6 +708,10 @@ export const UserSchema = /* GraphQL */ `
     uuid: String
     assets: [String]
     shouldSumBalance: Boolean
+    # Value every balance in USD server-side, off the venue's own rate table
+    # (the path the portfolio snapshot and the public REST API already use).
+    # Off by default - it costs a per-exchange price-table read (1 min cached).
+    includeUsdValues: Boolean
   }
   type getBalancesResponseData {
     asset: String
@@ -714,6 +720,10 @@ export const UserSchema = /* GraphQL */ `
     exchange: String
     exchangeUUID: String
     exchangeName: String
+    # Only returned when the request sets includeUsdValues. A null price means
+    # the venue publishes no USD rate for this asset - NOT that it is worth 0.
+    price: String
+    usdValue: String
   }
   type getBalancesResponse {
     status: Status
@@ -782,6 +792,8 @@ export const BotSchema = /* GraphQL */ `
     getHedgeDCABotDealsStats(
       input: getBotDealsStatsInput
     ): botDealsStatsResponse
+    getBotDcaUsage(input: getBotDealsStatsInput): botDcaUsageResponse
+    getComboBotDcaUsage(input: getBotDealsStatsInput): botDcaUsageResponse
     getComboBotMinigrids(input: getBotDealsInput): minigridReponse
     getHedgeComboBotMinigrids(input: getBotDealsInput): minigridReponse
     getProfitByBot(input: getProfitByBot!): getProfitResponse
@@ -1327,6 +1339,21 @@ export const BotSchema = /* GraphQL */ `
     status: Status
     reason: String
     data: dealStatsData
+  }
+  type dcaUsageBucket {
+    dcas: Int
+    deals: Int
+    configured: Int
+  }
+  type dcaUsageData {
+    finished: [dcaUsageBucket]
+    active: [dcaUsageBucket]
+    maxConfiguredDcas: Int
+  }
+  type botDcaUsageResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: dcaUsageData
   }
   input getBacktestsInput {
     shareId: String!
@@ -4065,6 +4092,7 @@ export const BotSchema = /* GraphQL */ `
     price: Float
   }
   type dcaDeal {
+    startBlocked: dealStartBlock
     paperContext: Boolean
     parentBotId: String
     flags: [String]
@@ -4123,6 +4151,28 @@ export const BotSchema = /* GraphQL */ `
     tags: [String]
     ac: dealAc
   }
+  # Why a created deal has never opened: the venue refused its opening order,
+  # or one of our pre-send guards held it back on the venue's behalf. Present
+  # only while the deal is still unstarted; cleared as soon as an opening order
+  # is accepted. Descriptive - the deal is NOT in an error state.
+  type dealStartBlock {
+    # User-facing reason the opening order was not accepted.
+    reason: String
+    # Bot-error subType the reason classified as, e.g. "Exchange rules".
+    subType: String
+    # ms epoch of the first refusal in this run of refusals.
+    since: Date
+    # ms epoch of the most recent refusal.
+    lastAttempt: Date
+    # How many opening attempts have been refused since "since".
+    attempts: Int
+    # ms epoch the restriction is expected to lift, when the venue grades it.
+    retryAfter: Date
+    # Restriction scope where the venue distinguishes one, e.g. "account".
+    scope: String
+    # Restriction level where the venue grades one (Binance QR 1 | 2 | 3).
+    level: Int
+  }
   type dealAc {
     before: Float
     after: Float
@@ -4145,6 +4195,7 @@ export const BotSchema = /* GraphQL */ `
     qty: Float
   }
   type comboDeal {
+    startBlocked: dealStartBlock
     paperContext: Boolean
     parentBotId: String
     flags: [String]

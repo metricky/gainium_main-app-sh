@@ -90,6 +90,58 @@ type StartDealInputType = {
 
 type APIMap = Map<string, (req: Request, res: Response) => void>
 
+/**
+ * How far a request's `time` header may sit from server time and still be
+ * accepted, in milliseconds. `time` is signed but was never checked for
+ * freshness, so a captured request stayed replayable forever
+ * (GHSA-whmj-5f67-9f3w). Five minutes is wide enough for ordinary client clock
+ * skew — every first-party client (gainium-mcp, n8n-nodes-gainium, the Chrome
+ * extension) stamps `Date.now()` per request.
+ *
+ * Set `API_SIGNATURE_WINDOW_MS=0` to disable the check. That restores the
+ * replayable behaviour and exists only as an escape hatch for an integration
+ * with a badly wrong clock — fix the clock instead.
+ */
+const SIGNATURE_WINDOW_MS = (() => {
+  const raw = process.env.API_SIGNATURE_WINDOW_MS
+  if (raw === undefined || raw === '') return 5 * 60 * 1000
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5 * 60 * 1000
+})()
+
+/**
+ * Is the caller's signed `time` close enough to now?
+ *
+ * Accepts the millisecond epoch every client sends. Skew is allowed in both
+ * directions: a client clock that runs fast is as ordinary as one that lags.
+ */
+export const isFreshTimestamp = (
+  time: unknown,
+  now: number = Date.now(),
+  windowMs: number = SIGNATURE_WINDOW_MS,
+): boolean => {
+  if (windowMs === 0) return true
+  const parsed =
+    typeof time === 'number' ? time : Number(String(time ?? '').trim())
+  if (!Number.isFinite(parsed)) return false
+  return Math.abs(now - parsed) <= windowMs
+}
+
+/**
+ * Constant-time string compare. A `===` on the signature leaks, through timing,
+ * how many leading bytes a guess got right.
+ */
+const signaturesMatch = (expected: string, provided: string): boolean => {
+  // Uint8Array rather than Buffer: timingSafeEqual's typings want an
+  // ArrayBufferView over a plain ArrayBuffer, which Buffer no longer satisfies.
+  const a = Uint8Array.from(Buffer.from(expected, 'utf8'))
+  const b = Uint8Array.from(Buffer.from(provided, 'utf8'))
+  // Lengths are fixed for base64 SHA-256, so an early return here reveals
+  // nothing an attacker does not already know.
+  if (a.length !== b.length) return false
+  return crypto.timingSafeEqual(a, b)
+}
+
 const checkKey = (
   secret: string,
   body: Record<string, unknown>,
@@ -103,49 +155,100 @@ const checkKey = (
   if (bodyResult.length === 2) {
     bodiesToCheck.push('')
   }
+  let matched = false
   for (const bodyToCheck of bodiesToCheck) {
     const signatureResult = crypto
       .createHmac('sha256', secret)
       .update(bodyToCheck + method + endpoint + time)
       .digest('base64')
-    if (signatureResult === signature) {
-      return true
+    // No early break: both candidate bodies are always compared, so the reply
+    // time does not reveal which one matched.
+    if (signaturesMatch(signatureResult, signature)) {
+      matched = true
     }
   }
-  return false
+  return matched
 }
+
+/** Why an API key failed to authenticate. */
+enum ApiKeyRejection {
+  /** The `token` header is not a key id at all. */
+  malformed = 'malformed',
+  /** No such key — never issued, or deleted since. */
+  unknown = 'unknown',
+  /** The key exists and is the caller's, but its 90-day term has run out. */
+  expired = 'expired',
+  /** Ours, not theirs: the key could not be read back from storage. */
+  unreadable = 'unreadable',
+}
+
+/**
+ * What the caller is told, in the same `{status, reason}` shape the read-only
+ * permission rejection below already returns. A key dies of old age after 90
+ * days with nothing else to announce it, so the 403 body is the only place an
+ * integration can learn why it stopped working.
+ */
+const apiKeyRejectionReason: Record<ApiKeyRejection, string> = {
+  [ApiKeyRejection.malformed]: 'This API key is not a valid key.',
+  [ApiKeyRejection.unknown]:
+    'This API key is not recognized. It may have been deleted.',
+  [ApiKeyRejection.expired]:
+    'This API key has expired. Renew it under Settings → API Keys to restore access.',
+  [ApiKeyRejection.unreadable]: 'This API key could not be verified.',
+}
+
+const rejectKey = (rejection: ApiKeyRejection) => ({
+  id: undefined,
+  secret: undefined,
+  permission: undefined,
+  keyPaperContext: undefined,
+  keyBotId: undefined,
+  rejection,
+})
 
 const getUserByKey = async <R extends UserSchema = UserSchema>(
   key: string,
   userDb: DB<R> = _userDb as unknown as DB<R>,
 ) => {
+  let keyId: Types.ObjectId
   try {
+    keyId = new Types.ObjectId(key)
+  } catch {
+    return rejectKey(ApiKeyRejection.malformed)
+  }
+  try {
+    // Expiry is asserted below rather than in the query. Folding it in made an
+    // expired key indistinguishable from one that was never issued, so every
+    // rejection reached the caller as the same anonymous 403.
     const user = await userDb.readData({
       apiKeys: {
         $elemMatch: {
-          _id: new Types.ObjectId(key)._id,
-          expired: { $gt: new Date().getTime() },
+          _id: keyId._id,
         },
       },
     })
+    if (user.status === StatusEnum.notok) {
+      return rejectKey(ApiKeyRejection.unreadable)
+    }
     const api = user.data?.result?.apiKeys?.find(
       (a) => a._id?.toString() === key,
     )
+    if (!api) {
+      return rejectKey(ApiKeyRejection.unknown)
+    }
+    if (new Date(api.expired).getTime() <= Date.now()) {
+      return rejectKey(ApiKeyRejection.expired)
+    }
     return {
       id: user.data?.result?._id.toString(),
-      secret: api ? await resolveApiSecret(api) : undefined,
-      permission: api?.permission,
-      keyPaperContext: api?.paperContext,
-      keyBotId: api?.botId,
+      secret: await resolveApiSecret(api),
+      permission: api.permission,
+      keyPaperContext: api.paperContext,
+      keyBotId: api.botId,
+      rejection: undefined,
     }
   } catch {
-    return {
-      id: undefined,
-      secret: undefined,
-      permission: undefined,
-      keyPaperContext: undefined,
-      keyBotId: undefined,
-    }
+    return rejectKey(ApiKeyRejection.unreadable)
   }
 }
 
@@ -194,8 +297,24 @@ export const middleware =
     }
     const user = await getUserByKey(token.toString(), userDb)
     if (!user.id || !user.secret || !user.permission) {
-      error(`API request: ${req.method} ${req.url} user not found`)
-      res.sendStatus(403)
+      const rejection = user.rejection ?? ApiKeyRejection.unknown
+      // A rejected key is the caller's problem, not ours, so it is a warning —
+      // an expired key retrying on a schedule used to fill the error log for as
+      // long as the client kept polling. `unreadable` stays an error: that one
+      // is a fault on our side of the credential store.
+      const log = rejection === ApiKeyRejection.unreadable ? error : warn
+      log(
+        `API request: ${req.method} ${req.url} key rejected (${rejection})` +
+          // Only echoed once it has parsed as a key id, so an arbitrary header
+          // value never reaches the log verbatim.
+          (rejection === ApiKeyRejection.malformed
+            ? ''
+            : `: ${token.toString()}`),
+      )
+      res.status(403).json({
+        status: StatusEnum.notok,
+        reason: apiKeyRejectionReason[rejection],
+      })
       return
     }
     if (req.method !== 'GET' && user.permission !== APIPermission.write) {
@@ -209,6 +328,16 @@ export const middleware =
       })
       return
     }
+    // SECURITY (GHSA-whmj-5f67-9f3w): `time` is part of the signed material but
+    // was never checked against the clock, so a captured request replayed
+    // indefinitely. Reject a stale one before spending a HMAC on it.
+    if (!isFreshTimestamp(time.toString())) {
+      warn(
+        `API request: ${req.method} ${req.url} timestamp outside the accepted window`,
+      )
+      res.sendStatus(401)
+      return
+    }
     if (
       !checkKey(
         user.secret,
@@ -219,7 +348,8 @@ export const middleware =
         signature.toString(),
       )
     ) {
-      console.log(req.body, req.method, req.url, time, signature)
+      // Deliberately does not log the body: it is caller-supplied and can carry
+      // credentials on some routes.
       error(`API request: ${req.method} ${req.url} signature not valid`)
       res.sendStatus(401)
       return
