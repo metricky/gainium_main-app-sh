@@ -32,6 +32,17 @@ export const isKraken = (exchange: ExchangeEnum) =>
   ].includes(exchange)
 
 /**
+ * The prefix `Exchange.apiCall` throws with once it has spent its OWN transport
+ * retry ladder — six attempts at 500ms against the connector, ~3s in total.
+ *
+ * Named rather than inlined because two different questions read it, and they
+ * must agree on the same string: {@link isAmbiguousOrderFailure} ("is the
+ * venue's state unknown?") and {@link isTransportRetryExhausted} ("has this
+ * call already been retried at the transport layer?").
+ */
+const TRANSPORT_RETRY_EXHAUSTED_MARKER = 'exchange connector |'
+
+/**
  * Transport/plumbing shapes that leave the VENUE'S state UNKNOWN.
  *
  * A venue rejection — min notional, tick size, insufficient funds, bad
@@ -64,7 +75,23 @@ const AMBIGUOUS_ORDER_FAILURE_MARKERS = [
   'bad gateway',
   'service unavailable',
   // What `Exchange.apiCall` throws once its transport retry ladder is spent.
-  'exchange connector |',
+  TRANSPORT_RETRY_EXHAUSTED_MARKER,
+  // Hyperliquid's `unknownOid`, which reaches a PLACEMENT result only after the
+  // venue has already accepted the order. The connector's own `openOrder` uses
+  // `unknownOid` as its "not a duplicate, go ahead and send" answer on the
+  // pre-flight lookup, so the only way the token can come back out of a
+  // placement is the post-acceptance status lookup — HL took the order, and
+  // then would not describe it. That is a lost answer, not a refusal, and it is
+  // exactly the shape that produced the orphan in forum #5097: BUY 1.18 HYPE
+  // accepted at 05:41:09 on 2026-08-26, written off at 05:41:20, filled at
+  // 06:13:32 into a position no bot was tracking.
+  //
+  // Note the deliberate asymmetry with `isDefinitiveOrderNotFound`, which also
+  // matches this token. There it describes an order nobody has touched for a
+  // day (the quarantine age floor is what makes that safe); here it describes
+  // one the venue was handed seconds ago. Same word, opposite meaning, and the
+  // caller's context is the only thing that can tell them apart.
+  'unknownoid',
 ]
 
 /**
@@ -100,3 +127,57 @@ export const isAmbiguousOrderFailure = (reason?: string | null): boolean => {
     (marker) => lower.indexOf(marker) !== -1,
   )
 }
+
+/**
+ * Does this whole-call failure mean "this connector has no such batch route"?
+ *
+ * Two shapes qualify, and only two:
+ *
+ *   - the DECLINE a transport answers deliberately (`... not supported ...`),
+ *     which is what the abstract exchange and every non-Kraken venue reply, and
+ *   - the 404 a connector that predates the route answers, which
+ *     `Exchange.apiCall` surfaces as `Exchange connector | Not Found`.
+ *
+ * It exists so a caller can latch "do not ask this again" on an answer that is
+ * a property of the DEPLOYED CODE — it cannot change until something restarts —
+ * without ever latching on an answer that is a property of this MOMENT. A
+ * timeout, a 5xx or an empty result must leave the batch path armed: latching
+ * on those turns one bad minute into a process-lifetime regression.
+ *
+ * Deliberately narrow on the 404: a bare `not found` is what a venue says about
+ * an ORDER, and the batch endpoints answer about orders. Only the transport
+ * prefix distinguishes "no such route" from "no such order", so only the
+ * prefixed form is matched.
+ */
+export const isBatchRouteUnavailable = (reason?: string | null): boolean => {
+  if (!reason) {
+    return false
+  }
+  const lower = `${reason}`.toLowerCase()
+  return (
+    lower.indexOf('not supported') !== -1 ||
+    lower.indexOf('unsupported') !== -1 ||
+    lower.indexOf(`${TRANSPORT_RETRY_EXHAUSTED_MARKER} not found`) !== -1
+  )
+}
+
+/**
+ * Has this failure ALREADY been retried by `Exchange.apiCall`'s transport
+ * ladder?
+ *
+ * Deliberately much narrower than {@link isAmbiguousOrderFailure}, which is
+ * about what the VENUE did; this is about what WE already did. Only
+ * `Exchange.apiCall` throws this prefix, and only after six attempts over ~3s,
+ * so a caller-level retry policy that sees it is about to re-run that whole
+ * ladder against a connector that has just refused six times in a row.
+ *
+ * Every other ambiguous reason — a `Response timeout` or a rate-limit reason
+ * carried in a `notok` body on an HTTP 200, say — is NOT covered by the
+ * transport ladder, and a caller-level retry is the only retry those get. So
+ * they must keep it.
+ *
+ * @param reason the `reason` of a `notok` BaseReturn, or a thrown message
+ */
+export const isTransportRetryExhausted = (reason?: string | null): boolean =>
+  !!reason &&
+  `${reason}`.toLowerCase().indexOf(TRANSPORT_RETRY_EXHAUSTED_MARKER) !== -1

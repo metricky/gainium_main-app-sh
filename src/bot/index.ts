@@ -2,7 +2,24 @@ import DB from '../db'
 import { v4 } from 'uuid'
 import { Worker, isMainThread, threadId } from 'worker_threads'
 import logger from '../utils/logger'
+import {
+  missingWebhookFields,
+  missingWebhookFieldsReason,
+} from '../server/tradeSignalContract'
 import { isPaper } from '../utils'
+import utils from '../utils'
+import { CLOSE_SETTLE, awaitDealsClosed } from './closeSettle'
+import { buyDialogEventsFor } from './buyDialogEvent'
+import {
+  resolveChangeTrailActor,
+  settingsChanges,
+  type ChangeTrailEntry,
+} from './changeTrail'
+import {
+  mustRedactBotCredentials,
+  redactBotCredentials,
+  redactBotListResult,
+} from './redactBotCredentials'
 import { ProjectionFields, Types, type PipelineStage } from 'mongoose'
 import ExchangeChooser from '../exchange/exchangeChooser'
 import {
@@ -16,6 +33,9 @@ import {
   ComboBotSchema,
   ComboBotSettings,
   ComboDealsSettings,
+  ChangeTrailActor,
+  ChangeTrailChange,
+  ChangeTrailOptions,
   ComboMinigridStatusEnum,
   AddFundsSettings,
   OrderSizeTypeEnum,
@@ -82,16 +102,36 @@ import {
   getObjectsDiff,
   combineMaps,
   convertHedgeComboBotToArray,
-  isXperpPair,
+  findPairBySymbol,
   updateRelatedBotsInVar,
 } from './utils'
+import { statsAfterReset } from './dca/botStatsReset'
+import { oldStartDcaDealsFilter } from './dca/oldStartDealsFilter'
+import {
+  buildPairCapitalPipeline,
+  buildPairStatsPipeline,
+  peakCapitalBySymbol,
+  shapePairStats,
+  type BotPairStatsRow,
+  type PairCapitalDeal,
+  type PairStatsGroup,
+  type PairStatsRange,
+} from './pairStats'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { mapDataGridOptionsToMongoOptions } from '../db/utils'
+import { LargeAccountService } from './largeAccount/largeAccountService'
+import {
+  DEAL_TOTALS_ARGS,
+  EMPTY_DEAL_TOTALS,
+  buildDealListFilter,
+  dealListTotalsPipeline,
+} from './dealListFilter'
 import RabbitClient from '../db/rabbit'
 import {
   botDb,
   botEventDb,
   botMessageDb,
+  changeTrailDb,
   comboBotDb,
   comboDealsDb,
   comboProfitDb,
@@ -347,6 +387,8 @@ class Bot<T extends UserSchema = UserSchema> {
   private orderDb = orderDb
 
   protected botEventDb = botEventDb
+
+  protected changeTrailDb = changeTrailDb
 
   private botMessageDb = botMessageDb
 
@@ -1278,6 +1320,27 @@ class Bot<T extends UserSchema = UserSchema> {
       data: null,
     }
   }
+  /**
+   * Answer to a close request whose deal is not open.
+   *
+   * The close lookups skip finished deals, so a deal that had already closed
+   * came back as "Deal not found" — which a user still looking at it in an
+   * out-of-date list reads as a platform fault, and retries. Name the state the
+   * deal actually ended in so the client can tell "gone" from "already done".
+   */
+  protected dealNotOpen(status?: DCADealStatusEnum) {
+    if (
+      status === DCADealStatusEnum.closed ||
+      status === DCADealStatusEnum.canceled
+    ) {
+      return {
+        status: StatusEnum.notok as const,
+        reason: `Deal already ${status}`,
+        data: null,
+      }
+    }
+    return this.entityNotFound('Deal')
+  }
 
   public static getInstance(useBots?: boolean): Bot {
     if (!Bot.instance) {
@@ -1475,6 +1538,66 @@ class Bot<T extends UserSchema = UserSchema> {
     }
   }
 
+  /**
+   * Filter for the deal lists (main-app spec 020): the caller's fixed scope
+   * (user, context, type, parent) AND the DataGrid items, with the default
+   * open/error/start statuses unless an item targets `status`. Also returned
+   * so `totals` can aggregate over exactly the same set.
+   */
+  private async dealListSearch(
+    user: ExcludeDoc<UserSchema>,
+    combo: boolean,
+    scope: Record<string, unknown>,
+    dataGridFilter?: DataGridFilterInput,
+  ) {
+    const userId = user._id.toString()
+    const botDb = (
+      combo ? this.comboBotDb : this.dcaBotDb
+    ) as typeof this.dcaBotDb
+    const built = await buildDealListFilter(dataGridFilter, {
+      timezone: user.timezone,
+      botIdsByName: async (nameCond) => {
+        const bots = await botDb.readData(
+          { userId, ...nameCond } as never,
+          { _id: 1 },
+          {},
+          true,
+        )
+        return bots.status === StatusEnum.ok
+          ? bots.data.result.map((b) => `${b._id}`)
+          : []
+      },
+    })
+    const search: Record<string, unknown> = {
+      ...(built.statusFromItems
+        ? {}
+        : {
+            status: {
+              $in: [
+                DCADealStatusEnum.open,
+                DCADealStatusEnum.error,
+                DCADealStatusEnum.start,
+              ],
+            },
+          }),
+      userId,
+      ...scope,
+      ...built.filter,
+    }
+    return { search, built }
+  }
+
+  public async getDealListTotals(combo: boolean, search: object) {
+    const db = (
+      combo ? this.comboDealsDb : this.dcaDealsDb
+    ) as typeof this.dcaDealsDb
+    const res = await db.aggregate<typeof EMPTY_DEAL_TOTALS>(
+      dealListTotalsPipeline(search as Record<string, unknown>) as never,
+    )
+    if (res.status !== StatusEnum.ok) return null
+    return { ...EMPTY_DEAL_TOTALS, ...(res.data.result[0] ?? {}) }
+  }
+
   public async getDCADealListGraphQl(
     user: ExcludeDoc<UserSchema>,
     paperContext?: boolean,
@@ -1483,43 +1606,33 @@ class Bot<T extends UserSchema = UserSchema> {
     exchange?: string,
     terminal?: boolean,
   ) {
-    const userId = user._id.toString()
-
-    const { filter, sort, skip, limit } =
-      mapDataGridOptionsToMongoOptions(dataGridFilter)
-    let s: Record<string, unknown> = {
-      status: {
-        $in: [
-          DCADealStatusEnum.open,
-          DCADealStatusEnum.error,
-          DCADealStatusEnum.start,
-        ],
-      },
-      userId,
+    const scope: Record<string, unknown> = {
       paperContext: paperContext ? { $eq: true } : { $ne: true },
       type: terminal
         ? { $eq: DCATypeEnum.terminal }
         : { $nin: [DCATypeEnum.terminal] },
-    }
-
-    if (filter.$and?.length || filter.$or?.length) {
-      const f = filter.$and?.length
-        ? filter.$and.reduce((acc, v) => ({ ...acc, ...v }), {})
-        : filter.$or?.reduce((acc, v) => ({ ...acc, ...v }), {})
-      s = { ...s, ...f }
-    } else {
-      s = { ...s, ...filter }
+      parentBotId: { $exists: false },
     }
     if (botId) {
-      s.botId = botId
+      scope.botId = botId
     }
     if (exchange) {
-      s.exchangeUUID = exchange
+      scope.exchangeUUID = exchange
     }
+    const { search, built } = await this.dealListSearch(
+      user,
+      false,
+      scope,
+      dataGridFilter,
+    )
     const request = await this.dcaDealsDb.readData(
-      { ...s, parentBotId: { $exists: false } },
+      search as never,
       {},
-      { sort, skip, limit: Math.min(500, limit ?? 500) },
+      {
+        sort: built.sort as never,
+        skip: built.skip,
+        limit: Math.min(500, built.limit ?? 500),
+      },
       true,
       true,
     )
@@ -1551,6 +1664,7 @@ class Bot<T extends UserSchema = UserSchema> {
         }),
       },
       total: request.data.count,
+      [DEAL_TOTALS_ARGS]: { combo: false, search },
     }
   }
 
@@ -1561,43 +1675,31 @@ class Bot<T extends UserSchema = UserSchema> {
     botId?: string,
     exchange?: string,
   ) {
-    const userId = user._id.toString()
-
-    const { filter, sort, skip, limit } =
-      mapDataGridOptionsToMongoOptions(dataGridFilter)
-
-    let s: Record<string, unknown> = {
-      status: {
-        $in: [
-          DCADealStatusEnum.open,
-          DCADealStatusEnum.error,
-          DCADealStatusEnum.start,
-        ],
-      },
-      userId,
+    const scope: Record<string, unknown> = {
       paperContext: paperContext ? { $eq: true } : { $ne: true },
       type: { $ne: DCATypeEnum.terminal },
-      ...filter,
-    }
-    if (filter.$and?.length || filter.$or?.length) {
-      const f = filter.$and?.length
-        ? filter.$and.reduce((acc, v) => ({ ...acc, ...v }), {})
-        : filter.$or?.reduce((acc, v) => ({ ...acc, ...v }), {})
-      s = { ...s, ...f }
-    } else {
-      s = { ...s, ...filter }
+      parentBotId: { $exists: false },
     }
     if (botId) {
-      s.botId = botId
+      scope.botId = botId
     }
     if (exchange) {
-      s.exchangeUUID = exchange
+      scope.exchangeUUID = exchange
     }
-
+    const { search, built } = await this.dealListSearch(
+      user,
+      true,
+      scope,
+      dataGridFilter,
+    )
     const request = await this.comboDealsDb.readData(
-      { ...s, parentBotId: { $exists: false } },
+      search as never,
       {},
-      { sort, skip, limit: Math.min(500, limit ?? 500) },
+      {
+        sort: built.sort as never,
+        skip: built.skip,
+        limit: Math.min(500, built.limit ?? 500),
+      },
       true,
       true,
     )
@@ -1629,6 +1731,7 @@ class Bot<T extends UserSchema = UserSchema> {
         }),
       },
       total: request.data.count,
+      [DEAL_TOTALS_ARGS]: { combo: true, search },
     }
   }
 
@@ -1791,23 +1894,42 @@ class Bot<T extends UserSchema = UserSchema> {
   public async getTradingTerminalBotsList(
     userId: string,
     paperContext: boolean,
+    dataGridInput?: DataGridFilterInput,
   ) {
+    const match: Record<string, unknown> = {
+      userId,
+      'settings.type': {
+        $eq: 'terminal',
+      },
+      paperContext: paperContext
+        ? {
+            $eq: true,
+          }
+        : {
+            $eq: false,
+          },
+    }
+    // Server paging (main-app spec 019 §3): without `dataGridInput` the list
+    // is every terminal bot, as before. With it, the page is cut BEFORE the
+    // per-bot deal lookup and `total` counts every match.
+    const paged = !!dataGridInput && Object.keys(dataGridInput).length > 0
+    const pageStages: PipelineStage[] = []
+    let search = match
+    if (paged) {
+      const { filter, sort, skip, limit } =
+        mapDataGridOptionsToMongoOptions(dataGridInput)
+      search = { ...filter, ...match }
+      pageStages.push(
+        { $sort: sort as Record<string, 1 | -1> },
+        { $skip: skip },
+        { $limit: Math.min(500, limit) },
+      )
+    }
     const agg: PipelineStage[] = [
       {
-        $match: {
-          userId,
-          'settings.type': {
-            $eq: 'terminal',
-          },
-          paperContext: paperContext
-            ? {
-                $eq: true,
-              }
-            : {
-                $eq: false,
-              },
-        },
+        $match: search,
       },
+      ...pageStages,
       /*{
         $lookup: {
           let: {
@@ -1858,6 +1980,11 @@ class Bot<T extends UserSchema = UserSchema> {
     ]
     const result = await this.dcaBotDb.aggregate(agg)
     if (result.status === StatusEnum.ok) {
+      let total = result.data.result.length
+      if (paged) {
+        const counted = await this.dcaBotDb.countData(search as never)
+        total = counted.status === StatusEnum.ok ? counted.data.result : total
+      }
       return {
         status: StatusEnum.ok,
         data: result.data.result.map((d) => ({
@@ -1867,6 +1994,7 @@ class Bot<T extends UserSchema = UserSchema> {
           deals: d.dcadeals,
         })),
         reason: null,
+        total,
       }
     }
     return result
@@ -2229,6 +2357,7 @@ class Bot<T extends UserSchema = UserSchema> {
             'stats.unrealizedProfit': {
               $ifNull: ['$stats.unrealizedProfit', 0],
             },
+            'stats.unrealizedProfitNet': 1,
           },
         },
         {
@@ -2284,6 +2413,17 @@ class Bot<T extends UserSchema = UserSchema> {
             unrealizedProfit: {
               $sum: '$stats.unrealizedProfit',
             },
+            // Fee-inclusive (main-app spec 019 §5). Deals written before it
+            // shipped lack the field; `unrealizedProfitNetDeals` says how many
+            // of `normal` it covers so the client can label a partial sum.
+            unrealizedProfitNet: {
+              $sum: '$stats.unrealizedProfitNet',
+            },
+            unrealizedProfitNetDeals: {
+              $sum: {
+                $cond: [{ $isNumber: '$stats.unrealizedProfitNet' }, 1, 0],
+              },
+            },
           },
         },
         {
@@ -2294,6 +2434,8 @@ class Bot<T extends UserSchema = UserSchema> {
             eighty: 1,
             max: 1,
             unrealizedProfit: 1,
+            unrealizedProfitNet: 1,
+            unrealizedProfitNetDeals: 1,
           },
         },
       ])
@@ -2336,6 +2478,7 @@ class Bot<T extends UserSchema = UserSchema> {
           },
           'stats.currentCount': 1,
           'stats.unrealizedProfit': { $ifNull: ['$stats.unrealizedProfit', 0] },
+          'stats.unrealizedProfitNet': 1,
           all: '$levels.all',
         },
       },
@@ -2392,6 +2535,15 @@ class Bot<T extends UserSchema = UserSchema> {
           unrealizedProfit: {
             $sum: '$stats.unrealizedProfit',
           },
+          // Fee-inclusive (main-app spec 019 §5); see the combo branch.
+          unrealizedProfitNet: {
+            $sum: '$stats.unrealizedProfitNet',
+          },
+          unrealizedProfitNetDeals: {
+            $sum: {
+              $cond: [{ $isNumber: '$stats.unrealizedProfitNet' }, 1, 0],
+            },
+          },
         },
       },
       {
@@ -2402,6 +2554,8 @@ class Bot<T extends UserSchema = UserSchema> {
           eighty: 1,
           max: 1,
           unrealizedProfit: 1,
+          unrealizedProfitNet: 1,
+          unrealizedProfitNetDeals: 1,
         },
       },
     ])
@@ -2415,10 +2569,29 @@ class Bot<T extends UserSchema = UserSchema> {
     all?: boolean,
     dataGridInput: DataGridFilterInput = {},
   ) {
+    const result = await this.getBotListUnredacted(
+      type,
+      userId,
+      status,
+      paperContext,
+      all,
+      dataGridInput,
+    )
+    // The demo session lists the demo account's bots as that account.
+    return token === 'demo' ? redactBotListResult(result) : result
+  }
+
+  private async getBotListUnredacted(
+    type: BotType,
+    userId: string,
+    status?: BotStatusEnum[],
+    paperContext?: boolean,
+    all?: boolean,
+    dataGridInput: DataGridFilterInput = {},
+  ) {
     if (type === BotType.grid) {
       return await this.getGridBotList(
         userId,
-        token,
         status,
         paperContext,
         dataGridInput,
@@ -2427,7 +2600,6 @@ class Bot<T extends UserSchema = UserSchema> {
     if (type === BotType.combo) {
       return await this.getComboBotList(
         userId,
-        token,
         status,
         paperContext,
         all,
@@ -2437,7 +2609,6 @@ class Bot<T extends UserSchema = UserSchema> {
     if (type === BotType.hedgeCombo) {
       return await this.getHedgeComboBotList(
         userId,
-        token,
         status,
         paperContext,
         all,
@@ -2447,7 +2618,6 @@ class Bot<T extends UserSchema = UserSchema> {
     if (type === BotType.hedgeDca) {
       return await this.getHedgeDcaBotList(
         userId,
-        token,
         status,
         paperContext,
         all,
@@ -2456,7 +2626,6 @@ class Bot<T extends UserSchema = UserSchema> {
     }
     return await this.getDCABotList(
       userId,
-      token,
       status,
       paperContext,
       all,
@@ -2474,7 +2643,6 @@ class Bot<T extends UserSchema = UserSchema> {
         {
           $or: [
             { userId },
-            { public: true },
             { shareId, share: { $eq: true } },
           ],
         },
@@ -2504,7 +2672,7 @@ class Bot<T extends UserSchema = UserSchema> {
             ? data.updated
             : new Date(),
         vars:
-          shareId && `${data.userId}` !== `${userId}`
+          `${data.userId}` !== `${userId}`
             ? { list: [], paths: [] }
             : (data.vars ?? { list: [], paths: [] }),
       },
@@ -2522,7 +2690,6 @@ class Bot<T extends UserSchema = UserSchema> {
         {
           $or: [
             { userId },
-            { public: true },
             { shareId, share: { $eq: true } },
           ],
         },
@@ -2552,7 +2719,7 @@ class Bot<T extends UserSchema = UserSchema> {
             ? data.updated
             : new Date(),
         vars:
-          shareId && `${data.userId}` !== `${userId}`
+          `${data.userId}` !== `${userId}`
             ? { list: [], paths: [] }
             : (data.vars ?? { list: [], paths: [] }),
       },
@@ -2571,7 +2738,6 @@ class Bot<T extends UserSchema = UserSchema> {
           {
             $or: [
               { userId },
-              { public: true },
               { shareId, share: { $eq: true } },
             ],
           },
@@ -2658,7 +2824,6 @@ class Bot<T extends UserSchema = UserSchema> {
           {
             $or: [
               { userId },
-              { public: true },
               { shareId, share: { $eq: true } },
             ],
           },
@@ -2742,7 +2907,6 @@ class Bot<T extends UserSchema = UserSchema> {
         {
           $or: [
             { userId },
-            { public: true },
             { shareId, share: { $eq: true } },
           ],
         },
@@ -2970,25 +3134,9 @@ class Bot<T extends UserSchema = UserSchema> {
       status: StatusEnum.ok as const,
       reason: null,
       data: pairs
-        .map((p) => {
-          // X-Perp pairs (e.g. `AAVE-USD_UM_XPERP`) are already the
-          // canonical exchange-native pair string - splitting them on `_`
-          // would tear the `_UM_XPERP` contract-type suffix apart instead
-          // of separating base/quote, so match those directly first.
-          if (isXperpPair(p)) {
-            const direct = pairsFromDb?.data?.result.find((f) => f.pair === p)
-            return direct ?? null
-          }
-          const split = p.split('_')
-          const find = pairsFromDb?.data?.result.find(
-            (f) =>
-              f.baseAsset.name === split[0] && f.quoteAsset.name === split[1],
-          )
-          if (find) {
-            return find
-          }
-          return null
-        })
+        .map(
+          (p) => findPairBySymbol(pairsFromDb?.data?.result ?? [], p) ?? null,
+        )
         .filter((f) => f !== null) as ClearPairsSchema[],
     }
   }
@@ -3270,6 +3418,8 @@ class Bot<T extends UserSchema = UserSchema> {
 
   @IdMute(mutex, (userId: string) => `${userId}checkBigAccount`)
   private async checkBigAccount(userId: string, action: 'add' | 'remove') {
+    // Large account mode (main-app spec 019) recounts on the next read.
+    LargeAccountService.getInstance().invalidate(userId)
     const user = await this.userDb.readData({ _id: userId })
     if (!user || !user.data?.result) {
       return
@@ -3368,6 +3518,9 @@ class Bot<T extends UserSchema = UserSchema> {
     const saveBotRequest = await this.botDb.createData({
       userId,
       status: BotStatusEnum.closed,
+      // Spec 014 §3 — gates the new observed-fee resolution + feeByAsset
+      // ledger in helper.ts:createTransaction to new grid bots only.
+      flags: [BotFlags.feeByAsset],
       settings: { ...settings, updatedBudget: true, newBalance: true },
       exchange: settings.exchange,
       exchangeUUID: settings.exchangeUUID,
@@ -4502,6 +4655,37 @@ class Bot<T extends UserSchema = UserSchema> {
         initialPriceStartFrom: null,
       }
     }
+    // Range moved past the start price: the restart re-derives the initial
+    // balances (the value-change TP/SL baseline) from that price, so every
+    // level lands on one side and the bot appears to have gained or lost the
+    // whole move at once. Re-base on the current price instead.
+    const newLow = set.$set.settings?.lowPrice ?? oldSettings.settings.lowPrice
+    const newTop = set.$set.settings?.topPrice ?? oldSettings.settings.topPrice
+    if (
+      (set.$set.initialPrice === undefined ||
+        set.$set.initialPrice === oldSettings.initialPrice) &&
+      oldSettings.initialPrice &&
+      (`${newLow}` !== `${oldSettings.settings.lowPrice}` ||
+        `${newTop}` !== `${oldSettings.settings.topPrice}`) &&
+      (oldSettings.initialPrice < +newLow || oldSettings.initialPrice > +newTop)
+    ) {
+      const _ex = this.ec.chooseExchangeFactory(oldSettings.exchange)
+      const price = _ex
+        ? await _ex('', '').latestPrice(oldSettings.symbol.symbol)
+        : null
+      if (price && price.status === StatusEnum.ok && price.data > 0) {
+        set['$set'] = {
+          ...set['$set'],
+          initialPrice: price.data,
+          initialPriceFrom: InitialPriceFromEnum.start,
+          initialPriceStart: price.data,
+          initialPriceStartFrom: InitialPriceFromEnum.start,
+        }
+        changedString = `${changedString}${
+          changedString.length ? ', ' : ''
+        }Initial Price: ${oldSettings.initialPrice} -> ${price.data}`
+      }
+    }
     const saveBotRequest = await this.botDb.updateData(
       { _id: id, userId },
       set,
@@ -4615,6 +4799,27 @@ class Bot<T extends UserSchema = UserSchema> {
     return saveBotRequest
   }
 
+  /**
+   * A pair missing from the pairs collection (mid-refresh, or a venue list
+   * that dropped it) is not a pair the bot stopped trading: keep the entry the
+   * bot already had for it, so a save can never shrink `symbol` below
+   * `settings.pair` — or empty it, which leaves the bot unrenderable.
+   */
+  private keepStoredSymbols(
+    symbolsMap: Map<string, Symbols>,
+    pairs: string[],
+    stored?: Map<string, Symbols> | Record<string, Symbols> | null,
+  ) {
+    const storedMap =
+      stored instanceof Map ? stored : new Map(Object.entries(stored ?? {}))
+    for (const pair of pairs) {
+      const entry = storedMap.get(pair)
+      if (!symbolsMap.has(pair) && entry) {
+        symbolsMap.set(pair, entry)
+      }
+    }
+  }
+
   public async changeDCABot(
     input: Partial<DCABotSettings> & { id: string; vars?: BotVars | null },
     userId: string,
@@ -4623,6 +4828,8 @@ class Bot<T extends UserSchema = UserSchema> {
     // already running. Only callers that genuinely re-own a running deal's
     // TP/SL — the hedge wrapper flipping externalTp/externalSl — pass true.
     replaceOrders = false,
+    actor?: ChangeTrailActor,
+    trail?: ChangeTrailOptions,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<typeof this.getBot>>(
@@ -4633,6 +4840,8 @@ class Bot<T extends UserSchema = UserSchema> {
         userId,
         paperContext,
         replaceOrders,
+        actor,
+        trail,
       )
     }
     const { id, vars, ...settings } = input
@@ -4684,25 +4893,33 @@ class Bot<T extends UserSchema = UserSchema> {
         ...settings,
       })
     }
-    if (settings.pair && !oldSettings.settings.useMulti) {
+    // A single-pair bot whose stored pair is EMPTY is not the configured bot
+    // the refusal below protects — it is a bot the engine emptied when its
+    // pair stopped being listed. It can never open a deal in that state, and
+    // refusing every pair change is what makes the damage permanent. Let such
+    // a bot be given its one pair back; a single-pair bot that still HAS its
+    // pair keeps refusing, and still takes exactly one pair either way.
+    const repairEmptyPair =
+      !oldSettings.settings.useMulti && !oldSettings.settings.pair?.length
+    const acceptsPair = oldSettings.settings.useMulti || repairEmptyPair
+    if (
+      settings.pair &&
+      (!acceptsPair || (repairEmptyPair && settings.pair.length > 1))
+    ) {
       return {
         status: StatusEnum.notok,
         reason: 'Cannot change pair for non-multi pairs bot',
         data: null,
       }
     }
-    if (
-      settings.pair &&
-      oldSettings.settings.useMulti &&
-      settings.pair.length === 0
-    ) {
+    if (settings.pair && acceptsPair && settings.pair.length === 0) {
       return {
         status: StatusEnum.notok,
         reason: 'Need to specify at least one pair',
         data: null,
       }
     }
-    if (settings.pair && oldSettings.settings.useMulti) {
+    if (settings.pair && acceptsPair) {
       const pairs = await this.pairsDb.readData(
         { pair: { $in: settings.pair } },
         {},
@@ -4721,7 +4938,10 @@ class Bot<T extends UserSchema = UserSchema> {
             quoteAsset: p.quoteAsset.name,
           })
         }
-        set.$set.symbol = symbolsMap
+        this.keepStoredSymbols(symbolsMap, settings.pair, oldSettings.symbol)
+        if (symbolsMap.size) {
+          set.$set.symbol = symbolsMap
+        }
       }
     }
 
@@ -4803,13 +5023,36 @@ class Bot<T extends UserSchema = UserSchema> {
         ),
         paperContext,
       })
+      this.recordChangeTrail({
+        userId: saveBotRequest.data.userId,
+        botId: `${saveBotRequest.data._id}`,
+        botType: BotType.dca,
+        scope: 'bot',
+        action: trail?.action ?? 'update_settings',
+        actor: resolveChangeTrailActor(actor),
+        changes: settingsChanges(
+          oldSettings.settings as unknown as Record<string, unknown>,
+          settings as Record<string, unknown>,
+        ),
+        ...(trail?.reason ? { reason: trail.reason } : {}),
+        paperContext,
+      })
       if (resetStats || (resetBaseAsset && oldSettings.stats)) {
         await this.dcaBotDb
           .updateData(
             { _id: id },
             {
               $set: {
-                stats: null,
+                // A sizing change invalidates the aggregates, which are all
+                // denominated against a starting balance it just moved — but
+                // not `stats.chart`, the daily equity series the bot card
+                // plots. Only a running bot ever rebuilds that series, so
+                // clearing it here left a bot stopped afterwards showing
+                // "No data" for good.
+                stats: statsAfterReset(
+                  oldSettings.stats,
+                  resetStats ? 'all' : 'keepChart',
+                ),
                 symbolStats: null,
                 resetStatsAfter: +new Date(),
               },
@@ -4834,6 +5077,8 @@ class Bot<T extends UserSchema = UserSchema> {
     userId: string,
     paperContext: boolean,
     forceRestart = false,
+    actor?: ChangeTrailActor,
+    trail?: ChangeTrailOptions,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<typeof this.getBot>>(
@@ -4844,6 +5089,8 @@ class Bot<T extends UserSchema = UserSchema> {
         userId,
         paperContext,
         forceRestart,
+        actor,
+        trail,
       )
     }
     const { id, vars, ...settings } = input
@@ -4897,25 +5144,33 @@ class Bot<T extends UserSchema = UserSchema> {
         ...settings,
       })
     }
-    if (settings.pair && !oldSettings.settings.useMulti) {
+    // A single-pair bot whose stored pair is EMPTY is not the configured bot
+    // the refusal below protects — it is a bot the engine emptied when its
+    // pair stopped being listed. It can never open a deal in that state, and
+    // refusing every pair change is what makes the damage permanent. Let such
+    // a bot be given its one pair back; a single-pair bot that still HAS its
+    // pair keeps refusing, and still takes exactly one pair either way.
+    const repairEmptyPair =
+      !oldSettings.settings.useMulti && !oldSettings.settings.pair?.length
+    const acceptsPair = oldSettings.settings.useMulti || repairEmptyPair
+    if (
+      settings.pair &&
+      (!acceptsPair || (repairEmptyPair && settings.pair.length > 1))
+    ) {
       return {
         status: StatusEnum.notok,
         reason: 'Cannot change pair for non-multi pairs bot',
         data: null,
       }
     }
-    if (
-      settings.pair &&
-      oldSettings.settings.useMulti &&
-      settings.pair.length === 0
-    ) {
+    if (settings.pair && acceptsPair && settings.pair.length === 0) {
       return {
         status: StatusEnum.notok,
         reason: 'Need to specify at least one pair',
         data: null,
       }
     }
-    if (settings.pair && oldSettings.settings.useMulti) {
+    if (settings.pair && acceptsPair) {
       const pairs = await this.pairsDb.readData(
         { pair: { $in: settings.pair } },
         {},
@@ -4934,7 +5189,10 @@ class Bot<T extends UserSchema = UserSchema> {
             quoteAsset: p.quoteAsset.name,
           })
         }
-        set.$set.symbol = symbolsMap
+        this.keepStoredSymbols(symbolsMap, settings.pair, oldSettings.symbol)
+        if (symbolsMap.size) {
+          set.$set.symbol = symbolsMap
+        }
       }
     }
 
@@ -5016,13 +5274,33 @@ class Bot<T extends UserSchema = UserSchema> {
         ),
         paperContext,
       })
+      this.recordChangeTrail({
+        userId: saveBotRequest.data.userId,
+        botId: `${saveBotRequest.data._id}`,
+        botType: BotType.combo,
+        scope: 'bot',
+        action: trail?.action ?? 'update_settings',
+        actor: resolveChangeTrailActor(actor),
+        changes: settingsChanges(
+          oldSettings.settings as unknown as Record<string, unknown>,
+          settings as Record<string, unknown>,
+        ),
+        ...(trail?.reason ? { reason: trail.reason } : {}),
+        paperContext,
+      })
       if (resetStats || (resetBaseAsset && oldSettings.stats)) {
         await this.comboBotDb
           .updateData(
             { _id: id },
             {
               $set: {
-                stats: null,
+                // Same scoping as `changeDCABot` above: keep the equity series
+                // across an order-sizing change, clear it only when the profit
+                // currency re-denominates the whole document.
+                stats: statsAfterReset(
+                  oldSettings.stats,
+                  resetStats ? 'all' : 'keepChart',
+                ),
                 symbolStats: null,
                 resetStatsAfter: +new Date(),
               },
@@ -5705,27 +5983,70 @@ class Bot<T extends UserSchema = UserSchema> {
         }
       }
     }
-    if (buyCount) {
-      this.botEventDb.createData({
-        userId: userId,
-        botId: id,
-        event: 'Buy dialog',
-        botType: type,
-        description: `Buy count: ${buyCount}`,
-        paperContext,
-      })
-    }
-    if (buyType) {
-      this.botEventDb.createData({
-        userId: userId,
-        botId: id,
-        event: 'Buy dialog',
-        botType: type,
-        description: `Buy type: ${buyType}`,
-        paperContext,
-      })
+    // Spec 081 — a manual buy is only what a branch above actually applied
+    // (grid -> open). Writing this from the presence of the optional input
+    // labelled every grid Stop a "Manual buy" the user never made.
+    for (const event of buyDialogEventsFor({
+      userId,
+      botId: id,
+      type,
+      status,
+      buyType,
+      buyCount,
+      paperContext,
+    })) {
+      this.botEventDb.createData(event)
     }
     return await this.getBot(type, userId, id, undefined, paperContext)
+  }
+
+  /**
+   * Re-establish the user-stream subscriptions of every bot this host runs
+   * on one exchange account (core spec 002 §4.3). Internal-API method: the
+   * fill-failsafe calls it over the bot-service rabbit queues when a
+   * `RECONCILE VIA SWEEP` it published was not acknowledged by any bot on
+   * the account. Returns the number of bots asked to resubscribe.
+   */
+  public async resubscribeUserStream(exchangeUUID: string): Promise<number> {
+    if (!exchangeUUID) {
+      return 0
+    }
+    if (!this.useBots) {
+      return (
+        (await this.callExternalBotService<number>(
+          'allWithHedge',
+          'resubscribeUserStream',
+          false,
+          exchangeUUID,
+        )) ?? 0
+      )
+    }
+    const targets = [
+      ...this.bots,
+      ...this.dcaBots,
+      ...this.comboBots,
+      ...this.hedgeComboBots,
+      ...this.hedgeDcaBots,
+    ].filter((b) => b.uuid === exchangeUUID)
+    let sent = 0
+    for (const b of targets) {
+      const worker = this.getWorkerById(b.worker)
+      if (!worker) {
+        continue
+      }
+      worker.postMessage({
+        do: 'method',
+        botType: b.type,
+        botId: b.id,
+        method: 'resubscribeUserStream',
+        args: ['sweep unacknowledged'],
+      })
+      sent += 1
+    }
+    this.handleLog(
+      `Resubscribe user stream requested for ${exchangeUUID}: ${sent} bot(s)`,
+    )
+    return sent
   }
 
   public async restartBot(
@@ -7210,7 +7531,7 @@ class Bot<T extends UserSchema = UserSchema> {
    *
    * The bot service deliberately does not consume its command queue until every
    * bot is back (a command processed before its bot is recreated used to start
-   * the bot twice — ClickUp 86eqmqjxg). That ordering is correct, but it was
+   * the bot twice). That ordering is correct, but it was
    * gated on an exact count with no escape hatch: if one bot never finished
    * re-hydrating, the listener never armed **for the life of the process**, and
    * every user start/stop/edit for that bot type sat in the durable queue until
@@ -7995,6 +8316,7 @@ class Bot<T extends UserSchema = UserSchema> {
     reopen = true,
     paperContext?: boolean,
     closeTrigger?: DCACloseTriggerEnum,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -8008,6 +8330,7 @@ class Bot<T extends UserSchema = UserSchema> {
         reopen,
         paperContext,
         closeTrigger,
+        actor,
       )
     }
     const findDeal = await this.dcaDealsDb.readData({
@@ -8019,9 +8342,35 @@ class Bot<T extends UserSchema = UserSchema> {
       return findDeal
     }
     if (!findDeal.data.result) {
-      return this.entityNotFound('Deal')
+      const ended = await this.dcaDealsDb.readData(
+        { _id: dealId, userId },
+        { status: 1 },
+      )
+      return this.dealNotOpen(
+        ended.status === StatusEnum.ok ? ended.data.result?.status : undefined,
+      )
     }
     const botId = findDeal.data.result.botId
+    // The close REQUEST is what the trail records; whether and how the
+    // engine then closes the deal is in the deal's own events.
+    this.recordChangeTrail({
+      userId,
+      botId,
+      botType: BotType.dca,
+      dealId,
+      scope: 'deal',
+      action: 'close_deal',
+      actor: resolveChangeTrailActor(actor),
+      changes: [
+        {
+          path: 'status',
+          before: findDeal.data.result.status,
+          after: 'close_requested',
+        },
+        ...(type ? [{ path: 'closeType', before: null, after: type }] : []),
+      ],
+      paperContext: !!findDeal.data.result.paperContext,
+    })
 
     const findLocal = this.dcaBots.find(
       (d) => d.id === botId && d.userId === userId,
@@ -8067,16 +8416,12 @@ class Bot<T extends UserSchema = UserSchema> {
         ],
       })
 
-      this.botEventDb.createData({
-        userId: userId,
-        botId,
-        botType: BotType.dca,
-        event: 'Close DCA deal',
-        description: `DCA deal closed manually, id: ${dealId}`,
-        paperContext: !!paperContext,
-        deal: dealId,
-        symbol: findDeal.data.result.symbol.symbol,
-      })
+      // No confirmation event here. At this point the close has only been
+      // POSTED to the worker, and a request the worker cannot action is dropped
+      // inside it — so "closed manually" would record a close that never
+      // happened, which is exactly what the user reads to believe it did. A
+      // confirmed close writes its own deal event from `processDealClose`, and
+      // the `leave` path writes one from `announceLeftOpenPosition`.
       return {
         status: StatusEnum.ok as StatusEnum.ok,
         reason: null,
@@ -8160,16 +8505,8 @@ class Bot<T extends UserSchema = UserSchema> {
         botData.data.result.settings.type ?? DCATypeEnum.regular,
       )
 
-      this.botEventDb.createData({
-        userId: userId,
-        botId: _botId,
-        botType: BotType.dca,
-        event: 'Close DCA deal',
-        description: `DCA deal closed manually, id: ${dealId}`,
-        paperContext: !!paperContext,
-        deal: dealId,
-        symbol: findDeal.data.result.symbol.symbol,
-      })
+      // No confirmation event on dispatch — see the sibling branch above. The
+      // bot was not even running yet here, so this one claimed even less.
       return {
         status: StatusEnum.ok as StatusEnum.ok,
         reason: null,
@@ -8320,6 +8657,7 @@ class Bot<T extends UserSchema = UserSchema> {
     reopen = true,
     paperContext?: boolean,
     closeTrigger?: DCACloseTriggerEnum,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -8333,6 +8671,7 @@ class Bot<T extends UserSchema = UserSchema> {
         reopen,
         paperContext,
         closeTrigger,
+        actor,
       )
     }
     const findDeal = await this.comboDealsDb.readData({
@@ -8344,9 +8683,35 @@ class Bot<T extends UserSchema = UserSchema> {
       return findDeal
     }
     if (!findDeal.data.result) {
-      return this.entityNotFound('Deal')
+      const ended = await this.comboDealsDb.readData(
+        { _id: dealId, userId },
+        { status: 1 },
+      )
+      return this.dealNotOpen(
+        ended.status === StatusEnum.ok ? ended.data.result?.status : undefined,
+      )
     }
     const botId = findDeal.data.result.botId
+    // The close REQUEST is what the trail records; whether and how the
+    // engine then closes the deal is in the deal's own events.
+    this.recordChangeTrail({
+      userId,
+      botId,
+      botType: BotType.combo,
+      dealId,
+      scope: 'deal',
+      action: 'close_deal',
+      actor: resolveChangeTrailActor(actor),
+      changes: [
+        {
+          path: 'status',
+          before: findDeal.data.result.status,
+          after: 'close_requested',
+        },
+        ...(type ? [{ path: 'closeType', before: null, after: type }] : []),
+      ],
+      paperContext: !!findDeal.data.result.paperContext,
+    })
 
     const findLocal = this.comboBots.find(
       (d) => d.id === botId && d.userId === userId,
@@ -8392,16 +8757,9 @@ class Bot<T extends UserSchema = UserSchema> {
         ],
       })
 
-      this.botEventDb.createData({
-        userId: userId,
-        botId,
-        botType: BotType.combo,
-        event: 'Close Combo deal',
-        description: `Combo deal closed manually, id: ${dealId}`,
-        paperContext: !!paperContext,
-        deal: dealId,
-        symbol: findDeal.data.result.symbol.symbol,
-      })
+      // No confirmation event on dispatch — same defect as `closeDCADeal`: the
+      // combo close is posted to the worker and dropped there if the deal is
+      // not in its map, so this event would confirm a close that never ran.
       return {
         status: StatusEnum.ok as StatusEnum.ok,
         reason: null,
@@ -8484,16 +8842,7 @@ class Bot<T extends UserSchema = UserSchema> {
         !!paperContext,
       )
 
-      this.botEventDb.createData({
-        userId: userId,
-        botId: _botId,
-        botType: BotType.combo,
-        event: 'Close Combo deal',
-        description: `Combo deal closed manually, id: ${dealId}`,
-        paperContext: !!paperContext,
-        deal: dealId,
-        symbol: findDeal.data.result.symbol.symbol,
-      })
+      // No confirmation event on dispatch — see the sibling branch above.
       return {
         status: StatusEnum.ok as StatusEnum.ok,
         reason: null,
@@ -8775,11 +9124,24 @@ class Bot<T extends UserSchema = UserSchema> {
             BotType.hedgeDca,
             'webhookProcess',
             false,
-            hedgeCombos,
+            hedgeDcas,
             ignoreSettings,
           )
         }
-        return StatusEnum.ok
+        // Not one item resolved to a bot. This used to answer StatusEnum.ok,
+        // so /trade_signal replied 200 to a signal it then dropped on the
+        // floor — the single most misleading response the endpoint had, since
+        // the sender (TradingView, n8n, a script) reads 200 as "delivered".
+        // The overwhelmingly common cause is a payload carrying the bot's
+        // Mongo `_id` instead of its `uuid`; both are opaque ids, so nothing
+        // about the 200 told the user which one they had wrong.
+        this.handleWarn(
+          `Webhook signal for ${[data]
+            .flat()
+            .map((d) => d?.uuid ?? 'no-uuid')
+            .join(', ')} matched no bot`,
+        )
+        return this.entityNotFound('Bot')
       } catch (e) {
         if ((e as Error)?.message === notAvailable) {
           this.handleWarn(
@@ -8793,22 +9155,101 @@ class Bot<T extends UserSchema = UserSchema> {
     if (BotServiceType === BotType.grid) {
       return StatusEnum.ok
     }
-    for (const d of [data].flat()) {
-      const result = await this.singleWebhookProcess(d, ignoreSettings)
-      if ([data].flat().length === 1) {
+    const items = [data].flat()
+    for (let i = 0; i < items.length; i++) {
+      // Spec 078: only wait for a close to settle when something in THIS
+      // payload still has to run against the account it is flattening. A
+      // single-action payload — the overwhelming majority — answers as
+      // promptly as it always did, so a caller with a short webhook timeout
+      // (TradingView retries on one, and a retried flip is a second flip)
+      // never pays for a wait nothing is waiting on.
+      const result = await this.singleWebhookProcess(
+        items[i],
+        ignoreSettings,
+        i < items.length - 1,
+      )
+      if (items.length === 1) {
         return result ?? StatusEnum.ok
       }
     }
     return StatusEnum.ok
   }
 
+  /**
+   * Spec 078: does this webhook action mean "flatten the position"?
+   *
+   * `close`/`closeSl` always do. `stopBot` only does when the payload asked
+   * for it: with no `closeType` the signal falls through to `leave`, which
+   * stops the bot and leaves the position open — the single most common reason
+   * an opposite bot is then refused forever.
+   */
+  private closesPosition(
+    action: WebhookActionEnum,
+    closeType?: 'limit' | 'market' | 'leave' | 'cancel',
+  ): boolean {
+    if (
+      action === WebhookActionEnum.close ||
+      action === WebhookActionEnum.closeSl
+    ) {
+      return true
+    }
+    return (
+      action === WebhookActionEnum.stopBot &&
+      (closeType === 'market' || closeType === 'limit')
+    )
+  }
+
+  /**
+   * Spec 078: wait for `bot`'s open deals to close, so the NEXT action in the
+   * same webhook payload does not race this one's close.
+   *
+   * Counting deals rather than reading the venue keeps this off the exchange
+   * rate limit: the deal is booked closed only once its closing order fills,
+   * which is the event the next action is waiting for. Never throws — the
+   * remaining items of the payload must still run.
+   */
+  private async awaitWebhookCloseSettled(
+    bot: { id: string; type: BotType },
+    symbol?: string,
+  ): Promise<void> {
+    const filter = {
+      botId: `${bot.id}`,
+      status: DCADealStatusEnum.open,
+      isDeleted: { $ne: true },
+      ...(symbol ? { 'symbol.symbol': symbol } : {}),
+    }
+    const settled = await awaitDealsClosed(
+      async () => {
+        const res =
+          bot.type === BotType.combo
+            ? await this.comboDealsDb.countData(filter)
+            : await this.dcaDealsDb.countData(filter)
+        return res.status === StatusEnum.ok ? res.data.result : undefined
+      },
+      { ...CLOSE_SETTLE, sleep: utils.sleep },
+    )
+    if (!settled) {
+      this.handleWarn(
+        `Close for bot ${bot.id} has not settled within ${
+          (CLOSE_SETTLE.attempts * CLOSE_SETTLE.intervalMs) / 1000
+        }s; continuing with the rest of the webhook payload`,
+      )
+    }
+  }
+
   @IdMute(mutex, (data?: WebhookData) => `${data?.uuid}singleWebhookProcess`)
   private async singleWebhookProcess(
     data: WebhookData,
     ignoreSettings = false,
+    /** Spec 078: another action in this payload runs after this one. */
+    moreToRun = false,
   ) {
     if (!data) {
-      return
+      return {
+        status: StatusEnum.notok as const,
+        reason: 'Empty webhook payload',
+        data: null,
+      }
     }
     const {
       action,
@@ -8821,6 +9262,20 @@ class Bot<T extends UserSchema = UserSchema> {
       closeType,
       type,
     } = data
+    // A payload missing either field fell off the end of this method and
+    // returned undefined, which webhookProcess reads as StatusEnum.ok — the
+    // same silent 200 an unresolvable uuid used to get. Name the missing
+    // field instead; it is almost always a template that rendered empty.
+    const missing = missingWebhookFields(data)
+    if (missing.length) {
+      const reason = missingWebhookFieldsReason(missing)
+      this.handleWarn(reason)
+      return {
+        status: StatusEnum.notok as const,
+        reason,
+        data: null,
+      }
+    }
     if (action && uuid) {
       let call: (() => unknown) | undefined
       // The cold-start path posts to the worker directly instead of setting
@@ -9198,6 +9653,26 @@ class Bot<T extends UserSchema = UserSchema> {
           `Response ${action} signal for ${uuid}: ${JSON.stringify(result)}`,
         )
       }
+      // Spec 078: a close action only POSTS to the worker, so awaiting it here
+      // means "the message was sent". A flip arrives as one array —
+      // [close/stop A, start B] — and the loop in `webhookProcess` moves to B
+      // the instant that post returns, which is how B ends up refused for a
+      // position A is still closing. Wait for A's deals to actually close
+      // before the next item runs. Bounded and best-effort: a close that has
+      // not landed inside the window falls back to the start-side settle
+      // (`opposingPositionOwner.ts`), i.e. exactly today's behaviour.
+      //
+      // `leave` is deliberately NOT settled: it closes nothing by design, so
+      // waiting for it would spend the window on a position that is staying
+      // exactly where it is.
+      if (
+        moreToRun &&
+        call &&
+        findBot &&
+        this.closesPosition(action, closeType)
+      ) {
+        await this.awaitWebhookCloseSettled(findBot, symbol)
+      }
       return result
     }
   }
@@ -9210,6 +9685,7 @@ class Bot<T extends UserSchema = UserSchema> {
     symbol?: string,
     type?: AddFundsTypeEnum,
     dealId?: string,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -9223,6 +9699,7 @@ class Bot<T extends UserSchema = UserSchema> {
         symbol,
         type,
         dealId,
+        actor,
       )
     }
     let botIdToUse = botId
@@ -9273,6 +9750,26 @@ class Bot<T extends UserSchema = UserSchema> {
         ],
       })
 
+      if (botIdToUse) {
+        this.recordChangeTrail({
+          userId,
+          botId: botIdToUse,
+          botType: BotType.dca,
+          dealId,
+          scope: dealId ? 'deal' : 'bot',
+          action: 'add_funds',
+          actor: resolveChangeTrailActor(actor, { type: 'api' }),
+          changes: [
+            {
+              path: 'addFunds',
+              before: null,
+              after: { qty, asset, symbol, type },
+            },
+          ],
+          paperContext: !!findBot.paperContext,
+        })
+      }
+
       return {
         status: StatusEnum.ok,
         reason: null,
@@ -9287,6 +9784,67 @@ class Bot<T extends UserSchema = UserSchema> {
     }
   }
 
+  /**
+   * Public-API twin of `executeNextDcaLevel`. Feature request:
+   * https://community.gainium.io/t/execute-next-dca-manually/5072
+   *
+   * `dealId` is REQUIRED here, unlike the add-funds twin which can fan out over
+   * every open deal on a bot. "Execute the next DCA on all deals" would walk a
+   * whole bot down its ladders at market from one call; the action is only
+   * meaningful, and only reversible in the user's head, against one named deal.
+   */
+  public async executeNextDcaLevelFromPublicApi(
+    userId: string,
+    dealId: string,
+    expectedLevel?: number,
+  ) {
+    if (!this.useBots) {
+      return await this.callExternalBotService<BaseReturn<string>>(
+        BotType.dca,
+        'executeNextDcaLevelFromPublicApi',
+        false,
+        userId,
+        dealId,
+        expectedLevel,
+      )
+    }
+    const findDeal = await this.dcaDealsDb.readData({
+      _id: dealId,
+      userId,
+    })
+    if (findDeal.status === StatusEnum.notok) {
+      return findDeal
+    }
+    // `readData` answers `{ status: ok, result: undefined }` on a MISS — the
+    // repo-wide trap. Without this the next line would take `botId` off
+    // undefined and the caller would get a 500 for what is a plain 404.
+    if (!findDeal.data?.result) {
+      return this.entityNotFound('Deal')
+    }
+    const botIdToUse = findDeal.data.result.botId
+    const findBot = this.dcaBots.find((b) => b.id === botIdToUse)
+    if (!findBot) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Bot is not running',
+        data: null,
+      }
+    }
+    this.getWorkerById(findBot.worker)?.postMessage({
+      do: 'method',
+      botType: BotType.dca,
+      botId: findBot.id,
+      method: 'executeNextDcaLevel',
+      args: [findBot.id, dealId, { expectedLevel }],
+    })
+
+    return {
+      status: StatusEnum.ok,
+      reason: null,
+      data: 'Execute next DCA scheduled',
+    }
+  }
+
   public async reduceDealFundsFromPublicApi(
     userId: string,
     botId: string | undefined,
@@ -9295,6 +9853,7 @@ class Bot<T extends UserSchema = UserSchema> {
     symbol?: string,
     type?: AddFundsTypeEnum,
     dealId?: string,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -9308,6 +9867,7 @@ class Bot<T extends UserSchema = UserSchema> {
         symbol,
         type,
         dealId,
+        actor,
       )
     }
     let botIdToUse = botId
@@ -9358,6 +9918,26 @@ class Bot<T extends UserSchema = UserSchema> {
         ],
       })
 
+      if (botIdToUse) {
+        this.recordChangeTrail({
+          userId,
+          botId: botIdToUse,
+          botType: BotType.dca,
+          dealId,
+          scope: dealId ? 'deal' : 'bot',
+          action: 'reduce_funds',
+          actor: resolveChangeTrailActor(actor, { type: 'api' }),
+          changes: [
+            {
+              path: 'reduceFunds',
+              before: null,
+              after: { qty, asset, symbol, type },
+            },
+          ],
+          paperContext: !!findBot.paperContext,
+        })
+      }
+
       return {
         status: StatusEnum.ok,
         reason: null,
@@ -9377,6 +9957,8 @@ class Bot<T extends UserSchema = UserSchema> {
     _botId: string,
     dealId: string,
     settings: Partial<DCADealsSettings>,
+    actor?: ChangeTrailActor,
+    trail?: ChangeTrailOptions,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -9387,6 +9969,8 @@ class Bot<T extends UserSchema = UserSchema> {
         _botId,
         dealId,
         settings,
+        actor,
+        trail,
       )
     }
     const findDeal = await this.dcaDealsDb.readData({
@@ -9417,7 +10001,7 @@ class Bot<T extends UserSchema = UserSchema> {
           )}: ${oldValue} -> ${value}`
       }
     })
-    const updateDealSettingsEvent = () =>
+    const updateDealSettingsEvent = () => {
       this.botEventDb.createData({
         userId: userId,
         botId,
@@ -9434,6 +10018,22 @@ class Bot<T extends UserSchema = UserSchema> {
           ),
         ),
       })
+      this.recordChangeTrail({
+        userId,
+        botId,
+        botType: BotType.dca,
+        dealId,
+        scope: 'deal',
+        action: trail?.action ?? 'update_settings',
+        actor: resolveChangeTrailActor(actor),
+        changes: settingsChanges(
+          findDeal.data.result.settings as unknown as Record<string, unknown>,
+          settings as Record<string, unknown>,
+        ),
+        ...(trail?.reason ? { reason: trail.reason } : {}),
+        paperContext: !!findDeal.data.result.paperContext,
+      })
+    }
     if (findLocal) {
       this.getWorkerById(findLocal.worker)?.postMessage({
         do: 'method',
@@ -9494,6 +10094,8 @@ class Bot<T extends UserSchema = UserSchema> {
     _botId: string,
     dealId: string,
     settings: Partial<ComboDealsSettings>,
+    actor?: ChangeTrailActor,
+    trail?: ChangeTrailOptions,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -9504,6 +10106,8 @@ class Bot<T extends UserSchema = UserSchema> {
         _botId,
         dealId,
         settings,
+        actor,
+        trail,
       )
     }
     const findDeal = await this.comboDealsDb.readData({
@@ -9534,7 +10138,7 @@ class Bot<T extends UserSchema = UserSchema> {
           )}: ${oldValue} -> ${value}`
       }
     })
-    const updateDealSettingsEvent = () =>
+    const updateDealSettingsEvent = () => {
       this.botEventDb.createData({
         userId: userId,
         botId,
@@ -9551,6 +10155,22 @@ class Bot<T extends UserSchema = UserSchema> {
           ),
         ),
       })
+      this.recordChangeTrail({
+        userId,
+        botId,
+        botType: BotType.combo,
+        dealId,
+        scope: 'deal',
+        action: trail?.action ?? 'update_settings',
+        actor: resolveChangeTrailActor(actor),
+        changes: settingsChanges(
+          findDeal.data.result.settings as unknown as Record<string, unknown>,
+          settings as Record<string, unknown>,
+        ),
+        ...(trail?.reason ? { reason: trail.reason } : {}),
+        paperContext: !!findDeal.data.result.paperContext,
+      })
+    }
     if (findLocal) {
       this.getWorkerById(findLocal.worker)?.postMessage({
         do: 'method',
@@ -9605,11 +10225,81 @@ class Bot<T extends UserSchema = UserSchema> {
     }
   }
 
+  /**
+   * Append one change-trail entry. Best-effort by design: it is never awaited
+   * by the change it describes, and any failure — a refused write, a rejected
+   * promise or a synchronous throw — is logged and swallowed.
+   */
+  protected recordChangeTrail(entry: ChangeTrailEntry) {
+    const fail = (e: unknown) =>
+      logger.warn(
+        `${loggerPrefix} Change trail write failed for bot ${entry.botId}${
+          entry.dealId ? ` deal ${entry.dealId}` : ''
+        } (${entry.action}): ${(e as Error)?.message ?? e}`,
+      )
+    try {
+      if (!entry.changes.length) {
+        return
+      }
+      Promise.resolve(this.changeTrailDb.createData(entry))
+        .then((res) => {
+          if (res?.status === StatusEnum.notok) {
+            fail(res.reason)
+          }
+        })
+        .catch(fail)
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  /** Trail entry for a deal-settings reset: the deal's overrides before it. */
+  private recordDealResetTrail(
+    userId: string,
+    botId: string,
+    botType: BotType.dca | BotType.combo,
+    dealId: string,
+    paperContext: boolean,
+    actor: ChangeTrailActor,
+  ) {
+    const read =
+      botType === BotType.combo
+        ? this.comboDealsDb.readData({ _id: dealId, userId }, { settings: 1 })
+        : this.dcaDealsDb.readData({ _id: dealId, userId }, { settings: 1 })
+    Promise.resolve(read)
+      .then((res) => {
+        const before =
+          res?.status === StatusEnum.ok ? res.data.result?.settings : undefined
+        const changes: ChangeTrailChange[] = [
+          { path: 'settings', before: before ?? null, after: 'bot_defaults' },
+        ]
+        this.recordChangeTrail({
+          userId,
+          botId,
+          botType,
+          dealId,
+          scope: 'deal',
+          action: 'reset_settings',
+          actor,
+          changes,
+          paperContext,
+        })
+      })
+      .catch((e) =>
+        logger.warn(
+          `${loggerPrefix} Change trail read failed for deal ${dealId}: ${
+            (e as Error)?.message ?? e
+          }`,
+        ),
+      )
+  }
+
   public async resetDealSettings(
     userId: string,
     botId: string,
     dealId: string,
     paperContext: boolean,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -9620,6 +10310,7 @@ class Bot<T extends UserSchema = UserSchema> {
         botId,
         dealId,
         paperContext,
+        actor,
       )
     }
     this.botEventDb.createData({
@@ -9631,6 +10322,14 @@ class Bot<T extends UserSchema = UserSchema> {
       paperContext,
       deal: dealId,
     })
+    this.recordDealResetTrail(
+      userId,
+      botId,
+      BotType.dca,
+      dealId,
+      paperContext,
+      resolveChangeTrailActor(actor),
+    )
     const findLocal = this.dcaBots.find(
       (d) => d.id === botId && d.userId === userId,
     )
@@ -9657,6 +10356,7 @@ class Bot<T extends UserSchema = UserSchema> {
     botId: string,
     dealId: string,
     paperContext: boolean,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -9667,6 +10367,7 @@ class Bot<T extends UserSchema = UserSchema> {
         botId,
         dealId,
         paperContext,
+        actor,
       )
     }
     this.botEventDb.createData({
@@ -9678,6 +10379,14 @@ class Bot<T extends UserSchema = UserSchema> {
       paperContext,
       deal: dealId,
     })
+    this.recordDealResetTrail(
+      userId,
+      botId,
+      BotType.combo,
+      dealId,
+      paperContext,
+      resolveChangeTrailActor(actor),
+    )
     const findLocal = this.comboBots.find(
       (d) => d.id === botId && d.userId === userId,
     )
@@ -10455,6 +11164,93 @@ class Bot<T extends UserSchema = UserSchema> {
       return findTransactionsRequest
     }
     return bot
+  }
+
+  /**
+   * Per-pair performance of a DCA / Combo / hedge bot, folded from its deals —
+   * see `pairStats.ts` for the populations and why this is not `symbolStats`.
+   *
+   * Access is exactly `getBot`'s: the owner, or anyone holding the share id of
+   * a bot shared with `share: true`. The deals are then read by the bot ids
+   * that check returned, never by an id from the input.
+   */
+  public async getBotPairStats(
+    userId: string,
+    type: BotType,
+    id: string,
+    shareId?: string,
+    publicBot = false,
+    paperContext?: boolean,
+    range: PairStatsRange = {},
+  ) {
+    if (type === BotType.grid) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Pair statistics are available for DCA and Combo bots',
+        data: null,
+      }
+    }
+    const bot = (await this.getBot(
+      type,
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )) as BaseReturn<Record<string, unknown>>
+    if (bot.status !== StatusEnum.ok || !bot.data) {
+      return bot
+    }
+    const hedge = type === BotType.hedgeDca || type === BotType.hedgeCombo
+    const bots = (
+      hedge ? ((bot.data.bots as Record<string, unknown>[]) ?? []) : [bot.data]
+    ).filter(Boolean)
+    const botIds = bots.map((b) => `${b._id}`)
+    const configuredPairs = bots.flatMap((b) => {
+      const assets = new Map(
+        (
+          (b.symbol as
+            | {
+                value?: {
+                  symbol?: string
+                  baseAsset?: string
+                  quoteAsset?: string
+                }
+              }[]
+            | undefined) ?? []
+        ).map((s) => [s.value?.symbol, s.value]),
+      )
+      const pairs =
+        ((b.settings as { pair?: string[] } | undefined)?.pair as string[]) ??
+        []
+      return pairs.map((symbol) => ({
+        symbol,
+        baseAsset: assets.get(symbol)?.baseAsset,
+        quoteAsset: assets.get(symbol)?.quoteAsset,
+      }))
+    })
+    const combo = type === BotType.combo || type === BotType.hedgeCombo
+    const dealsDb = (
+      combo ? this.comboDealsDb : this.dcaDealsDb
+    ) as typeof this.dcaDealsDb
+    const [groups, capital] = await Promise.all([
+      dealsDb.aggregate<PairStatsGroup>(buildPairStatsPipeline(botIds, range)),
+      dealsDb.aggregate<PairCapitalDeal>(
+        buildPairCapitalPipeline(botIds, range),
+      ),
+    ])
+    if (groups.status !== StatusEnum.ok) {
+      return groups
+    }
+    if (capital.status !== StatusEnum.ok) {
+      return capital
+    }
+    const data: BotPairStatsRow[] = shapePairStats(
+      groups.data?.result ?? [],
+      configuredPairs,
+      peakCapitalBySymbol(capital.data?.result ?? []),
+    )
+    return { status: StatusEnum.ok as const, reason: null, data }
   }
 
   public async getBotDealsStats(
@@ -11519,9 +12315,6 @@ class Bot<T extends UserSchema = UserSchema> {
       { userId },
       { share: { $eq: true }, shareId },
     ]
-    if (publicBot && !shareId) {
-      or.push({ public: true })
-    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
@@ -11544,11 +12337,13 @@ class Bot<T extends UserSchema = UserSchema> {
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
     }
-    const botData = { ...findBotRequest.data.result }
-    if (shareId && userId !== botData.userId) {
-      botData.uuid = ''
-      botData.vars = { list: [], paths: [] }
-    }
+    const botData = mustRedactBotCredentials(
+      userId,
+      findBotRequest.data.result.userId,
+      publicBot,
+    )
+      ? redactBotCredentials(findBotRequest.data.result)
+      : { ...findBotRequest.data.result }
     return {
       status: StatusEnum.ok,
       reason: null,
@@ -11569,9 +12364,6 @@ class Bot<T extends UserSchema = UserSchema> {
       { userId },
       { share: { $eq: true }, shareId },
     ]
-    if (publicBot && !shareId) {
-      or.push({ public: true })
-    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
@@ -11595,9 +12387,16 @@ class Bot<T extends UserSchema = UserSchema> {
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
     }
-    if (shareId && userId !== findBotRequest.data.result.userId) {
-      findBotRequest.data.result.uuid = ''
-      findBotRequest.data.result.vars = { list: [], paths: [] }
+    if (
+      mustRedactBotCredentials(
+        userId,
+        findBotRequest.data.result.userId,
+        publicBot,
+      )
+    ) {
+      findBotRequest.data.result = redactBotCredentials(
+        findBotRequest.data.result,
+      )
     }
     return {
       status: StatusEnum.ok,
@@ -11620,9 +12419,6 @@ class Bot<T extends UserSchema = UserSchema> {
       { userId },
       { share: { $eq: true }, shareId },
     ]
-    if (publicBot && !shareId) {
-      or.push({ public: true })
-    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
@@ -11646,9 +12442,16 @@ class Bot<T extends UserSchema = UserSchema> {
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
     }
-    if (shareId && userId !== findBotRequest.data.result.userId) {
-      findBotRequest.data.result.uuid = ''
-      findBotRequest.data.result.vars = { list: [], paths: [] }
+    if (
+      mustRedactBotCredentials(
+        userId,
+        findBotRequest.data.result.userId,
+        publicBot,
+      )
+    ) {
+      findBotRequest.data.result = redactBotCredentials(
+        findBotRequest.data.result,
+      )
     }
     return {
       status: StatusEnum.ok,
@@ -11671,9 +12474,6 @@ class Bot<T extends UserSchema = UserSchema> {
       { userId },
       { share: { $eq: true }, shareId },
     ]
-    if (publicBot && !shareId) {
-      or.push({ public: true })
-    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
@@ -11696,8 +12496,15 @@ class Bot<T extends UserSchema = UserSchema> {
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
     }
-    if (shareId) {
-      findBotRequest.data.result.uuid = ''
+    const redact = mustRedactBotCredentials(
+      userId,
+      findBotRequest.data.result.userId,
+      publicBot,
+    )
+    if (redact) {
+      findBotRequest.data.result = redactBotCredentials(
+        findBotRequest.data.result,
+      )
     }
     const longBot = findBotRequest.data?.result.bots.find(
       (b) => b.settings.strategy === StrategyEnum.long,
@@ -11708,12 +12515,17 @@ class Bot<T extends UserSchema = UserSchema> {
     if (!longBot || !shortBot) {
       return this.entityNotFound('Bot')
     }
+    // Each leg is a bot of its own with its own webhook uuid.
     const long = {
-      ...convertComboBotToArray(longBot),
+      ...convertComboBotToArray(
+        redact ? redactBotCredentials(longBot) : longBot,
+      ),
       dealsInBot: longBot.deals,
     }
     const short = {
-      ...convertComboBotToArray(shortBot),
+      ...convertComboBotToArray(
+        redact ? redactBotCredentials(shortBot) : shortBot,
+      ),
       dealsInBot: shortBot.deals,
     }
     return {
@@ -11737,9 +12549,6 @@ class Bot<T extends UserSchema = UserSchema> {
       { userId },
       { share: { $eq: true }, shareId },
     ]
-    if (publicBot && !shareId) {
-      or.push({ public: true })
-    }
     const filter: Record<string, unknown> = {
       _id: id,
       $or: or,
@@ -11763,8 +12572,15 @@ class Bot<T extends UserSchema = UserSchema> {
     if (findBotRequest.data && !findBotRequest.data.result) {
       return this.entityNotFound('Bot')
     }
-    if (shareId) {
-      findBotRequest.data.result.uuid = ''
+    const redact = mustRedactBotCredentials(
+      userId,
+      findBotRequest.data.result.userId,
+      publicBot,
+    )
+    if (redact) {
+      findBotRequest.data.result = redactBotCredentials(
+        findBotRequest.data.result,
+      )
     }
     const longBot = findBotRequest.data?.result.bots.find(
       (b) => b.settings.strategy === StrategyEnum.long,
@@ -11775,12 +12591,17 @@ class Bot<T extends UserSchema = UserSchema> {
     if (!longBot || !shortBot) {
       return this.entityNotFound('Bot')
     }
+    // Each leg is a bot of its own with its own webhook uuid.
     const long = {
-      ...convertComboBotToArray(longBot),
+      ...convertComboBotToArray(
+        redact ? redactBotCredentials(longBot) : longBot,
+      ),
       dealsInBot: longBot.deals,
     }
     const short = {
-      ...convertComboBotToArray(shortBot),
+      ...convertComboBotToArray(
+        redact ? redactBotCredentials(shortBot) : shortBot,
+      ),
       dealsInBot: shortBot.deals,
     }
     return {
@@ -11795,7 +12616,6 @@ class Bot<T extends UserSchema = UserSchema> {
 
   private async getGridBotList(
     userId: string,
-    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     dataGridInput: DataGridFilterInput = {},
@@ -11804,9 +12624,6 @@ class Bot<T extends UserSchema = UserSchema> {
       [x: string]: unknown
     } = {
       userId: userId,
-    }
-    if (token === 'demo') {
-      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -11879,7 +12696,6 @@ class Bot<T extends UserSchema = UserSchema> {
 
   private async getComboBotList(
     userId: string,
-    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -11890,9 +12706,6 @@ class Bot<T extends UserSchema = UserSchema> {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
-    }
-    if (token === 'demo') {
-      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -11967,7 +12780,6 @@ class Bot<T extends UserSchema = UserSchema> {
 
   private async getHedgeComboBotList(
     userId: string,
-    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -11978,9 +12790,6 @@ class Bot<T extends UserSchema = UserSchema> {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
-    }
-    if (token === 'demo') {
-      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -12013,6 +12822,17 @@ class Bot<T extends UserSchema = UserSchema> {
       if (typeof sort === 'undefined') {
         sort = { status: -1 }
       }
+    }
+    // Server paging (main-app spec 019 §3): an EXPLICIT pageSize below the
+    // floor is honoured, so hedge lists can be paged in small pages. Every
+    // request that never sends one below 500 — V1 included — is unchanged.
+    const explicitPageSize = dataGridInput.pageSize
+    if (
+      typeof explicitPageSize === 'number' &&
+      explicitPageSize > 0 &&
+      explicitPageSize < 500
+    ) {
+      _limit = explicitPageSize
     }
     const search = { ...filter, isDeleted: { $ne: true } }
     const options = { sort, limit: _limit, skip, populate: 'bots' }
@@ -12067,7 +12887,6 @@ class Bot<T extends UserSchema = UserSchema> {
 
   private async getHedgeDcaBotList(
     userId: string,
-    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -12078,9 +12897,6 @@ class Bot<T extends UserSchema = UserSchema> {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
-    }
-    if (token === 'demo') {
-      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -12113,6 +12929,17 @@ class Bot<T extends UserSchema = UserSchema> {
       if (typeof sort === 'undefined') {
         sort = { status: -1 }
       }
+    }
+    // Server paging (main-app spec 019 §3): an EXPLICIT pageSize below the
+    // floor is honoured, so hedge lists can be paged in small pages. Every
+    // request that never sends one below 500 — V1 included — is unchanged.
+    const explicitPageSize = dataGridInput.pageSize
+    if (
+      typeof explicitPageSize === 'number' &&
+      explicitPageSize > 0 &&
+      explicitPageSize < 500
+    ) {
+      _limit = explicitPageSize
     }
     const search = { ...filter, isDeleted: { $ne: true } }
     const options = { sort, limit: _limit, skip, populate: 'bots' }
@@ -12167,7 +12994,6 @@ class Bot<T extends UserSchema = UserSchema> {
 
   private async getDCABotList(
     userId: string,
-    token: string,
     status?: BotStatusEnum[],
     paperContext?: boolean,
     all = false,
@@ -12178,9 +13004,6 @@ class Bot<T extends UserSchema = UserSchema> {
     } = {
       userId,
       paperContext: paperContext ? { $eq: true } : { $ne: true },
-    }
-    if (token === 'demo') {
-      filter.public = true
     }
     if (status) {
       filter.status = { $in: status }
@@ -12460,6 +13283,7 @@ class Bot<T extends UserSchema = UserSchema> {
     paperContext: boolean,
     settings: AddFundsSettings,
     fromWebhook = false,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -12472,6 +13296,7 @@ class Bot<T extends UserSchema = UserSchema> {
         paperContext,
         settings,
         fromWebhook,
+        actor,
       )
     }
     const bot = await this.getDCABotFromDb(
@@ -12517,10 +13342,103 @@ class Bot<T extends UserSchema = UserSchema> {
       })
     }
 
+    this.recordChangeTrail({
+      userId,
+      botId,
+      botType: BotType.dca,
+      dealId,
+      scope: 'deal',
+      action: 'add_funds',
+      actor: resolveChangeTrailActor(
+        actor,
+        fromWebhook ? { type: 'webhook' } : undefined,
+      ),
+      changes: [{ path: 'addFunds', before: null, after: settings }],
+      paperContext,
+    })
+
     return {
       status: StatusEnum.ok,
       reason: null,
       data: 'Add funds scheduled',
+    }
+  }
+
+  /**
+   * Fill a DCA deal's next safety order now, at market. Feature request:
+   * https://community.gainium.io/t/execute-next-dca-manually/5072
+   *
+   * Same dispatch shape as `addDealFunds`: the worker owns the deal, so this
+   * only routes the request and answers "scheduled". Anything the engine
+   * refuses (deal closed, no levels left, the ladder moved on) surfaces as a
+   * bot message from `executeNextDcaLevel` itself.
+   */
+  public async executeNextDcaLevel(
+    botId: string,
+    dealId: string,
+    userId: string,
+    paperContext: boolean,
+    opts?: { expectedLevel?: number },
+  ) {
+    if (!this.useBots) {
+      return await this.callExternalBotService<BaseReturn<string>>(
+        BotType.dca,
+        'executeNextDcaLevel',
+        false,
+        botId,
+        dealId,
+        userId,
+        paperContext,
+        opts,
+      )
+    }
+    const bot = await this.getDCABotFromDb(
+      userId,
+      botId,
+      undefined,
+      paperContext,
+    )
+    if (bot.status === StatusEnum.notok) {
+      return bot
+    }
+    if (!bot.data) {
+      return this.entityNotFound('Bot')
+    }
+    const findLocal = this.dcaBots.find((d) => d.id === botId)
+    if (!findLocal) {
+      await this.createNewBot(
+        botId,
+        BotType.dca,
+        userId,
+        bot.data.exchange,
+        bot.data.uuid,
+        [botId, bot.data.exchange],
+        (worker) => {
+          worker.postMessage({
+            do: 'method',
+            botType: BotType.dca,
+            botId,
+            method: 'executeNextDcaLevel',
+            args: [botId, dealId, opts],
+          })
+        },
+        paperContext,
+        bot.data.settings.type ?? DCATypeEnum.regular,
+      )
+    } else {
+      this.getWorkerById(findLocal.worker)?.postMessage({
+        do: 'method',
+        botType: BotType.dca,
+        botId: findLocal.id,
+        method: 'executeNextDcaLevel',
+        args: [botId, dealId, opts],
+      })
+    }
+
+    return {
+      status: StatusEnum.ok,
+      reason: null,
+      data: 'Execute next DCA scheduled',
     }
   }
 
@@ -12531,6 +13449,7 @@ class Bot<T extends UserSchema = UserSchema> {
     paperContext: boolean,
     settings: AddFundsSettings,
     fromWebhook = false,
+    actor?: ChangeTrailActor,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -12543,6 +13462,7 @@ class Bot<T extends UserSchema = UserSchema> {
         paperContext,
         settings,
         fromWebhook,
+        actor,
       )
     }
     const bot = await this.getDCABotFromDb(
@@ -12587,6 +13507,21 @@ class Bot<T extends UserSchema = UserSchema> {
         args: [botId, dealId, settings, fromWebhook],
       })
     }
+
+    this.recordChangeTrail({
+      userId,
+      botId,
+      botType: BotType.dca,
+      dealId,
+      scope: 'deal',
+      action: 'reduce_funds',
+      actor: resolveChangeTrailActor(
+        actor,
+        fromWebhook ? { type: 'webhook' } : undefined,
+      ),
+      changes: [{ path: 'reduceFunds', before: null, after: settings }],
+      paperContext,
+    })
 
     return {
       status: StatusEnum.ok,
@@ -12730,6 +13665,79 @@ class Bot<T extends UserSchema = UserSchema> {
       status: StatusEnum.ok,
       reason: null,
       data: 'Cancel pending add funds request scheduled',
+    }
+  }
+
+  /**
+   * Buy a deal's resting base-order remainder at market, at the user's
+   * request. Spec `111` §4.6. Same route to the worker as
+   * `cancelPendingAddFundsDealOrder`; the bot is read under the caller's own
+   * user id, so a deal of another account is never reached.
+   */
+  public async buyDealBaseRemainder(
+    botId: string,
+    dealId: string,
+    userId: string,
+    paperContext: boolean,
+  ) {
+    if (!this.useBots) {
+      return await this.callExternalBotService<BaseReturn<string>>(
+        BotType.dca,
+        'buyDealBaseRemainder',
+        false,
+        botId,
+        dealId,
+        userId,
+        paperContext,
+      )
+    }
+    const bot = await this.getDCABotFromDb(
+      userId,
+      botId,
+      undefined,
+      paperContext,
+    )
+    if (bot.status === StatusEnum.notok) {
+      return bot
+    }
+    if (!bot.data) {
+      return this.entityNotFound('Bot')
+    }
+    const findLocal = this.dcaBots.find((d) => d.id === botId)
+    if (!findLocal) {
+      await this.createNewBot(
+        botId,
+        BotType.dca,
+        userId,
+        bot.data.exchange,
+        bot.data.uuid,
+        [botId, bot.data.exchange],
+        (worker) => {
+          worker.postMessage({
+            do: 'method',
+            botType: BotType.dca,
+            botId,
+            method: 'buyBaseEntryRemainder',
+            args: [botId, dealId],
+          })
+        },
+        paperContext,
+        bot.data.settings.type ?? DCATypeEnum.regular,
+      )
+    } else {
+      this.getWorkerById(findLocal.worker)?.postMessage({
+        do: 'method',
+        botType: BotType.dca,
+        botId,
+        method: 'buyBaseEntryRemainder',
+        args: [botId, dealId],
+      })
+    }
+
+    return {
+      status: StatusEnum.ok,
+      reason: null,
+      data: 'Buy remainder at market request scheduled',
     }
   }
 
@@ -13705,13 +14713,7 @@ class Bot<T extends UserSchema = UserSchema> {
     const prefix = `Closing old start deals | `
     this.handleLog(`${prefix} start`)
     const startDcaDeals = await this.dcaDealsDb.readData(
-      {
-        status: DCADealStatusEnum.start,
-        $not: { type: 'terminal', 'settings.useLimitPrice': true },
-        createTime: {
-          $lt: +new Date() - 24 * 60 * 60 * 1000,
-        },
-      },
+      oldStartDcaDealsFilter(+new Date()),
       {},
       {},
       true,
@@ -13737,6 +14739,7 @@ class Bot<T extends UserSchema = UserSchema> {
           undefined,
           deal.paperContext,
           DCACloseTriggerEnum.auto,
+          { type: 'system' },
         )
       }
     }
@@ -13772,6 +14775,7 @@ class Bot<T extends UserSchema = UserSchema> {
           undefined,
           deal.paperContext,
           DCACloseTriggerEnum.auto,
+          { type: 'system' },
         )
       }
     }

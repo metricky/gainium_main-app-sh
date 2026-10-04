@@ -28,19 +28,31 @@ export const DCA_BOT_STANDARD_FIELDS = [
   'profit.totalUsd',
   'deals.all',
   'deals.active',
-  'createdAt',
-  'updatedAt',
+  // A bot's timestamps are `created`/`updated` — not `createdAt`/`updatedAt`.
+  'created',
+  'updated',
 ] as const
 
 /**
  * Extended fields for DCA bots - additional useful data
+ *
+ * Carries the stop loss, the trailing exits and the safety-order ladder, so
+ * that reading a bot, adjusting a few values and creating the adjusted copy is
+ * lossless. Each value travels with the boolean that arms it: anything omitted
+ * here is silently replaced by `DCA_FORM_DEFAULTS` on the way back in (see
+ * `botDefaults.ts`, and spec 062), which disarms the stop loss and the
+ * trailing take profit rather than merely dropping a number.
  */
 export const DCA_BOT_EXTENDED_FIELDS = [
   ...DCA_BOT_STANDARD_FIELDS,
   'settings.baseOrderSize',
-  'settings.stopLoss',
-  'settings.trailingDeviation',
-  'settings.maxSafetyTradesCount',
+  'settings.useSl',
+  'settings.slPerc',
+  'settings.trailingTp',
+  'settings.trailingTpPerc',
+  'settings.trailingSl',
+  'settings.ordersCount',
+  'settings.activeOrdersCount',
   'cost',
   'workingTimeNumber',
   'profitToday',
@@ -62,24 +74,80 @@ export const COMBO_BOT_STANDARD_FIELDS = [
   'profit.totalUsd',
   'deals.all',
   'deals.active',
-  'createdAt',
-  'updatedAt',
+  'created',
+  'updated',
 ] as const
 
 /**
  * Extended fields for Combo bots
+ *
+ * A combo bot stores `DCABotSettings`, so the same value+toggle pairs as
+ * `DCA_BOT_EXTENDED_FIELDS` — see the note there.
  */
 export const COMBO_BOT_EXTENDED_FIELDS = [
   ...COMBO_BOT_STANDARD_FIELDS,
   'settings.baseOrderSize',
-  'settings.stopLoss',
-  'settings.trailingDeviation',
-  'settings.maxSafetyTradesCount',
+  'settings.useSl',
+  'settings.slPerc',
+  'settings.trailingTp',
+  'settings.trailingTpPerc',
+  'settings.trailingSl',
+  'settings.ordersCount',
+  'settings.activeOrdersCount',
   'cost',
   'workingTimeNumber',
   'profitToday',
   'statusReason',
   'dealsStatsForBot',
+] as const
+
+/**
+ * Essential fields for hedge bots (hedgeCombo / hedgeDca) - minimal list data.
+ *
+ * A hedge bot is a WRAPPER over two child bots, so its field set looks nothing
+ * like the other three: there is no top-level `settings`, no `exchange`, and
+ * its stored `profit` is a permanent zero (the engine only ever writes `status`
+ * back to the wrapper). `name`, `profit`, `dealsInBot` and friends below are
+ * therefore aggregated from the legs at read time — see
+ * `core/src/bot/hedgeAggregate.ts`.
+ */
+export const HEDGE_BOT_ESSENTIAL_FIELDS = [
+  '_id',
+  'uuid',
+  'name',
+  'status',
+  'paperContext',
+] as const
+
+/**
+ * Standard fields for hedge bots
+ */
+export const HEDGE_BOT_STANDARD_FIELDS = [
+  ...HEDGE_BOT_ESSENTIAL_FIELDS,
+  'profit.total',
+  'profit.totalUsd',
+  'profitByAssets',
+  'profitBasis',
+  'dealsInBot.all',
+  'dealsInBot.active',
+  'created',
+  'updated',
+] as const
+
+/**
+ * Extended fields for hedge bots
+ */
+export const HEDGE_BOT_EXTENDED_FIELDS = [
+  ...HEDGE_BOT_STANDARD_FIELDS,
+  'sharedSettings',
+  'unrealizedProfit',
+  'profitToday',
+  'workingTimeNumber',
+  'cost',
+  'statusReason',
+  'flags',
+  'symbol',
+  'bots',
 ] as const
 
 /**
@@ -100,30 +168,88 @@ export const GRID_BOT_ESSENTIAL_FIELDS = [
  */
 export const GRID_BOT_STANDARD_FIELDS = [
   ...GRID_BOT_ESSENTIAL_FIELDS,
-  'settings.symbol',
+  // The pair as `POST /api/v2/bots/grid` takes it back, plus the stored
+  // base/quote breakdown. A grid bot has no `settings.symbol`, and its
+  // timestamps are `created`/`updated` — not `createdAt`/`updatedAt`.
+  'settings.pair',
+  'symbol',
   'profit.total',
   'profit.totalUsd',
   'levels.active',
   'levels.all',
-  'createdAt',
-  'updatedAt',
+  'created',
+  'updated',
 ] as const
 
 /**
  * Extended fields for Grid bots
+ *
+ * Carries the whole grid definition — range, level count, budget, grid
+ * geometry, the take profit / stop loss configuration and the futures
+ * configuration — so that reading a bot, adjusting a few values and creating
+ * the adjusted copy is lossless. Anything omitted here is silently replaced by
+ * `GRID_FORM_DEFAULTS` on the way back in (see `botDefaults.ts`, and specs 061
+ * and 066).
+ *
+ * The settings below are exactly `GRID_FORM_DEFAULTS` — the list
+ * `POST /api/v2/bots/grid` merges the request body over — minus
+ * `GRID_EXCLUDED_FIELDS`, which that endpoint refuses with
+ * `Field <name> is not supported` and which must therefore not be handed back
+ * to a caller who would echo them. `gridFieldProjection.spec.ts` fails if the
+ * two lists drift apart again.
  */
 export const GRID_BOT_EXTENDED_FIELDS = [
   ...GRID_BOT_STANDARD_FIELDS,
-  'settings.gridLevels',
-  'settings.lowerPrice',
-  'settings.upperPrice',
+  'settings.levels',
+  'settings.lowPrice',
+  'settings.topPrice',
   'settings.gridType',
+  'settings.gridStep',
+  'settings.budget',
+  'settings.ordersInAdvance',
+  'settings.useOrderInAdvance',
+  'settings.prioritize',
+  'settings.sellDisplacement',
+  'settings.profitCurrency',
+  'settings.orderFixedIn',
+  'settings.feeOrder',
+  'settings.useStartPrice',
+  'settings.startPrice',
+  'settings.skipBalanceCheck',
+  'settings.tpSl',
+  'settings.tpSlCondition',
+  'settings.tpSlAction',
+  'settings.sl',
+  'settings.slCondition',
+  'settings.slAction',
+  // The thresholds the flags above arm. Returning the flags without them is
+  // what let a copy be created with its stop loss armed at the default 0.
+  'settings.tpPerc',
+  // The one path the `bots.dca` preset resolved on a grid bot, and so the one
+  // a grid caller receives today: reading grid bots with their own preset
+  // (spec 063) must not take it away.
+  'settings.slPerc',
+  'settings.tpTopPrice',
+  'settings.slLowPrice',
+  'settings.tpSlLimit',
+  'settings.slLimit',
+  // Without these a cross-margin 5x futures grid is copied as an isolated 1x
+  // spot one.
+  'settings.futures',
+  'settings.coinm',
+  'settings.marginType',
+  'settings.leverage',
+  'settings.strategy',
+  'settings.futuresStrategy',
   'cost',
   'initialPrice',
   'avgPrice',
   'workingTimeNumber',
   'profitToday',
   'statusReason',
+  'flags',
+  'feePaid',
+  'feeByAsset',
 ] as const
 
 /**
@@ -160,19 +286,30 @@ export const DCA_DEAL_STANDARD_FIELDS = [
   // preset, and the people who most need it are the ones polling a deal after
   // an automation opened it.
   'startBlocked',
+  // A trailing take-profit close the exchange refused, and the retry or pause
+  // that followed (spec 050). Standard for the same reason as `startBlocked`:
+  // a caller polling a deal needs to know a profitable exit was attempted and
+  // could not be executed, because while it is `paused` nothing will try
+  // again until price returns to the take profit.
+  'trailingClose',
 ] as const
 
 /**
  * Extended fields for DCA deals
+ *
+ * A deal's `settings` is the snapshot of the bot settings taken when it
+ * opened, so it uses the bot's own names — the safety order size is
+ * `orderSize` and the safety trade count is `ordersCount` (spec 062).
  */
 export const DCA_DEAL_EXTENDED_FIELDS = [
   ...DCA_DEAL_STANDARD_FIELDS,
   'settings.baseOrderSize',
-  'settings.safetyOrderSize',
-  'settings.maxSafetyTradesCount',
+  'settings.orderSize',
+  'settings.ordersCount',
   'initialBalances',
   'currentBalances',
   'feePaid',
+  'feeByAsset',
   'usage',
   'stats',
   'strategy',
@@ -336,6 +473,18 @@ export const ENDPOINT_FIELD_CONFIG = {
     standard: GRID_BOT_STANDARD_FIELDS,
     extended: GRID_BOT_EXTENDED_FIELDS,
   },
+  // Both hedge bot types share one config: the wrapper document is identical
+  // for hedgeCombo and hedgeDca, only its legs differ (combo vs dca bots).
+  'bots.hedgeCombo': {
+    minimal: HEDGE_BOT_ESSENTIAL_FIELDS,
+    standard: HEDGE_BOT_STANDARD_FIELDS,
+    extended: HEDGE_BOT_EXTENDED_FIELDS,
+  },
+  'bots.hedgeDca': {
+    minimal: HEDGE_BOT_ESSENTIAL_FIELDS,
+    standard: HEDGE_BOT_STANDARD_FIELDS,
+    extended: HEDGE_BOT_EXTENDED_FIELDS,
+  },
   'deals.dca': {
     minimal: DCA_DEAL_ESSENTIAL_FIELDS,
     standard: DCA_DEAL_STANDARD_FIELDS,
@@ -367,6 +516,38 @@ export const ENDPOINT_FIELD_CONFIG = {
 } as const
 
 export type EndpointType = keyof typeof ENDPOINT_FIELD_CONFIG
+
+/**
+ * The bot field config a `:botType` path segment selects.
+ *
+ * The bot routes that take the type as a path parameter cannot bind a preset
+ * when they register — the type is only known per request — so they resolve it
+ * here instead. Each type has its own config and they are not
+ * interchangeable: `bots.grid` and `bots.dca` differ by 28 paths at
+ * `extended`, and a bot read with another type's preset simply loses every
+ * path that preset does not name (spec 063).
+ */
+export const BOT_TYPE_ENDPOINT = {
+  dca: 'bots.dca',
+  combo: 'bots.combo',
+  grid: 'bots.grid',
+  hedgeCombo: 'bots.hedgeCombo',
+  hedgeDca: 'bots.hedgeDca',
+} as const satisfies Record<string, EndpointType>
+
+/**
+ * Field config for a bot type, by its `:botType` path segment.
+ *
+ * Total: an unrecognised segment resolves to `bots.dca`, which is what every
+ * bot type resolved to before spec 063. The bot routes reject anything outside
+ * `ALL_BOT_TYPES` with a 400 before asking, so the fallback never widens a
+ * response — it only keeps the helper safe to call.
+ */
+export function endpointForBotType(botType: string): EndpointType {
+  return (
+    BOT_TYPE_ENDPOINT[botType as keyof typeof BOT_TYPE_ENDPOINT] ?? 'bots.dca'
+  )
+}
 
 /**
  * Get field configuration for an endpoint

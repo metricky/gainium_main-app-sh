@@ -14,8 +14,15 @@ import {
   StrategyEnum,
   FuturesStrategyEnum,
   BotType,
+  BotFlags,
 } from '../../types'
-import MainBot, { isDefinitiveOrderNotFound } from './main'
+import MainBot, {
+  isDefinitiveOrderNotFound,
+  reconcileUnresolvedWarn,
+} from './main'
+import { observedFeeOnSide, observedFeeSplit } from './orderFee'
+import { observedFeeLegs, accrueFeeLedger } from './feeLedger'
+import { gridBudgetVerdict, gridBudgetRefusalMessage } from './gridBudgetGuard'
 
 import type {
   BotData,
@@ -70,6 +77,13 @@ export enum TpSlReturn {
 }
 
 const mutex = new IdMutex()
+
+/**
+ * How long `stop()` waits for the final stats flush before going ahead with
+ * the close. Far above any healthy `completeStats` write and far below
+ * anything a user would notice in a close (spec 064 §4.2).
+ */
+const FLUSH_STATS_TIMEOUT_MS = 5000
 
 const { sleep } = utils
 
@@ -144,6 +158,25 @@ function createBotHelper<
     private filledWhileLoading: Map<string, Order> = new Map()
     private feeOrders: Set<string> = new Set()
     private feeProcessed: Set<string> = new Set()
+    /**
+     * Fills already folded into {@link BotHelper#data}`.position`, by
+     * `clientOrderId` — the position fold's half of the per-fill idempotency
+     * `createTransaction` gets from its ledger's unique `index` (spec `089`).
+     *
+     * The fold is incremental, so a fill delivered to `processFilledOrder`
+     * twice used to be ADDED twice and nothing later corrected it. It is
+     * re-delivered routinely: `cancelAllOrder` walks a stale order snapshot,
+     * the venue answers "Order not found" for one that filled in the gap, and
+     * the unknown-order ladder re-reads it, logs "already processed while
+     * request was in progress" and returns it anyway — plus the reconcile
+     * sweep and `checkOrders`, which replay filled orders by design.
+     */
+    private positionBooked: Set<string> = new Set()
+    /** See `tpSlEntryPrice()` (spec 117). */
+    private tpSlEntry: (ClearBotSchema['position'] & { entry: number }) | null =
+      null
+    private tpSlEntryQueue: Promise<void> = Promise.resolve()
+    private tpSlEntryPending = 0
     private blockCheck = false
     protected startTimeoutTime = 0
     protected limitTimer: NodeJS.Timeout | null = null
@@ -293,17 +326,20 @@ function createBotHelper<
             [...orders]
               .sort((a, b) => b.updateTime - a.updateTime)
               .find((o) => o.typeOrder === TypeOrderEnum.stop)?.updateTime ?? 0
-          this.data.position = await this.calculatePositionForOrders(
-            orders.filter(
-              (o) =>
-                o.status === 'FILLED' &&
-                o.updateTime > lastTP &&
-                (this.data?.lastPositionChange
-                  ? o.updateTime > this.data.lastPositionChange
-                  : true) &&
-                o.typeOrder !== TypeOrderEnum.stab,
-            ),
+          const positionOrders = orders.filter(
+            (o) =>
+              o.status === 'FILLED' &&
+              o.updateTime > lastTP &&
+              (this.data?.lastPositionChange
+                ? o.updateTime > this.data.lastPositionChange
+                : true) &&
+              o.typeOrder !== TypeOrderEnum.stab,
           )
+          this.data.position =
+            await this.calculatePositionForOrders(positionOrders)
+          // Same slice the sum was built from, so the two cannot drift
+          // (spec `089` §4.2) — `start()` runs `cancelAllOrder()` after this.
+          this.seedBookedPosition(positionOrders)
           this.updateData({ position: this.data.position })
           this.emit('bot settings update', { position: this.data.position })
         }
@@ -476,6 +512,65 @@ function createBotHelper<
 
     get futuresStrategy() {
       return this.data?.settings.futuresStrategy ?? FuturesStrategyEnum.neutral
+    }
+    /**
+     * Refuse a start whose budget cannot fund every level at the exchange's
+     * per-order minimum.<br />
+     *
+     * The sizing routine raises a below-minimum level to the exchange minimum,
+     * so without this the grid — and the start order sized from it — commits a
+     * multiple of the budget. Sizes the full grid without touching
+     * {@link BotHelper#grids}, reads what the routine wanted against the
+     * minimum, and lets `./gridBudgetGuard` decide.<br />
+     *
+     * Fail-open when the grid cannot be sized (no data, no price, no exchange
+     * info): that is the behaviour before this check existed.
+     *
+     * @returns {boolean} true when the start was refused and the bot stopped
+     */
+    async refuseStartBelowMinimumBudget(): Promise<boolean> {
+      if (!this.data || !this.initialGrid) {
+        return false
+      }
+      const { pair, budget, levels } = this.data.settings
+      const lastPrice = await this.getLatestPrice(pair)
+      if (lastPrice === 0) {
+        return false
+      }
+      await this.generateCurrentGrids(
+        lastPrice,
+        !this.isShort ? OrderSideEnum.buy : OrderSideEnum.sell,
+        true,
+        false,
+        true,
+      )
+      const sizing = this.lastGridSizing
+      if (!sizing) {
+        return false
+      }
+      const verdict = gridBudgetVerdict({
+        budget: +budget,
+        wanted: sizing.wanted,
+        minimum: sizing.minimum,
+      })
+      if (!verdict.refuse) {
+        return false
+      }
+      const ed = await this.getExchangeInfo(pair)
+      this.handleErrors(
+        gridBudgetRefusalMessage({
+          budget: +budget,
+          minimumBudget: verdict.minimumBudget,
+          asset: (this.coinm ? ed?.baseAsset.name : ed?.quoteAsset.name) ?? '',
+          levels: +levels,
+          pair,
+        }),
+        'start',
+      )
+      this.serviceRestart = false
+      this.finishLoad = true
+      await this.stop()
+      return true
     }
     /**
      * Get qty to initial swap<br />
@@ -760,8 +855,18 @@ function createBotHelper<
                 ? quote
                 : base
 
+            let free = balance?.free ?? Infinity
+            if (this.futures && required / this.currentLeverage > free) {
+              // Pooled collateral (Kraken flex, Bitget Unified multi_assets)
+              // margins from coins the per-asset figure does not count.
+              free = await this.pooledMarginOrKeep(
+                ed.quoteAsset.name,
+                free,
+                price,
+              )
+            }
             if (
-              required / this.currentLeverage > (balance?.free ?? Infinity) &&
+              required / this.currentLeverage > free &&
               !this.data.settings.skipBalanceCheck
             ) {
               this.sendEndProcess()
@@ -892,16 +997,28 @@ function createBotHelper<
             // Not a service restart — the user started or restarted this bot,
             // which is the manual escape hatch from order quarantine.
             await this.clearAllOrderQuarantine('bot started by user')
+            // A fill outside the current grid belongs to a range the user has
+            // since moved away from; anchoring on it would split the new grid
+            // around a stale price (e.g. every level a SELL, some below market).
+            const anchor =
+              this.restart &&
+              this.lastFilled &&
+              this.isPriceOnCurrentGrid(parseFloat(this.lastFilled.price))
+                ? this.lastFilled
+                : null
+            if (this.restart && this.lastFilled && !anchor) {
+              this.handleLog(
+                `Last filled price ${this.lastFilled.price} is outside the grid ${this.data.settings.lowPrice}-${this.data.settings.topPrice}, place orders from the latest price`,
+              )
+            }
             this.limitOrders(
               this.botId,
-              this.lastFilled
-                ? this.lastFilled.side === 'BUY'
+              anchor
+                ? anchor.side === 'BUY'
                   ? OrderSideEnum.buy
                   : OrderSideEnum.sell
                 : OrderSideEnum.buy,
-              this.restart && this.lastFilled
-                ? parseFloat(this.lastFilled.price)
-                : undefined,
+              anchor ? parseFloat(anchor.price) : undefined,
             ).then(async () => {
               this.loadingComplete = true
               await this.runAfterLoading()
@@ -917,6 +1034,18 @@ function createBotHelper<
       }
       this.endMethod(_id)
       this.handleLog('Swap assets end')
+    }
+    /**
+     * Whether a price can be one of the current grid's order prices: inside
+     * low..top widened by the sell displacement, with a small rounding margin.
+     */
+    private isPriceOnCurrentGrid(price: number) {
+      if (!this.data || !price || isNaN(price)) {
+        return false
+      }
+      const { lowPrice, topPrice, sellDisplacement } = this.data.settings
+      const margin = (1 + (sellDisplacement || 0)) * 1.001
+      return price >= lowPrice / margin && price <= topPrice * margin
     }
     /**
      * Generate initial grids<br />
@@ -1160,13 +1289,26 @@ function createBotHelper<
       this.blockCheck = true
       try {
         this.handleLog('Check order after user stream reconnect')
+        await this.spreadReconcileStart()
         const filledOrders: Order[] = []
-        for (const o of this.getOrdersByStatusAndDealId({
+        // See the DCA copy: aggregated at the end, and retried before it counts.
+        const unresolved: string[] = []
+        // Attempts actually spent on the orders in `unresolved` — the warn used
+        // to print the budget constant instead, which reads as a retry storm
+        // when the ladder in fact stopped on its first answer (#676).
+        let unresolvedLookupAttempts = 0
+        const toCheck = this.getOrdersByStatusAndDealId({
           defaultStatuses: true,
-        })) {
-          const getOrder = await this.getOrder(o.clientOrderId, o.symbol, false)
+        })
+        await this.primeReconcileBatch(toCheck)
+        for (const o of toCheck) {
+          let attemptsForOrder = 0
+          const getOrder = await this.getOrderForReconcile(o, {
+            onAttempts: (n) => (attemptsForOrder = n),
+          })
           if (!getOrder || !getOrder.data) {
-            this.handleWarn(`Not enough data to get order ${o.clientOrderId}`)
+            unresolved.push(o.clientOrderId)
+            unresolvedLookupAttempts += attemptsForOrder
             continue
           }
           if (getOrder.status === StatusEnum.notok) {
@@ -1195,6 +1337,11 @@ function createBotHelper<
               `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} not changed.`,
             )
           }
+        }
+        if (unresolved.length) {
+          this.handleWarn(
+            reconcileUnresolvedWarn(unresolved, unresolvedLookupAttempts),
+          )
         }
         const [lastFilled] = filledOrders.sort(
           (a, b) => b.updateTime - a.updateTime,
@@ -1227,6 +1374,7 @@ function createBotHelper<
           `Check orders after reconnect failed: ${(e as Error).message}`,
         )
       } finally {
+        this.reconcileBatch = null
         this.blockCheck = false
         this.endMethod(_id)
       }
@@ -1429,11 +1577,14 @@ function createBotHelper<
             )) {
               if (this.isOrderQuarantined(o)) continue
               if (this.restartProbeExhausted()) continue
-              const exchangeData = await this.getOrder(
-                o.clientOrderId,
-                pair,
-                true,
-              )
+              // Bounded retry on a transient, as the reconnect pass already
+              // does — a single-shot probe here reads one lookup blip as the
+              // venue's answer and skips the order for the whole restart
+              // (see `isDefinitiveOrderNotFound`).
+              const exchangeData = await this.getOrderForReconcile(o, {
+                fromCache: true,
+                symbol: pair,
+              })
               if (isDefinitiveOrderNotFound(exchangeData)) {
                 this.handleWarn(
                   `Order ${o.clientOrderId} not found on exchange: ${exchangeData?.reason}`,
@@ -1698,14 +1849,34 @@ function createBotHelper<
         /**
          * Cancel all unnecessery orders, remove them from orders property
          */
-        for (const order of orderSettings.cancel) {
-          const result = await this.cancelGridOnExchange(order)
-          if (result && !realOrders) {
-            await this.countBalances(lastPrice)
+        // Spec `082` §3. One venue call for the whole cancel phase, when the
+        // bot is armed for it; `cancelGridOnExchange` -> `cancelOrderOnExchange`
+        // consumes the answers and is otherwise unchanged. Primed with the
+        // orders those calls will resolve to — via the same lookup they use —
+        // so an entry it cannot find simply is not primed and that level is
+        // cancelled the way it always was. Cleared in `finally` because an
+        // entry is only true of the moment it was fetched.
+        //
+        // No branch inside this loop returns, so every primed order is
+        // reached: there is no path on which the batch cancels an order the
+        // loop then fails to write down.
+        await this.primeCancelBatch(
+          orderSettings.cancel
+            .map((g) => this.findOrderForGrid(g))
+            .filter((o): o is Order => !!o),
+        )
+        try {
+          for (const order of orderSettings.cancel) {
+            const result = await this.cancelGridOnExchange(order)
+            if (result && !realOrders) {
+              await this.countBalances(lastPrice)
+            }
+            if (result?.status === 'FILLED') {
+              this.handleUnknownOrder(result)
+            }
           }
-          if (result?.status === 'FILLED') {
-            this.handleUnknownOrder(result)
-          }
+        } finally {
+          this.clearCancelBatch()
         }
         if (realOrders) {
           this.endMethod(_id)
@@ -1715,18 +1886,25 @@ function createBotHelper<
           await utils.sleep(300)
         }
         let i = 0
+        const toPlace = [...orderSettings.new].sort(
+          (a, b) =>
+            Math.abs(a.price - lastPrice) - Math.abs(b.price - lastPrice),
+        )
         /**
          * Add new orders, add them to orders property
          */
-        for (const order of [...orderSettings.new].sort(
-          (a, b) =>
-            Math.abs(a.price - lastPrice) - Math.abs(b.price - lastPrice),
-        )) {
-          i++
+        // The loop body, unchanged and extracted, so that the batched orders
+        // and the sequential ones run the SAME code. The only edit is `stage`:
+        // the progress counter used to be read at the bottom from the shared
+        // `i`, which is still incremented here in placement order, but a body
+        // that shares its pre-send section with others must carry its own
+        // number rather than read whatever the counter has reached by then.
+        const placeOne = async (order: Grid) => {
+          const stage = ++i
           const get = this.getOrderFromMap(order.newClientOrderId)
           if (get && get.status !== 'CANCELED') {
             this.handleLog(`Order duplicate: ${order.newClientOrderId}`)
-            continue
+            return
           }
           const result = await this.placeRegularOrder(order, ed)
           if (result) {
@@ -1752,12 +1930,67 @@ function createBotHelper<
           if (this.firstRun) {
             const progress = {
               text: BotProgressCodeEnum.placeOrder,
-              stage: i,
+              stage,
               total: orderSettings.new.length,
               isAllowedToCancel: false,
             }
             this.updateProgress(progress)
           }
+        }
+        // Spec `082` §7. Which of these orders may share one venue call: the
+        // ones this loop would have sent anyway, decided here, serially,
+        // against the state as it is now — the same checks in the same order,
+        // plus a refusal to batch two orders this loop's own duplicate checks
+        // would have collapsed into one (see `batchablePlacements`). With the
+        // flag off, on any other venue, or with fewer than two eligible
+        // orders, `batched` is empty and the loop below is exactly today's.
+        const batched = this.batchablePlacements(
+          toPlace,
+          (order) =>
+            !this.getOrderFromMap(order.newClientOrderId) ||
+            this.getOrderFromMap(order.newClientOrderId)?.status === 'CANCELED',
+          (order) => !this.isOrderExist(order, TypeOrderEnum.regular),
+        )
+        if (batched.length) {
+          const batcher = this.installOpenBatcher(
+            batched.map((o) => o.newClientOrderId),
+          )
+          // Collected rather than propagated, so that ONE body throwing cannot
+          // leave the others parked: `Promise.all` rejects on the first
+          // rejection while its peers are still waiting for their answers, and
+          // those continuations would then run detached, after this method had
+          // already left. The first failure is re-thrown once everybody has
+          // settled, so a caller still sees it.
+          const failures: unknown[] = []
+          try {
+            await Promise.all(
+              batched.map(async (order) => {
+                try {
+                  await placeOne(order)
+                } catch (e) {
+                  failures.push(e)
+                } finally {
+                  // Reports this participant done whether it placed, was
+                  // skipped by its own duplicate check or threw. The batcher
+                  // reads a participant that never reached the send site as a
+                  // bail, so the rest of the burst never waits on it.
+                  batcher.settled(order.newClientOrderId)
+                }
+              }),
+            )
+          } finally {
+            this.removeOpenBatcher(batcher)
+          }
+          if (failures.length) {
+            throw failures[0]
+          }
+        }
+        const batchedIds = new Set(batched.map((o) => o.newClientOrderId))
+        for (const order of toPlace) {
+          if (batchedIds.has(order.newClientOrderId)) {
+            continue
+          }
+          await placeOne(order)
         }
         if (this.firstRun) {
           this.firstRun = false
@@ -1796,7 +2029,8 @@ function createBotHelper<
           if (!this.data || !this.futures || this.data.position.qty === 0) {
             return
           }
-          const { qty, price, side } = this.data.position
+          const { qty, side } = this.data.position
+          const price = await this.closeEntryPrice(order.clientOrderId)
           const profit =
             side === PositionSide.LONG
               ? _price * qty - price * qty
@@ -1924,8 +2158,11 @@ function createBotHelper<
       const price = parseFloat(order.origPrice)
 
       if (order.typeOrder !== TypeOrderEnum.fee) {
-        this.createTransaction(order)
+        const booked = this.createTransaction(order)
         await this.calculatePosition(order)
+        // Spec 117: after the round trip is in the ledger, which is what
+        // decides the entry the TP/SL values the position against.
+        booked.then(() => this.refreshTpSlEntry(order))
       }
       if (
         !skipLimitOrders &&
@@ -1976,10 +2213,30 @@ function createBotHelper<
       }
       return pos
     }
+    /**
+     * Record fills as already folded into `data.position` (spec `089` §4.2).
+     *
+     * `start()` rebuilds the position wholesale from an order slice and THEN
+     * runs `cancelAllOrder()`, so without this every bot run re-books the
+     * orders the rebuild just summed.
+     */
+    protected seedBookedPosition(orders: { clientOrderId: string }[]) {
+      this.positionBooked = new Set(orders.map((o) => o.clientOrderId))
+    }
     private async calculatePosition(order: Order) {
       if (!this.data || !this.futures) {
         return
       }
+      // Spec `089`: the fold below is incremental, so it must run at most once
+      // per fill. `createTransaction`, called on the line above this method's
+      // only hot caller, is refused by its own ledger guard on a re-delivery —
+      // this is the same refusal for the position.
+      if (this.positionBooked.has(order.clientOrderId)) {
+        return this.handleDebug(
+          `Position already booked for ${order.clientOrderId}, skip`,
+        )
+      }
+      this.positionBooked.add(order.clientOrderId)
 
       const qty = +(order.executedQty ?? '0') || +order.origQty
       const price = +order.price
@@ -2183,23 +2440,31 @@ function createBotHelper<
           status: cancelPartiallyFilled ? this.orderStatuses : 'NEW',
         })
         let i = 0
-        for (const order of newOrders) {
-          i++
-          const cancel = await this.cancelOrderOnExchange(order, setErrors)
+        // Spec `082` §3 — one venue call for the whole teardown. Nothing in
+        // this loop returns early, so every order the batch cancels is also
+        // reached by the loop and written down locally.
+        await this.primeCancelBatch(newOrders)
+        try {
+          for (const order of newOrders) {
+            i++
+            const cancel = await this.cancelOrderOnExchange(order, setErrors)
 
-          if (cancel?.status === 'FILLED') {
-            await this.handleUnknownOrder(cancel)
-          }
-          await this.countBalances(lastPrice)
-          if (!this.firstRun) {
-            const progress = {
-              text: BotProgressCodeEnum.cancelOrder,
-              stage: i,
-              total: newOrders.length,
-              isAllowedToCancel: false,
+            if (cancel?.status === 'FILLED') {
+              await this.handleUnknownOrder(cancel)
             }
-            this.updateProgress(progress)
+            await this.countBalances(lastPrice)
+            if (!this.firstRun) {
+              const progress = {
+                text: BotProgressCodeEnum.cancelOrder,
+                stage: i,
+                total: newOrders.length,
+                isAllowedToCancel: false,
+              }
+              this.updateProgress(progress)
+            }
           }
+        } finally {
+          this.clearCancelBatch()
         }
         this.sendEndProcess(true)
       }
@@ -2315,6 +2580,9 @@ function createBotHelper<
       this.orders = new Map()
       this.orderStatusMap = new Map()
       this.orderDealMap = new Map()
+      // In lockstep with `orders` above: `loadOrders` refills both, and the
+      // position rebuild there re-seeds this one (spec `089` §4.3).
+      this.positionBooked = new Set()
       this.lockTpSlCheck = false
       this.lockProcessQueueMethod = false
       this.lastFilled = null
@@ -2373,6 +2641,9 @@ function createBotHelper<
       this.finishLoad = false
       this.clearClassProperties(undefined, true)
       const data = await this.loadData()
+      // Read before the "Last balance change not set" downgrade below clears
+      // it: a bot brought back by a service restart is never refused.
+      const serviceRestartAtEntry = !!this.serviceRestart
       if (data) {
         this.serviceRestart = false
         this.finishLoad = true
@@ -2529,6 +2800,18 @@ function createBotHelper<
           }
         }
 
+        // Only a user-initiated start is guarded. `restartProcess` marks a
+        // settings-edit reload; `restart` alone does not, because `reloadBot`
+        // clears it when the edit asks for a new start order.
+        if (
+          !this.restart &&
+          !this.restartProcess &&
+          !serviceRestartAtEntry &&
+          (await this.refuseStartBelowMinimumBudget())
+        ) {
+          this.endMethod(_id)
+          return
+        }
         if (checkStartCondition) {
           await this.swapAssets()
         }
@@ -2586,11 +2869,226 @@ function createBotHelper<
       this.secondRestart = false
       this.endMethod(_id)
     }
+    /**
+     * Entry price the close leg of `data.position` is valued against (spec 099).
+     *
+     * A NEUTRAL grid books its round trips pairwise at grid-level prices, so
+     * the position left at close is exactly the fills no paired transaction
+     * booked — not `position.price`, which still averages every fill that ever
+     * added to the position, paired ones included. Their net cash is the entry.
+     * Everything else, or a ledger that does not net to the position, keeps
+     * `position.price`.
+     */
+    private async closeEntryPrice(closeOrderId: string): Promise<number> {
+      const position = this.data?.position
+      if (!this.data || !position || !this.usesUnpairedEntry) {
+        return position?.price ?? 0
+      }
+      const read = await this.readUnpairedEntry(position, closeOrderId)
+      if ('fallback' in read) {
+        this.handleWarn(read.fallback)
+        return position.price
+      }
+      this.handleLog(
+        `Close entry: ${read.entry} from unpaired fills (position price ${position.price})`,
+      )
+      return read.entry
+    }
+    /** `closeEntryPrice()` departs from `position.price` only here (spec 099). */
+    private get usesUnpairedEntry() {
+      return !this.coinm && this.futuresStrategy === FuturesStrategyEnum.neutral
+    }
+    /**
+     * The unpaired-fills entry of `position`, or why it falls back to
+     * `position.price`. `fill` stands in for its own ledger row, which may not
+     * be written as FILLED yet when a fill triggers the read.
+     */
+    private async readUnpairedEntry(
+      position: ClearBotSchema['position'],
+      closeOrderId: string,
+      fill?: Order,
+    ): Promise<{ entry: number } | { fallback: string }> {
+      try {
+        const [orders, transactions] = await Promise.all([
+          this.ordersDb.readData(
+            {
+              botId: this.botId,
+              status: 'FILLED',
+              typeOrder: { $in: [TypeOrderEnum.regular, TypeOrderEnum.stop] },
+            },
+            {
+              clientOrderId: 1,
+              side: 1,
+              price: 1,
+              origQty: 1,
+              executedQty: 1,
+              updateTime: 1,
+              typeOrder: 1,
+            },
+            {},
+            true,
+          ),
+          this.transactionDb.readData(
+            {
+              idBuy: { $ne: '' },
+              idSell: { $ne: '' },
+              botId: this.botId,
+              userId: this.userId,
+            },
+            { idBuy: 1, idSell: 1 },
+            {},
+            true,
+          ),
+        ])
+        if (
+          orders.status !== StatusEnum.ok ||
+          transactions.status !== StatusEnum.ok
+        ) {
+          throw new Error(
+            orders.status !== StatusEnum.ok
+              ? orders.reason
+              : (transactions as { reason: string }).reason,
+          )
+        }
+        const rows = fill
+          ? [
+              ...orders.data.result.filter(
+                (o) => o.clientOrderId !== fill.clientOrderId,
+              ),
+              fill,
+            ]
+          : orders.data.result
+        const paired = new Set<string>()
+        for (const t of transactions.data.result) {
+          if (t.idBuy && t.idSell) {
+            paired.add(t.idBuy)
+            paired.add(t.idSell)
+          }
+        }
+        // Same slice `loadOrders` rebuilds the position from.
+        const since = Math.max(
+          this.data?.lastPositionChange ?? 0,
+          ...rows
+            .filter(
+              (o) =>
+                o.typeOrder === TypeOrderEnum.stop &&
+                o.clientOrderId !== closeOrderId,
+            )
+            .map((o) => o.updateTime ?? 0),
+        )
+        let netQty = 0
+        let netQuote = 0
+        for (const o of rows) {
+          if (
+            o.typeOrder !== TypeOrderEnum.regular ||
+            o.updateTime <= since ||
+            paired.has(o.clientOrderId)
+          ) {
+            continue
+          }
+          const sign = o.side === OrderSideEnum.buy ? 1 : -1
+          const qty = +(o.executedQty ?? '0') || +o.origQty
+          netQty += sign * qty
+          netQuote -= sign * qty * +o.price
+        }
+        const signedPosition =
+          (position.side === PositionSide.SHORT ? -1 : 1) * position.qty
+        const entry =
+          (position.side === PositionSide.SHORT ? netQuote : -netQuote) /
+          position.qty
+        if (
+          Math.abs(netQty - signedPosition) >
+            1e-8 * Math.max(1, position.qty) ||
+          !(entry > 0) ||
+          !isFinite(entry)
+        ) {
+          return {
+            fallback: `Close entry: unpaired fills net ${netQty} against position ${signedPosition}, using position price ${position.price}`,
+          }
+        }
+        return { entry }
+      } catch (e) {
+        return {
+          fallback: `Close entry: cannot read the ledger (${(e as Error)?.message ?? e}), using position price ${position.price}`,
+        }
+      }
+    }
+    /**
+     * Entry the value-changed TP/SL values the open position against: the one
+     * `closeEntryPrice()` would book the close at (spec 117). `tpSl()` runs
+     * per price tick and stays synchronous, so it reads this cache, keyed to
+     * the position it was computed for; the ledger is read after each fill's
+     * transaction is booked, and once from the tick for a position no fill
+     * refreshed (restart, settings change).
+     */
+    private tpSlEntryPrice(position: ClearBotSchema['position']): number {
+      if (position.qty === 0 || !this.usesUnpairedEntry) {
+        return position.price
+      }
+      const cached = this.tpSlEntry
+      if (
+        cached &&
+        cached.side === position.side &&
+        cached.qty === position.qty &&
+        cached.price === position.price
+      ) {
+        return cached.entry
+      }
+      if (!this.tpSlEntryPending) {
+        this.refreshTpSlEntry()
+      }
+      return position.price
+    }
+    private refreshTpSlEntry(fill?: Order): Promise<void> {
+      const settings = this.data?.settings
+      if (
+        !settings ||
+        !this.futures ||
+        !this.usesUnpairedEntry ||
+        !(
+          (settings.tpSl && settings.tpSlCondition === 'valueChanged') ||
+          (settings.sl && settings.slCondition === 'valueChanged')
+        )
+      ) {
+        return this.tpSlEntryQueue
+      }
+      // Chained, so the last refresh to finish is the last one started.
+      this.tpSlEntryPending += 1
+      this.tpSlEntryQueue = this.tpSlEntryQueue.then(async () => {
+        try {
+          const position = this.data?.position
+          if (!position || position.qty === 0) {
+            return
+          }
+          const read = await this.readUnpairedEntry(position, '', fill)
+          const entry = 'entry' in read ? read.entry : position.price
+          this.tpSlEntry = { ...position, entry }
+          this.handleDebug(
+            `TP/SL entry: ${entry} for ${position.side} ${position.qty} (position price ${position.price})`,
+          )
+          // Spec 124: the run-up/drawdown, live stats and the dashboard value
+          // the position against this same entry.
+          if (this.data) {
+            const closeEntry = { ...this.tpSlEntry }
+            this.data.closeEntry = closeEntry
+            this.updateData({ closeEntry })
+            this.emit('bot settings update', { closeEntry })
+          }
+        } finally {
+          this.tpSlEntryPending -= 1
+        }
+      })
+      return this.tpSlEntryQueue
+    }
     protected async profitAfterPositionClosed(result: Order) {
       if (!this.data || !this.futures || this.data.position.qty === 0) {
         return
       }
-      const { qty, price, side } = this.data.position
+      const { qty, side } = this.data.position
+      const price = await this.closeEntryPrice(result.clientOrderId)
+      if (!this.data || this.data.position.qty === 0) {
+        return
+      }
       const profit =
         (side === PositionSide.LONG
           ? +result.price * qty - price * qty
@@ -2606,6 +3104,13 @@ function createBotHelper<
       }
       this.updateData({ profit: this.data.profit })
       this.emit('bot settings update', { profit: this.data.profit })
+      // The closing leg carries the position's whole un-round-tripped result,
+      // and `userProfitByHour` is the only thing the account statistics read —
+      // without this the statistics keep the grid round-trips booked by
+      // `createTransaction` and silently drop the close. Booked once per fill:
+      // the `position.qty === 0` guard above plus the `resetPosition()` every
+      // caller runs straight after mean a replayed fill returns before here.
+      this.saveProfitToDb(profitUsd, result.updateTime || +new Date())
     }
     private async processSellAtStop(
       type: CloseGRIDTypeEnum.closeByLimit | CloseGRIDTypeEnum.closeByMarket,
@@ -2814,15 +3319,28 @@ function createBotHelper<
               ...res,
               _id: `${res.data._id}`,
             })
+            // Same reason as in `profitAfterPositionClosed`, for the spot close.
+            // Gated on the insert, as `createTransaction` is: `index` is the
+            // fill's clientOrderId under a unique index, so a fill already
+            // booked by `closeBotByTp` or by an earlier delivery is refused
+            // here and cannot be counted twice.
+            this.saveProfitToDb(profitUsd, res.data.updateTime)
+            // Carried into memory the way `profitAfterPositionClosed` carries
+            // it, under the SAME gate as the ledger write above. `updateData`
+            // `$set`s an absolute profit, so a close leg left only in the
+            // document is discarded by the next `createTransaction` — which
+            // builds its own absolute value from `this.data`; and advancing it
+            // on a refused replay would book the close twice (spec 073).
+            this.data.profit = {
+              ...this.data.profit,
+              total: this.data.profit.total + profit,
+              totalUsd: this.data.profit.totalUsd + profitUsd,
+            }
           }
           const data = {
             currentBalances,
             feeBalance: 0,
-            profit: {
-              ...this.data.profit,
-              total: this.data.profit.total + profit,
-              totalUsd: this.data.profit.totalUsd + profitUsd,
-            },
+            profit: this.data.profit,
           }
 
           this.emit('bot settings update', data)
@@ -3159,10 +3677,13 @@ function createBotHelper<
      *
      * @param {Order} o Filled order to sount transaction for
      */
-    @IdMute(
-      mutex,
-      (order: Order) => `${order.botId}transaction${order.clientOrderId}`,
-    )
+    // Keyed on the BOT, not on the fill. `processFilledOrder` calls this
+    // without awaiting it, so a per-fill key let every fill delivered in one
+    // price message run concurrently — and they all read the same
+    // `this.data.profit.total` across the awaits below, so the running
+    // `cummulativeProfit*` the ledger is built from was written N times from
+    // one stale base and N-1 legs vanished from it (spec 073).
+    @IdMute(mutex, (order: Order) => `${order.botId}transaction`)
     async createTransaction(o: Order): Promise<void> {
       if (!this.data) {
         return
@@ -3198,9 +3719,82 @@ function createBotHelper<
         )
         const qty = parseFloat(o.origQty)
         const price = parseFloat(o.price)
-        let comBase = o.side === OrderSideEnum.buy ? qty * fee.maker : 0
+        // Spec 014 §2.4: grid gains the same observedFeeSplit/
+        // observedFeeOnSide resolution combo already has, in place of the
+        // stored-rate-only estimate — gated on BotFlags.feeByAsset (§3), new
+        // grid bots only.
+        const feeByAssetGated = !!this.data.flags?.includes(BotFlags.feeByAsset)
+        const observedSplit = observedFeeSplit(
+          o,
+          this.data.symbol.baseAsset,
+          this.data.symbol.quoteAsset,
+        )
+        const observedFee = feeByAssetGated
+          ? observedFeeOnSide(
+              observedSplit,
+              o.side === OrderSideEnum.buy ? 'base' : 'quote',
+              price,
+            )
+          : null
+        const feeLegRaw = feeByAssetGated
+          ? observedFeeLegs(
+              o,
+              this.data.symbol.baseAsset,
+              this.data.symbol.quoteAsset,
+            )
+          : []
+        // Off-pair fee (spec 014 §2.2): book 0 on base/quote, never the
+        // estimate — the ledger built below carries it, USD only.
+        const offPair =
+          feeByAssetGated && !observedSplit && feeLegRaw.length > 0
+        // Spec 014 §2.1/§2.3: every observed leg is recorded on the ledger
+        // (on-pair legs included, §4 Q3), priced in USD at capture time.
+        let cachedPrices:
+          | { pair: string; price: number; exchange: string }[]
+          | undefined
+        const feeLegs: { asset: string; amount: number; usdRate: number }[] = []
+        let offPairFeeUsd = 0
+        for (const leg of feeLegRaw) {
+          let usdRate: number
+          if (feeLegRaw.length === 1 && o.feePaidUsd !== undefined) {
+            const usd = +o.feePaidUsd
+            usdRate = leg.amount > 0 ? usd / leg.amount : 0
+          } else if (leg.asset === this.data.symbol.baseAsset) {
+            usdRate = await this.getUsdRate(this.data.symbol.symbol, 'base')
+          } else if (leg.asset === this.data.symbol.quoteAsset) {
+            usdRate = await this.getUsdRate(this.data.symbol.symbol, 'quote')
+          } else {
+            if (!cachedPrices) {
+              const pricesResult = await this.exchange?.getAllPrices(true)
+              cachedPrices =
+                pricesResult?.status === StatusEnum.ok
+                  ? pricesResult.data.map((p) => ({ ...p, exchange: 'all' }))
+                  : []
+            }
+            usdRate =
+              utils.findUSDRate(
+                leg.asset,
+                cachedPrices ?? [],
+                this.data?.exchange,
+              ) || 0
+          }
+          feeLegs.push({ asset: leg.asset, amount: leg.amount, usdRate })
+          if (offPair) {
+            offPairFeeUsd += leg.amount * usdRate
+          }
+        }
+        let comBase =
+          o.side === OrderSideEnum.buy
+            ? offPair
+              ? 0
+              : (observedFee ?? qty * fee.maker)
+            : 0
         let comQuote =
-          o.side === OrderSideEnum.sell ? qty * price * fee.maker : 0
+          o.side === OrderSideEnum.sell
+            ? offPair
+              ? 0
+              : (observedFee ?? qty * price * fee.maker)
+            : 0
         let profitQuote = 0
         let matchedPrice = 0
         let matchQty = 0
@@ -3581,9 +4175,13 @@ function createBotHelper<
                 : this.data?.settings.profitCurrency === 'base'
                   ? profitBase - comBase
                   : profitQuote - comQuote,
-              totalUsd: this.data?.profit?.totalUsd
-                ? this.data?.profit?.totalUsd + profitUsdt
-                : profitUsdt,
+              // Spec 014 §2.2: an off-pair fee's USD value moves totalUsd
+              // only — the native-currency `total` above is unaffected,
+              // since the fee was never booked to base/quote for that leg.
+              totalUsd:
+                (this.data?.profit?.totalUsd
+                  ? this.data?.profit?.totalUsd + profitUsdt
+                  : profitUsdt) - offPairFeeUsd,
               freeTotal:
                 this.data?.profit.freeTotal || this.data.profit.total
                   ? (this.data?.profit?.freeTotal || this.data.profit.total) +
@@ -3602,11 +4200,33 @@ function createBotHelper<
               pureBase: 0,
               pureQuote: 0,
             },
+            // Spec 014 §2.5/§3: new grid bots only (BotFlags.feeByAsset — no
+            // separate flag for this field). Grid has no "close" to finalize
+            // a total at, so `feePaid` is a live running total updated on
+            // every transaction — the write pattern combo's
+            // minigrid.feePaid already uses.
+            feePaid: feeByAssetGated
+              ? {
+                  base: (this.data?.feePaid?.base ?? 0) + comBase,
+                  quote: (this.data?.feePaid?.quote ?? 0) + comQuote,
+                }
+              : undefined,
+            // Spec 014 §2.1: every observed leg (on-pair legs included, §4
+            // Q3).
+            feeByAsset: feeByAssetGated
+              ? feeLegs.reduce(
+                  (ledger, leg) =>
+                    accrueFeeLedger(ledger, leg.asset, leg.amount, leg.usdRate),
+                  this.data?.feeByAsset,
+                )
+              : undefined,
           }
           if (this.data) {
             this.data.transactionsCount =
               data.transactionsCount || this.data.transactionsCount
             this.data.profit = data.profit || this.data.profit
+            this.data.feePaid = data.feePaid || this.data.feePaid
+            this.data.feeByAsset = data.feeByAsset || this.data.feeByAsset
           }
           this.emit('bot settings update', data)
           this.updateData({ ...data })
@@ -3973,12 +4593,21 @@ function createBotHelper<
             initialBalances.base * initialPrice + initialBalances.quote
           if (this.futures) {
             const current = this.data.position
+            // Spec 117: against the entry the close is booked at, not the
+            // whole-position average a neutral grid's close no longer uses.
+            const entry = this.tpSlEntryPrice(current)
             const diff =
               current.side === PositionSide.LONG
-                ? lastPrice - current.price
-                : current.price - lastPrice
-            const perc = current.price !== 0 ? diff / current.price : 0
-            const val = current.qty * perc * lastPrice
+                ? lastPrice - entry
+                : entry - lastPrice
+            // Spec 064 §4.1: the live value of a position of `qty` base units
+            // entered at `entry` and marked at `lastPrice` is
+            // `qty * (lastPrice - entry)` — the same quantity
+            // `profitAfterPositionClosed()` books when that position is closed
+            // at `lastPrice`. Scaling it by `lastPrice / entry` understated a
+            // long's open loss (the stop fired late) and overstated a short's
+            // (it fired early).
+            const val = current.qty * diff
             const valueChange = val + this.data.profit.total
             const totalPerc =
               valueChange / (initialValue / this.currentLeverage)
@@ -4143,10 +4772,97 @@ function createBotHelper<
         clearTimeout(this.priceTimer)
       }
     }
+    /**
+     * The snapshot `GridMonitor` is fed — the only shape it reads a bot
+     * through.
+     *
+     * Built here rather than inline so the sample taken on every price update,
+     * the one main-app's override of that callback takes, and the final one
+     * taken when the bot stops cannot drift apart (spec 064 §4.2).
+     */
+    protected gridStatsSnapshot():
+      | BotParentProcessStatsEventDtoGrid['payload']['bot']
+      | null {
+      if (!this.data) {
+        return null
+      }
+      return {
+        _id: this.botId,
+        exchange: this.data.exchange,
+        initialBalances: this.data.initialBalances,
+        initialPrice: this.data.initialPrice,
+        currentBalances: this.data.currentBalances,
+        realInitialBalances: this.data.realInitialBalances,
+        settings: {
+          marginType: this.data.settings.marginType,
+          leverage: this.data.settings.leverage,
+          profitCurrency: this.data.settings.profitCurrency,
+        },
+        position: this.data.position,
+        closeEntry: this.data.closeEntry,
+        profit: {
+          total: this.data.profit.total,
+        },
+        stats: this.data.stats,
+      }
+    }
+    /**
+     * Take the final stats measurement and flush it before the bot goes away.
+     *
+     * A grid bot is sampled at most once a minute and nothing used to remove
+     * it from `GridMonitor`, so the window it stops in — the one holding the
+     * drawdown that fired the stop-loss, or the run-up that fired the
+     * take-profit — was neither sampled nor written. `afterBotStop()` runs at
+     * the TOP of `stop()`, before the closing order, so the position is still
+     * open here and the measurement is the unrealized result the bot is
+     * stopping on.
+     *
+     * The wait is bounded: `removeBotStats` runs under the same per-bot
+     * `IdMute` key as the sample, whose wait queue is a `getFixedArray` — an
+     * evicted waiter's promise never settles, and `stop()` awaits this before
+     * it places the closing order. Spec 064 §4.2.
+     */
+    private async flushBotStats(): Promise<void> {
+      const bot = this.gridStatsSnapshot()
+      if (!bot || !this.data) {
+        return
+      }
+      const symbol = this.data.symbol.symbol
+      const price = this.getLastStreamData(symbol)?.price
+      if (price === undefined) {
+        return
+      }
+      let timer: NodeJS.Timeout | undefined
+      try {
+        await Promise.race([
+          DealStats.getInstance().removeStats({
+            event: 'removeStats',
+            botType: BotType.grid,
+            payload: {
+              data: { symbol, price, time: +new Date(), volume: 0 },
+              bot,
+            },
+          }),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+              this.handleWarn(
+                `Stats flush on stop did not answer in ${FLUSH_STATS_TIMEOUT_MS}ms, continuing`,
+              )
+              resolve()
+            }, FLUSH_STATS_TIMEOUT_MS)
+          }),
+        ])
+      } finally {
+        if (timer) {
+          clearTimeout(timer)
+        }
+      }
+    }
     async afterBotStop() {
       this.stopPriceTimer()
       this.stopConsumerHeartbeat()
       this.stopQuantRulesRetries()
+      await this.flushBotStats()
       return
     }
     /** Check if price not update */
@@ -4159,6 +4875,7 @@ function createBotHelper<
       const symbol = this.data.symbol.symbol
       const lastStreamData = this.getLastStreamData(symbol)
       if (+new Date() - (lastStreamData?.time ?? 0) < this.priceTimeout) {
+        this.trackPriceStreamHealth(symbol, false)
         return
       }
       const needPrice =
@@ -4168,6 +4885,11 @@ function createBotHelper<
       if (!needPrice) {
         return
       }
+      // Info-level, state-change only: see MainBot#trackPriceStreamHealth. A
+      // grid bot on a symbol with no live stream evaluates its TP/SL on this
+      // timer's cadence, not the market's. Logged only for bots that actually
+      // depend on the price, and only after the gate above.
+      this.trackPriceStreamHealth(symbol, true)
       if (this.exchange) {
         this.handleDebug(`Grid Required prices for ${symbol} in price timer`)
         const allPrices = await this.exchange?.getAllPrices(true)
@@ -4280,7 +5002,9 @@ function createBotHelper<
                     : PositionSide.BOTH
                 : PositionSide.BOTH,
             }
-          } else if (!this.futures) {
+          } else if (this.futures) {
+            this.handleLog('Position already closed. Executing stop method')
+          } else {
             const qty = await this.sellBaseAmount()
             if (qty * msg.price < ed.quoteAsset.minAmount) {
               this.handleLog(
@@ -4482,24 +5206,31 @@ function createBotHelper<
                   ...res,
                   _id: `${res.data._id}`,
                 })
-              }
-              const data = {
-                currentBalances,
-                profit: {
+                // Gated on the insert for the same reason as the one in
+                // `processFilledStop`: both methods handle the same closing
+                // fill — this one the venue's synchronous answer, that one the
+                // user stream's delivery — and the unique `index` is what
+                // decides which of them books it.
+                this.saveProfitToDb(profitUsd, res.data.updateTime)
+                // Same reason, and under the same gate, as in
+                // `processFilledStop` (spec 073).
+                this.data.profit = {
                   ...this.data.profit,
                   total: this.data.profit.total + profit,
                   totalUsd: this.data.profit.totalUsd + profitUsd,
-                },
+                }
               }
-              this.saveProfitToDb(
-                profitUsd,
-                res.data?.updateTime ?? +new Date(),
-              )
+              const data = {
+                currentBalances,
+                profit: this.data.profit,
+              }
               this.emit('bot settings update', data)
               this.updateData({ ...data })
             }
-            this.stop(true)
           }
+          // Spec 127: also when there was nothing to close — the grid is
+          // already cancelled and blocked, so not stopping leaves it bare.
+          this.stop(true)
         }
       } else {
         this.lockTpSlCheck = false
@@ -4553,32 +5284,13 @@ function createBotHelper<
           60 * 1000
         ) {
           this.lastCheckPerSymbol.set(msg.symbol, +new Date())
-          if (this.data) {
+          const bot = this.gridStatsSnapshot()
+          if (bot) {
             const data: BotParentProcessStatsEventDtoGrid = {
               event: 'processStats',
               botId: this.botId,
               botType: BotType.grid,
-              payload: {
-                data: msg,
-                bot: {
-                  _id: this.botId,
-                  exchange: this.data.exchange,
-                  initialBalances: this.data.initialBalances,
-                  initialPrice: this.data.initialPrice,
-                  currentBalances: this.data.currentBalances,
-                  realInitialBalances: this.data.realInitialBalances,
-                  settings: {
-                    marginType: this.data.settings.marginType,
-                    leverage: this.data.settings.leverage,
-                    profitCurrency: this.data.settings.profitCurrency,
-                  },
-                  position: this.data.position,
-                  profit: {
-                    total: this.data.profit.total,
-                  },
-                  stats: this.data.stats,
-                },
-              },
+              payload: { data: msg, bot },
             }
             DealStats.getInstance().updateStats(data)
           }
@@ -4878,6 +5590,7 @@ function createBotHelper<
           profit: this.data.profit,
           status: this.data.status,
           position: this.data.position,
+          closeEntry: this.data.closeEntry,
           currentBalances: this.data.currentBalances,
           lastPrice: this.data.lastPrice,
           lastUsdRate: this.data.lastUsdRate,

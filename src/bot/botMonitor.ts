@@ -24,6 +24,7 @@ import utils, { isCoinm } from '../utils'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { botDb, comboBotDb, dcaBotDb } from '../db/dbInit'
 import logger from '../utils/logger'
+import { gridPositionEntry } from './gridCloseEntry'
 
 const { findUSDRate } = utils
 
@@ -78,6 +79,7 @@ export type CalculateGridLiveStatsParams = {
     | 'profit'
     | 'status'
     | 'position'
+    | 'closeEntry'
     | 'currentBalances'
     | 'lastPrice'
     | 'lastUsdRate'
@@ -618,13 +620,16 @@ class BotMonitor {
         if (!current) {
           notUseValueChange = true
         } else {
+          // Spec 124: against the entry the value-changed TP/SL uses.
+          const entry = gridPositionEntry(current, bot.closeEntry)
           const diff =
             current.side === PositionSide.LONG
-              ? +findPrice.price - current.price
-              : current.price - +findPrice.price
+              ? +findPrice.price - entry
+              : entry - +findPrice.price
 
-          const perc = current.price !== 0 ? diff / current.price : 0
-          const val = current.qty * perc * +findPrice.price
+          // Spec 064: see the note in `helper.ts` `tpSl()`. The live value of
+          // the position is `qty * (lastPrice − entry)`.
+          const val = current.qty * diff
           valueCurrent = bot.profit.totalUsd + initialBalance / leverage + val
           valueChange = bot.profit.totalUsd + val
         }

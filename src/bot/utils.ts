@@ -439,10 +439,18 @@ export const getSettingsChangeDescription = (
       typeof oldSettings[key] !== 'undefined'
     ) {
       if (!Array.isArray(oldSettings[key])) {
+        // hodlNextBuy is a timestamp; daily timers only use its (UTC) date,
+        // with hodlAt applied in the user's timezone
+        const format = (value: unknown) =>
+          key === 'hodlNextBuy' && Number(value) > 0
+            ? (settings.hodlHourly ?? oldSettings.hodlHourly)
+              ? `${new Date(Number(value)).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+              : new Date(Number(value)).toISOString().slice(0, 10)
+            : value
         result.push(
           `${botSettingsKeyToPropertyName(
             key as keyof ClearDCABotSchema['settings'],
-          )}: ${oldSettings[key]} -> ${settings[key]}`,
+          )}: ${format(oldSettings[key])} -> ${format(settings[key])}`,
         )
       }
     }
@@ -486,6 +494,59 @@ export const complianceRestriction = 'Compliance restriction'
  * Its own subType so the admin rules can tune it without touching real errors.
  */
 export const positionLeftOpen = 'Position left open'
+
+/**
+ * A close request was accepted and answered `ok`, but the engine could not act
+ * on it and the deal is still live. Not a malfunction of the bot — the request
+ * was lost — but the user believes a position is closed when it is not, so it
+ * must reach them. Its own subType so the admin rules can tune it without
+ * touching real errors.
+ *
+ * Raised by calling `processError` with this subType directly; deliberately NOT
+ * in `errorDict`, which matches on message text and would then also claim any
+ * unrelated message that happened to contain the same words.
+ */
+export const closeNotActioned = 'Close request not actioned'
+
+/**
+ * A trailing TAKE PROFIT could not be executed: the exchange refused the
+ * closing order, every retry was refused too, and the deal is still open with
+ * its trail paused. Not a malfunction of the bot — the venue said no — but the
+ * user has an open, profitable-when-it-fired position that nothing will close
+ * for them now, so it must reach them. See spec `050`.
+ *
+ * Raised by calling `processError` with this subType directly; deliberately
+ * NOT in `errorDict`, which matches on message text and would then also claim
+ * any unrelated message that happened to contain the same words.
+ */
+export const trailingCloseFailed = 'Trailing take profit not executed'
+
+/**
+ * The venue refused a MARKET base order because its book is in limit-only mode,
+ * so the entry was re-placed as a LIMIT one instead of being abandoned. Not a
+ * malfunction of the bot — the substitution is the right call and it worked —
+ * but the user configured a market entry and got a limit one, and only they can
+ * change the bot's entry settings, so it must reach them. See spec `052`.
+ *
+ * Raised by calling `processError` with this subType directly; deliberately
+ * NOT in `errorDict`, which matches on message text and would then also claim
+ * any unrelated message that happened to contain the same words.
+ */
+export const limitOnlyEntryReplaced = 'Market entry replaced with limit'
+
+/**
+ * A DCA deal was not opened because the exchange minimum would have raised its
+ * base or safety orders past the configured size (`minOrderFloor.ts`). A
+ * property of one PAIR — its minimum — so it is reported per pair: keyed per
+ * bot, a 265-pair bot's single row kept the pair tag of the FIRST refusal while
+ * its text was rewritten by every later one, so the notification named one pair
+ * and tagged another.
+ *
+ * Raised by calling `processError` with this subType directly; deliberately
+ * NOT in `errorDict`, which matches on message text and would then also claim
+ * any unrelated message that happened to contain the same words.
+ */
+export const orderBelowExchangeMinSubType = 'Order below exchange minimum'
 
 export const errorDict = {
   'Leverage cannot exceed': futuresPosition,
@@ -619,6 +680,9 @@ export const errorDict = {
   'closed due to position liquidation': futuresLiquidation,
   'The order price cannot be': orderPrice,
   'Order qty is not a number': orderParams,
+  // Spec `084` §4.3: the submission boundary's own refusal of a size that
+  // rounded away to zero. Same class as the non-finite one above.
+  'Order qty must be greater than zero': orderParams,
   'The quantity increment is invalid': orderParams,
   'Quantity parameter cannot be empty': orderParams,
   'The order amount must': orderParams,
@@ -903,6 +967,10 @@ export const checkDCADealSettings = (
   allowedKeys = allowedSettingsKeys,
   onlyDcaKeys = onlyDcaSettingsKeys,
   onlyComboKeys = onlyComboSettingsKeys,
+  dcaConditions: string[] = [
+    DCAConditionEnum.percentage,
+    DCAConditionEnum.custom,
+  ],
 ): { status: StatusEnum.ok } | { status: StatusEnum.notok; reason: string } => {
   const keys = Object.keys(settings)
   if (keys.length === 0) {
@@ -972,10 +1040,7 @@ export const checkDCADealSettings = (
     checkArray(settings.multiTp) &&
     checkBoolean(settings.trailingTp) &&
     checkStringAsNumber(settings.trailingTpPerc, true) &&
-    checkStringAsEnum(settings.dcaCondition, [
-      DCAConditionEnum.percentage,
-      DCAConditionEnum.custom,
-    ]) &&
+    checkStringAsEnum(settings.dcaCondition, dcaConditions) &&
     checkArray(settings.dcaCustom)
   if (!checkTypes) {
     return { status: StatusEnum.notok, reason: 'Wrong settings' }
@@ -1204,6 +1269,9 @@ export const checkDCABotSettings = (
     'comboActiveMinigrids',
     'comboUseSmartGrids',
     'comboSmartGridsCount',
+    // Full-array replacements, validated by applyIndicatorSettingsUpdate.
+    'indicators',
+    'indicatorGroups',
   ]
   const onlyDcaKeys = [...onlyDcaSettingsKeys].filter((v) => v !== 'orderSize')
 
@@ -1225,6 +1293,13 @@ export const checkDCABotSettings = (
     allowedKeys,
     onlyDcaKeys,
     onlyComboKeys,
+    // A bot (not a running deal) may move onto indicator-driven safety
+    // orders; applyIndicatorSettingsUpdate checks it has a startDca indicator.
+    [
+      DCAConditionEnum.percentage,
+      DCAConditionEnum.custom,
+      DCAConditionEnum.indicators,
+    ],
   )
   if (basic.status === StatusEnum.notok) {
     return basic
@@ -1256,6 +1331,8 @@ export const checkDCABotSettings = (
     checkStringAsEnum(settings.startCondition, [
       StartConditionEnum.asap,
       StartConditionEnum.manual,
+      // Needs a startDeal indicator; applyIndicatorSettingsUpdate checks it.
+      StartConditionEnum.ti,
     ]) &&
     checkStringAsNumber(settings.maxNumberOfOpenDeals, true) &&
     checkBoolean(settings.useStaticPriceFilter) &&
@@ -1451,6 +1528,51 @@ export const checkDCABotSettings = (
 // contract-type suffix appended - the `_` in that suffix is not a
 // legacy `base_quote` delimiter and must not be split on below.
 export const isXperpPair = (pair: string) => /_UM_XPERP$/i.test(pair)
+
+export type PairLike = {
+  pair: string
+  baseAsset: { name: string }
+  quoteAsset: { name: string }
+}
+
+/**
+ * Resolve one pair string against an exchange's `pairs` rows.
+ *
+ * Two formats reach us, and only one of them is a key:
+ *
+ * - the **exchange-native symbol** (`ARBUSDT`, `BTCUSD_PERP`,
+ *   `BTCUSDT_260925`, `AAVE-USD_UM_XPERP`) - what every bot stores in
+ *   `settings.pair`, what `Bot.createBot`/`prepareDCABot` look up, and what
+ *   every API read hands back;
+ * - the documented API input format **`BASE_QUOTE`** (`ARB_USDT`) - which is
+ *   *not* unique: a venue lists a perpetual and several dated delivery
+ *   contracts on the same base and quote, so a split-only lookup can answer
+ *   with a different instrument than the caller meant.
+ *
+ * Native first is therefore both correct and safe: no pair row is named
+ * `${baseAsset}_${quoteAsset}`, so an exact match can never capture a
+ * `BASE_QUOTE` input, and a native symbol can never be torn into the wrong
+ * instrument. This generalises the X-Perp special case above, which was this
+ * same rule hand-applied to one suffix. See spec 067.
+ */
+export const findPairBySymbol = <T extends PairLike>(
+  pairs: T[],
+  input: string,
+): T | undefined => {
+  const symbol = input.trim()
+  const native = pairs.find((p) => p.pair === symbol)
+  if (native) {
+    return native
+  }
+  const [base, quote] = symbol.split('_')
+  if (!base || !quote) {
+    return undefined
+  }
+  return pairs.find(
+    (p) =>
+      p.baseAsset.name === base.trim() && p.quoteAsset.name === quote.trim(),
+  )
+}
 
 export const convertPairs = async (pairs: string[], exchange: ExchangeEnum) => {
   if (!pairs.length) {

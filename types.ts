@@ -282,6 +282,11 @@ export type ExchangeInfo = {
   // every other exchange => treated as canonical. Drives the pair-picker
   // "Canonical only" toggle. Danger List #1.
   isCanonical?: boolean
+  // Clean equity ticker behind a tokenized-stock market (`AAPL` for Bitget's
+  // `rAAPL`), set by the connector only where the exchange itself flags the
+  // market as a wrapper (Bitget v3 `isReality`). Absent => base name is the
+  // ticker. Danger List #1.
+  underlying?: string
 }
 
 export type TpSlCondition = 'valueChanged' | 'priceReached'
@@ -717,6 +722,16 @@ export type DCACustom = {
   uuid: string
 }
 
+/**
+ * One indicator-DCA ladder level as it stood when the deal opened. Level N is
+ * the N-th `startDca` indicator. Frozen per deal so a bot-settings save cannot
+ * resize or move the safety orders of a deal that is already running.
+ */
+export type DCAIndicatorLevel = {
+  orderSize?: string
+  minPercFromLast?: string
+}
+
 export enum CooldownOptionsEnum {
   symbol = 'symbol',
   bot = 'bot',
@@ -806,6 +821,10 @@ export interface DCABotSettings extends BaseSettings {
   closeAfterXwin?: string
   useCloseAfterXloss?: boolean
   closeAfterXloss?: string
+  useCloseAfterXconsecutiveWin?: boolean
+  closeAfterXconsecutiveWin?: string
+  useCloseAfterXconsecutiveLoss?: boolean
+  closeAfterXconsecutiveLoss?: string
   useCloseAfterXprofit?: boolean
   closeAfterXprofitValue?: string
   closeAfterXprofitCond?: IndicatorStartConditionEnum
@@ -909,6 +928,27 @@ export interface DCABotSettings extends BaseSettings {
   useSeparateMaxDealsOverAndUnderPerSymbol?: boolean
   maxDealsOverPerSymbol?: string
   maxDealsUnderPerSymbol?: string
+  /**
+   * Let the bot raise a Base/Safety Order to the exchange minimum when the
+   * configured size is below it. Off or missing: the deal is not opened on that
+   * pair and the user is notified. Bots that existed before this default were
+   * backfilled `true`. Regular DCA bots only.
+   */
+  allowRaiseToExchangeMin?: boolean
+  /**
+   * When the free balance cannot fund the whole deal (base order plus every
+   * safety order), open it anyway, scaled down to what is available: the base
+   * order and each safety order shrink by the same ratio, so the ladder keeps
+   * its shape. Off or missing: the deal is skipped, as before. Regular DCA bots
+   * with a fixed order size (base / quote / usd) only.
+   */
+  reduceToAvailableBalance?: boolean
+  /**
+   * Smallest base order a reduced deal may open with, in the base order size's
+   * unit. Below it the deal is skipped. Empty or 0: no floor beyond the
+   * exchange minimum.
+   */
+  reduceToAvailableMinSize?: string
   dcaByMarket?: boolean
 }
 
@@ -1048,6 +1088,10 @@ export type BotData = {
   created?: Date
   public?: boolean
   avgPrice?: number
+  flags?: string[]
+  feeByAsset?: { asset: string; total: number; totalUsd: number }[]
+  feePaid?: { base: number; quote: number }
+  feeSizingFallback?: FeeSizingFallback
 }
 export type DCABotData = {
   _id: string
@@ -1188,6 +1232,12 @@ export type DCADealsSettings = Pick<
 > & {
   avgPrice: number
   changed: boolean
+  dcaIndicatorLevels?: DCAIndicatorLevel[]
+  /**
+   * Deal-only limit on an indicator / custom ladder, set by the deal's
+   * "Change DCA levels" action. Unset = the full ladder. Spec `118`.
+   */
+  dcaLevelsCap?: number
   orderSizePercQty?: number
   slChangedByUser?: boolean
   updatedComboAdjustments?: boolean
@@ -1212,6 +1262,14 @@ export type ProfitLossStats = {
   unrealizedProfit: number
   usage: number
   maxUsage: number
+  /** Fee-inclusive uPnL in USD (main-app spec 019 §5). */
+  unrealizedProfitNet?: number
+  /** Fee-inclusive P&L in percent (9.8 = 9.8 %). */
+  unrealizedPercentNet?: number
+  /** usage in USD + fee-inclusive uPnL. */
+  valueUsd?: number
+  /** When the stats worker last persisted these stats. */
+  updatedAt?: Date
 }
 
 export type BlockOrder = { price: number; qty: number; side: OrderSideEnum }
@@ -1221,6 +1279,12 @@ export type Sizes = {
   dca: number[]
   origBase: number
   origDca: number[]
+  /**
+   * The deal was opened reduced to the available balance
+   * (`reduceToAvailableBalance`). While such a deal is open the bot opens no
+   * other reduced deal: the available balance goes to one deal, not split.
+   */
+  reducedToAvailable?: boolean
 }
 
 export enum DCADealFlags {
@@ -1228,6 +1292,7 @@ export enum DCADealFlags {
   futuresPrecision = 'futuresPrecision',
   externalTp = 'externalTp',
   externalSl = 'externalSl',
+  feeByAsset = 'feeByAsset',
 }
 
 export enum DCACloseTriggerEnum {
@@ -1296,6 +1361,9 @@ export interface DCADealsSchema extends SchemaI {
     base?: number
     quote?: number
   }
+  /** Per-asset fee ledger (spec 014 §2.1), gated behind
+   *  `DCADealFlags.feeByAsset`. Inherited by `ComboDealsSchema`. */
+  feeByAsset?: { asset: string; total: number; totalUsd: number }[]
   funding?: Funding
   avgPrice: number
   displayAvg: number
@@ -1390,6 +1458,82 @@ export interface DCADealsSchema extends SchemaI {
    * re-hitting the venue during a restriction escalates the penalty.
    */
   startBlocked?: DealStartBlock
+  /**
+   * A trailing TAKE PROFIT close the exchange refused, and what the engine is
+   * doing about it. Spec `050`.
+   *
+   * When the trail fires the deal is in profit, and that profit lasts only as
+   * long as the price does — so a refusal the venue owns (a lockout, a
+   * rate-limit ban, a 5xx) is retried on a progressive backoff rather than
+   * abandoned. This field is what makes that retry real rather than a timer in
+   * one worker's memory: it carries the deadline across a restart, and it is
+   * also the only "a trailing close is in flight" statement that survives one
+   * (`closeBySl` does not — it lives on the `FullDeal` wrapper, not here).
+   *
+   * `retrying` suppresses every other close path for this deal, so it is
+   * deliberately self-releasing: see `isTrailingRetryPending`. `paused` means
+   * the budget is spent, the trail is disarmed and the user has been told; it
+   * suppresses nothing, and it is cleared the moment the trail re-arms.
+   *
+   * Descriptive only — it never changes deal status.
+   */
+  trailingClose?: TrailingCloseRetry
+  /**
+   * Spec 015 §7 — set only for a deal that zeroed its TP quantity gross-up
+   * (spec §2, `quantityFeeIsThirdAssetOnly`) and had that real-fee-sized TP
+   * rejected by the venue in a way that looks size-shaped. `pending` is
+   * diagnostic only (does not change any TP's size yet); `confirmed` — set
+   * only once the SAME TP resent at the account-rate size then succeeds —
+   * is the one piece of evidence the real-fee assumption, not something
+   * else, was the problem, and gates every subsequent TP build for this
+   * deal straight to the account-rate size.
+   */
+  feeSizingFallback?: FeeSizingFallback
+}
+
+/**
+ * Spec 015 §7.3. Sibling to `DealStartBlock`, not a reuse of it — that field
+ * is hard-scoped to the opening order by its own comment.
+ */
+export type FeeSizingFallback = {
+  status: 'pending' | 'confirmed'
+  /** ms epoch when the real-fee attempt was first rejected and classified. */
+  since: number
+  /** ms epoch when the estimated-fee resend then succeeded. */
+  confirmedAt?: number
+  /** The classified rejection reason, verbatim. */
+  reason: string
+  /** clientOrderId of the real-fee attempt that got rejected. */
+  triggeredByOrderId: string
+}
+
+/**
+ * A refused trailing take-profit close and the retry the engine scheduled for
+ * it — see `DCADealsSchema['trailingClose']` and `bot/dca/trailingCloseRetry`.
+ */
+export type TrailingCloseRetry = {
+  /**
+   * `retrying` — an attempt is due at `nextAttempt`; nothing else may close
+   * this deal. `paused` — the budget is spent, the trail is disarmed, and it
+   * will not arm again until price crosses back over the arming line.
+   */
+  status: 'retrying' | 'paused'
+  /** Failed close attempts in this run, the initial one included. */
+  attempts: number
+  /** ms epoch of the first refusal in this run. */
+  since: number
+  /** ms epoch of the most recent refusal. */
+  lastAttempt: number
+  /** ms epoch the next attempt is due. `retrying` only. */
+  nextAttempt?: number
+  /** The venue's own rejection text, verbatim. */
+  reason: string
+  /**
+   * `paused` only: a tick has been observed on the far side of the arming
+   * line, so the tick that crosses back re-arms the trail. Persisted because
+   * a crossing is an event, and a restart must not forget one was earned.
+   */
+  rearmReady?: boolean
 }
 
 /**
@@ -1435,6 +1579,13 @@ export type AddFundsSettings = {
   limitPrice?: string
   asset: OrderSizeTypeEnum
   type?: AddFundsTypeEnum
+  /**
+   * The rest of a base order that opened its deal part-filled, resting as a
+   * LIMIT on a bot that may not enter at market. Spec `111`.
+   */
+  baseRemainder?: boolean
+  /** That base order's requested quantity, for "filled of total". */
+  baseTotal?: string
 }
 
 export interface ComboDealsSchema extends DCADealsSchema {
@@ -1459,6 +1610,9 @@ export interface ComboDealsSchema extends DCADealsSchema {
     base?: number
     quote?: number
   }
+  /** Per-asset fee ledger (spec 014 §2.1), gated behind
+   *  `DCADealFlags.feeByAsset`. */
+  feeByAsset?: { asset: string; total: number; totalUsd: number }[]
   funding?: Funding
   avgPrice: number
   displayAvg: number
@@ -1535,6 +1689,9 @@ export interface ComboMinigridSchema extends SchemaI {
     pureBase?: number
     pureQuote?: number
   }
+  /** Per-asset fee ledger (spec 014 §2.1), gated behind
+   *  `DCADealFlags.feeByAsset` (read off the owning deal). */
+  feeByAsset?: { asset: string; total: number; totalUsd: number }[]
   feePaid?: {
     base?: number
     quote?: number
@@ -1763,10 +1920,25 @@ export enum APIPermission {
   write = 'write',
 }
 
+export type LargeAccountContextStatsDoc = {
+  activeBots: number
+  openDeals: number
+  terminalBots: number
+  autoActive: boolean
+  computedAt: Date
+}
+
 export interface UserSchema extends SchemaI {
   username: string
   password: string
   bigAccount?: boolean
+  largeAccountOverride?: 'auto' | 'on' | 'off'
+  largeAccountOverrideBy?: 'user' | 'admin' | null
+  largeAccountOverrideAt?: Date
+  largeAccountStats?: {
+    live?: LargeAccountContextStatsDoc
+    paper?: LargeAccountContextStatsDoc
+  }
   tokens: UserToken[]
   exchanges: ExchangeInUser[]
   timezone: string
@@ -1821,6 +1993,58 @@ export interface BotEventSchema extends SchemaI {
   type?: MessageTypeEnum
   deal?: string
   symbol?: string
+}
+
+/** Who made a bot/deal settings change (change trail). */
+export type ChangeTrailActorType = 'user' | 'ai' | 'api' | 'webhook' | 'system'
+
+export type ChangeTrailActor = {
+  type: ChangeTrailActorType
+  runId?: string
+  messageId?: string
+  decisionId?: string
+}
+
+export type ChangeTrailAction =
+  | 'update_settings'
+  | 'reset_settings'
+  | 'close_deal'
+  | 'add_funds'
+  | 'reduce_funds'
+  | 'revert'
+
+/**
+ * Per-call overrides for the change-trail entry an API-layer entry point
+ * writes. `action` replaces the default (`update_settings`) — e.g. `revert`
+ * when the change restores earlier values; `reason` is stored as given.
+ */
+export type ChangeTrailOptions = {
+  action?: ChangeTrailAction
+  reason?: string
+}
+
+export type ChangeTrailChange = {
+  path: string
+  before?: unknown
+  after?: unknown
+}
+
+/**
+ * One bot or deal settings change, by any actor. Append-only audit record,
+ * kept 365 days (TTL). Written best-effort: a failed write never blocks the
+ * change it describes.
+ */
+export interface ChangeTrailSchema extends SchemaI {
+  userId: string
+  botId: string
+  botType: BotType
+  dealId?: string
+  scope: 'bot' | 'deal'
+  action: ChangeTrailAction
+  actor: ChangeTrailActor
+  changes: ChangeTrailChange[]
+  reason?: string
+  paperContext: boolean
 }
 
 export interface ReconcileSweepSchema extends SchemaI {
@@ -2019,6 +2243,17 @@ export type PositionInBot = {
   price: number
 }
 export interface BotSchema extends MainBot<BotSettings> {
+  /** Grid bots have no dcaBot/comboBot-style `flags` field today (spec 014 §3). */
+  flags?: string[]
+  /** Per-asset fee ledger (spec 014 §2.1) — one entry per asset a fee was ever
+   *  observed to be paid in, gated behind `BotFlags.feeByAsset`. */
+  feeByAsset?: { asset: string; total: number; totalUsd: number }[]
+  /** Running base/quote fee total, updated on every transaction (spec 014
+   *  §2.5) — grid has no "close" to finalize a total at the way DCA/combo
+   *  deals do, so this stays live for as long as the bot runs. */
+  feePaid?: { base: number; quote: number }
+  /** Spec 015 §7.3 — bot-level (grid has no deal to hang this on). */
+  feeSizingFallback?: FeeSizingFallback
   initialPrice: number
   initialPriceFrom?: InitialPriceFromEnum
   initialPriceStart?: number
@@ -2047,6 +2282,12 @@ export interface BotSchema extends MainBot<BotSettings> {
     required: Asset
   }
   position: PositionInBot
+  /**
+   * The entry a NEUTRAL futures grid's value-changed TP/SL values `position`
+   * against (spec 117), keyed to the position it was computed for. Valid only
+   * while side, qty and price still match `position` (spec 124 §4.2).
+   */
+  closeEntry?: GridCloseEntry
   /** Signed-position breakpoints {time, qty}, newest last (funding rewind). */
   positionHistory?: { time: number; qty: number }[]
   stats: ProfitLossStats
@@ -2054,6 +2295,8 @@ export interface BotSchema extends MainBot<BotSettings> {
   lastPriceRangeAlert?: number
   liveStats?: GridLiveStats
 }
+
+export type GridCloseEntry = PositionInBot & { entry: number }
 
 export type GridLiveStats = {
   budget: number
@@ -2234,12 +2477,34 @@ export type BotSymbolsStats = {
       dailyProfit: UsdAssetNumber
       dailyProfitPerc: number
       winRate: number
+      /** Gross profit / gross loss; see `profitFactorOf` for the encoding. */
       profitFactor: number
+      /**
+       * Sum of the winning / losing deals' profit (loss is negative). Optional:
+       * a record written before they existed carries neither until its pair's
+       * next close, which seeds both from the pair's deals (dcaHelper
+       * `botUpdateStats`).
+       */
+      grossProfit?: UsdAssetNumber
+      grossLoss?: UsdAssetNumber
     }
   }
   duration: {
     maxDealDuration: number
     avgDealDuration: number
+    /**
+     * Sum of `close - create` over the deals counted in {@link measuredDeals},
+     * the numerator of `avgDealDuration`. Optional: bots that traded before it
+     * existed have no history, and their averages start from the next close.
+     */
+    totalTime?: number
+    /**
+     * How many closed deals `totalTime` was accumulated from. Deliberately NOT
+     * `numerical.deals.profit + loss` — that count predates `totalTime` on
+     * every existing bot, so dividing by it would report a fraction of the
+     * real average rather than an average of the deals actually measured.
+     */
+    measuredDeals?: number
   }
   symbol: string
 }
@@ -2309,6 +2574,7 @@ export enum BotFlags {
   newBaseProfit = 'newBaseProfit',
   externalTp = 'externalTp',
   externalSl = 'externalSl',
+  feeByAsset = 'feeByAsset',
 }
 
 export type DealStatsForBot = {
@@ -2530,6 +2796,13 @@ export interface PairsSchema extends SchemaI {
    * canonical. Drives the pair-picker "Canonical only" toggle.
    */
   isCanonical?: boolean
+  /**
+   * Clean equity ticker behind a tokenized-stock market, for logo/name lookup.
+   * From the connector where the exchange flags the wrapper (Bitget
+   * `isReality`), else from the curated `CURATED_UNDERLYING` map; resolved by
+   * `resolveUnderlying` in the pairs cron. Absent => the base name is the ticker.
+   */
+  underlying?: string
 }
 
 export interface StoreFilesSchema extends SchemaI {
@@ -2551,9 +2824,27 @@ export interface FeesSchema extends SchemaI {
   pair: string
   maker: number
   taker: number
+  /** See `UserFee.source`. Persisted so a fallback cannot overwrite a real
+   *  rate; absent on rows written before this existed. */
+  source?: 'venue' | 'ladder'
 }
 
-export type UserFee = { maker: number; taker: number }
+export type UserFee = {
+  maker: number
+  taker: number
+  /**
+   * Where this rate came from, as reported by the connector. `venue` = the
+   * exchange told us what THIS account pays; `ladder` = it could not, so the
+   * rate is the published schedule's entry rung — a guess that is wrong for
+   * anyone off the bottom tier. Absent means "not reported", never "venue".
+   *
+   * Mirrors `UserFee` in exchange-connector's `core/src/exchange/types.ts`.
+   * The two have no compile-time link (Danger List #1) — keep them identical.
+   * Only `updateUserFee` reads it, to name the user whose lookup degraded:
+   * the connector sees credentials, never a userId, so it cannot say whose.
+   */
+  source?: 'venue' | 'ladder'
+}
 
 export type ClearFeesSchema = ExcludeDoc<FeesSchema>
 
@@ -3187,6 +3478,12 @@ export type CommonOrder = {
   status: OrderStatusType
   type: OrderTypeT
   side: OrderSideType
+  /**
+   * Something the user should know about an order the venue ACCEPTED, from the
+   * exchange connector — e.g. a Bitget Reality token whose book has nobody on
+   * the other side, so the order will wait. Never a refusal.
+   */
+  notice?: string
   fills?: {
     price: string
     qty: string
@@ -3194,6 +3491,53 @@ export type CommonOrder = {
     commissionAsset: string
     tradeId: string
   }[]
+  /**
+   * The fee the VENUE actually charged for this order, as the venue reported
+   * it — never a rate we applied ourselves. Mirrors `CommonOrder` in
+   * exchange-connector core and paper-trading field for field.
+   *
+   * This is the observation that `deal.commission` never was.
+   * `commission` is `qty * price * storedFeeRate` — an estimate, and only ever
+   * as good as the stored rate, which can silently stop matching what the
+   * venue charges. An observed fee cannot go stale that way.
+   *
+   * ABSENT MEANS "NOT OBSERVED", NEVER "FREE". Every producer omits the field
+   * rather than sending a `0`, and every consumer here must fall back to the
+   * estimate when it is missing — a fee we could not observe must never book
+   * as zero cost.
+   */
+  feePaid?: string
+  /**
+   * WHICH side of the pair the fee came out of, for the venues that answer the
+   * currency question by naming a side: Kraken (via `oflags`), Coinbase (which
+   * settles every fee in quote), Bybit derivatives (settle coin) and Bybit
+   * spot (the asset received). Maps straight onto `deal.feePaid.{base,quote}`.
+   */
+  feeSide?: 'base' | 'quote'
+  /**
+   * The fee asset's TICKER, for the venues that name a currency instead of a
+   * side. It may be NEITHER side of the pair: an account paying fees in BNB,
+   * BGB or KCS is charged in an asset it did not trade. Resolving it is this
+   * side's job, because this is the side that knows the order's
+   * `baseAsset`/`quoteAsset`.
+   */
+  feeAsset?: string
+  /**
+   * Set INSTEAD of `feePaid`/`feeAsset` when one order was charged in more
+   * than one currency — a partial BNB/BGB deduction covering part of the fee
+   * with the rest taken in the quote asset. The legs are not summed by the
+   * producer because they are different currencies and adding them would mean
+   * inventing an FX rate.
+   */
+  feeBreakdown?: { asset: string; amount: string }[]
+  /**
+   * The fee's USD value, when the VENUE itself computed and reported it —
+   * today, only Kraken spot's `fee_usd_equiv` (`websocket-connector-sh`
+   * spec 003 §2). Preferred over any rate-lookup for that leg (spec 014
+   * §1.4/§2.3): at least as accurate as anything derived from a
+   * separately-fetched price table, and skips a lookup entirely.
+   */
+  feePaidUsd?: string
 }
 
 /**
@@ -3225,6 +3569,17 @@ export type OrderQuarantine = {
 
 export type Order = CommonOrder & {
   _id?: string
+  /**
+   * Highest venue trade id already folded into `feePaid`.
+   *
+   * The user stream reports a fee PER TRADE, so a partially filled order's fee
+   * has to be accumulated across several events. Venue trade ids increase
+   * monotonically per symbol, so keeping the high-water mark makes that
+   * accumulation idempotent: a replayed or duplicated report — after a stream
+   * reconnect, or a bot restart that refills the queue — cannot be counted
+   * twice, and a genuinely new trade always is.
+   */
+  feeTradeId?: number
   exchange: ExchangeEnum
   exchangeUUID: string
   typeOrder: TypeOrder
@@ -3299,7 +3654,12 @@ export type UnPromise<T> = T extends Promise<infer U> ? U : T
 export interface AssetBalance {
   asset: string
   free: string
-  locked: string
+  /**
+   * Absent when the producing stream reports no hold figure (Kraken spot v2,
+   * websocket-connector-sh ≥ 1.14.11). Consumers must then leave the stored
+   * `locked` untouched — see `core/src/utils/balanceWrite.ts`.
+   */
+  locked?: string
   /**
    * The venue's own spendable figure for this asset, when the producing stream
    * publishes one. Mirrors `AssetBalance.venueAvailable` in
@@ -3435,6 +3795,43 @@ export interface SpotUpdate {
   symbol: string // Symbol
   totalQuoteTradeQuantity: string // Cumulative quote asset transacted quantity
   totalTradeQuantity: string // Cumulative filled quantity
+  /**
+   * The fee charged for THIS trade (Binance `n`) and the asset it was taken in
+   * (`N`), which may be neither side of the pair on a BNB-discount account.
+   *
+   * websocket-connector has always forwarded both — they are simply not
+   * per-order but per-TRADE, so a partially filled order emits several reports
+   * each carrying its own slice. That is why the consumer accumulates rather
+   * than overwrites, and why `tradeId` matters: it is what makes the
+   * accumulation safe against a replayed report.
+   *
+   * This is the ONLY fee source Binance has for an order that rests and fills
+   * later: neither `GET /api/v3/order` nor the futures order endpoint returns
+   * a commission at all.
+   */
+  commission?: string
+  commissionAsset?: string | null
+  tradeId?: number
+  /**
+   * The fee the venue reported, forwarded by `websocket-connector-sh` spec
+   * 003 for every venue but Binance (which uses `commission`/
+   * `commissionAsset`/`tradeId` above instead — its own per-trade shape,
+   * unchanged by that spec). Already an order-level running total by the
+   * time it reaches here — see spec 003 §2.1 for the per-venue
+   * cumulative-vs-per-fill resolution; this repo never accumulates these.
+   */
+  feePaid?: string
+  feeAsset?: string
+  /**
+   * WHICH side of the pair the fee came out of. Only paper-trading sets
+   * this — it always knows the side deterministically and never sets
+   * `feeAsset` (paper-trading spec 003) — real venues report `feeAsset`
+   * instead.
+   */
+  feeSide?: 'base' | 'quote'
+  feeBreakdown?: { asset: string; amount: string }[]
+  /** Venue-computed USD value of the fee — only Kraken spot today. */
+  feePaidUsd?: string
 }
 export type ExecutionReport = (SpotUpdate | OrderUpdate) & {
   liquidation?: boolean
@@ -3985,8 +4382,24 @@ export interface SSBCreditSchema extends SchemaI {
   multiply: number
 }
 
+/**
+ * The process that produced a stored backtest result, when it is not a plain
+ * backtest (e.g. a run that compares variants of the bot). `id` refers to the
+ * producer's own record; `status` / `progress` follow it while it runs, and
+ * the result fields stay empty until it completes.
+ */
+export type BacktestResultSource = {
+  kind: string
+  id: string
+  variant?: string | null
+  status?: string | null
+  /** 0 … 100 */
+  progress?: number | null
+}
+
 export interface DCABacktestingResult extends SchemaI {
   serverSide?: boolean
+  source?: BacktestResultSource
   noData?: boolean
   maxLeverage?: number
   financial: {
@@ -4122,6 +4535,7 @@ export type PeriodicStats = {
   }
 }
 export interface ComboBacktestingResult extends SchemaI {
+  source?: BacktestResultSource
   serverSide: boolean
   noData?: boolean
   maxLeverage?: number
@@ -4817,6 +5231,7 @@ export type InputGrid = {
     profitCurrency: ClearBotSchema['settings']['profitCurrency']
   }
   position: ClearBotSchema['position']
+  closeEntry?: ClearBotSchema['closeEntry']
   profit: {
     total: ClearBotSchema['profit']['total']
   }
@@ -4838,10 +5253,29 @@ export type BotParentProcessStatsEventDtoDcaCombo = {
 
 export type BotParentRemoveStatsEventDtoDcaCombo = {
   event: 'removeStats'
+  botType: BotType.combo | BotType.dca
   dealId: string
-  combo: boolean
-  time: number
 }
+
+/**
+ * A grid bot is tracked per BOT, not per deal, and its stats are sampled at
+ * most once a minute — so the window it stops in is never sampled and never
+ * written. The removal therefore carries the price the bot is stopping on, so
+ * the monitor can take one final measurement before it flushes and drops the
+ * entry (spec 064).
+ */
+export type BotParentRemoveStatsEventDtoGrid = {
+  event: 'removeStats'
+  botType: BotType.grid
+  payload: {
+    data: PriceMessage
+    bot: InputGrid
+  }
+}
+
+export type BotParentRemoveStatsEventDto =
+  | BotParentRemoveStatsEventDtoDcaCombo
+  | BotParentRemoveStatsEventDtoGrid
 
 export type BotParentProcessStatsEventDtoGrid = {
   event: 'processStats'
@@ -5201,6 +5635,13 @@ export interface MigrationSchema extends SchemaI {
 export type MigrationJob = {
   version: number
   job: () => Promise<void>
+  /**
+   * Optional read-only preview of {@link job}: counts the documents `job()`
+   * would touch, using the same filter, and writes nothing. Lets an operator
+   * size a bulk data migration before running it. A migration that has no
+   * cheap count, or nothing countable to preview, simply omits this.
+   */
+  dryRun?: () => Promise<number>
 }
 
 export enum BotServiceQueues {

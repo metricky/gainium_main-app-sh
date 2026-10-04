@@ -20,7 +20,12 @@ import crypto from 'crypto'
 import { resolveApiSecret } from '../utils/credentials'
 import logger from '../utils/logger'
 
-import { DCADealsSettings, OrderSizeTypeEnum, ExchangeEnum } from '../../types'
+import {
+  DCADealsSettings,
+  OrderSizeTypeEnum,
+  ExchangeEnum,
+  type ChangeTrailActor,
+} from '../../types'
 import {
   comboBotDb,
   comboDealsDb,
@@ -36,6 +41,8 @@ import {
 } from '../bot/utils'
 import { isCoinm, isFutures, isPaper } from '../utils'
 import { priceBalancesUsd } from '../utils/user'
+import { walletUuidOf } from '../utils/sharedWallet'
+import { applyIndicatorSettingsUpdate } from './v2/validators/indicatorUpdate'
 
 type ChangeBotPairsInputType = {
   botId?: string
@@ -266,6 +273,9 @@ declare global {
     }
   }
 }
+
+/** Change-trail actor for everything the public REST API changes. */
+const apiActor: ChangeTrailActor = { type: 'api' }
 
 const prefix = '[API Service]'
 
@@ -546,8 +556,15 @@ const allAPI = <R extends UserSchema = UserSchema>(
     const filter: Record<string, unknown> = {
       userId: `${user.id}`,
     }
+    // A linked leg's wallet is stored under its source connection.
+    const userExchanges = exchanges.data?.result?.exchanges
+    const walletUuid = exchangeId ? walletUuidOf(userExchanges, exchangeId) : ''
+    const requestedProvider = userExchanges?.find(
+      (e) => e.uuid === exchangeId,
+    )?.provider
+    const relinked = !!exchangeId && walletUuid !== exchangeId
     if (exchangeId) {
-      filter.exchangeUUID = exchangeId
+      filter.exchangeUUID = walletUuid
     }
     if (paperContext !== null && !exchangeId) {
       filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
@@ -585,18 +602,20 @@ const allAPI = <R extends UserSchema = UserSchema>(
       const priced = withUsd
         ? usdMap.get(`${b.exchangeUUID ?? ''}:${b.asset}`)
         : undefined
+      // Rows read through a link are reported as the leg that was asked for.
+      const code = relinked ? (requestedProvider ?? b.exchange) : b.exchange
       return {
         asset: b.asset,
         free: b.free,
         locked: b.locked,
-        exchangeCode: b.exchange,
-        exchangeMarket: isFutures(b.exchange) ? 'futures' : 'spot',
-        exchangeType: isFutures(b.exchange)
-          ? isCoinm(b.exchange)
+        exchangeCode: code,
+        exchangeMarket: isFutures(code) ? 'futures' : 'spot',
+        exchangeType: isFutures(code)
+          ? isCoinm(code)
             ? 'inverse'
             : 'linear'
           : undefined,
-        exchangeId: b.exchangeUUID,
+        exchangeId: relinked ? exchangeId : b.exchangeUUID,
         ...(withUsd
           ? { price: priced?.price ?? 0, usdValue: priced?.usdValue ?? 0 }
           : {}),
@@ -847,7 +866,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
       res.status(400).send(check)
       return
     }
-    Bot.updateDCADealSettings(user.id, '', dealId, settings).then((result) =>
+    Bot.updateDCADealSettings(user.id, '', dealId, settings, apiActor).then((result) =>
       res.send(result),
     )
   })
@@ -901,7 +920,13 @@ const allAPI = <R extends UserSchema = UserSchema>(
       res.status(400).send(check)
       return
     }
-    Bot.updateComboDealSettings(user.id, '', dealId, settings).then((result) =>
+    Bot.updateComboDealSettings(
+      user.id,
+      '',
+      dealId,
+      settings,
+      apiActor,
+    ).then((result) =>
       res.send(result),
     )
   })
@@ -962,7 +987,16 @@ const allAPI = <R extends UserSchema = UserSchema>(
       res.status(400).send(check)
       return
     }
-    const { pair, ...rest } = settings
+    const indicatorUpdate = applyIndicatorSettingsUpdate(
+      bot.data.result.settings,
+      settings,
+      bot.data.result.vars,
+    )
+    if (indicatorUpdate.status === StatusEnum.notok) {
+      res.status(400).send(indicatorUpdate)
+      return
+    }
+    const { pair, ...rest } = indicatorUpdate.settings
     let pairToUse = pair
     if (pair?.length) {
       const updatePairs = await Bot.changeDCABotPairs(
@@ -990,10 +1024,12 @@ const allAPI = <R extends UserSchema = UserSchema>(
         ...rest,
         pair: pairToUse,
         id: botId,
-        vars: bot.data.result.vars,
+        vars: indicatorUpdate.vars,
       },
       user.id,
       !!bot.data.result.paperContext,
+      undefined,
+      apiActor,
     ).then((result) =>
       result && result.status === StatusEnum.notok
         ? res.send(result)
@@ -1060,10 +1096,25 @@ const allAPI = <R extends UserSchema = UserSchema>(
       res.status(400).send(check)
       return
     }
+    const indicatorUpdate = applyIndicatorSettingsUpdate(
+      bot.data.result.settings,
+      settings,
+      bot.data.result.vars,
+    )
+    if (indicatorUpdate.status === StatusEnum.notok) {
+      res.status(400).send(indicatorUpdate)
+      return
+    }
     Bot.changeComboBot(
-      { ...settings, id: botId, vars: bot.data.result.vars },
+      {
+        ...indicatorUpdate.settings,
+        id: botId,
+        vars: indicatorUpdate.vars,
+      },
       user.id,
       !!bot.data.result.paperContext,
+      undefined,
+      apiActor,
     ).then((result) =>
       result && result.status === StatusEnum.notok
         ? res.send(result)
@@ -1215,6 +1266,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
       symbol,
       type,
       dealId,
+      apiActor,
     ).then((result) => res.send(result))
   })
 
@@ -1274,6 +1326,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
       symbol,
       type,
       dealId,
+      apiActor,
     ).then((result) => res.send(result))
   })
 
@@ -1453,6 +1506,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
           undefined,
           undefined,
           DCACloseTriggerEnum.api,
+          apiActor,
         ),
       )
     } else {
@@ -1465,6 +1519,7 @@ const allAPI = <R extends UserSchema = UserSchema>(
           undefined,
           undefined,
           DCACloseTriggerEnum.api,
+          apiActor,
         ),
       )
     }
@@ -1492,8 +1547,26 @@ const allAPI = <R extends UserSchema = UserSchema>(
     }
     res.send(
       botType === BotType.combo
-        ? await Bot.closeComboDeal(user.id, '', dealId, CloseDCATypeEnum.cancel)
-        : await Bot.closeDCADeal(user.id, '', dealId, CloseDCATypeEnum.cancel),
+        ? await Bot.closeComboDeal(
+            user.id,
+            '',
+            dealId,
+            CloseDCATypeEnum.cancel,
+            undefined,
+            undefined,
+            undefined,
+            apiActor,
+          )
+        : await Bot.closeDCADeal(
+            user.id,
+            '',
+            dealId,
+            CloseDCATypeEnum.cancel,
+            undefined,
+            undefined,
+            undefined,
+            apiActor,
+          ),
     )
   })
 
@@ -1554,6 +1627,14 @@ const allAPI = <R extends UserSchema = UserSchema>(
       if (check.status === StatusEnum.notok) {
         return res.status(400).send(check)
       }
+      const indicatorUpdate = applyIndicatorSettingsUpdate(
+        bot.data.result.settings,
+        rest,
+        bot.data.result.vars,
+      )
+      if (indicatorUpdate.status === StatusEnum.notok) {
+        return res.status(400).send(indicatorUpdate)
+      }
       if (pair?.length) {
         pair =
           (await Bot.checkPairs(bot.data.result.exchange, pair))?.data?.map(
@@ -1562,14 +1643,14 @@ const allAPI = <R extends UserSchema = UserSchema>(
       }
       const combinedSettings = {
         ...bot.data.result.settings,
-        ...(settings ?? {}),
+        ...indicatorUpdate.settings,
         pair: pair?.length ? pair : bot.data.result.settings.pair,
       }
       if (bot.data.result.settings.name && !settings?.name) {
         combinedSettings.name = `${bot.data.result.settings.name} (clone)`
       }
 
-      const vars = bot.data.result.vars
+      const vars = indicatorUpdate.vars
       if (rest && vars) {
         vars.paths = vars.paths.filter((p) => !(p.path in rest))
         const v = vars.paths.map((p) => p.variable)
@@ -1674,6 +1755,14 @@ const allAPI = <R extends UserSchema = UserSchema>(
       if (check.status === StatusEnum.notok) {
         return res.status(400).send(check)
       }
+      const indicatorUpdate = applyIndicatorSettingsUpdate(
+        bot.data.result.settings,
+        rest,
+        bot.data.result.vars,
+      )
+      if (indicatorUpdate.status === StatusEnum.notok) {
+        return res.status(400).send(indicatorUpdate)
+      }
       if (pair?.length) {
         pair =
           (await Bot.checkPairs(bot.data.result.exchange, pair))?.data?.map(
@@ -1682,13 +1771,13 @@ const allAPI = <R extends UserSchema = UserSchema>(
       }
       const combinedSettings = {
         ...bot.data.result.settings,
-        ...(rest ?? {}),
+        ...indicatorUpdate.settings,
         pair: pair?.length ? pair : bot.data.result.settings.pair,
       }
       if (bot.data.result.settings.name && !rest?.name) {
         combinedSettings.name = `${bot.data.result.settings.name} (clone)`
       }
-      const vars = bot.data.result.vars
+      const vars = indicatorUpdate.vars
       if (rest && vars) {
         vars.paths = vars.paths.filter((p) => !(p.path in rest))
         const v = vars.paths.map((p) => p.variable)

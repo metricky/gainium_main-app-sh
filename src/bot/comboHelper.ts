@@ -18,10 +18,15 @@ import type {
   BotParentProcessStatsEventDtoDcaCombo,
   DealStopLossCombo,
   CompareBalancesResponse,
-  OrderStatusType,
 } from '../../types'
 import type { InitialGrid } from './helper'
 import type { FullDeal } from './dcaHelper'
+import type { NewDealTrigger } from './newDealApproval'
+import { nextLadderLevel } from './dca/ladderLevels'
+import {
+  pickRestoreBaseEntry,
+  shouldSettlePartialBaseEntry,
+} from './dca/partialBaseEntry'
 import {
   minigridDb,
   comboTransactionsDb,
@@ -54,6 +59,8 @@ import {
   DCACloseTriggerEnum,
   TrailingModeEnum,
 } from '../../types'
+import { observedFeeOnSide, observedFeeSplit } from './orderFee'
+import { observedFeeLegs, accrueFeeLedger } from './feeLedger'
 import { IdMute, IdMutex } from '../utils/mutex'
 import utils from '../utils'
 const { sleep } = utils
@@ -67,6 +74,14 @@ import {
   comboSolveParts,
 } from './combo/tpSolve'
 import type { ComboTpSolveInput } from './combo/tpSolve'
+import { levelOf, reanchorLevelAfterFill } from './combo/reanchorAfterFill'
+import {
+  baseGridBelowMinimumBudget,
+  notEnoughBalanceNewDeal,
+  standingConditionKey,
+} from './conditionLatch'
+import { gridBudgetVerdict, gridBudgetRefusalMessage } from './gridBudgetGuard'
+import { capLadderPlacements } from './ladderPlacementCap'
 
 const mutex = new IdMutex()
 const mutexConcurrently = new IdMutex(300)
@@ -120,6 +135,10 @@ function createComboBotHelper<
     transactionsDb = comboTransactionsDb
     private lastMinigridOrder: Map<string, LastMinigridOrdes> = new Map()
     private usedOrderId: Map<string, Set<string>> = new Map()
+    /** Spec `120`: `closeDealById` calls in progress, per deal. */
+    private closesRunning: Map<string, number> = new Map()
+    /** Spec `120`: deals a close was requested for that are still open. */
+    private closeRequested: Set<string> = new Set()
     private feeOrderReasons: Map<string, string[]> = new Map()
     private lastFilledOrderMap: Map<string, Order> = new Map()
     private comboTtpPersistAt: Map<string, number> = new Map()
@@ -1037,6 +1056,8 @@ function createComboBotHelper<
       profitPureQuote: number
       pureFeeBase: number
       pureFeeQuote: number
+      feeLegs: { asset: string; amount: number; usdRate: number }[]
+      offPairFeeUsd: number
     }> {
       if (!this.shouldProceed()) {
         this.handleLog(this.notProceedMessage('create transaction'))
@@ -1117,8 +1138,63 @@ function createComboBotHelper<
       const _profitBase = await this.profitBase(deal?.deal)
       const qty = parseFloat(o.origQty)
       const price = parseFloat(o.price)
-      let comBase = o.side === OrderSideEnum.buy ? qty * fee.maker : 0
-      let comQuote = o.side === OrderSideEnum.sell ? qty * price * fee.maker : 0
+      // Prefer the fee the VENUE charged over `qty * rate`. The estimate below
+      // is only as good as the stored rate, and this is the number that ends
+      // up in the transaction's `pureFee*` and, through `updateMinigridFee`,
+      // in `minigrid.feePaid` and `deal.feePaid`.
+      //
+      // The fallback is per ORDER and deliberately not a zero: an order whose
+      // fee the venue did not report — or reported in an asset that is neither
+      // side of the pair, like a BNB deduction — still cost something, and
+      // `observedFeeSplit` returns null rather than a zeroed split precisely
+      // so that case cannot book as free.
+      // Prefer the fee the VENUE charged over `qty * rate`. The estimate below
+      // is only as good as the stored rate, and this is the number that ends
+      // up in the transaction's `pureFee*` and, through `updateMinigridFee`,
+      // in `minigrid.feePaid` and `deal.feePaid`.
+      //
+      // Expressed on the trade's side rather than the venue's — see
+      // `observedFeeOnSide`, which explains why the one-side shape has to be
+      // preserved here. An order whose fee could not be observed, or was
+      // charged in an asset that is neither side of the pair, keeps the
+      // estimate: it still cost something, and must not book as free.
+      const observedSplit = observedFeeSplit(
+        o,
+        minigrid.schema.symbol.baseAsset,
+        minigrid.schema.symbol.quoteAsset,
+      )
+      const observedFee = observedFeeOnSide(
+        observedSplit,
+        o.side === OrderSideEnum.buy ? 'base' : 'quote',
+        price,
+      )
+      // Spec 014 §2.1/§2.2/§3: new deals only.
+      const feeByAssetGated = !!deal?.deal.flags?.includes(
+        DCADealFlags.feeByAsset,
+      )
+      const feeLegRaw = feeByAssetGated
+        ? observedFeeLegs(
+            o,
+            minigrid.schema.symbol.baseAsset,
+            minigrid.schema.symbol.quoteAsset,
+          )
+        : []
+      // Off-pair fee (spec 014 §2.2): the venue reported a fee but it matches
+      // neither side of the pair — book 0 on base/quote (never the estimate)
+      // and let the ledger below carry it, USD only.
+      const offPair = feeByAssetGated && !observedSplit && feeLegRaw.length > 0
+      let comBase =
+        o.side === OrderSideEnum.buy
+          ? offPair
+            ? 0
+            : (observedFee ?? qty * fee.maker)
+          : 0
+      let comQuote =
+        o.side === OrderSideEnum.sell
+          ? offPair
+            ? 0
+            : (observedFee ?? qty * price * fee.maker)
+          : 0
       let profitQuote = 0
       let matchedPrice = 0
       let matchQty = 0
@@ -1127,6 +1203,43 @@ function createComboBotHelper<
       let pureQuote = 0
       const pureFeeBase = comBase
       const pureFeeQuote = comQuote
+      // Spec 014 §2.1/§2.3: every observed leg is recorded on the ledger
+      // (on-pair legs included, spec §4 Q3 — the raw split, not the
+      // observedFeeOnSide-converted amount), priced in USD at capture time.
+      let cachedPrices:
+        | { pair: string; price: number; exchange: string }[]
+        | undefined
+      const feeLegs: { asset: string; amount: number; usdRate: number }[] = []
+      let offPairFeeUsd = 0
+      for (const leg of feeLegRaw) {
+        let usdRate: number
+        if (feeLegRaw.length === 1 && o.feePaidUsd !== undefined) {
+          const usd = +o.feePaidUsd
+          usdRate = leg.amount > 0 ? usd / leg.amount : 0
+        } else if (leg.asset === minigrid.schema.symbol.baseAsset) {
+          usdRate = await this.getUsdRate(pair, 'base')
+        } else if (leg.asset === minigrid.schema.symbol.quoteAsset) {
+          usdRate = await this.getUsdRate(pair, 'quote')
+        } else {
+          if (!cachedPrices) {
+            const pricesResult = await this.exchange?.getAllPrices(true)
+            cachedPrices =
+              pricesResult?.status === StatusEnum.ok
+                ? pricesResult.data.map((p) => ({ ...p, exchange: 'all' }))
+                : []
+          }
+          usdRate =
+            utils.findUSDRate(
+              leg.asset,
+              cachedPrices ?? [],
+              this.data?.exchange,
+            ) || 0
+        }
+        feeLegs.push({ asset: leg.asset, amount: leg.amount, usdRate })
+        if (offPair) {
+          offPairFeeUsd += leg.amount * usdRate
+        }
+      }
       let matchedId = ''
       let profitUsdt = 0
       let amountBaseBuy = o.side === 'SELL' ? 0 : parseFloat(o.origQty)
@@ -1444,6 +1557,8 @@ function createComboBotHelper<
           profitPureQuote: pureQuote - pureFeeQuote,
           pureFeeBase,
           pureFeeQuote,
+          feeLegs,
+          offPairFeeUsd,
         }
       }
       this.endMethod(_id)
@@ -2243,6 +2358,14 @@ function createComboBotHelper<
           })
           this.updateBotDealStats(dealId)
           this.updateAssets(dealId)
+          // The user-facing safety-order number — see the DCA call site. Uses
+          // `nextLadderLevel` so an add-funds fill, which increments the same
+          // counter, does not shift every later alert by one.
+          this.sendSafetyOrderFilledAlert(
+            findDeal.deal,
+            order,
+            nextLadderLevel(findDeal.deal) - 1,
+          )
         })
 
         const gridOrders = await this.createMinigrid(
@@ -2555,42 +2678,130 @@ function createComboBotHelper<
     override async processCanceledOrder(
       order: Order,
       _updateTime: number,
-      expired: boolean,
+      _expired: boolean,
     ): Promise<void> {
-      if (!expired) {
+      if (order.typeOrder === TypeOrderEnum.dealStart) {
+        // A Combo entry is a MARKET order and arms no base-order timer, so this
+        // callback is the only report of a venue cancel. One that ended part
+        // filled is a position the account holds: open the deal on it, exactly
+        // as the DCA callback does. Spec 101 §4.1.
+        if (
+          order.dealId &&
+          shouldSettlePartialBaseEntry({
+            orderStatus: order.status,
+            dealStatus: this.getDeal(order.dealId)?.deal.status,
+            executedQty: order.executedQty,
+            updateTime: order.updateTime,
+            hasPendingCheck: this.dealTimersMap.has(order.dealId),
+          })
+        ) {
+          await this.settlePartialBaseEntry(order, order.dealId)
+        } else {
+          this.checkUnfilledBaseEntryCancel(order)
+        }
         return
       }
-      if (order.typeOrder === TypeOrderEnum.dealGrid) {
-        const positionChanged =
-          (this.isLong && order.side === OrderSideEnum.sell) ||
-          (!this.isLong && order.side === OrderSideEnum.buy)
-        if (positionChanged) {
-          const findMinigrid = this.getMinigrid(order.minigridId)
-
-          if (findMinigrid) {
-            findMinigrid.currentOrders = findMinigrid.currentOrders.filter(
-              (o) =>
-                !(
-                  o.price === +order.origPrice &&
-                  o.qty === +order.origQty &&
-                  o.side === order.side
-                ),
-            )
-            this.setMinigrid(findMinigrid)
+      if (order.typeOrder !== TypeOrderEnum.dealGrid) {
+        return
+      }
+      // A cancel this bot issued is not a hole in the ladder. Smart Grids
+      // cancels the levels furthest from the price on purpose and re-places
+      // them from `currentOrders` when the price comes back; pruning them here
+      // erased them for the life of the minigrid, and a position whose sells
+      // were trimmed while a lower minigrid traded was left with no sell order
+      // at all. Every other cancel the bot issues (re-placement, minigrid or
+      // deal close) rebuilds or removes the ladder itself. Spec 130.
+      if (this.isOwnCancel(order.clientOrderId)) {
+        return
+      }
+      // `CANCELED` and `EXPIRED` are the same fact — the level is off the book
+      // — and the side it sat on does not change that. Until spec 077 this ran
+      // only for `EXPIRED`, and then only for the side that closes the
+      // position, so on a long bot a cancelled BUY stayed on the ladder for the
+      // life of the minigrid. `currentOrders` is the only input to `grids` and,
+      // through `updateAssets`, to `deal.assets.used`, so every such cancel
+      // permanently overstated the quote the deal has reserved — and the deal,
+      // believing the funds were spoken for, could never re-place the levels
+      // into the hole the cancels left.
+      const price = +order.origPrice
+      const qty = +order.origQty
+      // The ladder is matched by LEVEL, not by client order id: it is
+      // regenerated wholesale on every fill and every entry is handed a fresh
+      // `newClientOrderId`, so the id on an entry is not the id of the order
+      // resting at it. A cancel that arrives after the engine has already
+      // re-placed that level must therefore leave it alone. `processOrderQueue`
+      // deletes the cancelled row from the live-order index before calling us,
+      // so anything still found here is a different, live order. Spec 077 §4.2.
+      const stillResting = this.getOrdersByStatusAndDealId({
+        dealId: order.dealId,
+        status: ['NEW', 'PARTIALLY_FILLED'],
+      }).some(
+        (o) =>
+          o.typeOrder === TypeOrderEnum.dealGrid &&
+          o.minigridId === order.minigridId &&
+          o.side === order.side &&
+          +o.origPrice === price &&
+          +o.origQty === qty,
+      )
+      if (stillResting) {
+        return
+      }
+      // Grid levels of THIS minigrid only: the deal-side ladder carries
+      // `dealRegular` safety orders, and one of those at the same price is not
+      // this order. Spec 077 §4.3.
+      const isCanceledLevel = (o: Grid) =>
+        o.type === TypeOrderEnum.dealGrid &&
+        o.minigridId === order.minigridId &&
+        o.price === price &&
+        o.qty === qty &&
+        o.side === order.side
+      let pruned = false
+      const findMinigrid = this.getMinigrid(order.minigridId)
+      if (findMinigrid) {
+        const remaining = findMinigrid.currentOrders.filter(
+          (o) => !isCanceledLevel(o),
+        )
+        if (remaining.length !== findMinigrid.currentOrders.length) {
+          pruned = true
+          findMinigrid.currentOrders = remaining
+          // The same three the fill path rewrites off a regenerated ladder;
+          // without them the level counts keep the cancelled orders. Spec 077
+          // §4.4.
+          const currentBalances = this.calculateMinigridBalances(remaining)
+          findMinigrid.schema.currentBalances = currentBalances
+          findMinigrid.schema.assets = {
+            used: currentBalances,
+            required: currentBalances,
           }
-          const findDeal = this.getDeal(order.dealId)
-          if (findDeal) {
-            findDeal.currentOrders = findDeal.currentOrders.filter(
-              (o) =>
-                !(
-                  o.price === +order.origPrice &&
-                  o.qty === +order.origQty &&
-                  o.side === order.side
-                ),
-            )
-            this.saveDeal(findDeal)
+          findMinigrid.schema.grids = {
+            buy: remaining.filter((g) => g.side === OrderSideEnum.buy).length,
+            sell: remaining.filter((g) => g.side === OrderSideEnum.sell).length,
           }
+          this.setMinigrid(findMinigrid)
+          await this.saveMinigrid(findMinigrid, {
+            currentBalances: findMinigrid.schema.currentBalances,
+            assets: findMinigrid.schema.assets,
+            grids: findMinigrid.schema.grids,
+          })
         }
+      }
+      const findDeal = this.getDeal(order.dealId)
+      if (findDeal) {
+        const remaining = findDeal.currentOrders.filter(
+          (o) => !isCanceledLevel(o),
+        )
+        if (remaining.length !== findDeal.currentOrders.length) {
+          pruned = true
+          findDeal.currentOrders = remaining
+          this.saveDeal(findDeal)
+        }
+      }
+      if (pruned && order.dealId) {
+        // `used` is derived from the minigrids' ladders — this is the line that
+        // gives the deal its funds back. Only when something actually left a
+        // ladder: a close sweep cancels every resting order in turn, and this
+        // is the expensive part of the method. Spec 077 §4.4.
+        await this.updateAssets(order.dealId)
       }
     }
 
@@ -2680,6 +2891,19 @@ function createComboBotHelper<
         base: (minigrid.schema.feePaid?.base ?? 0) + (tr?.pureFeeBase ?? 0),
         quote: (minigrid.schema.feePaid?.quote ?? 0) + (tr?.pureFeeQuote ?? 0),
       }
+      // Spec 014 §2.1/§4 Q2: mirrored onto both the minigrid and the owning
+      // deal, the same way feePaid already is above. Off-pair USD moves
+      // totalUsd only (§2.2) — total/pureBase/pureQuote already added above
+      // are unaffected.
+      for (const leg of tr?.feeLegs ?? []) {
+        minigrid.schema.feeByAsset = accrueFeeLedger(
+          minigrid.schema.feeByAsset,
+          leg.asset,
+          leg.amount,
+          leg.usdRate,
+        )
+      }
+      minigrid.schema.profit.totalUsd -= tr?.offPairFeeUsd ?? 0
 
       minigrid.schema.updateTime = order.updateTime
       if (deal) {
@@ -2696,6 +2920,15 @@ function createComboBotHelper<
           base: (deal.deal.feePaid?.base ?? 0) + (tr?.pureFeeBase ?? 0),
           quote: (deal.deal.feePaid?.quote ?? 0) + (tr?.pureFeeQuote ?? 0),
         }
+        for (const leg of tr?.feeLegs ?? []) {
+          deal.deal.feeByAsset = accrueFeeLedger(
+            deal.deal.feeByAsset,
+            leg.asset,
+            leg.amount,
+            leg.usdRate,
+          )
+        }
+        deal.deal.profit.totalUsd -= tr?.offPairFeeUsd ?? 0
         deal.deal.transactions = {
           buy:
             (deal.deal.transactions?.buy ?? 0) + (order.side === 'BUY' ? 1 : 0),
@@ -2720,57 +2953,106 @@ function createComboBotHelper<
           'settings.avgPrice': deal.deal.settings.avgPrice,
           displayAvg: deal.deal.displayAvg,
           feePaid: deal.deal.feePaid,
+          feeByAsset: deal.deal.feeByAsset,
           transactions: deal.deal.transactions,
           fullFee: deal.deal.fullFee,
           updateTime: deal.deal.updateTime,
         })
       }
-      let grids: Grid[] = (
-        (await this.generateGridsOnPrice(
-          {
-            pair,
-            initialGrids: minigrid.initialGrids,
-            lowPrice: minigrid.schema.settings.lowPrice,
-            topPrice: minigrid.schema.settings.topPrice,
-            levels: minigrid.schema.settings.levels,
-            updatedBudget: true,
-            _budget: minigrid.schema.settings.budget,
-            _lastPrice: +order.origPrice,
-            _initialPriceStart: minigrid.schema.initialPrice,
-            _side:
-              order.side === 'BUY' ? OrderSideEnum.buy : OrderSideEnum.sell,
-            all: true,
-            profitCurrency: settings.futures
-              ? 'quote'
-              : (settings.profitCurrency ?? 'quote'),
-            orderFixedIn: settings.futures
-              ? settings.coinm
-                ? ('quote' as const)
-                : ('base' as const)
-              : settings.profitCurrency === 'quote'
-                ? ('base' as const)
-                : ('quote' as const),
-          },
-          !this.isLong,
-          this.data?.settings.newBalance,
-          this.feeOrder,
-          deal?.deal.tags?.includes('newSell'),
-        )) ?? []
-      ).map((g) => ({
-        ...g,
-        newClientOrderId: this.getOrderId(`CMB-GR`),
-        dealId,
-        type: TypeOrderEnum.dealGrid,
-        minigridId: minigrid.schema._id,
-      }))
+      const side = order.side === 'BUY' ? OrderSideEnum.buy : OrderSideEnum.sell
+      const rebuildAt = async (lastPrice: number): Promise<Grid[]> =>
+        (
+          (await this.generateGridsOnPrice(
+            {
+              pair,
+              initialGrids: minigrid.initialGrids,
+              lowPrice: minigrid.schema.settings.lowPrice,
+              topPrice: minigrid.schema.settings.topPrice,
+              levels: minigrid.schema.settings.levels,
+              updatedBudget: true,
+              _budget: minigrid.schema.settings.budget,
+              _lastPrice: lastPrice,
+              _initialPriceStart: minigrid.schema.initialPrice,
+              _side: side,
+              all: true,
+              profitCurrency: settings.futures
+                ? 'quote'
+                : (settings.profitCurrency ?? 'quote'),
+              orderFixedIn: settings.futures
+                ? settings.coinm
+                  ? ('quote' as const)
+                  : ('base' as const)
+                : settings.profitCurrency === 'quote'
+                  ? ('base' as const)
+                  : ('quote' as const),
+            },
+            !this.isLong,
+            this.data?.settings.newBalance,
+            this.feeOrder,
+            deal?.deal.tags?.includes('newSell'),
+          )) ?? []
+        ).map((g) => ({
+          ...g,
+          newClientOrderId: this.getOrderId(`CMB-GR`),
+          dealId,
+          type: TypeOrderEnum.dealGrid,
+          minigridId: minigrid.schema._id,
+        }))
+      let grids: Grid[] = await rebuildAt(+order.origPrice)
+      /** Where the ladder's empty level is recorded as sitting after this fill. */
+      let anchorPrice = +order.origPrice
 
       let prev = minigrid.currentOrders
       const isLatest = this.isLastMinigridOrder(
         order.updateTime,
         +order.origPrice,
-        order.side === 'BUY' ? OrderSideEnum.buy : OrderSideEnum.sell,
+        side,
         minigrid.schema._id,
       )
+      if (isLatest) {
+        // Spec `116`: orders placed after this fill were not on the book when
+        // its price traded, so the rebuild must not count them as filled.
+        const level = reanchorLevelAfterFill({
+          rebuilt: grids,
+          levels: minigrid.initialGrids,
+          resting: this.getOrdersByStatusAndDealId({
+            status: ['NEW', 'PARTIALLY_FILLED'],
+            dealId,
+          })
+            .filter(
+              (o) =>
+                o.minigridId === minigrid.schema._id &&
+                o.typeOrder === TypeOrderEnum.dealGrid &&
+                o.clientOrderId !== order.clientOrderId,
+            )
+            .map((o) => ({
+              side: o.side === 'BUY' ? OrderSideEnum.buy : OrderSideEnum.sell,
+              price: +(o.origPrice || o.price),
+              placedAt: o.transactTime,
+            })),
+          side,
+          filledAt: order.updateTime,
+        })
+        const anchor = minigrid.initialGrids.find((l) => l.number === level)
+        if (anchor) {
+          anchorPrice =
+            side === OrderSideEnum.buy ? anchor.price.buy : anchor.price.sell
+          this.handleLog(
+            `Minigrid ${minigrid.schema._id} rebuilt at level ${anchor.number} (${anchorPrice}) after ${order.clientOrderId}: orders placed after the fill did not fill`,
+          )
+          grids = await rebuildAt(anchorPrice)
+          // The filled order's level is free again; let the diff re-place it.
+          const filled = levelOf(minigrid.initialGrids, side, +order.origPrice)
+          prev = prev.filter(
+            (g) => !(g.number === filled?.number && g.side === side),
+          )
+          this.lastMinigridOrder.set(minigrid.schema._id, {
+            time: order.updateTime,
+            price: anchorPrice,
+            side,
+          })
+        }
+      }
       if (!isLatest) {
         this.handleDebug(
           `Not latest order ${order.clientOrderId}, apply previous minigrid orders`,
@@ -2811,13 +3093,9 @@ function createComboBotHelper<
         minigrid.schema.avgPrice = avgPrice
         const prevPrice = minigrid.schema.lastPrice
         minigrid.schema.lastPrice = isLatest
-          ? +order.origPrice
+          ? anchorPrice
           : minigrid.schema.lastPrice
-        minigrid.schema.lastSide = isLatest
-          ? order.side === 'BUY'
-            ? OrderSideEnum.buy
-            : OrderSideEnum.sell
-          : minigrid.schema.lastSide
+        minigrid.schema.lastSide = isLatest ? side : minigrid.schema.lastSide
         if (settings.comboUseSmartGrids && settings.comboSmartGridsCount) {
           const count = +(settings.comboSmartGridsCount ?? '0')
           if (count && !isNaN(count)) {
@@ -2878,6 +3156,7 @@ function createComboBotHelper<
         lastSide: minigrid.schema.lastSide,
         avgPrice: minigrid.schema.avgPrice,
         feePaid: minigrid.schema.feePaid,
+        feeByAsset: minigrid.schema.feeByAsset,
       })
 
       if (
@@ -3027,15 +3306,22 @@ function createComboBotHelper<
           }).filter(
             (o) => o.minigridId === minigrid.schema._id && o.status === 'NEW',
           )
-          for (const o of minigridOrders) {
-            await this.cancelOrderOnExchange(o)
+          // Spec `082` §3 — the minigrid is closing and every one of its
+          // resting orders goes; the loop has no early return.
+          await this.primeCancelBatch(minigridOrders)
+          try {
+            for (const o of minigridOrders) {
+              await this.cancelOrderOnExchange(o)
+            }
+          } finally {
+            this.clearCancelBatch()
           }
           for (const o of this.pendingOrdersList.get(minigrid.schema._id) ??
             []) {
             this.stopList.add(o.newClientOrderId)
           }
           this.pendingOrdersList.delete(minigrid.schema._id)
-          if (!deal.closeBySl) {
+          if (!deal.closeBySl && !this.isDealClosing(dealId)) {
             await this.placeOrders(
               this.botId,
               pair,
@@ -3112,7 +3398,9 @@ function createComboBotHelper<
           )
         }
       }
-      if (!deal?.closeBySl) {
+      // Spec `120`: the fill is recorded above; while the deal is being
+      // closed nothing is placed for it.
+      if (!deal?.closeBySl && !this.isDealClosing(dealId)) {
         await this.placeOrders(this.botId, pair, dealId, toPlace)
         this.autoRebalancing(this.botId, dealId)
       } else {
@@ -3131,14 +3419,95 @@ function createComboBotHelper<
         this.serviceRestart && !this.secondRestart,
       )
       this.usedOrderId.delete(dealId)
+      this.closeRequested.delete(dealId)
       this.updateUsedOrderId()
       this.updateBotDealStats(dealId)
+    }
+    /**
+     * Spec `120`. Closing a deal cancels every resting grid order, and one
+     * that was partly filled comes back as a fill, which `updateMinigrid`
+     * processes after the close's own `allowToPlaceOrders` gate has already
+     * lifted. `closeBySl` is the only close signal it reads, and a manual
+     * close never sets it. So the fill rebuilt the ladder and placed grid
+     * BUYs and SELLs into a deal that was being sold. Track the close for
+     * as long as it runs and, afterwards, for as long as its closing order is
+     * live. Not tracked when the close leaves nothing resting, so a refused
+     * close does not freeze the grid.
+     */
+    override async closeDealById(
+      botId: string,
+      dealId: string,
+      closeType: CloseDCATypeEnum = CloseDCATypeEnum.leave,
+      reopen = true,
+      forceMarket = false,
+      slSource = false,
+      checkProfit = false,
+      price = '',
+      liquidationPrice?: number,
+      sl = false,
+      closeTrigger?: DCACloseTriggerEnum,
+      count = 0,
+    ) {
+      const args = [
+        botId,
+        dealId,
+        closeType,
+        reopen,
+        forceMarket,
+        slSource,
+        checkProfit,
+        price,
+        liquidationPrice,
+        sl,
+        closeTrigger,
+        count,
+      ] as const
+      const tracked =
+        (closeType === CloseDCATypeEnum.closeByMarket ||
+          closeType === CloseDCATypeEnum.closeByLimit) &&
+        this.getDeal(dealId)?.deal.status === DCADealStatusEnum.open
+      if (!tracked) {
+        return super.closeDealById(...args)
+      }
+      this.closesRunning.set(dealId, (this.closesRunning.get(dealId) ?? 0) + 1)
+      this.closeRequested.add(dealId)
+      try {
+        return await super.closeDealById(...args)
+      } finally {
+        const left = (this.closesRunning.get(dealId) ?? 1) - 1
+        if (left > 0) {
+          this.closesRunning.set(dealId, left)
+        } else {
+          this.closesRunning.delete(dealId)
+          if (!this.hasLiveCloseOrder(dealId)) {
+            this.closeRequested.delete(dealId)
+          }
+        }
+      }
+    }
+    private hasLiveCloseOrder(dealId: string) {
+      return (
+        this.getDeal(dealId)?.deal.status === DCADealStatusEnum.open &&
+        this.getOrdersByStatusAndDealId({
+          status: ['NEW', 'PARTIALLY_FILLED'],
+          dealId,
+        }).some((o) => o.typeOrder === TypeOrderEnum.dealTP)
+      )
+    }
+    /** Spec `120` §4.1/§4.2 — no grid order may be placed for this deal. */
+    private isDealClosing(dealId: string) {
+      return (
+        !!this.closesRunning.get(dealId) ||
+        (this.closeRequested.has(dealId) && this.hasLiveCloseOrder(dealId))
+      )
     }
     override clearClassProperties(clearRedis = false, start = false) {
       super.clearClassProperties(clearRedis, start)
       this.minigrids = new Map()
       this.lastMinigridOrder = new Map()
       this.usedOrderId = new Map()
+      this.closesRunning = new Map()
+      this.closeRequested = new Set()
     }
     override async afterBotStop() {
       // super handles stopPriceTimer / stopReconcileSweep /
@@ -3777,14 +4146,16 @@ function createComboBotHelper<
               )
             }
           }
+          // Unrounded running level of the ladder. Each level is
+          // `step × scale^(i-1)` of the start price beyond the one before; only
+          // the level itself is rounded to the tick, so the rounding does not
+          // carry into every level after it.
+          let ladderLevel = latestPrice
           for (let i = 1; i <= (ordersCount ?? 0); i++) {
             const stepVal = stepScale ** (i - 1)
             const volumeVal = volumeScale ** (i - 1)
-            let price = this.math.round(
-              (i === 1 ? latestPrice : orders[orders.length - 1].price) -
-                (this.isLong ? 1 : -1) * gridStep * stepVal,
-              symbol.priceAssetPrecision,
-            )
+            ladderLevel -= (this.isLong ? 1 : -1) * gridStep * stepVal
+            let price = this.math.round(ladderLevel, symbol.priceAssetPrecision)
             if (i === 1) {
               if (price === latestPrice) {
                 price = this.math.round(
@@ -3796,7 +4167,14 @@ function createComboBotHelper<
               }
             }
             if (i > 1) {
-              if (price === orders[orders.length - 1].price) {
+              const prevPrice = orders[orders.length - 1]?.price ?? 0
+              if (
+                price === prevPrice ||
+                // A level rounded off the unrounded ladder can land behind the
+                // previous one when this guard pushed that one a tick further.
+                (orders.length > 0 &&
+                  (this.isLong ? price > prevPrice : price < prevPrice))
+              ) {
                 price = this.math.round(
                   orders[orders.length - 1].price +
                     (this.isLong ? -1 : 1) *
@@ -4145,7 +4523,17 @@ function createComboBotHelper<
       }
       return []
     }
-    override async checkBalance(symbol: string) {
+    override async checkBalance(symbol: string): Promise<{
+      status: boolean
+      required: number
+      available: number
+      price: number
+      /**
+       * The balance could not be READ. This is not a statement about what
+       * the account holds — callers must not price a shortfall off it.
+       */
+      unknown?: boolean
+    }> {
       const result = {
         status: true,
         required: 0,
@@ -4171,6 +4559,18 @@ function createComboBotHelper<
       }
       const ex = await this.getExchangeInfo(symbol)
       const balance = await this.checkAssets(true, true)
+      if (!balance) {
+        // Same defect and same reasoning as the DCA path; see
+        // `dcaHelper.checkBalance` and spec 054.
+        this.handleDebug('Cannot read balances, bypass check balance')
+        return {
+          status: false,
+          required: 0,
+          available: 0,
+          price: 0,
+          unknown: true,
+        }
+      }
       const leverage = await this.getLeverageMultipler()
       const latestPrice = await this.getLatestPrice(symbol)
       if (latestPrice === 0) {
@@ -4288,7 +4688,11 @@ function createComboBotHelper<
             ? (balance?.get(ed.quoteAsset.name)?.free ?? 0)
             : balance?.get(ed.baseAsset.name)?.free) ?? 0
       if (requiredAmount / leverage > available) {
-        available = await this.pooledMarginOrKeep(ed.quoteAsset.name, available)
+        available = await this.pooledMarginOrKeep(
+          ed.quoteAsset.name,
+          available,
+          latestPrice,
+        )
       }
       if (requiredAmount / leverage > available) {
         return {
@@ -4339,6 +4743,92 @@ function createComboBotHelper<
           this.saveMinigridToRedis(this.botId, false)
         }
       }
+    }
+
+    /**
+     * Refuse a new deal whose base order budget cannot fund every base-grid
+     * level at the venue's per-order minimum. Spec 087.<br />
+     *
+     * A combo base grid splits the base order's own notional across its levels,
+     * and on futures {@link getBaseOrder} then re-sizes the base order to the
+     * sum of those levels so the position and the ladder that unwinds it agree
+     * (spec 086). When a level's budget share falls below the venue minimum,
+     * `MainBot.generateGridsOnPrice` raises it to that minimum, and the inflated
+     * sum lands on the POSITION — silently, and by a factor that grows with the
+     * level count. There is no size the grid could take instead: below the
+     * minimum it is unplaceable. So the deal must not open.<br />
+     *
+     * Grid bots answer this at start, for the whole bot
+     * ({@link BotHelper#refuseStartBelowMinimumBudget}, spec 068). A combo bot
+     * holds a pair LIST and the needed budget is per-pair
+     * (`≈ levels × max(minQty × price, minNotional)`), so the refusal is per
+     * pair and per deal — a pair that cannot be funded opens no deal while the
+     * rest of the bot trades on. That also reaches bots already running in this
+     * state, which a start-time check would not until someone restarted them.
+     * <br />
+     *
+     * Futures only: the spot branch of {@link getBaseOrder} never copies the
+     * grid sum onto the base order, so the clamps cannot reach the position
+     * there. Fail-open on anything unsizeable (no price, no exchange info, no
+     * sizing report) — that is the behaviour before this check existed.
+     *
+     * @returns {boolean} true when the deal was refused
+     */
+    async refuseDealBelowMinimumBudget(symbol: string): Promise<boolean> {
+      const key = standingConditionKey(baseGridBelowMinimumBudget, symbol)
+      if (!this.futures) {
+        return false
+      }
+      // No dealId: read-only. `getBaseOrder` only writes `balanceStart` when it
+      // is given one, and this is the same call `checkBalance` already makes.
+      const base = await this.getBaseOrder(symbol)
+      const sizing = this.lastGridSizing
+      const budget = base?.minigridBudget
+      if (!base || !sizing || !budget) {
+        return false
+      }
+      const verdict = gridBudgetVerdict({
+        budget,
+        wanted: sizing.wanted,
+        minimum: sizing.minimum,
+      })
+      if (!verdict.refuse) {
+        // The condition cleared — re-arm so a return of it is reported.
+        this.standingConditionLatch.clear(key)
+        return false
+      }
+      const settings = await this.getAggregatedSettings()
+      const ed = await this.getExchangeInfo(symbol)
+      // Once per (pair, condition), not once per cycle — the level count and
+      // the base order size are settings, so nothing but an edit clears this.
+      // See `openNewDeal`'s balance refusal and spec 008.
+      if (this.standingConditionLatch.shouldReport(key, +new Date())) {
+        this.handleErrors(
+          gridBudgetRefusalMessage({
+            budget,
+            minimumBudget: verdict.minimumBudget,
+            asset:
+              (this.coinm ? ed?.baseAsset.name : ed?.quoteAsset.name) ?? '',
+            levels: Math.floor(
+              +(settings.baseGridLevels ?? settings.gridLevel ?? '1'),
+            ),
+            pair: symbol,
+            // Not the grid bots' "Bot will stop": this refuses one pair and
+            // leaves the bot running.
+            advice:
+              'Increase the base order size or reduce the number of base grid levels. No deal will start on this pair',
+          }),
+          'openNewDeal',
+          '',
+          false,
+          true,
+          true,
+          false,
+          // `symbol` so the alert names the pair the refusal happened on.
+          symbol,
+        )
+      }
+      return true
     }
 
     override async getBaseOrder(
@@ -4409,7 +4899,18 @@ function createComboBotHelper<
               : long
                 ? ed.quoteAsset.name
                 : ed.baseAsset.name
-            const find = balances.data.find((b) => b.asset === asset)
+            const held = balances.data.find((b) => b.asset === asset)
+            // Pooled collateral (OKX Multi-currency margin, Kraken flex,
+            // Bitget multi_assets): the quote row can be 0 or missing while
+            // the account margins the deal from other coins.
+            const find = this.futures
+              ? await this.withPooledCollateral(
+                  asset,
+                  ed.quoteAsset.name,
+                  held,
+                  priceRequest,
+                )
+              : held
             if (find) {
               let useQty =
                 orderSizeType === OrderSizeTypeEnum.percFree
@@ -4734,7 +5235,10 @@ function createComboBotHelper<
       }
       const dealSettings = this.getInitalDealSettings()
       if (this.data && symbolData && dealSettings) {
-        const flags: DCADealFlags[] = [DCADealFlags.futuresPrecision]
+        const flags: DCADealFlags[] = [
+          DCADealFlags.futuresPrecision,
+          DCADealFlags.feeByAsset,
+        ]
         if (this.data.flags?.includes(BotFlags.externalSl)) {
           flags.push(DCADealFlags.externalSl)
         }
@@ -5198,6 +5702,7 @@ function createComboBotHelper<
       dynamic = false,
       time = 0,
       cbIfNotOpened?: () => void,
+      trigger?: NewDealTrigger,
     ) {
       if (!this.loadingComplete) {
         this.runAfterLoadingQueue.push(() =>
@@ -5208,6 +5713,7 @@ function createComboBotHelper<
             dynamic,
             time,
             cbIfNotOpened,
+            trigger,
           ),
         )
         return this.handleDebug('Loading not complete yet')
@@ -5268,15 +5774,45 @@ function createComboBotHelper<
           (skipRange || (await this.checkInRange(symbol))) &&
           this.data?.status !== BotStatusEnum.closed
         ) {
+          // Spec 087. Before the balance check, because this is a settings
+          // fault whatever the account holds — and a shortfall computed from an
+          // over-committed base order would name the wrong cause.
+          if (await this.refuseDealBelowMinimumBudget(symbol)) {
+            this.resetPending(this.botId, symbol)
+            this.endMethod(_id)
+            if (cbIfNotOpened) {
+              cbIfNotOpened()
+            }
+            return
+          }
           let checkBalance = await this.checkBalance(symbol)
           if (!checkBalance.status) {
             this.handleDebug(
-              `Not enough balance to start new deal. Required: ${checkBalance.required}, available: ${checkBalance.available}, repeat check in 5 seconds`,
+              checkBalance.unknown
+                ? `Cannot read balance to start new deal ${symbol}, repeat check in 5 seconds`
+                : `Not enough balance to start new deal. Required: ${checkBalance.required}, available: ${checkBalance.available}, repeat check in 5 seconds`,
             )
             await sleep(5000)
             checkBalance = await this.checkBalance(symbol)
           }
+          if (checkBalance.unknown) {
+            // Same defect and same reasoning as the DCA path, latch policy
+            // included; see `dcaHelper.openNewDeal` and spec 054.
+            this.handleDebug(
+              `Cannot read balance, wont open new deal ${symbol}`,
+            )
+            this.endMethod(_id)
+            this.resetPending(this.botId, symbol)
+            if (cbIfNotOpened) {
+              cbIfNotOpened()
+            }
+            return
+          }
           if (checkBalance.status) {
+            // The shortfall cleared — re-arm so a return of it is reported.
+            this.standingConditionLatch.clear(
+              standingConditionKey(notEnoughBalanceNewDeal, symbol),
+            )
             if (!(skip && !dynamic)) {
               const cooldownStart = await this.checkCooldownStart(
                 this.botId,
@@ -5333,6 +5869,25 @@ function createComboBotHelper<
                 return
               }
             }
+            // Last step before the deal exists: every gate above has passed.
+            // Same hook as the DCA path (inherited `approveNewDeal`).
+            if (
+              !(await this.checkNewDealApproval(
+                symbol,
+                skip,
+                dynamic,
+                trigger,
+                settings.startCondition,
+                settings.indicators,
+              ))
+            ) {
+              this.resetPending(this.botId, symbol)
+              this.endMethod(_id)
+              if (cbIfNotOpened) {
+                cbIfNotOpened()
+              }
+              return
+            }
             this.updateDealLastTime(this.botId, 'opened', +new Date(), symbol)
             let sizes: Sizes | undefined | null
             if (this.useCompountReduce) {
@@ -5366,7 +5921,29 @@ function createComboBotHelper<
                 ? `, price: ${checkBalance.price} ${ed.quoteAsset.name}`
                 : ''
             }`
-            this.handleErrors(msg, 'openNewDeal', '', false, true)
+            // Once per (pair, condition), not once per cycle — same defect and
+            // same reasoning as the DCA path; see `dcaHelper.openNewDeal` and
+            // spec 008. Combo has no terminal deal type, so there is no
+            // one-shot exemption here.
+            if (
+              this.standingConditionLatch.shouldReport(
+                standingConditionKey(notEnoughBalanceNewDeal, symbol),
+                +new Date(),
+              )
+            ) {
+              // `symbol` (8th arg) so the alert names the pair the refusal
+              // actually happened on; see `dcaHelper.openNewDeal`.
+              this.handleErrors(
+                msg,
+                'openNewDeal',
+                '',
+                false,
+                true,
+                true,
+                false,
+                symbol,
+              )
+            }
             this.resetPending(this.botId, symbol)
             if (cbIfNotOpened) {
               cbIfNotOpened()
@@ -5951,7 +6528,7 @@ function createComboBotHelper<
       })
         .filter((o) => o.status === 'FILLED' || +o.executedQty > 0)
         .sort((a, b) => +b.updateTime - +a.updateTime)[0]
-      return await this.findDiffCombo(
+      const diff = await this.findDiffCombo(
         [
           ...deal.currentOrders.filter((g) => g.type !== TypeOrderEnum.dealTP),
           ...[...minigrids.flatMap((m) => m.currentOrders)],
@@ -5962,6 +6539,46 @@ function createComboBotHelper<
         deal,
         true,
       )
+      // `findDiff` pairs a ladder level with a resting order on price alone,
+      // and `checkOrders` places `new` while ignoring `cancel`. A reload
+      // rebuilds the ladder from the deal's start price, so a level priced a
+      // tick differently than the order already resting there (a rounding
+      // change since the deal opened) was placed a second time next to it.
+      // The resting order is that level's live order: keep it, place nothing.
+      // Spec 105.
+      const restingLevels = new Set(
+        activeRegularOrders
+          .filter(
+            (o) => o.typeOrder === TypeOrderEnum.dealRegular && o.dcaLevel,
+          )
+          .map(
+            (o) =>
+              `${o.side === 'BUY' ? OrderSideEnum.buy : OrderSideEnum.sell}@${o.dcaLevel}`,
+          ),
+      )
+      const paired = diff.new.filter(
+        (g) =>
+          !(
+            g.type === TypeOrderEnum.dealRegular &&
+            g.dcaLevel &&
+            restingLevels.has(`${g.side}@${g.dcaLevel}`)
+          ),
+      )
+      // Whatever the pairing decided, never rest more safety orders than the
+      // ladder holds. Spec 107.
+      const { place, dropped } = capLadderPlacements(
+        deal.currentOrders.filter((g) => !g.hide),
+        activeRegularOrders,
+        paired,
+      )
+      if (dropped.length) {
+        this.handleWarn(
+          `Deal ${deal.deal._id} reload: refused ${dropped.length} safety order(s) at ${dropped
+            .map((g) => g.price)
+            .join(', ')}: they would rest more orders than the ladder holds`,
+        )
+      }
+      return { ...diff, new: place }
     }
 
     @IdMute(
@@ -6276,41 +6893,47 @@ function createComboBotHelper<
       )
       if (startDeals.length > 0) {
         for (const d of startDeals) {
-          const inDb = await this.ordersDb.readData<{
-            symbol: string
-            clientOrderId: string
-            status: OrderStatusType
-          }>(
+          // Not filtered on status: a base order the venue cancelled after a
+          // part fill was hidden by `status: { $ne: 'CANCELED' }`, and the deal
+          // fell through to "not started yet" and bought its entry again on top
+          // of the position. `pickRestoreBaseEntry` keeps the old choice
+          // wherever the old query made one. Spec 101 §4.2, as DCA's spec 048.
+          const inDb = await this.ordersDb.readData<Order>(
             {
               botId: this.botId,
               dealId: d.deal._id,
               typeOrder: TypeOrderEnum.dealStart,
-              status: { $ne: 'CANCELED' },
             },
-            { symbol: 1, clientOrderId: 1, status: 1 },
+            undefined,
+            {},
+            true,
           )
-          if (inDb && inDb.status === StatusEnum.ok && inDb.data.result) {
-            if (inDb.data.result.status !== 'FILLED') {
+          const baseRow =
+            inDb && inDb.status === StatusEnum.ok
+              ? pickRestoreBaseEntry(inDb.data.result)
+              : undefined
+          if (baseRow) {
+            if (baseRow.status !== 'FILLED') {
+              // `checkBaseOrder` reads the order map. A cold load from Mongo
+              // leaves terminal rows out of it, so put this one back.
+              if (
+                (baseRow.status === 'CANCELED' ||
+                  baseRow.status === 'EXPIRED') &&
+                !this.getOrderFromMap(baseRow.clientOrderId)
+              ) {
+                this.setOrder(baseRow, false)
+              }
               await this.checkBaseOrder(
                 this.botId,
-                inDb.data.result.symbol,
-                inDb.data.result.clientOrderId,
+                baseRow.symbol,
+                baseRow.clientOrderId,
                 d.deal._id,
               )
             } else {
               this.handleLog(
                 `Deal ${d.deal._id} in status start, but found filled base order`,
               )
-              const full = await this.ordersDb.readData({
-                clientOrderId: inDb.data.result.clientOrderId,
-              })
-              if (full.data?.result) {
-                await this.startDeal(full.data.result)
-              } else {
-                this.handleWarn(
-                  `Cannot find full order for ${inDb.data.result.clientOrderId}`,
-                )
-              }
+              await this.startDeal(baseRow)
             }
           } else {
             this.handleLog(

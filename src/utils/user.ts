@@ -28,6 +28,7 @@ import type { Socket } from 'socket.io-client'
 import utils from '.'
 import { resolveConnection } from './credentials'
 import logger from './logger'
+import { BalanceFailureLog } from './balanceFailureLog'
 import {
   botEventDb,
   botMessageDb,
@@ -84,8 +85,19 @@ const { getTimezoneOffset, findUSDRate } = utils
  * `balances` collection, so the displayed "available" reads wrong. Clamp at the
  * write boundary so the collection can never store a negative locked amount.
  */
-const normalizeLocked = (locked: number): number =>
-  Number.isFinite(locked) && locked > 0 ? locked : 0
+import {
+  hasLocked,
+  lockedInsertValue,
+  lockedUpdateFields,
+  normalizeLocked,
+  streamedFree,
+} from './balanceWrite'
+import { createHoldRefresh } from './holdRefresh'
+import {
+  groupSharedKeyLegs,
+  isSharedWalletProvider,
+  planSharedWalletLinks,
+} from './sharedWallet'
 
 /**
  * The venue's own spendable figure, as fields to merge into the balance write.
@@ -187,8 +199,41 @@ const processBalanceUpdate = async () => {
         }
         const redis = await RedisClient.getInstance()
         if (msg.eventType === 'outboundAccountPosition') {
+          // An item with no `locked` carries the wallet TOTAL in `free`
+          // (Kraken spot v2); the hold the REST refresh stored has to come out
+          // of it before it is shown or written (core spec 069).
+          const storedLocked: Map<string, number> = new Map()
+          const totalOnly = msg.balances.filter((b) => !hasLocked(b))
+          if (totalOnly.length) {
+            const stored = await balanceDb.readData(
+              {
+                asset: { $in: totalOnly.map((b) => b.asset) },
+                userId,
+                exchange: e.provider,
+                exchangeUUID: e.uuid,
+                paperContext: paperExchanges.includes(e.provider),
+              },
+              undefined,
+              {},
+              true,
+            )
+            if (stored.status === StatusEnum.ok) {
+              for (const r of stored.data.result) {
+                storedLocked.set(r.asset, r.locked)
+              }
+            }
+          }
+          const freeOf = (b: (typeof msg.balances)[number]) =>
+            streamedFree(b, storedLocked.get(b.asset))
+
           const data = msg.balances.map((b) => ({
             ...b,
+            ...(hasLocked(b)
+              ? {}
+              : {
+                  free: `${freeOf(b)}`,
+                  locked: `${normalizeLocked(storedLocked.get(b.asset) ?? 0)}`,
+                }),
             exchange: e.provider,
             exchangeUUID: e.uuid,
             paperContext: paperExchanges.includes(e.provider),
@@ -212,8 +257,8 @@ const processBalanceUpdate = async () => {
                 { exchangeUUID: e.uuid, asset: d.asset, userId },
                 {
                   ...d,
-                  free: parseFloat(d.free),
-                  locked: normalizeLocked(parseFloat(d.locked)),
+                  free: freeOf(d),
+                  locked: lockedInsertValue(d),
                   // After the spread, so the raw string from the event never
                   // reaches the doc.
                   ...venueAvailableFields(d.venueAvailable),
@@ -238,8 +283,11 @@ const processBalanceUpdate = async () => {
                 {
                   $set: {
                     ...d,
-                    free: parseFloat(d.free),
-                    locked: normalizeLocked(parseFloat(d.locked)),
+                    free: freeOf(d),
+                    // Absent `locked` (Kraken spot v2) leaves the stored hold
+                    // alone: `...d` carries no such key then, and the helper
+                    // adds none (core spec 003 §4.2).
+                    ...lockedUpdateFields(d),
                     // After the spread, so the raw string from the event never
                     // reaches the doc.
                     ...venueAvailableFields(d.venueAvailable),
@@ -382,6 +430,13 @@ const processBalanceUpdate = async () => {
 const balanceFetchConcurrency = () =>
   Math.max(1, parseInt(process.env.BALANCE_FETCH_CONCURRENCY ?? '', 10) || 8)
 
+/**
+ * Coalesces the per-connection line written when the connector refuses a
+ * balance refresh, so a venue outage cannot flood the log. See
+ * `balanceFailureLog.ts`.
+ */
+const balanceFailureLog = new BalanceFailureLog()
+
 const updateUserBalance = async (
   user: ClearUserSchema,
   uuid?: string,
@@ -431,6 +486,23 @@ const updateUserBalance = async (
         e.bybitHost,
       )
       const balances = await provider.getBalance()
+      if (balances.status !== 'OK') {
+        // The connector reports a refusal as a NOTOK result, not a throw, so
+        // the catch below never sees it. Without this line the connection
+        // shows no balances and nothing says why.
+        const reason = `${balances.reason ?? 'no reason'}`
+        const note = balanceFailureLog.note(e.provider, reason, e.uuid)
+        for (const s of note.summaries) {
+          logger.warn(
+            `updateUserBalance | ${s.provider} NOTOK repeated ${s.failures}x across ${s.connections} connection(s) in the last ${s.windowMinutes}m: ${s.reason}`,
+          )
+        }
+        if (note.log) {
+          logger.warn(
+            `updateUserBalance | ${userId} ${e.provider} ${e.uuid} NOTOK: ${reason}`,
+          )
+        }
+      }
       if (balances.status === 'OK' && userBalances.status === StatusEnum.ok) {
         const balancesMap: Map<string, FreeAsset[0]> = new Map()
         for (const b of balances.data) {
@@ -576,7 +648,7 @@ const setHyperliquidTimer = async (
     setInterval(
       () => (
         logger.debug(`Hyperliquid timer trigger for ${uuid}`),
-        updateUserBalance(user, uuid, undefined, ec)
+        refreshSharedWalletLeg(user._id.toString(), uuid, ec)
       ),
       hyperliquidTimeout,
     ),
@@ -599,12 +671,174 @@ const setBitgetTimer = async (
     setInterval(
       () => (
         logger.debug(`Bitget timer trigger for ${uuid}`),
-        updateUserBalance(user, uuid, undefined, ec)
+        refreshSharedWalletLeg(user._id.toString(), uuid, ec)
       ),
       bitgetTimeout,
     ),
   )
 }
+
+const stopBalanceTimer = (uuid: string) => {
+  for (const timers of [hyperliquidTimer, bitgetTimer]) {
+    const timer = timers.get(uuid)
+    if (timer) {
+      clearInterval(timer)
+      timers.delete(uuid)
+    }
+  }
+}
+
+/** When each user's legs were last checked against the venue. A mode switch
+ *  is rare, and the venue answer is cached connector-side anyway. */
+const sharedWalletChecked: Map<string, number> = new Map()
+
+const sharedWalletInterval = 60 * 60 * 1000
+
+/**
+ * Link a user's Hyperliquid / Bitget legs that share one wallet to their spot
+ * leg, and unlink them when the account is no longer unified (see
+ * `sharedWallet.ts`). A newly linked leg stops refreshing and loses its own
+ * `balances` rows — they were the same money as the source's, counted again.
+ * Returns the user as it stands afterwards, read fresh; `null` if unreadable.
+ */
+const reconcileSharedWalletLinks = async (
+  userId: string,
+  ec = ExchangeChooser,
+  force = false,
+): Promise<ClearUserSchema | null> => {
+  const read = async () => {
+    const user = await userDb.readData(userListFilter({ _id: userId }))
+    if (user.status === StatusEnum.notok) {
+      logger.warn(`Shared wallet | read user ${userId} failed: ${user.reason}`)
+      return null
+    }
+    return user.data.result ?? null
+  }
+  const user = await read()
+  if (!user) return null
+  const last = sharedWalletChecked.get(userId) ?? 0
+  if (!force && Date.now() - last < sharedWalletInterval) return user
+  const legs = user.exchanges.filter(
+    (e) =>
+      isSharedWalletProvider(e.provider) &&
+      !paperExchanges.includes(e.provider),
+  )
+  if (legs.length < 2) return user
+  sharedWalletChecked.set(userId, Date.now())
+  let changed = false
+  const unlinked: string[] = []
+  for (const group of await groupSharedKeyLegs(legs)) {
+    const { source } = group
+    const exchange = ec.chooseExchangeFactory(source.provider)
+    if (!exchange) continue
+    const shared = await exchange(
+      source.key,
+      source.secret,
+      source.passphrase,
+      undefined,
+      source.keysType,
+      source.okxSource,
+      source.bybitHost,
+    )
+      .getSharedWallet()
+      .catch(() => null)
+    const plan = planSharedWalletLinks(
+      group,
+      shared?.status === StatusEnum.ok ? shared.data : null,
+    )
+    for (const { uuid, to } of plan.link) {
+      const res = await userDb.updateData(
+        { _id: userId, 'exchanges.uuid': uuid },
+        { $set: { 'exchanges.$.linkedTo': to } },
+      )
+      if (res.status === StatusEnum.notok) {
+        logger.error(`Shared wallet | link ${uuid} → ${to}: ${res.reason}`)
+        continue
+      }
+      changed = true
+      stopBalanceTimer(uuid)
+      await balanceDb.deleteManyData({
+        userId,
+        exchangeUUID: uuid,
+        paperContext: { $ne: true },
+      })
+      logger.info(`Shared wallet | ${userId} linked ${uuid} → ${to}`)
+    }
+    for (const uuid of plan.unlink) {
+      const res = await userDb.updateData(
+        { _id: userId, 'exchanges.uuid': uuid },
+        { $set: { 'exchanges.$.linkedTo': null } },
+      )
+      if (res.status === StatusEnum.notok) {
+        logger.error(`Shared wallet | unlink ${uuid}: ${res.reason}`)
+        continue
+      }
+      changed = true
+      unlinked.push(uuid)
+      logger.info(`Shared wallet | ${userId} unlinked ${uuid}`)
+    }
+  }
+  if (!changed) return user
+  const fresh = await read()
+  if (!fresh) return null
+  // An unlinked leg is its own wallet again: give it back its refresher.
+  for (const uuid of unlinked) {
+    const leg = fresh.exchanges.find((e) => e.uuid === uuid)
+    if (!leg) continue
+    if (leg.provider.startsWith('hyperliquid')) {
+      setHyperliquidTimer(fresh, uuid, ec)
+    } else {
+      setBitgetTimer(fresh, uuid, ec)
+    }
+    await updateUserBalance(fresh, uuid, undefined, ec)
+  }
+  return fresh
+}
+
+/** Timer tick for a Hyperliquid / Bitget leg: re-check its link, then refresh
+ *  it unless it now reads through its source. */
+const refreshSharedWalletLeg = async (
+  userId: string,
+  uuid: string,
+  ec = ExchangeChooser,
+) => {
+  const user = await reconcileSharedWalletLinks(userId, ec)
+  if (!user) return
+  const leg = user.exchanges.find((e) => e.uuid === uuid)
+  if (!leg || leg.linkedTo) {
+    stopBalanceTimer(uuid)
+    return
+  }
+  await updateUserBalance(user, uuid, undefined, ec)
+}
+
+/**
+ * One REST balance refresh for a connection whose venue does not stream its
+ * hold (spec 070). Reads the user fresh: the event may arrive long after
+ * `connectUserBalance` loaded the document, and a refresh against stale
+ * credentials is a wasted connector call.
+ */
+const refreshBalanceForHold = async (
+  userId: string,
+  uuid: string,
+  ec = ExchangeChooser,
+) => {
+  const user = await userDb.readData(userListFilter({ _id: userId }))
+  if (user.status === StatusEnum.notok) {
+    logger.warn(`Hold refresh | read user ${userId} failed: ${user.reason}`)
+    return
+  }
+  if (!user.data.result) {
+    return
+  }
+  logger.debug(`Hold refresh | ${uuid}@${userId}`)
+  await updateUserBalance(user.data.result, uuid, undefined, ec)
+}
+
+const holdRefresh = createHoldRefresh({
+  onError: (uuid, error) =>
+    logger.warn(`Hold refresh | ${uuid} failed: ${error}`),
+})
 
 const connectUserBalance = async (
   id?: string,
@@ -627,12 +861,21 @@ const connectUserBalance = async (
     true,
   )
   if (users.status === 'OK' && users.data.count > 0) {
+    let list = users.data.result
     if (uuid || id) {
+      // A connection was just added or changed: settle its links first, so a
+      // unified wallet is never written under a leg that should read through.
+      list = await Promise.all(
+        list.map(
+          async (u) =>
+            (await reconcileSharedWalletLinks(u._id.toString(), ec, true)) ?? u,
+        ),
+      )
       await Promise.all(
-        users.data.result.map((u) => updateUserBalance(u, uuid, undefined, ec)),
+        list.map((u) => updateUserBalance(u, uuid, undefined, ec)),
       )
     }
-    for (const u of users.data.result) {
+    for (const u of list) {
       const userId = u._id.toString()
       for (const e of u.exchanges.filter((ue) => !ue.linkedTo)) {
         if (e.provider === ExchangeEnum.coinbase) {
@@ -700,7 +943,14 @@ const connectUserBalance = async (
 
         if (redisClient) {
           redisClient.subscribe(e.uuid, async (msg) => {
-            balanceMsg.push({ ...JSON.parse(msg), userId, e })
+            const parsed = JSON.parse(msg)
+            // Order events share this channel with the balance events. On a
+            // venue whose stream carries no hold they are the only prompt
+            // signal that `locked` moved (spec 070).
+            holdRefresh.schedule(e.provider, e.uuid, parsed?.eventType, () =>
+              refreshBalanceForHold(userId, e.uuid, ec),
+            )
+            balanceMsg.push({ ...parsed, userId, e })
             await processBalanceUpdate()
           })
         }
@@ -710,6 +960,8 @@ const connectUserBalance = async (
 }
 
 const disconnectUserBalance = async (uuid: string) => {
+  holdRefresh.cancel(uuid)
+
   const getTimer = coinsbaseTimer.get(uuid)
   if (getTimer) {
     clearInterval(getTimer)
@@ -968,8 +1220,10 @@ const fiatRateEntries = (fiatRates: RateSchema['fiatRates']): Prices =>
  * covers Kraken xStocks (`PGx.T`), Bybit-spot xstocks (`AAPLX`), etc. uniformly.
  *
  * Returns a map keyed by `${exchangeUUID}:${asset}` → `{ price, usdValue }`.
- * `getAllPrices` is a Redis read on a warm cache, so this is cheap enough to call
- * per request. Kept standalone (not wired into the cron) to bound blast radius.
+ * The rate table comes from `getAllPricesStaleOk`, a Redis read whenever any
+ * good table has been stored, so this is cheap enough to call per request and
+ * never waits on a connector that has parked the venue's price read. Kept
+ * standalone (not wired into the cron) to bound blast radius.
  */
 export const priceBalancesUsd = async (
   balances: PricedBalanceInput[],
@@ -987,7 +1241,7 @@ export const priceBalancesUsd = async (
     const factory = ec.chooseExchangeFactory(e as ExchangeEnum)
     if (!factory) continue
     try {
-      const prices = await factory('', '').getAllPrices()
+      const prices = await factory('', '').getAllPricesStaleOk()
       if (prices.status === StatusEnum.ok) {
         rates = [
           ...rates,
@@ -1261,7 +1515,11 @@ const userSnapshots = async (
         logger.debug(
           `Snapshot | User ${u.username} found ${balances.data.result.length} balances`,
         )
-        const userExchanges = u.exchanges.map((e) => e.uuid)
+        // A linked leg reads its source's wallet; any row left under it is
+        // that same money again (unified accounts, `sharedWallet.ts`).
+        const userExchanges = u.exchanges
+          .filter((e) => !e.linkedTo)
+          .map((e) => e.uuid)
         for (const b of balances.data.result.filter((b) =>
           userExchanges.includes(b.exchangeUUID),
         )) {
@@ -1441,6 +1699,78 @@ const userSnapshots = async (
   }
 }
 
+/**
+ * Hard ceiling on an ON-DEMAND portfolio refresh (the `updateBalance` mutation
+ * the dashboard fires when a user opens/refreshes the portfolio).
+ *
+ * `userSnapshots` walks every one of the user's exchanges — `getAllPrices()`
+ * per venue, then `getBalance()` per venue through exchange-balancer — and none
+ * of those legs has a deadline, so the resolver waits for the slowest venue no
+ * matter how long that takes. The dashboard's own client aborts at 30s
+ * (`main-dash-redesign/core/src/lib/apiClient.ts` `timeout = 30000`), so past
+ * that the user does not see a slow refresh, they see a FAILED one — and the
+ * work already done is thrown away. Prod, 45 slow `updateBalance` ops over 25
+ * days: 43 of them landed between 5.2s and 22.7s, then two ran 126.8s
+ * (markuspfyl222@gmail.com) and 163.1s (wael.rashed@hotmail.com, 2026-08-30,
+ * bug #572) while the archive backfill sweep held the event loop.
+ *
+ * 25s sits above that healthy band and below the client ceiling: on the
+ * recorded 25 days it would have fired on exactly those two hangs and on none
+ * of the 43 legitimate refreshes.
+ *
+ * Same shape as the caps `updateStatus` (6s connection probe, `exchange/
+ * verify.ts`) and `getLeverageBracket` (10s + stale table, `leverageBracketCache
+ * .ts`) already carry — this was the one human-facing path still unbounded.
+ */
+const SNAPSHOT_REFRESH_DEADLINE_MS =
+  Number(process.env.SNAPSHOT_REFRESH_DEADLINE_MS ?? '') || 25_000
+
+/**
+ * Await an on-demand `userSnapshots` refresh, but never past the deadline.
+ *
+ * The refresh is deliberately left RUNNING when the deadline wins — it still
+ * writes its snapshot and balances, so the next read picks the fresh numbers
+ * up; abandoning it would only throw the venue round trips away. The caller
+ * then serves the last STORED snapshot, which turns this class of incident
+ * from a hung portfolio into a stale one.
+ *
+ * Never rejects: once we stop awaiting it, a rejection would otherwise surface
+ * as an unhandled rejection with no caller left to catch it.
+ *
+ * @returns true when the refresh finished inside the deadline.
+ */
+const awaitSnapshotRefresh = async (
+  refresh: Promise<unknown>,
+  userId: string,
+): Promise<boolean> => {
+  const settled = refresh.then(
+    () => true,
+    (e: unknown) => {
+      logger.error(
+        `Snapshot | ${userId} on-demand refresh failed: ${
+          (e as Error)?.message ?? e
+        }`,
+      )
+      return true
+    },
+  )
+  let timer: NodeJS.Timeout | undefined
+  const deadline = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), SNAPSHOT_REFRESH_DEADLINE_MS)
+  })
+  const inTime = await Promise.race([settled, deadline]).finally(() => {
+    if (timer) {
+      clearTimeout(timer)
+    }
+  })
+  if (!inTime) {
+    logger.warn(
+      `Snapshot | ${userId} on-demand refresh exceeded ${SNAPSHOT_REFRESH_DEADLINE_MS}ms — serving the last stored snapshot; the refresh keeps running`,
+    )
+  }
+  return inTime
+}
+
 const checkTokens = async () => {
   const removeTokens = await userDb.updateManyData(
     {},
@@ -1578,6 +1908,8 @@ export const resetUser = async (
           CloseDCATypeEnum.cancel,
           undefined,
           d.paperContext,
+          undefined,
+          { type: 'system' },
         )
       }
       logger.debug(`${prefix} | DCA deals closed`)
@@ -1610,6 +1942,8 @@ export const resetUser = async (
           CloseDCATypeEnum.cancel,
           undefined,
           d.paperContext,
+          undefined,
+          { type: 'system' },
         )
       }
       logger.debug(`${prefix} | Combo deals closed`)
@@ -2055,6 +2389,7 @@ export default {
   connectUserBalance,
   updateUserFee,
   userSnapshots,
+  awaitSnapshotRefresh,
   disconnectUserBalance,
   checkTokens,
   resetUser,

@@ -29,7 +29,6 @@ import type {
   BaseReturn,
   PriceMessage,
   BybitHost,
-  BotSchema,
 } from '../../types'
 import {
   PositionSide,
@@ -45,6 +44,7 @@ import {
 import {
   BotStatusEnum,
   BotType,
+  DCADealStatusEnum,
   ExchangeEnum,
   MessageTypeEnum,
   OrderSideEnum,
@@ -54,12 +54,36 @@ import {
   DCATypeEnum,
   getSellBuyCountReturn,
 } from '../../types'
+import {
+  accrueStreamFee,
+  hasObservedFee,
+  observedFeeOf,
+  streamFeeFields,
+} from './orderFee'
+import { isFillEvidenceFree, statesQuantity } from './fillEvidence'
+import {
+  executionReportRewindsOrder,
+  executionReportUnfillsOrder,
+} from './staleExecutionReport'
+import {
+  canRecoverReduceOnlyRemainder,
+  isKrakenUsdmUnderfilledReduceOnlyClose,
+} from './reduceOnlyRemainder'
+import { isVenueCanceledRemainderFill } from './remainderFill'
+import { bitgetSpotMarketBuyQty } from './bitgetMarketBuyAmount'
+import { statsAfterReset } from './dca/botStatsReset'
 import ExchangeChooser from '../exchange/exchangeChooser'
 import Exchange from '../exchange'
 import { MathHelper } from '../utils/math'
 import utils, { isPaper } from '../utils'
 import { resolveConnection } from '../utils/credentials'
-import { isAmbiguousOrderFailure } from '../utils/exchange'
+import {
+  isAmbiguousOrderFailure,
+  isBatchRouteUnavailable,
+  isTransportRetryExhausted,
+} from '../utils/exchange'
+import { batchCancelEnabled, batchPlaceEnabled } from './batchFlags'
+import OpenOrderBatcher from './openOrderBatcher'
 import logger from '../utils/logger'
 import { IdMute, IdMutex } from '../utils/mutex'
 import * as crypto from 'crypto'
@@ -75,10 +99,24 @@ import {
 import {
   getSubTypeBehavior,
   getSubTypeLogPolicy,
+  isPerSymbolSubType,
   logPolicyBucket,
   noteErrorRuleHit,
 } from './errorRulesCache'
 import QuantRulesGuard, { LEVEL2_VIOLATIONS } from './quantRulesGuard'
+import { poisonedSnapshotProfitField } from './redisSnapshotGuard'
+import { mergeOpenOrdersIntoSnapshot } from './orderSnapshotMerge'
+import QtyStepGuard, {
+  decimalsToStep,
+  deriveAcceptedDecimals,
+  isQtyDecimalsRefusal,
+} from './qtyStepGuard'
+import {
+  HEDGE_REFUSAL_MAX_AGE_MS,
+  hedgeLegForSettings,
+  isPositionSideRefusal,
+  readHedgeMode,
+} from './hedgeModeGuard'
 
 /**
  * Retry budget for a deal whose start carries no timing of its own (ASAP): the
@@ -117,8 +155,17 @@ const QUANT_RULES_VIOLATION_HEADROOM = 3
 import ComplianceGuard from './complianceGuard'
 import AuthFailureGuard, { isHardAuthFailure } from './authGuard'
 import RetryBackoff from './retryBackoff'
+import { ConditionLatch, STANDING_CONDITION_REARM_MS } from './conditionLatch'
+import { PriceStreamGapTracker } from './priceStreamGap'
+import { awaitPositionFlat } from './opposingPositionSettle'
+import {
+  opposingPositionRefusal,
+  settleWindowFor,
+  type OpposingHolder,
+} from './opposingPositionOwner'
 import { paperExchanges } from '../exchange/paper/utils'
 import type { InitialGrid } from './helper'
+import { gridLevelMinimum, type GridSizingReport } from './gridBudgetGuard'
 import { updateUserSteps } from '../utils/user'
 import { QueryFilter, Types } from 'mongoose'
 import { removePaperFormExchangeName } from '../exchange/helpers'
@@ -131,17 +178,29 @@ import {
   botMessageDb,
   brokerCodesDb,
   comboBotDb,
+  comboDealsDb,
   dcaBotDb,
+  dcaDealsDb,
   orderDb,
   rateDb,
+  userDb,
   userProfitByHourDb,
 } from '../db/dbInit'
 import Rabbit from '../db/rabbit'
 import { RunWithDelay } from '../utils/delay'
 import BotSharedData, { type StreamData } from './shared'
 import SharedStream from './sharedStream'
+import {
+  assessUserStreamLiveness,
+  FAILSAFE_HEARTBEAT_KEY,
+  isPingMessage,
+  parseProberHeartbeat,
+  userStreamAckKey,
+  USER_STREAM_ACK_TTL_SEC,
+} from './userStreamLiveness'
 import FundingStream, { fundingChannel } from './fundingStream'
 import FundingStore from './fundingStore'
+import { poolCoversQuote, widenByPool } from './pooledMargin'
 import {
   computeFunding,
   type SignedFill,
@@ -164,6 +223,28 @@ type AccountCBFunctions = {
 }
 
 const { findUSDRate, sleep, id } = utils
+
+/**
+ * Kraken's ceiling on a free-text `cl_ord_id`, in characters.
+ *
+ * Kraken accepts a client order id in exactly three forms: long UUID
+ * (8-4-4-4-12 hex), short UUID (32 hex, no dashes), or free ASCII text of at
+ * most 18 characters. Only the last one can carry an id we chose, so it is the
+ * budget {@link MainBot#getOrderId} generates a Kraken spot id inside.
+ * `specs/010.kraken-spot-client-order-id-length.md`.
+ */
+export const KRAKEN_CL_ORD_ID_MAX_LENGTH = 18
+
+/**
+ * The most decimals Bitget's spot order-entry validator accepts on the amount
+ * a MARKET BUY is sized in.
+ *
+ * This is deliberately NOT read from the symbol: Bitget's own `quotePrecision`
+ * is the number that is wrong. `ICPUSDT` publishes 7 and then refuses the
+ * order — `checkbdscale error value=4.9999286 checkscale=6`.
+ * `specs/084.a-zero-remainder-and-an-over-scaled-market-buy-amount.md` §4.2.
+ */
+const BITGET_SPOT_QUOTE_MAX_SCALE = 6
 
 /**
  * Return from findDiff function
@@ -218,12 +299,37 @@ const mutex = new IdMutex()
 
 const mutexEmit = new IdMutex(30)
 
+/**
+ * How often to repeat the "still no live price stream" line for one symbol.
+ * The condition it reports usually lasts for the life of the process, so the
+ * first line carries the information and the repeats only prove it persists.
+ */
+const PRICE_STREAM_GAP_LOG_EVERY_MS = 60 * 60 * 1000
+
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
+
+/**
+ * How long the account's `userStreamInfo` channel may stay silent — while the
+ * fill-failsafe prober is alive — before a bot holding resting orders treats
+ * itself as deaf and re-subscribes (core spec 002 §4.6). Default 6 min = three
+ * probe periods.
+ */
+const userStreamSilenceMs =
+  Number(process.env.USER_STREAM_SILENCE_MS) > 0
+    ? Number(process.env.USER_STREAM_SILENCE_MS)
+    : 6 * 60_000
+const proberStaleMs = 3 * 60_000
+/**
+ * How long a cancel this bot issued is remembered as its own. The venue's
+ * CANCELED arrives within seconds; an hour only bounds the map. Spec 095 §4.1.
+ */
+const ownCancelTtlMs = 60 * 60_000
 
 type AllowedMethods =
   | 'checkClosedDeals'
   | 'sendDealClosedAlert'
   | 'sendDealOpenedAlert'
+  | 'sendSafetyOrderFilledAlert'
   | 'checkInDynamicRange'
   | 'checkInRange'
   | 'checkMaxDealsPerPair'
@@ -265,7 +371,33 @@ export const notEnoughErrors = [
   'Insufficient balance',
   'Insufficient position',
   'insufficientAvailableFunds',
+  // Kraken (spot) and Hyperliquid (perps) word their balance rejections in a
+  // way none of the patterns above match, so every not-enough-balance
+  // behaviour skipped both venues silently: the coalesced "Not enough balance"
+  // message (handleOrderErrors), the refused-order backoff and size memory
+  // (sendGridToExchange), the fee-sizing fallback and adaptive close. A
+  // rejection instead surfaced as a hard bot error and the same doomed order
+  // was re-sent on the next tick.
+  //
+  // Matched on the venue's own wording rather than a generic 'insufficient':
+  // a broad token would also catch coin-m margin rejections, and adaptive
+  // close cannot size those (see its `!this.futures` gate in dcaHelper).
+  'EOrder:Insufficient funds',
+  'insufficient margin to place order',
 ]
+
+/**
+ * Whether a venue rejected an order because the account could not fund it.
+ *
+ * Pure and exported so the venue-string list can be regression-tested without
+ * standing up a bot — the list is the whole behaviour here, and a venue
+ * rewording its rejection is exactly the failure this needs to catch.
+ * `Bot.isErrorNotEnoughBalance` is the in-class caller.
+ */
+export const matchesNotEnoughBalance = (errorString: string): boolean =>
+  notEnoughErrors.some(
+    (e) => errorString.toLowerCase().indexOf(e.toLowerCase()) !== -1,
+  )
 
 export const eventMap: { [x: string]: string } = {
   'bot update': 'data update',
@@ -338,6 +470,21 @@ const orderQuarantineMinAgeMs = Number(
 )
 
 /**
+ * Reconcile-pass tunables. See {@link MainBot.getOrderForReconcile} and
+ * {@link MainBot.spreadReconcileStart} for why each exists.
+ *
+ * `SPREAD` is the width of the random start delay, not a fixed wait: the mean
+ * cost is half of it, and it only ever delays a backstop.
+ */
+export const reconcileLookupAttempts = Number(
+  process.env.BOT_RECONCILE_LOOKUP_ATTEMPTS ?? 3,
+)
+const reconcileLookupBackoffMs = Number(
+  process.env.BOT_RECONCILE_LOOKUP_BACKOFF_MS ?? 750,
+)
+const reconcileSpreadMs = Number(process.env.BOT_RECONCILE_SPREAD_MS ?? 15_000)
+
+/**
  * Does this failed lookup mean "the venue says this order does not exist", as
  * opposed to "the call did not succeed"?
  *
@@ -365,7 +512,9 @@ export function isDefinitiveOrderNotFound(res?: {
   if (!reason) return false
   // Coinbase: "Coinbase order not found after execution."
   // OKX / Bitget: "Order not found"   Bybit: "Order not found after execution"
-  // Kraken: "Order not found in active orders" / "in history" / "in open orders"
+  // Kraken futures: "Order not found in active orders" / "in history"
+  // Kraken spot: "Order not found in open orders" is deliberately NOT matched —
+  // see below.
   // Binance passes through -2013 "Order does not exist".
   // Hyperliquid: the raw `unknownOid` status, via `HyperliquidError`.
   //
@@ -375,11 +524,158 @@ export function isDefinitiveOrderNotFound(res?: {
   // retries `unknownOid` four times when it knows an order was just placed; the
   // reconcile path gets no such retry, so age is what separates the two cases.
   // Matched exactly rather than as a substring — it is a bare status token.
+  //
+  // Kraken spot's "Order not found in open orders" is ambiguous, and it is the
+  // worst kind of ambiguous: it LOOKS definitive. The connector resolves a spot
+  // order by its txid through QueryOrders — the one exact lookup, and the only
+  // one that can see a closed order — and emits this string only after that
+  // lookup failed for ANY reason and it fell through to a userref scan of the
+  // open-orders list, which cannot resolve a txid at all. So the string means
+  // "QueryOrders did not answer", and absence from the open list is exactly
+  // where a FILLED order lives. On a bot-worker restart the single-shot probe
+  // in `checkOrders` took a transient miss on three filled safety orders, read
+  // it as a venue denial, and left the deal one level deep — the position on
+  // the venue was ~12x what the deal said until the next reconnect pass
+  // re-asked seven minutes later and booked them. Treated as "the call did not
+  // succeed": the caller retries and the quarantine takes no strike.
+  if (/\border not found in open orders\b/.test(reason)) return false
   return (
     /\border not found\b/.test(reason) ||
     /\border does not exist\b/.test(reason) ||
-    reason === 'unknownoid'
+    reason === 'unknownoid' ||
+    isKucoinOrderNotExist(reason)
   )
+}
+
+/**
+ * KuCoin's "no such order" on a lookup: `validation.queryOrder.orderNotExist |
+ * 400100`. Before Spec 109 it matched none of the wordings above, so a KuCoin
+ * order the venue had never seen — a refused placement left NEW with orderId
+ * -1 — was asked about on every reconcile forever and never retired.
+ */
+export function isKucoinOrderNotExist(reason?: string | null) {
+  return /queryorder\.ordernotexist/.test(`${reason ?? ''}`.toLowerCase())
+}
+
+/**
+ * A "no such order" that is NOT an answer about an order handed to the venue
+ * seconds ago. Hyperliquid's `unknownOid` (also an ambiguous failure) and
+ * KuCoin's `orderNotExist` both describe propagation lag as readily as
+ * absence, so a just-placed order keeps the full ladder and is held for the
+ * reconcile path (whose 24h age floor makes the same answer trustworthy).
+ * Spec 109.
+ */
+export function isNotFoundUnreliableJustAfterPlacement(reason?: string | null) {
+  return isAmbiguousOrderFailure(reason) || isKucoinOrderNotExist(reason)
+}
+
+/**
+ * Should a reconcile RETIRE an order the venue definitively reports as absent,
+ * rather than merely quarantine it? Only when the order never received an
+ * exchange id (the `-1` placeholder: the placement never landed) and it is
+ * past the quarantine age floor. Quarantine stops the lookups but leaves the
+ * order in memory as resting — for a never-placed take-profit that is a deal
+ * that believes it has an exit it does not have. Spec 109.
+ */
+export function isRetirableNeverPlacedOrder(
+  order: { orderId?: string | number; transactTime?: number; updateTime?: number },
+  now: number,
+  minAgeMs: number,
+) {
+  if (`${order.orderId ?? ''}` !== noExchangeOrderId) return false
+  const lastKnownAt = Math.max(order.transactTime ?? 0, order.updateTime ?? 0)
+  return !!lastKnownAt && now - lastKnownAt >= minAgeMs
+}
+
+/**
+ * Retry policy for a reconcile-path order lookup. Pure but for the injected
+ * `fetch`/`sleep`, so the policy itself is testable without a live bot.
+ *
+ * Stops on the first of: a result carrying data (success), a definitive
+ * "no such order" from the venue (a retry asks the same question, and
+ * {@link isDefinitiveOrderNotFound} is what makes that safe to trust), a
+ * failure `Exchange.apiCall` has ALREADY spent its own transport ladder on
+ * ({@link isTransportRetryExhausted}), or the attempt budget. Backoff is
+ * exponential with ±50% jitter — without the jitter a fleet-wide burst would
+ * retry in lockstep and re-create the congestion that caused the first failure.
+ *
+ * That third stop is what keeps this budget a budget. `fetch` here is
+ * `MainBot.getOrder` -> `Exchange.getOrder` -> `apiCall`, and `apiCall` retries
+ * a connector 5xx/timeout SIX times at 500ms before it gives up — so every
+ * attempt spent here is really six connector round trips over ~3s, and the
+ * ceiling multiplies out to `attempts x 6` instead of `attempts`. Bug #599,
+ * 2026-09-02 01:21-01:23Z: one Kraken combo bot reconciling five resting orders
+ * against a connector answering HTTP 500 cost 96 round trips (5 orders x 18,
+ * plus 6 for the `primeReconcileBatch` prefetch) in ~100s, and paged the
+ * operator as "86 transport failures ... likely wedged" — 6 logical questions
+ * rendered as 86 failures. Re-asking after the transport layer has just been
+ * refused six times in a row inside 3s cannot learn anything new; an unresolved
+ * order is a no-op that the next reconcile sweep picks up (it takes no
+ * quarantine strike — that needs a DEFINITIVE not-found), so stopping early
+ * costs nothing and the amplifier goes with it.
+ *
+ * Returns the LAST result, so callers keep today's `!res?.data` handling.
+ *
+ * `opts.onAttempts` reports how many `fetch` calls were actually spent — an
+ * OPTIONAL, additive channel precisely because the return type is a shared
+ * `*-sh` export (Danger List #11) that must not change. It exists because the
+ * three early stops above make the budget a poor proxy for the spend, and the
+ * callers were logging the budget as though it were the spend: bug #676, where
+ * 853 prod warns all read "after 3 attempts" on passes far too fast to have
+ * slept even once. See `reconcileUnresolvedWarn`.
+ */
+export async function reconcileLookup<
+  T extends { status: StatusEnum; reason?: string | null; data?: unknown },
+>(
+  fetch: () => Promise<T | undefined>,
+  opts: {
+    attempts: number
+    backoffMs: number
+    sleep: (ms: number) => Promise<void>
+    random?: () => number
+    onAttempts?: (spent: number) => void
+  },
+): Promise<T | undefined> {
+  const attempts = Math.max(1, opts.attempts)
+  const random = opts.random ?? Math.random
+  let spent = 1
+  let last = await fetch()
+  for (let attempt = 1; attempt < attempts; attempt++) {
+    if (last?.data) break
+    if (isDefinitiveOrderNotFound(last ?? undefined)) break
+    if (isTransportRetryExhausted(last?.reason)) break
+    const base = opts.backoffMs * 2 ** (attempt - 1)
+    await opts.sleep(Math.round(base * (0.5 + random())))
+    last = await fetch()
+    spent++
+  }
+  opts.onAttempts?.(spent)
+  return last
+}
+
+/**
+ * The reconcile pass's aggregate "could not read these orders" warn.
+ *
+ * One function for both `checkOrdersAfterReconnect` copies (grid in
+ * `helper.ts`, DCA/combo in `dcaHelper.ts`) — they carried the same template
+ * literal verbatim, which is how they came to print the same wrong number in
+ * two places (#676).
+ *
+ * `attemptsSpent` is the total actually spent on the UNRESOLVED orders, not on
+ * the whole pass: the message is about those orders, and summing the resolved
+ * ones in would re-create the ambiguity this wording exists to remove. The
+ * budget is printed too, labelled, so a reader can tell at a glance whether
+ * the ladder ran (`N orders / N attempts` = one look each, it stopped early)
+ * or was exhausted (`N orders / 3N attempts`).
+ */
+export function reconcileUnresolvedWarn(
+  unresolved: string[],
+  attemptsSpent: number,
+  budget: number = reconcileLookupAttempts,
+): string {
+  return `Reconcile could not read ${unresolved.length} order(s) after ${attemptsSpent} lookup attempt(s) (budget ${budget}/order): ${unresolved
+    .slice(0, 10)
+    .join(', ')}${unresolved.length > 10 ? ' …' : ''}`
 }
 /**
  * The placeholder an {@link Order} carries in `orderId` from the moment it is
@@ -403,6 +699,35 @@ const quantRulesRejection =
   'Futures Trading Quantitative Rules violated, only reduceOnly order is allowed, please try again later.'
 
 const noExchangeOrderId = '-1'
+
+/**
+ * Exchanges that have answered "no batch order lookup" once. Process-wide
+ * because the answer is a property of the venue's API, not of a bot: asking
+ * again per bot per pass would spend a round trip to learn the same thing.
+ * Reset only by a restart, which is also when a newly-deployed connector would
+ * start supporting it.
+ */
+const unsupportedOrderBatch = new Set<ExchangeEnum>()
+/**
+ * Exchanges whose connector has answered "no batch order cancel" once —
+ * process-wide, for the same reason as {@link unsupportedOrderBatch}.
+ *
+ * Unlike that set, this one is populated ONLY from an answer that cannot be a
+ * transient ({@link isBatchRouteUnavailable}: a decline, or the 404 of a
+ * connector deployed before the route existed). An empty result, a timeout or
+ * a 5xx leaves the batch path armed. The difference matters because this latch
+ * has no expiry: a batch cancel that failed for a minute is a minute's worth of
+ * slower cancels, while a latch set on that minute is a process-lifetime
+ * regression nothing will ever report.
+ */
+const unsupportedCancelBatch = new Set<ExchangeEnum>()
+/**
+ * Kraken's published ceiling for `CancelOrderBatch` — 50 unique ids per call.
+ * A bulk loop longer than that is split rather than sent whole, because the
+ * venue refuses an over-long batch outright instead of trimming it, and the
+ * loops that prime this can and do exceed it.
+ */
+const maxCancelBatchIds = 50
 /**
  * How many times `_handleUnknownOrder` re-asks the venue about an order it
  * cannot resolve before it gives up and marks the local order CANCELED.
@@ -539,6 +864,12 @@ class MainBot<T extends IMainBot> {
   math: MathHelper
   /** Service restart flag */
   serviceRestart = false
+  /**
+   * What the last {@link MainBot.generateGridsOnPrice} call wanted for one
+   * level and the least that level may be. Recorded, never acted on, by the
+   * sizing routine — see `./gridBudgetGuard`. `null` when nothing was derived.
+   */
+  lastGridSizing: GridSizingReport | null = null
   /** When the current restart-time order check started probing the exchange.
    *  `0` = no budget running, so every non-restart path is unaffected. */
   private restartProbeStartedAt = 0
@@ -598,6 +929,38 @@ class MainBot<T extends IMainBot> {
    * {@link MainBot#_handleUnknownOrder}.
    */
   private unknownOrderInFlight: Map<string, Promise<null | Order>> = new Map()
+  /**
+   * Venue-side order rows prefetched for the reconcile pass currently running,
+   * keyed by the id {@link MainBot#getOrder} actually asks the venue for (the
+   * translated exchange order id, not our client id). Populated by
+   * {@link MainBot#primeReconcileBatch}, consumed once per entry, and dropped
+   * when the pass ends — see that method for why single-use matters.
+   */
+  protected reconcileBatch: Map<string, CommonOrder> | null = null
+  /**
+   * Venue-side CANCEL confirmations prefetched for the bulk cancel loop
+   * currently running, keyed by the exchange order id `cancelOrderOnExchange`
+   * addresses the venue with. Populated by {@link MainBot#primeCancelBatch},
+   * consumed once per entry, and cleared by the loop that primed it — see that
+   * method for why both of those matter.
+   */
+  protected cancelBatch: Map<string, CommonOrder> | null = null
+  /**
+   * Client ids of orders this bot has asked the venue to cancel, with when.
+   * Written BEFORE the venue round trip: the user stream's CANCELED can land
+   * before our own HTTP answer, and a cancel callback reading this must see
+   * the record by then. Lets `processCanceledOrder` tell a cancel we made from
+   * one made by the account owner or the venue. In memory only, pruned by age.
+   * Spec `095` §4.1.
+   */
+  protected ownCancels: Map<string, number> = new Map()
+  /**
+   * The coalescer for the burst of placements currently running, or null.
+   * Installed by a burst loop around its own orders and removed in that loop's
+   * `finally`; {@link MainBot#sendOrderToExchange} consults it for the orders
+   * it names and for nothing else. See `openOrderBatcher.ts`.
+   */
+  protected openBatcher: OpenOrderBatcher | null = null
   /** Used pairs */
   pairs: Set<string> = new Set()
   /** Run after loading */
@@ -608,6 +971,16 @@ class MainBot<T extends IMainBot> {
   callbackAfterUserStream: ((botId: string) => Promise<void>) | null = null
   /** User stream initial start */
   userStreamInitialStart = true
+  /** Last message received on `userStreamInfo<uuid>` (spec 002 §4.6). */
+  lastUserStreamInfoAt = 0
+  /** When the current `userStreamInfo<uuid>` subscription was requested. */
+  userStreamSubscribedAt = 0
+  /** When the last channel repair was attempted. */
+  userStreamLastRepairAt = 0
+  /** Repairs that were followed by continued silence. */
+  userStreamSilentRepairs = 0
+  /** A repair happened and the channel has not delivered since. */
+  userStreamRepairPending = false
   /** Hedge mode */
   hedge = false
   /** pairs not found during load */
@@ -627,6 +1000,14 @@ class MainBot<T extends IMainBot> {
    * @param {boolean} [log=true] Set logging. Default = true
    */
   private errorsMap: Map<string, number> = new Map()
+  /**
+   * Conditions that are a standing STATE rather than an event, so each one is
+   * reported when it starts holding instead of on every re-evaluation of it.
+   * See {@link ConditionLatch} — and note the gate belongs at the call site,
+   * which knows when the condition ends; `handleErrors` cannot tell a standing
+   * state from a genuine repeat.
+   */
+  standingConditionLatch = new ConditionLatch(STANDING_CONDITION_REARM_MS)
   partiallyFilledFilledSet: Set<string> = new Set()
   allowedMethods: Set<AllowedMethods> = new Set()
   redisDb: RedisWrapper | null = null
@@ -782,6 +1163,18 @@ class MainBot<T extends IMainBot> {
     // both choices err towards leaving the order alone.
     const lastKnownAt = Math.max(order.transactTime ?? 0, order.updateTime ?? 0)
     if (!lastKnownAt || now - lastKnownAt < orderQuarantineMinAgeMs) return
+    // Never reached the venue and the venue confirms it: retire it, the same
+    // write-off the unknown-order ladder gives a `-1` order (bug #369), so the
+    // bot stops treating it as resting. Spec 109.
+    if (isRetirableNeverPlacedOrder(order, now, orderQuarantineMinAgeMs)) {
+      this.handleLog(
+        `Order ${order.clientOrderId} never reached the exchange and the exchange confirms it does not exist (${reason}) — retiring it as CANCELED`,
+      )
+      const retired = { ...order, status: 'CANCELED' as const }
+      this.deleteOrder(order.clientOrderId)
+      this.updateOrderOnDb(retired)
+      return
+    }
     const current = order.quarantine
     // Already quarantined, or already struck in this run: nothing new was learned.
     if (current?.since || (current && current.runId === runId)) return
@@ -799,6 +1192,341 @@ class MainBot<T extends IMainBot> {
     order.quarantine = next
     this.setOrder(order)
     this.updateOrderOnDb(order)
+  }
+
+  /**
+   * Spread the start of a reconcile pass across the fleet.
+   *
+   * Every bot on an account reconciles when its user stream (re)subscribes, and
+   * a user-stream connector restart re-subscribes every account at once. On
+   * 2026-08-29 that put **5,319 DCA bots** into `checkOrdersAfterReconnect`
+   * inside a few seconds — 1,422 in one second — each then calling `getOrder`
+   * once per open order. 2,731 of those lookups failed over the following 8
+   * hours, and because the pass had no retry each failure silently dropped an
+   * order until the next restart. The burst was manufacturing the very failures
+   * the pass exists to catch.
+   *
+   * The pass is a backstop, not a hot path: nothing depends on it completing in
+   * the same second it was triggered, so a random delay is free. Applied after
+   * `blockCheck` is taken, so overlapping triggers still collapse to one run.
+   */
+  protected async spreadReconcileStart() {
+    if (!(reconcileSpreadMs > 0)) return
+    await utils.sleep(Math.floor(Math.random() * reconcileSpreadMs))
+  }
+
+  /**
+   * `getOrder` for the reconcile paths, with a bounded retry on a TRANSIENT
+   * failure.
+   *
+   * The reconcile loops treated "the call did not succeed" and "the venue says
+   * this order is gone" identically: one `Not enough data to get order` warning
+   * and `continue`, with nothing to re-check it. A rate-limited or timed-out
+   * lookup therefore cost a whole reconcile cycle — in the Kraken ETH/EUR case
+   * of 2026-08-28, the 00:30 pass looked straight at the filled order, failed
+   * to fetch it, skipped it, and the fill stayed unbooked for another 7½ hours.
+   *
+   * {@link isDefinitiveOrderNotFound} is what makes a retry safe to bound: when
+   * the venue has actually answered "no such order", retrying cannot change the
+   * answer and the quarantine path owns it, so we return immediately. Only the
+   * genuinely ambiguous failures are retried, with exponential backoff and
+   * ±50% jitter so a retry storm cannot re-synchronise.
+   */
+  /**
+   * Ask the venue about every order this reconcile pass is about to walk, in
+   * one call, and hold the answers for {@link MainBot#getOrder} to consume.
+   *
+   * The reconcile loops are strictly serial — `for (…) await
+   * getOrderForReconcile(o)` — so on Kraken, whose private REST budget is 20
+   * tokens decaying at 0.5/s per account, a bot's pass arrives as a burst that
+   * drains the bucket and then parks every remaining call, the user's own
+   * `openOrder` included, for ~2.1s each. Measured 2026-08-31: 50.5% of all
+   * Kraken order placements queued, 72% of `openOrder`, while Kraken itself
+   * never rate-limited us once. One QueryOrders call answers up to 50 orders
+   * for the same single token.
+   *
+   * Strictly an optimisation. It resolves nothing the per-order path would not
+   * resolve, and every failure mode — an exchange with no batch lookup, a
+   * transport with no such route (paper-trading), a partial or empty answer —
+   * leaves `reconcileBatch` without that id and the loop does exactly what it
+   * does today. Ids are translated the same way {@link MainBot#getOrder}
+   * translates them, because that is the id the venue is asked for; an order
+   * whose translation says it never reached the exchange is left out entirely
+   * so that guard still fires on the normal path.
+   */
+  /**
+   * The id the VENUE knows this order by.
+   *
+   * Coinbase, KuCoin full-futures and Kraken cannot be asked about our client
+   * order id, so those are looked up in the local map and translated to the
+   * exchange's own id; every other venue answers to the client id directly.
+   * `null` means the order never reached the exchange — the caller must not ask
+   * the venue about it at all.
+   *
+   * Extracted so {@link MainBot#getOrder} and
+   * {@link MainBot#primeReconcileBatch} cannot disagree about what to ask for:
+   * the prefetch is keyed by this value, so if the two ever computed it
+   * differently the prefetch would silently never hit.
+   */
+  private venueOrderId(clientOrderId: string): string | null {
+    if (
+      this.data?.exchange === ExchangeEnum.coinbase ||
+      this.kucoinFullFutures ||
+      this.data?.exchange === ExchangeEnum.kraken
+    ) {
+      const local = this.getOrderFromMap(clientOrderId)
+      if (local) {
+        return local.orderId === noExchangeOrderId ? null : `${local.orderId}`
+      }
+    }
+    return clientOrderId
+  }
+
+  protected async primeReconcileBatch(orders: Order[]) {
+    this.reconcileBatch = null
+    if (!this.exchange || !this.data || orders.length < 2) {
+      return
+    }
+    if (unsupportedOrderBatch.has(this.data.exchange)) {
+      return
+    }
+    const ids: string[] = []
+    for (const o of orders) {
+      // Same translation `getOrder` applies, via the same method — the prefetch
+      // is keyed by the id the venue is actually asked for, and an order that
+      // never reached the exchange is left out so that guard still fires on the
+      // normal path.
+      const id = this.venueOrderId(o.clientOrderId)
+      if (id !== null) {
+        ids.push(id)
+      }
+    }
+    if (ids.length < 2) {
+      return
+    }
+    try {
+      const symbol = orders[0].symbol
+      const res = await this.exchange.getOrdersBatch({
+        symbol,
+        newClientOrderIds: ids,
+      })
+      if (res.status !== StatusEnum.ok || !res.data?.length) {
+        // A venue or transport that cannot batch says so once and is not asked
+        // again by this process. The reason is not inspected: every non-ok
+        // answer means "resolve these yourself", which the caller does anyway.
+        unsupportedOrderBatch.add(this.data.exchange)
+        return
+      }
+      const map = new Map<string, CommonOrder>()
+      for (const order of res.data) {
+        const key = order.clientOrderId || order.orderId
+        if (key) {
+          map.set(`${key}`, order)
+        }
+      }
+      this.reconcileBatch = map.size ? map : null
+      this.handleDebug(
+        `Reconcile prefetch resolved ${map.size}/${ids.length} orders in one call`,
+      )
+    } catch (e) {
+      // Never fatal: the pass proceeds one order at a time.
+      this.handleDebug(
+        `Reconcile prefetch failed, falling back per order: ${e}`,
+      )
+      this.reconcileBatch = null
+    }
+  }
+
+  /**
+   * Cancel every order a bulk loop is about to walk in ONE venue call, and
+   * hold the answers for {@link MainBot#cancelOrderOnExchange} to consume.
+   *
+   * The arithmetic, on Kraken spot: private REST is metered against a 20-token
+   * bucket per key refilling at 0.5/s, and one cancel costs two tokens (the
+   * QueryOrders lookup plus CancelOrder). A bulk teardown is a strictly serial
+   * `for (…) await cancelOrderOnExchange(o)`, so it empties the bucket in its
+   * first few orders and then pays ~4s per order for the rest.
+   * `CancelOrderBatch` cancels up to 50 for one call.
+   *
+   * Strictly an optimisation, and its failure modes are all the same failure
+   * mode: an id this call does not come back with is simply not primed, and
+   * the loop cancels it exactly as it does today. Nothing here decides
+   * whether an order should be cancelled, only how many round trips that
+   * costs.
+   *
+   * Three properties are load-bearing:
+   *
+   *  - **Kraken spot only, and only when armed.** No other venue is asked a
+   *    single extra question, so no other venue's behaviour can change.
+   *  - **Keyed by the exchange order id**, which is what `cancelOrderOnExchange`
+   *    addresses Kraken with (the client order id does not resolve there at
+   *    all — see that method). An order still carrying the `'-1'` placeholder
+   *    has no venue-side id and is left out entirely, so its existing guard
+   *    still fires on the normal path.
+   *  - **Single use, and cleared by the loop that primed it.** A primed entry
+   *    is a statement about the venue AT PRIME TIME; letting one answer a
+   *    cancel issued later — for an order placed since, or by a different code
+   *    path — would report a cancel that never happened.
+   */
+  protected async primeCancelBatch(orders: Order[]) {
+    this.cancelBatch = null
+    if (!this.exchange || !this.data || !this.krakenSpot) {
+      return
+    }
+    if (!this.isBatchCancelArmed()) {
+      return
+    }
+    if (unsupportedCancelBatch.has(this.data.exchange)) {
+      return
+    }
+    // Grouped by symbol because the venue's batch cancel is per pair and the
+    // callers are not: a DCA bot's teardown walks one deal's orders, but
+    // `cancelAllOrder` on a multi-pair bot walks whatever is open. One call per
+    // symbol keeps the primed map correct for every one of them instead of
+    // silently priming only the first.
+    const idsBySymbol = new Map<string, string[]>()
+    for (const o of orders) {
+      const id = `${o?.orderId ?? ''}`
+      if (!o || !id || id === noExchangeOrderId) {
+        continue
+      }
+      const ids = idsBySymbol.get(o.symbol) ?? []
+      if (!ids.includes(id)) {
+        ids.push(id)
+      }
+      idsBySymbol.set(o.symbol, ids)
+    }
+    // The bulk call cancels on the venue before the per-order loop runs.
+    for (const o of orders) {
+      this.noteOwnCancel(o?.clientOrderId)
+    }
+    const map = new Map<string, CommonOrder>()
+    let asked = 0
+    try {
+      for (const [symbol, ids] of idsBySymbol) {
+        // One order is not a batch: the per-order path is one call either way,
+        // and it is the path whose behaviour is already proven.
+        if (ids.length < 2) {
+          continue
+        }
+        for (let at = 0; at < ids.length; at += maxCancelBatchIds) {
+          const chunk = ids.slice(at, at + maxCancelBatchIds)
+          asked += chunk.length
+          const res = await this.exchange.cancelOrdersBatch({
+            symbol,
+            newClientOrderIds: chunk,
+          })
+          if (res.status !== StatusEnum.ok || !res.data?.length) {
+            if (isBatchRouteUnavailable(res.reason)) {
+              // A property of the deployed connector: ask once per process.
+              unsupportedCancelBatch.add(this.data.exchange)
+              this.handleDebug(
+                `Bulk cancel not available (${res.reason}) — cancelling one at a time from now on`,
+              )
+              this.cancelBatch = null
+              return
+            }
+            // Anything else — an empty answer, a timeout, a venue error — is
+            // this moment's problem only. Nothing was promised about these
+            // ids, so the loop cancels them itself, and the next bulk loop
+            // asks again.
+            this.handleDebug(
+              `Bulk cancel returned nothing for ${symbol} (${res.reason ?? 'empty'}) — cancelling those one at a time`,
+            )
+            continue
+          }
+          for (const order of res.data) {
+            const key = `${order.orderId ?? ''}`
+            if (key && key !== noExchangeOrderId) {
+              map.set(key, order)
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Never fatal: the loop proceeds one order at a time.
+      this.handleDebug(`Bulk cancel failed, falling back per order: ${e}`)
+      this.cancelBatch = null
+      return
+    }
+    this.cancelBatch = map.size ? map : null
+    if (asked) {
+      this.handleDebug(
+        `Bulk cancel confirmed ${map.size}/${asked} order(s) in ${idsBySymbol.size} call group(s)`,
+      )
+    }
+  }
+
+  /** Record that this bot is about to cancel `clientOrderId`. Spec 095 §4.1. */
+  protected noteOwnCancel(clientOrderId: string | undefined) {
+    if (!clientOrderId) {
+      return
+    }
+    const now = Date.now()
+    // `??=`: a bot built off the prototype has no field initialisers.
+    const own = (this.ownCancels ??= new Map())
+    if (own.size > 256) {
+      for (const [id, at] of own) {
+        if (now - at > ownCancelTtlMs) {
+          own.delete(id)
+        }
+      }
+    }
+    own.set(clientOrderId, now)
+  }
+
+  /** Did this bot ask to cancel `clientOrderId` (recently)? Spec 095 §4.1. */
+  isOwnCancel(clientOrderId: string | undefined) {
+    const at = clientOrderId ? this.ownCancels?.get(clientOrderId) : undefined
+    return at !== undefined && Date.now() - at <= ownCancelTtlMs
+  }
+
+  /**
+   * Drop whatever {@link MainBot#primeCancelBatch} left behind.
+   *
+   * Every priming caller does this in a `finally`, including the ones that
+   * `return` from the middle of their loop. An entry that outlived its loop
+   * would be consumed by an unrelated later cancel and report, as this venue's
+   * answer, something the venue said about a different moment.
+   */
+  protected clearCancelBatch() {
+    this.cancelBatch = null
+  }
+
+  /**
+   * `opts` exists for the restart probes in `checkOrders`, which read the
+   * redis order cache first and, for grid, ask by the bot's pair rather than
+   * the order's symbol. Both are passed through unchanged, so moving those
+   * loops onto this retry changed nothing about WHAT they ask — only that a
+   * transient miss is re-asked instead of being read as the venue's answer.
+   */
+  protected async getOrderForReconcile(
+    o: Order,
+    opts: {
+      fromCache?: boolean
+      symbol?: string
+      onAttempts?: (spent: number) => void
+    } = {},
+  ) {
+    const symbol = opts.symbol ?? o.symbol
+    const fromCache = opts.fromCache ?? false
+    // No exchange bound: retrying cannot fix that, and sleeping through it once
+    // per order turns a dead bot into a slow one.
+    if (!this.exchange || !this.data) {
+      // Still exactly one lookup — reported so a caller counting attempts sees
+      // this branch as the single attempt it is, not as zero.
+      opts.onAttempts?.(1)
+      return await this.getOrder(o.clientOrderId, symbol, fromCache)
+    }
+    return await reconcileLookup(
+      () => this.getOrder(o.clientOrderId, symbol, fromCache),
+      {
+        attempts: reconcileLookupAttempts,
+        backoffMs: reconcileLookupBackoffMs,
+        sleep: utils.sleep,
+        onAttempts: opts.onAttempts,
+      },
+    )
   }
 
   /**
@@ -1370,14 +2098,22 @@ class MainBot<T extends IMainBot> {
             findPath?.path.includes('ordersCount') ||
             findPath?.path.includes('volumeScale') ||
             findPath?.path.includes('maxNumberOfOpenDeals')
-          if (resetStats || (this.data as BotSchema | null)?.stats) {
+          const bot = this.data as ClearDCABotSchema | null
+          if (resetStats && bot?.stats) {
             this.handleLog(
               `Reset bot ${this.botId} stats after variable ${data._id} changed`,
             )
+            // Same scope as a sizing edit through the settings API. This path
+            // does not reload the bot, so the in-memory copy — what the next
+            // deal close folds into and what goes to Redis — is reset too.
+            const stats = statsAfterReset(bot.stats, 'keepChart')
+            bot.stats = stats ?? undefined
+            bot.symbolStats = undefined
+            bot.resetStatsAfter = +new Date()
             this.updateData({
-              stats: null,
+              stats,
               symbolStats: null,
-              resetStatsAfter: +new Date(),
+              resetStatsAfter: bot.resetStatsAfter,
             })
           }
         }
@@ -1396,6 +2132,8 @@ class MainBot<T extends IMainBot> {
 
   closeUserStream() {
     const uuid = this.data?.exchangeUUID
+    this.userStreamSubscribedAt = 0
+    this.userStreamRepairPending = false
     this.rabbitClient?.send(rabbitUsersStreamKey, {
       event: 'close stream',
       uuid,
@@ -1443,6 +2181,21 @@ class MainBot<T extends IMainBot> {
   }
 
   async connectRabbitUserStream() {
+    // Same guard `resubscribeUserStream()` already uses: with no connection on
+    // the doc there is nothing to open a stream for. The `restart: 'userStream'`
+    // broadcast handled in `processServiceLog` reaches EVERY bot instance in the
+    // worker, including ones whose `this.data` is still null — a bot mid
+    // `loadData()`, and an archive bot that `loadData()` filters out
+    // (`status: {$ne: archive}`) and `sendBotClosed()` therefore never
+    // unsubscribes. Those reached `getExchangeData()` and logged
+    // `No exchange data in connect rabbit undefined` — the literal string — with
+    // an empty `userId`, because `this.userId` is only assigned once `loadData()`
+    // has the doc, so the record could not even be attributed to a user (165 bots
+    // in 7 days). A bot still loading connects anyway: `loadData()` reaches here
+    // via `setExchangeCredentials()` once it has the doc.
+    if (!this.data?.exchangeUUID) {
+      return
+    }
     const exchangeData = await this.getExchangeData()
     if (!exchangeData) {
       return
@@ -1509,7 +2262,32 @@ class MainBot<T extends IMainBot> {
   }
 
   protected userStreamInfoCb(msg: string) {
+    const now = Date.now()
+    this.lastUserStreamInfoAt = now
+    this.ackUserStreamInfo(now)
+    const repaired = this.userStreamRepairPending
+    if (repaired) {
+      this.userStreamRepairPending = false
+      this.userStreamSilentRepairs = 0
+      this.handleLog(`User stream channel delivering again after repair`)
+    }
+    if (isPingMessage(msg)) {
+      // Fleet-wide probe every couple of minutes: ack (above), never log at
+      // info. A probe is also the first thing a repaired channel hears, so it
+      // is where the post-repair reconcile is triggered.
+      if (repaired) {
+        this.reconcileAfterUserStreamRepair()
+      }
+      return
+    }
     this.handleLog(`${msg}`)
+    if (
+      repaired &&
+      !(msg ?? '').includes('Subscribed to user') &&
+      !(msg ?? '').includes('RECONCILE VIA SWEEP')
+    ) {
+      this.reconcileAfterUserStreamRepair()
+    }
     if ((msg ?? '').includes('Subscribed to user')) {
       if (
         this.callbackAfterUserStream &&
@@ -1557,6 +2335,121 @@ class MainBot<T extends IMainBot> {
           }
         })
     }
+  }
+
+  /**
+   * Acknowledge a receipt on the account channel so the fill-failsafe can
+   * tell a deaf bot from a quiet one (spec 002 §4.5). Fire and forget.
+   */
+  private ackUserStreamInfo(now: number) {
+    const uuid = this.data?.exchangeUUID
+    if (!uuid || !this.redisDb?.isReady) {
+      return
+    }
+    const key = userStreamAckKey(uuid)
+    void this.redisDb
+      .hSet(key, this.botId, `${now}`)
+      .then(() => this.redisDb?.expire(key, USER_STREAM_ACK_TTL_SEC))
+      .catch(() => undefined)
+  }
+
+  private reconcileAfterUserStreamRepair() {
+    void Promise.resolve(this.callbackAfterUserStream?.(this.botId)).catch(
+      (e) =>
+        this.handleWarn(
+          `reconcile after user stream repair failed: ${(e as Error).message}`,
+        ),
+    )
+  }
+
+  /** Resting orders this bot currently holds on the venue. */
+  protected countRestingOrders(): number {
+    let n = 0
+    for (const o of this.orders.values()) {
+      if (o.status === 'NEW' || o.status === 'PARTIALLY_FILLED') {
+        n += 1
+      }
+    }
+    return n
+  }
+
+  /**
+   * Re-establish every server-side subscription behind this bot's user
+   * stream (spec 002 §4.3, §4.6): the `userStreamInfo<uuid>` info channel,
+   * the account event channel routed by {@link SharedStream}, and a fresh
+   * `open stream` to the connector. Safe to call at any time; also exposed
+   * to the bot host so the fill-failsafe can trigger it for an account whose
+   * reconcile sweep went unacknowledged.
+   */
+  public async resubscribeUserStream(reason = 'requested'): Promise<void> {
+    const uuid = this.data?.exchangeUUID
+    if (!uuid || !this.cbFunctions) {
+      return
+    }
+    this.handleWarn(`USER-STREAM REPAIR: resubscribing ${uuid} (${reason})`)
+    this.userStreamLastRepairAt = Date.now()
+    this.userStreamRepairPending = true
+    const infoChannel = `userStreamInfo${uuid}`
+    const relisted = (await this.redisSubGlobal?.resubscribe(infoChannel)) ?? 0
+    if (!relisted) {
+      this.redisSubGlobal?.subscribe(infoChannel, this.userStreamInfoCb)
+    }
+    const account = await this.sharedStream.resubscribe(uuid)
+    if (!account) {
+      this.userStreamChannel = uuid
+      await this.sharedStream.addListener(
+        uuid,
+        this.botId,
+        this.accountCallback,
+      )
+    }
+    this.userStreamSubscribedAt = Date.now()
+    this.connectRabbitUserStream()
+  }
+
+  /**
+   * Silence check, run from the 30 s consumer heartbeat (spec 002 §4.6). A
+   * bot holding resting orders that has heard nothing on its channel for
+   * `USER_STREAM_SILENCE_MS` while the fill-failsafe prober is alive is deaf:
+   * repair it, and after two silent repairs tell the user as well.
+   */
+  private async checkUserStreamLiveness() {
+    if (!this.data || !this.redisDb?.isReady) {
+      return
+    }
+    // A pending repair that is still followed by silence counts against it.
+    const silentRepairs = this.userStreamRepairPending
+      ? this.userStreamSilentRepairs + 1
+      : this.userStreamSilentRepairs
+    const raw = await this.redisDb.get(FAILSAFE_HEARTBEAT_KEY).catch(() => null)
+    const verdict = assessUserStreamLiveness({
+      now: Date.now(),
+      lastHeardAt: this.lastUserStreamInfoAt,
+      subscribedAt: this.userStreamSubscribedAt,
+      lastRepairAt: this.userStreamLastRepairAt,
+      silentRepairs,
+      restingOrders: this.countRestingOrders(),
+      prober: parseProberHeartbeat(raw ?? null),
+      silenceMs: userStreamSilenceMs,
+      proberStaleMs,
+    })
+    if (verdict.action === 'none') {
+      return
+    }
+    this.userStreamSilentRepairs = silentRepairs
+    if (verdict.action === 'repair-and-error') {
+      // Visible to the user, does not flip the bot into error status: the bot
+      // keeps trading and keeps repairing; the user learns fills may book late.
+      void this.handleErrors(
+        `Gainium is not receiving live updates for this exchange connection (${verdict.reason}). Order fills may be booked with a delay while we keep reconnecting automatically.`,
+        'userStreamLiveness',
+        '',
+        false,
+        true,
+        true,
+      )
+    }
+    await this.resubscribeUserStream(verdict.reason)
   }
 
   public async setExchangeCredentials(
@@ -1607,14 +2500,15 @@ class MainBot<T extends IMainBot> {
         if (!this.redisSubGlobal) {
           this.redisSubGlobal = await RedisClient.getInstance(true, 'global')
         }
-        await this.redisSubGlobal.unsubscribe(
-          `userStreamInfo${exchangeUUID}`,
-          this.userStreamInfoCb,
-        )
+        // No unsubscribe-before-subscribe here: the callback is a per-instance
+        // bound function, node-redis dedups a repeat subscribe of the same
+        // listener, and the pre-unsubscribe is what cancelled a sibling's
+        // in-flight SUBSCRIBE on the shared account channel (core spec 002).
         this.redisSubGlobal?.subscribe(
           `userStreamInfo${exchangeUUID}`,
           this.userStreamInfoCb,
         )
+        this.userStreamSubscribedAt = Date.now()
         this.sharedStream.addListener(
           this.userStreamChannel,
           this.botId,
@@ -1696,12 +2590,58 @@ class MainBot<T extends IMainBot> {
   }
 
   public async getExchangeInfo(symbol: string, force = false) {
-    return await this.sharedData.getExchangeInfo(
+    const info = await this.sharedData.getExchangeInfo(
       removePaperFormExchangeName(this.data?.exchange ?? ExchangeEnum.binance),
       symbol,
       this.botId,
       force,
     )
+    return this.applyLearnedQtyStep(symbol, info)
+  }
+
+  /**
+   * Widen a pair's quantity step to what THIS connection's venue has actually
+   * proven it accepts (see `qtyStepGuard.ts`).
+   *
+   * `pairs` holds one row per `exchange@pair`, loaded from the venue's public
+   * instrument list — but the host an account signs against is not always the
+   * host that list came from (Bybit's regional endpoints publish coarser lot
+   * filters, and some symbols only on one of them). When such a venue refuses a
+   * quantity, `sendOrderToExchange` records the precision the refusal proves,
+   * and this is where every later sizing decision picks it up: this method is
+   * the single read path for pair filters in the engine, so `baseAssetPrecision`
+   * and the `baseAsset.step` remainder arithmetic in dcaHelper / gridMonitor /
+   * comboHelper all inherit it without their own call sites changing.
+   *
+   * Three properties matter and are pinned by `qtyStepGuard.spec.ts`:
+   *  - it only ever COARSENS — a learned step finer than the shared one is
+   *    ignored, so this can never loosen a venue's real filter;
+   *  - it COPIES — the row from the shared store is handed to every bot in the
+   *    worker, so mutating it would re-size other users' orders on that pair;
+   *  - with nothing learned it returns the very same object, so an account that
+   *    has never been refused is byte-for-byte unaffected.
+   */
+  private applyLearnedQtyStep(
+    symbol: string,
+    info: ClearPairsSchema | undefined,
+  ): ClearPairsSchema | undefined {
+    const decimals = QtyStepGuard.peek(this.data?.exchangeUUID, symbol)
+    if (!info || decimals === null) {
+      return info
+    }
+    const step = decimalsToStep(decimals)
+    if (!(step > info.baseAsset.step)) {
+      return info
+    }
+    return {
+      ...info,
+      baseAsset: {
+        ...info.baseAsset,
+        step,
+        // An order below a single step cannot be expressed at this precision.
+        minAmount: Math.max(info.baseAsset.minAmount, step),
+      },
+    }
   }
 
   /**
@@ -1846,6 +2786,37 @@ class MainBot<T extends IMainBot> {
   }
 
   /**
+   * What the re-raise cooldown for this occurrence is keyed on — i.e. what the
+   * window is a window *of*.
+   *
+   * Three cases, all the same question answered about a different subject:
+   *
+   * - a TERMINAL deal has one throwaway bot per deal, so `messageBotId` is
+   *   never the same twice and a per-bot window suppresses nothing. Key on the
+   *   constraint that is stable across those bots: user + subType + symbol.
+   * - a PER-CONTRACT subType ({@link isPerSymbolSubType}) is one condition per
+   *   contract, not per bot. Without the symbol the first blocked contract's
+   *   window swallows the FIRST report of every other one, so the user is told
+   *   about one of N contracts they each have to act on separately (spec 007).
+   * - everything else is a property of the bot, and keeps the bot-wide window
+   *   it has always had.
+   */
+  private buildCooldownKey(
+    terminal: boolean,
+    messageBotId: string,
+    subType: string,
+    symbol?: string,
+  ): string[] {
+    if (terminal) {
+      return [this.userId, subType, symbol ?? '']
+    }
+    if (symbol && isPerSymbolSubType(subType)) {
+      return [messageBotId, subType, symbol]
+    }
+    return [messageBotId, subType]
+  }
+
+  /**
    * May this occurrence raise a USER-FACING alert, or has one already gone out
    * for this account's current hard-auth cooldown window?
    *
@@ -1952,12 +2923,19 @@ class MainBot<T extends IMainBot> {
         ? MessageTypeEnum.error
         : MessageTypeEnum.warning
       // The pair that actually errored, when the occurrence carried one. The
-      // fallback is `settings.pair[0]`, which used to be applied
+      // fallback is the bot's first configured pair, which used to be applied
       // unconditionally: on a multi-pair bot that made EVERY notification name
       // the bot's first pair regardless of which pair failed, so a row could
       // say `BTC-USDC` above a message about AIOZ (community #5069). Only a
       // caller with no symbol to give still lands on the fallback.
-      const symbol = _symbol ?? this.data?.settings.pair[0]
+      //
+      // `settings.pair` is NOT one shape across bot types: DCA/combo store an
+      // ARRAY (`schema.ts` `pair: [RequiredString]`) but grid stores a plain
+      // STRING (`botSettingsCommon` `pair: RequiredString`). Indexing `[0]`
+      // therefore returned the first CHARACTER on every grid bot — `TONUSDT`
+      // was reported as `T` — so use the same flatten idiom the user-stream
+      // filter below already applies to this field.
+      const symbol = _symbol ?? [this.data?.settings.pair ?? []].flat()[0]
       const exchange = this.data?.exchange
 
       // Re-raise backoff. The rate limit lives on the RAISE, not on the row:
@@ -1988,17 +2966,17 @@ class MainBot<T extends IMainBot> {
       // `force` (user-initiated actions) is never suppressed.
       //
       // Keyed per (bot, subType) for a bot the user keeps — which is what makes
-      // the window mean anything: the bot is the thing they are watching. A
-      // terminal deal is not that. It is one bot per deal, created by the
-      // request that starts it, so `messageBotId` is never the same twice and a
-      // per-bot cooldown can suppress nothing at all: every occurrence is the
-      // first for its bot, and a caller looping on a condition that will not
-      // clear collects one notification per attempt. For those, key on what
-      // actually identifies the constraint and is stable across the bots — the
-      // user, the subType, and the symbol it keeps failing on.
-      const cooldownKey = terminal
-        ? [this.userId, subType, symbol ?? '']
-        : [messageBotId, subType]
+      // the window mean anything: the bot is the thing they are watching, and a
+      // terminal deal or a per-contract refusal is not. See
+      // {@link MainBot#buildCooldownKey} for why each of those keys on
+      // something else instead.
+      const perSymbol = !!symbol && isPerSymbolSubType(subType)
+      const cooldownKey = this.buildCooldownKey(
+        terminal,
+        messageBotId,
+        subType,
+        symbol,
+      )
       let raise = sendError
       if (raise && !force) {
         const cooldown = await errorRaiseBackoff.check(cooldownKey)
@@ -2048,6 +3026,7 @@ class MainBot<T extends IMainBot> {
       }
       // Refreshed on every occurrence, so a coalesced row reports the LATEST
       // state of the condition rather than a snapshot of the first time it fired.
+      // `symbol` is the exception — see `onEveryCoalesced` below.
       const onEvery = {
         botName,
         type: messageType,
@@ -2077,7 +3056,31 @@ class MainBot<T extends IMainBot> {
           subType,
           showUser: raise,
           bucket,
+          // A per-contract subType gets one row per contract, so the user is
+          // told about each one they have to act on separately rather than
+          // about whichever failed last.
+          // `botMessageCoalesceKey` carries `symbol` for this to be insertable.
+          ...(perSymbol ? { symbol } : {}),
         }
+        // `symbol` is part of the row's position in `botMessageCoalesceKey`, so
+        // it may only be written where it cannot MOVE the row. For a
+        // per-contract subType it is in the filter above, so `$set`ting it can
+        // only ever rewrite it to the value it already holds. For every other
+        // subType the filter has no `symbol` — `$set`ting it there moves the row
+        // inside a UNIQUE index, and a multi-pair bot's sibling children share
+        // one `messageBotId` while holding separate `processError` mutexes (the
+        // `@IdMute` id is the CHILD botId), so two of them can insert one row
+        // each in the same window: the index tolerates that pair because their
+        // symbols differ, and from then on every occurrence carrying the other
+        // contract tried to move its row onto its sibling and died on E11000 —
+        // in the upsert AND in the fold below, which re-used this same payload.
+        // Production dropped 119 of the 240 occurrences in one hour that way
+        // (spec 015). So pin it on insert instead: the row is labelled once,
+        // with the contract the window actually opened on, and never moves.
+        // Refreshing it was never right anyway — spec 007 §1.2.1 calls the
+        // resulting silent re-labelling out as a defect in its own right.
+        const { symbol: _movesTheRow, ...onEveryExceptSymbol } = onEvery
+        const onEveryCoalesced = perSymbol ? onEvery : onEveryExceptSymbol
         // `$inc` makes "is this the first occurrence in this window?" a property
         // of the write itself rather than of a separate read: count===1 means
         // this call created the row. Nothing else can observe a different answer.
@@ -2086,8 +3089,12 @@ class MainBot<T extends IMainBot> {
           {
             // `bucket` rides in $setOnInsert rather than the key spread so the
             // `always` path above can share `onInsert` without carrying a null.
-            $setOnInsert: { ...onInsert, bucket },
-            $set: onEvery,
+            $setOnInsert: {
+              ...onInsert,
+              bucket,
+              ...(perSymbol ? {} : { symbol }),
+            },
+            $set: onEveryCoalesced,
             $inc: { count: 1 },
           },
           true,
@@ -2104,7 +3111,7 @@ class MainBot<T extends IMainBot> {
           // coalescing exists to prevent.
           firstOccurrence = false
           const folded = await this.messagesDb.updateData(key, {
-            $set: onEvery,
+            $set: onEveryCoalesced,
             $inc: { count: 1 },
           })
           if (folded.status === StatusEnum.notok) {
@@ -2294,13 +3301,11 @@ class MainBot<T extends IMainBot> {
     )
   }
 
-  private isErrorNotEnoughBalance(errorString: string): boolean {
-    for (const e of notEnoughErrors) {
-      if (errorString.toLowerCase().indexOf(e.toLowerCase()) !== -1) {
-        return true
-      }
-    }
-    return false
+  // `protected`, not `private`: spec 015 §7.2's isFeeSizingRejection
+  // (dcaHelper.ts) is a subclass method that needs to compose this with
+  // isNotionalReason. No behavior change — same body, wider visibility.
+  protected isErrorNotEnoughBalance(errorString: string): boolean {
+    return matchesNotEnoughBalance(errorString)
   }
 
   @IdMute(mutex, (botId: string) => `checkNotEnoughBalanceErrors${botId}`)
@@ -2708,15 +3713,15 @@ class MainBot<T extends IMainBot> {
     )
   }
 
+  /**
+   * Redis price channels for these pairs. Always the display pair, never the
+   * Hyperliquid wire code: websocket-connector publishes `trade@` by display
+   * pair (it translates wire codes internally), so a channel keyed by wire
+   * code (`BTC@hyperliquidLinear`, `xyz:NVDA@hyperliquidLinear`) has no
+   * publisher and the bot never ticks. Same fix as the candle channel in
+   * indicators/service.ts.
+   */
   async redisSubKeys(pairs: string[]) {
-    if (this.hyperliquid) {
-      pairs = await Promise.all(
-        pairs.map(async (p) => {
-          const find = await this.getExchangeInfo(p)
-          return this.isKraken ? p : (find?.code ?? p)
-        }),
-      )
-    }
     return pairs.map(
       (p) =>
         `trade@${p}@${removePaperFormExchangeName(
@@ -2934,7 +3939,20 @@ class MainBot<T extends IMainBot> {
     this.handleLog('Load data start')
     if (this.serviceRestart && !this.secondRestart && !SKIP_REDIS) {
       const botData = await this.getFromRedis<typeof this.data>('botData')
-      if (botData) {
+      const poisoned = poisonedSnapshotProfitField(botData)
+      if (botData && poisoned) {
+        // The snapshot laundered a NaN into `null` (see redisSnapshotGuard).
+        // Restoring it would reset the bot's realized profit to zero; the
+        // database copy below is the last value Mongo accepted.
+        this.handleErrors(
+          `Redis bot snapshot has a non-finite ${poisoned}, loading bot data from the database instead`,
+          'loadData()',
+          'Load bot data',
+          false,
+          false,
+          false,
+        )
+      } else if (botData) {
         if (realStatus && botData.status !== realStatus) {
           this.handleLog(
             `Skip load from redis, redis status ${botData.status}, real status ${realStatus}`,
@@ -3096,10 +4114,37 @@ class MainBot<T extends IMainBot> {
             if (allPositions) {
               this.handleLog(`Get hedge`)
             }
-            let hedge = allPositions
-              ? skipFutures
-                ? { data: !!keys.hedge, status: StatusEnum.ok }
-                : await this.exchange.getHedge()
+            // `skipFutures` used to substitute the STORED `keys.hedge` for this
+            // read, so a service restart adopted whatever the account's
+            // position mode was the last time the user told us about it. The
+            // user is free to change that mode at the exchange, where nothing
+            // tells us, and then every order this bot builds names the mode we
+            // remember instead of the one the venue enforces — OKX answers
+            // `Parameter posSide error`, Binance USD-M `-4061`, and the bot
+            // cannot place an order at all until it is restarted from a path
+            // that does read live.
+            //
+            // The read is back for every futures connection, but it is no
+            // longer per BOT: `readHedgeMode` coalesces it per connection, so a
+            // mass restart makes one call per account rather than one per bot —
+            // fewer calls than the code this substitution originally replaced.
+            // A venue that does not answer still falls back to `keys.hedge`,
+            // which is exactly the behaviour being replaced.
+            //
+            // Note the non-`allPositions` venues below already re-read live on
+            // every restart (`getHedge(symbol)`); this only stops binance/okx/
+            // bitget/kucoin from being the exception.
+            //
+            // The coalescing window applies to the SERVICE RESTART only. A
+            // user-initiated start keeps the uncached read it has today: the
+            // `setHedge` mutation runs in the API process and cannot invalidate
+            // a bot worker's cache, so a user who changes the mode here and
+            // immediately starts a bot must not be served a window-old answer.
+            let hedge: BaseReturn<boolean> | null = allPositions
+              ? await this.readAccountHedge(
+                  !!keys.hedge,
+                  skipFutures ? undefined : 0,
+                )
               : null
             if (allPositions) {
               this.handleLog(`Got hedge: ${hedge?.data}`)
@@ -3290,15 +4335,63 @@ class MainBot<T extends IMainBot> {
                         : 'SHORT'
                       : findPosition.positionSide
                   if (side !== requiredSide) {
-                    this.handleErrors(
-                      `Cannot start when existing position not met bot settings. Side in active position is ${side}, but bot will open ${requiredSide}. Symbol: ${symbol}`,
-                      'load data',
-                      'check positions',
-                      false,
-                    )
-                    if (!skipFuturesError) {
-                      this.endMethod(id)
-                      return true
+                    // Spec 041: a long/short flip starts this bot while the
+                    // opposite bot's market close is still in flight, so one
+                    // read sees a position that is gone a second later. Look
+                    // again before refusing — but only when the refusal would
+                    // stop the bot, and never on a service restart, where
+                    // nothing is closing it.
+                    //
+                    // Spec 078: HOW LONG to look depends on who holds the
+                    // position. A running bot with an open deal on that side
+                    // is not unwinding anything, so waiting a minute buys the
+                    // same answer a minute later; a close in flight, a stopped
+                    // bot, or a leftover nobody owns is worth the longer park.
+                    // The same lookup names the holder in the refusal.
+                    const exchange = this.exchange
+                    const holder =
+                      !skipFuturesError && !this.serviceRestart
+                        ? await this.findOpposingDealHolder(symbol)
+                        : null
+                    const settled =
+                      !skipFuturesError && !this.serviceRestart
+                        ? await awaitPositionFlat(
+                            () =>
+                              allPositions
+                                ? exchange.futures_getPositions()
+                                : exchange.futures_getPositions(symbol),
+                            symbol,
+                            { ...settleWindowFor(holder), sleep },
+                          )
+                        : undefined
+                    if (settled) {
+                      this.handleLog(
+                        `Active ${side} position on ${symbol} closed while starting, continue`,
+                      )
+                      positionsRequest = settled
+                    } else {
+                      if (holder) {
+                        this.handleLog(
+                          `Opposing ${side} position on ${symbol} is held by deal ${holder.dealId} on bot ${holder.botId} (${
+                            holder.botStopped ? 'stopped' : 'running'
+                          })`,
+                        )
+                      }
+                      this.handleErrors(
+                        opposingPositionRefusal({
+                          side,
+                          requiredSide,
+                          symbol,
+                          holder,
+                        }),
+                        'load data',
+                        'check positions',
+                        false,
+                      )
+                      if (!skipFuturesError) {
+                        this.endMethod(id)
+                        return true
+                      }
                     }
                   }
                 }
@@ -3401,6 +4494,7 @@ class MainBot<T extends IMainBot> {
   async _loadOrders(
     query?: QueryFilter<ClearOrderSchema>,
     skipRedis = false,
+    dealIds: string[] = [],
   ): Promise<ClearOrderSchema[]> {
     const id = this.startMethod('loadOrders main')
     // The Redis order snapshot is a COLD-START shortcut only, hence the same
@@ -3433,8 +4527,51 @@ class MainBot<T extends IMainBot> {
       const orders = await this.getFromRedis<Order[]>('orders')
       if (orders && orders.length) {
         this.handleLog(`Found in redis ${orders.length} orders`)
+        // The snapshot misses whatever was placed after its last delayed
+        // write, and that write dies with the process: on 2026-09-25 a safety
+        // order and a take-profit saved 72 s before a restart were absent
+        // from it, and the restart check placed both again. Merge in the open
+        // rows Mongo holds for these deals. Scoped by `dealId` (indexed) to
+        // open statuses, so a mass restart reads no order history. Spec 109.
+        const restored = orders.map((o) => ({ ...o, _id: o._id }))
+        const ids = [
+          ...new Set([
+            ...dealIds,
+            ...restored.flatMap((o) => (o.dealId ? [`${o.dealId}`] : [])),
+          ]),
+        ]
+        if (!ids.length) {
+          this.endMethod(id)
+          return restored
+        }
+        const open = await this.ordersDb.readData(
+          {
+            botId: this.botId,
+            dealId: { $in: ids },
+            status: { $in: ['NEW', 'PARTIALLY_FILLED'] },
+            typeOrder: {
+              $nin: [TypeOrderEnum.liquidation, TypeOrderEnum.br],
+            },
+          },
+          undefined,
+          {},
+          true,
+        )
+        if (open.status === StatusEnum.notok) {
+          this.handleWarn(
+            `Cannot read open orders to merge into the redis snapshot: ${open.reason}`,
+          )
+          this.endMethod(id)
+          return restored
+        }
+        const merged = mergeOpenOrdersIntoSnapshot(restored, open.data.result)
+        if (merged.added) {
+          this.handleLog(
+            `Added ${merged.added} open orders from DB missing in redis`,
+          )
+        }
         this.endMethod(id)
-        return orders.map((o) => ({ ...o, _id: o._id }))
+        return merged.orders
       }
     }
     this.handleLog('Load orders start')
@@ -3510,6 +4647,71 @@ class MainBot<T extends IMainBot> {
     return await this.sharedData.getUserSchema(this.userId, this.botId, force)
   }
 
+  /**
+   * The connection's position mode as the VENUE reports it, with the stored
+   * copy as the fallback and a write-back when the two disagree.
+   *
+   * Returns the same `{ status, data }` shape `Exchange.getHedge()` does so the
+   * call sites keep their existing branches, and never reports `notok`: an
+   * unanswered read is not a reason to refuse to start a bot, it is a reason to
+   * keep believing what we already believed.
+   *
+   * @param storedHedge what `user.exchanges[].hedge` currently says.
+   * @param maxAgeMs how stale a coalesced answer may be for this caller.
+   */
+  protected async readAccountHedge(
+    storedHedge: boolean,
+    maxAgeMs?: number,
+  ): Promise<{ status: StatusEnum.ok; data: boolean }> {
+    const exchange = this.exchange
+    const uuid = `${this.data?.exchangeUUID ?? ''}`
+    const live = exchange
+      ? await readHedgeMode(uuid, () => exchange.getHedge(), maxAgeMs)
+      : null
+    if (live === null) {
+      return { status: StatusEnum.ok, data: storedHedge }
+    }
+    if (live !== storedHedge) {
+      this.handleLog(
+        `Position mode on the exchange is ${
+          live ? 'hedge' : 'one-way'
+        }, stored as ${storedHedge ? 'hedge' : 'one-way'}. Updating`,
+      )
+      await this.persistHedgeMode(uuid, live)
+    }
+    return { status: StatusEnum.ok, data: live }
+  }
+
+  /**
+   * Write a venue-read position mode back onto the connection.
+   *
+   * Scoped to the one array element and guarded by `$ne`, so it is a no-op when
+   * the stored copy already agrees and it can never touch another connection or
+   * another field. Deliberately does NOT set `status` / `lastUpdated` the way
+   * the `setHedge` mutation does: this is not the user changing the mode, it is
+   * us catching up with a change they made at the exchange.
+   *
+   * The mutation's own active-bot guard is untouched and still applies — this
+   * path never calls `setHedge`, so no bot can flip the mode on the account.
+   */
+  private async persistHedgeMode(uuid: string, hedge: boolean): Promise<void> {
+    if (!uuid || !this.userId) {
+      return
+    }
+    const result = await userDb.updateData(
+      {
+        _id: this.userId,
+        exchanges: { $elemMatch: { uuid, hedge: { $ne: hedge } } },
+      } as any,
+      { $set: { 'exchanges.$.hedge': hedge } } as any,
+    )
+    if (result.status === StatusEnum.notok) {
+      this.handleWarn(
+        `Cannot store position mode for exchange ${uuid}: ${result.reason}`,
+      )
+    }
+  }
+
   async getBalancesFromExchange() {
     if (!this.data || !this.exchange) {
       return null
@@ -3575,6 +4777,115 @@ class MainBot<T extends IMainBot> {
   }
 
   /**
+   * Spec 078: which OTHER bot of this user holds an open deal on `symbol`, if
+   * any — the owner of the position this bot is being refused for.
+   *
+   * Answers two questions with one read: what to tell the user (an open deal
+   * on a named bot reads very differently from a leftover nobody owns), and
+   * whether waiting for the position to clear is worth anything at all
+   * (`settleWindowFor`).
+   *
+   * Best-effort by design: it runs on the refusal path, and an unreadable
+   * deals collection must degrade to the old wording, never to a throw inside
+   * `loadData` — whose caller awaits it outside its try/catch.
+   *
+   * `exchangeUUID` is matched in code rather than in the filter: it is a newer
+   * field, and a deal that predates it must not be read as "no holder" and
+   * reported to the user as a leftover.
+   */
+  private async findOpposingDealHolder(
+    symbol: string,
+  ): Promise<OpposingHolder> {
+    try {
+      if (!this.userId || !this.botId) {
+        return null
+      }
+      const paperContext = !!this.data?.paperContext
+      const uuid = this.data?.exchangeUUID
+      const onThisAccount = (deal: {
+        botId?: string
+        exchangeUUID?: string
+      }): boolean =>
+        !!deal.botId &&
+        (!uuid || !deal.exchangeUUID || deal.exchangeUUID === uuid)
+      const fields = { botId: 1, exchangeUUID: 1 } as const
+      const options = { limit: 5 } as const
+
+      const dcaRes = await dcaDealsDb.readData(
+        {
+          userId: this.userId,
+          'symbol.symbol': symbol,
+          status: DCADealStatusEnum.open,
+          isDeleted: { $ne: true },
+          botId: { $ne: `${this.botId}` },
+          paperContext: paperContext ? { $eq: true } : { $ne: true },
+        },
+        fields,
+        options,
+        true,
+      )
+      let deal =
+        dcaRes.status === StatusEnum.ok
+          ? (dcaRes.data?.result ?? []).find(onThisAccount)
+          : undefined
+      if (!deal) {
+        const comboRes = await comboDealsDb.readData(
+          {
+            userId: this.userId,
+            'symbol.symbol': symbol,
+            status: DCADealStatusEnum.open,
+            isDeleted: { $ne: true },
+            botId: { $ne: `${this.botId}` },
+            paperContext: paperContext ? { $eq: true } : { $ne: true },
+          },
+          fields,
+          options,
+          true,
+        )
+        deal =
+          comboRes.status === StatusEnum.ok
+            ? (comboRes.data?.result ?? []).find(onThisAccount)
+            : undefined
+      }
+      if (!deal?.botId) {
+        return null
+      }
+
+      const botId = new Types.ObjectId(`${deal.botId}`)
+      const botFields = { status: 1, settings: 1 } as const
+      const dcaBotRes = await dcaBotDb.readData({ _id: botId }, botFields, {})
+      let bot =
+        dcaBotRes.status === StatusEnum.ok ? dcaBotRes.data?.result : undefined
+      if (!bot) {
+        const comboBotRes = await comboBotDb.readData(
+          { _id: botId },
+          botFields,
+          {},
+        )
+        bot =
+          comboBotRes.status === StatusEnum.ok
+            ? comboBotRes.data?.result
+            : undefined
+      }
+      return {
+        dealId: `${deal._id ?? ''}`,
+        botId: `${deal.botId}`,
+        botName: bot?.settings?.name,
+        // Unknown status counts as running: claiming a bot is stopped when we
+        // could not read it would send the user to look at the wrong thing.
+        botStopped: !!bot?.status && bot.status !== BotStatusEnum.open,
+      }
+    } catch (e) {
+      this.handleWarn(
+        `Cannot resolve opposing position holder for ${symbol}: ${
+          (e as Error)?.message ?? e
+        }`,
+      )
+      return null
+    }
+  }
+
+  /**
    * Get user balances for current pair<br />
    *
    * Using {@link MainBot#exchange}<br />
@@ -3588,6 +4899,16 @@ class MainBot<T extends IMainBot> {
   ): Promise<Map<string, FreeAsset[0]> | undefined> {
     this.handleLog('Check assets start')
     const asset: Map<string, FreeAsset[0]> = new Map()
+    // A balance READ that failed is not a balance of zero. Callers score a
+    // missing entry as `?? 0`, so answering an unreadable account with an
+    // empty Map is indistinguishable from a successful read of an account
+    // that genuinely holds none of the pair's assets — and that is how a
+    // funded user gets told "available: 0". `undefined` is already in this
+    // method's declared return type and every caller already reads through
+    // `?.get(...)`, so it is the signal no successful read can produce.
+    // Partial DB figures are still data: serve them rather than discarding
+    // them just because the venue call that followed did not land.
+    const unreadable = () => (asset.size ? asset : undefined)
     let finish = false
     const bnfcr = await this.isBNFCR()
     if (this.exchange) {
@@ -3680,7 +5001,7 @@ class MainBot<T extends IMainBot> {
               ).toISOString()}: ${cooldown.reason}`,
             )
             if (returnData) {
-              return asset
+              return unreadable()
             }
             return
           }
@@ -3698,7 +5019,7 @@ class MainBot<T extends IMainBot> {
           }
           this.handleErrors(balances.reason, 'checkAssets()', 'getBalance')
           if (returnData) {
-            return asset
+            return unreadable()
           }
           return
         }
@@ -3734,11 +5055,78 @@ class MainBot<T extends IMainBot> {
       }
     }
 
-    return asset
+    // No exchange client at all means nothing was read either — same
+    // "unknown", not an account that holds nothing.
+    return this.exchange ? asset : unreadable()
   }
 
   getLastStreamData(symbol: string) {
     return this.lastStreamData.get(symbol)
+  }
+
+  /**
+   * Symbols currently being served by the REST price poll instead of the
+   * `trade@<symbol>@<exchange>` stream. See {@link MainBot#trackPriceStreamHealth}.
+   */
+  private priceStreamGaps = new PriceStreamGapTracker(
+    PRICE_STREAM_GAP_LOG_EVERY_MS,
+    // Boot grace: a freshly loaded bot has no stream data for any symbol, and
+    // its subscriptions settle over the next minutes. Without this, the first
+    // poll flags every symbol and two runs later declares them all recovered
+    // — hundreds of lines per worker restart saying nothing. A symbol that
+    // still has not ticked after 2 × priceTimeout is reported as before.
+    { graceMs: 2 * this.priceTimeout, startedAt: +new Date() },
+  )
+
+  /**
+   * State-change logging for "this symbol has no live price stream".
+   *
+   * `priceTimerFn` (DCA/Combo and Grid both) is a FALLBACK, not the primary
+   * price path: it only fetches over REST for symbols whose last stream update
+   * is older than {@link MainBot#priceTimeout} (2.5 min), and it re-injects the
+   * result through `priceUpdateCallback`, which is what drives `checkTPLevel`,
+   * `checkDealsStopLoss`, trailing and the DCA level checks. So a symbol whose
+   * stream is dead is not merely stale — every price-triggered decision on it
+   * runs on a ~5-minute grid (the 2.5-min timer, skipping every other tick
+   * because the previous REST injection is itself only 2.5 min old) rather than
+   * per tick.
+   *
+   * That state was invisible: the fallback logged at debug, and debug is off in
+   * production. A whole exchange missing from the price connector's enabled set
+   * therefore looked, from the bot's side, exactly like a normal quiet market.
+   *
+   * Bounded on purpose — one line when a symbol enters the gap, one every
+   * {@link PRICE_STREAM_GAP_LOG_EVERY_MS} while it persists, one when live
+   * ticks come back. Nothing per tick, nothing per timer run.
+   *
+   * `servedLastRun` is how a genuine tick is told apart from our own REST
+   * injection: after a fallback fetch the symbol looks "fresh" on the very next
+   * run because we wrote that freshness ourselves, so recovery is only declared
+   * on a run that finds it fresh without having served it the run before.
+   */
+  protected trackPriceStreamHealth(symbol: string, stale: boolean) {
+    const event = this.priceStreamGaps.note(symbol, stale, +new Date())
+    if (!event) {
+      return
+    }
+    const where = `${symbol} on ${this.data?.exchange ?? 'unknown exchange'}`
+    if (event.kind === 'entered') {
+      this.handleLog(
+        `No live price stream for ${where} — falling back to REST price polling every ${
+          this.priceTimeout / 1000 / 60
+        }m. Price-triggered checks (TP level, SL, trailing, DCA level) run at that cadence until ticks return.`,
+      )
+      return
+    }
+    if (event.kind === 'persisting') {
+      this.handleLog(
+        `Still no live price stream for ${where} after ${event.minutes}m — still REST polling.`,
+      )
+      return
+    }
+    this.handleLog(
+      `Live price stream resumed for ${where} after ${event.minutes}m of REST polling.`,
+    )
   }
 
   setLastStreamData(symbol: string, data: StreamData) {
@@ -3819,6 +5207,12 @@ class MainBot<T extends IMainBot> {
         false,
         false,
         false,
+        false,
+        // The pair we actually asked the venue for. Without it the message
+        // falls back to the bot's first configured pair, so a 356-pair bot
+        // reported every "Not supported symbols" against `BTCUSDT` — a symbol
+        // the venue does list — and the failing pair was unrecoverable.
+        symbol,
       )
     }
     return 0
@@ -3994,26 +5388,35 @@ class MainBot<T extends IMainBot> {
       )
     }
     if (this.exchange && this.data) {
-      if (
-        this.data.exchange === ExchangeEnum.coinbase ||
-        this.kucoinFullFutures ||
-        this.data.exchange === ExchangeEnum.kraken
-      ) {
-        const local = this.getOrderFromMap(id)
-        if (local) {
-          if (local.orderId === noExchangeOrderId) {
-            this.endMethod(_id)
-            return this.exchange.returnBad()(
-              new Error(orderNeverReachedExchange),
-            )
-          }
-          id = `${local.orderId}`
-        }
+      const venueId = this.venueOrderId(id)
+      if (venueId === null) {
+        this.endMethod(_id)
+        return this.exchange.returnBad()(new Error(orderNeverReachedExchange))
       }
-      const result = await this.exchange.getOrder({
-        symbol,
-        newClientOrderId: id,
-      })
+      id = venueId
+      // Served from the reconcile prefetch when this pass already asked the
+      // venue about this id. Hooked HERE, at the transport call, rather than
+      // earlier in the method: everything above (the Kraken/Coinbase/KuCoin
+      // client-id -> exchange-id translation, the `noExchangeOrderId` guard)
+      // and everything below (executedQty conversion, the KuCoin price
+      // reconstruction, the CANCELED-with-fills promotion) must run exactly as
+      // it does on the uncached path, or a batched order would be a subtly
+      // different order. Single-use, so a prefetched row can never answer a
+      // question asked outside the pass that fetched it.
+      const prefetched = this.reconcileBatch?.get(id)
+      if (prefetched) {
+        this.reconcileBatch?.delete(id)
+      }
+      const result = prefetched
+        ? {
+            status: StatusEnum.ok as StatusEnum.ok,
+            data: prefetched,
+            reason: null,
+          }
+        : await this.exchange.getOrder({
+            symbol,
+            newClientOrderId: id,
+          })
       if (!result.data) {
         this.endMethod(_id)
         return result
@@ -4026,6 +5429,10 @@ class MainBot<T extends IMainBot> {
         }
       }
       result.data.executedQty = await this.convertOrderExecutedQty(result.data)
+      result.data.cummulativeQuoteQty = await this.convertOrderQuoteQty(
+        result.data.symbol,
+        result.data.cummulativeQuoteQty,
+      )
       if (
         this.kucoinFutures &&
         result.data.cummulativeQuoteQty &&
@@ -4056,10 +5463,18 @@ class MainBot<T extends IMainBot> {
    * Update order information in {@link MainBot#orders} and orders collection in DB, send update via {@link MainBot#ioUpdate}<br />
    *
    * @param {string} id id of the order that needed to find
+   * @param {string} symbol symbol of the order
+   * @param {boolean} justPlaced the order was handed to the venue seconds ago,
+   *   rather than being reconciled long after the fact — see
+   *   {@link MainBot#_runUnknownOrderLadder}
    * @returns {Promise<null | Order>} null or order
    */
 
-  async _handleUnknownOrder(id: string, symbol: string): Promise<null | Order> {
+  async _handleUnknownOrder(
+    id: string,
+    symbol: string,
+    justPlaced = false,
+  ): Promise<null | Order> {
     // Every caller is asking the same single question — "what actually happened
     // to this order?" — so concurrent entries for one client order id are
     // coalesced onto the ladder that is already asking it, the same
@@ -4084,7 +5499,7 @@ class MainBot<T extends IMainBot> {
       this.handleLog(`Unknown order lookup already running for ${id}, joining`)
       return running
     }
-    const ladder = this._runUnknownOrderLadder(id, symbol)
+    const ladder = this._runUnknownOrderLadder(id, symbol, justPlaced)
     this.unknownOrderInFlight.set(id, ladder)
     try {
       return await ladder
@@ -4097,10 +5512,35 @@ class MainBot<T extends IMainBot> {
    * The retry ladder itself. Private because re-entering it through
    * {@link MainBot#_handleUnknownOrder} would make its own recursion join the
    * in-flight entry it just registered, and deadlock.
+   *
+   * `justPlaced` marks the one caller that is asking about an order the venue
+   * was handed SECONDS ago — the write-off guard in `sendOrderToExchange`. Two
+   * of this ladder's shortcuts silently assume the opposite (a stale reconcile
+   * of an order nobody has touched in a while) and turn a propagation lag into
+   * a permanent orphan when they are wrong, so both are suspended for it:
+   *
+   *   - the `orderId === '-1'` fast-fail below, which reads "no exchange id" as
+   *     proof the order never landed. For a just-placed order there is no
+   *     exchange id precisely BECAUSE the response was lost, which is the case
+   *     where the venue is most likely to still have it.
+   *   - the exhaustion branch's write-off. Reconciling, running out of attempts
+   *     means the order is long gone; here it means we never got an answer at
+   *     all, and `deleteOrder` is not a recoverable way to be wrong — it also
+   *     unregisters the id from `SharedStream`, so the venue's later fills stop
+   *     reaching this bot entirely. Leaving the local record alone hands the
+   *     order to the reconcile/quarantine path (age floor + strikes), which is
+   *     built to retire an order the venue really does not have.
+   *
+   * A DEFINITIVE negative still writes off in either mode. The one exception is
+   * Hyperliquid's `unknownOid`, which {@link isDefinitiveOrderNotFound} matches
+   * and {@link isAmbiguousOrderFailure} also matches: HL uses that single token
+   * for "no such order" and for "not propagated yet", so for a just-placed
+   * order it is not an answer.
    */
   private async _runUnknownOrderLadder(
     id: string,
     symbol: string,
+    justPlaced = false,
   ): Promise<null | Order> {
     const origId = id
     if (this.data && this.exchange && this.orders) {
@@ -4113,6 +5553,12 @@ class MainBot<T extends IMainBot> {
         this.kucoinFullFutures
       if ((this.canceledMap.get(id) ?? 0) > unknownOrderMaxAttempts) {
         this.canceledMap.delete(id)
+        if (justPlaced) {
+          this.handleWarn(
+            `Order ${id} was accepted for placement but ${this.data.exchange} would not describe it after ${unknownOrderMaxAttempts} attempts — keeping it for the reconcile path instead of writing it off`,
+          )
+          return null
+        }
         const get = this.getOrderFromMap(id)
         let find = get && get.status === 'NEW' ? get : undefined
         if (find && this.orders) {
@@ -4190,16 +5636,25 @@ class MainBot<T extends IMainBot> {
         // client order id the order may exist there under that id even though
         // we never recorded the response, and that call is the only thing that
         // would find it. This drops the 5 redundant retries, not the lookup.
+        //
+        // For a just-placed order the venue's `unknownOid` is not definitive
+        // (see the method doc); anything else it says still is, and takes the
+        // fast path — recursing WITHOUT `justPlaced`, because from here on we
+        // do have an answer and the ordinary write-off is the right one.
         if (
           isDefinitiveOrderNotFound(request) &&
+          !(
+            justPlaced &&
+            isNotFoundUnreliableJustAfterPlacement(request.reason)
+          ) &&
           local?.orderId === noExchangeOrderId
         ) {
           this.canceledMap.set(origId, unknownOrderMaxAttempts)
-          return this._runUnknownOrderLadder(origId, symbol)
+          return this._runUnknownOrderLadder(origId, symbol, false)
         }
 
         await sleep(1000 * (getCount + 1))
-        return this._runUnknownOrderLadder(origId, symbol)
+        return this._runUnknownOrderLadder(origId, symbol, justPlaced)
       }
       if (request.status === StatusEnum.ok) {
         this.handleLog(`Real order ${origId} status: ${request.data.status}`)
@@ -4484,6 +5939,10 @@ class MainBot<T extends IMainBot> {
       this.handleDebug(`Order ${orderId} already filled`)
       return null
     }
+    // Read BEFORE the merge below rewrites them onto the copy — the comparison
+    // is between the row the engine HOLDS and the report as converted, so both
+    // quantities and both timestamps are in the same units. Spec 090 §4.2.
+    const held = { status: find.status, updateTime: find.updateTime }
     const order = { ...find }
     // The venue just told us about this order, so it demonstrably exists and
     // any decision to stop polling it is void. This is the push half of the
@@ -4519,7 +5978,10 @@ class MainBot<T extends IMainBot> {
     order.cummulativeQuoteQty = this.kucoinFutures
       ? `${+msg.price * +order.executedQty}`
       : msg.eventType === 'executionReport'
-        ? msg.totalQuoteTradeQuantity
+        ? await this.convertOrderQuoteQty(
+            msg.symbol,
+            msg.totalQuoteTradeQuantity,
+          )
         : `${(+msg.averagePrice || +msg.price) * +order.executedQty}`
     if (this.hyperliquid) {
       order.type = find.type
@@ -4531,10 +5993,74 @@ class MainBot<T extends IMainBot> {
     if (price !== 0) {
       order.price = `${price}`
     }
+    // An order's state only moves forward, but the stream's delivery order is
+    // not guaranteed: production has a `NEW` acknowledgement arriving 10 ms
+    // AFTER the `PARTIALLY_FILLED` it precedes, carrying the venue's own
+    // earlier timestamp. Applied, it puts `NEW`/`0` over a real fill, and
+    // every guard written for a part-filled base entry then reads that —
+    // `shouldSettlePartialBaseEntry` declines a `NEW` row, and `checkBaseOrder`
+    // falls through to the arm that cancels the entry and places a SECOND base
+    // order on a position the account already holds. Dropped here rather than
+    // downstream, because this is the merge that loses the fill and
+    // `processOrderQueue` persists whatever it is handed. `handleLog`, not
+    // `handleDebug`: the bot services do not run at debug level, and once this
+    // stops causing harm the line is the only trace the condition leaves.
+    // Spec 090 §4.2/§4.4.
+    if (process && executionReportRewindsOrder(held, order)) {
+      this.handleLog(
+        `Order ${orderId} report ${order.status} at ${order.updateTime} is older than the ${held.status} row held at ${held.updateTime}. Ignoring it`,
+      )
+      return null
+    }
+    // The same rewind with an equal timestamp, which the rule above lets
+    // through by design: a `PARTIALLY_FILLED` for the full quantity delivered
+    // just after the `FILLED`. `updateOrderOnDb` already refuses it; applied
+    // here it puts a filled order back in the live-status index, where a combo
+    // grid reads it as a resting level and never places its counter. Spec 114.
+    if (process && executionReportUnfillsOrder(held, order)) {
+      this.handleLog(
+        `Order ${orderId} report ${order.status} at ${order.updateTime} would reopen the FILLED row held at ${held.updateTime}. Ignoring it`,
+      )
+      return null
+    }
+    // The venue told us what this trade cost. websocket-connector has always
+    // forwarded `commission`/`commissionAsset` on both `executionReport` and
+    // `ORDER_TRADE_UPDATE`, and this converter has always thrown them away —
+    // so `deal.feePaid` fell back to `qty * price * storedFeeRate` even for
+    // fills the venue had already priced for us. It matters most on Binance,
+    // whose order endpoints report no fee at all: for an order that rests and
+    // fills later this is the only source there is.
+    //
+    // Accumulated, not assigned: the stream reports per TRADE, so a partially
+    // filled order arrives in slices. `accrueStreamFee` keeps that idempotent
+    // against a replayed report via the trade-id high-water mark.
+    Object.assign(order, accrueStreamFee(order, msg))
+    // Every other venue (`websocket-connector-sh` spec 003), plus paper
+    // trading's `feeSide` (spec 019): already order-level running totals by
+    // the time they reach here — ASSIGNED, not accumulated, unlike
+    // Binance's per-trade `commission` above.
+    Object.assign(order, streamFeeFields(msg))
     return order
   }
 
   async mergeCommonOrderWithOrder(co: CommonOrder, o: Order): Promise<Order> {
+    // A quantity the payload does not STATE must not overwrite the one we
+    // already hold (spec 028 §4.3). `{ ...co }` rebuilds the order from the
+    // payload, so an absent field silently destroys ours — and the result of
+    // that is not a zero but an `undefined` that every consumer downstream
+    // reads as NaN. `closeDeal` read one as its close quantity and wrote
+    // `deal.size = NaN`. A stated `'0'` is a statement and still wins.
+    const executedQty = statesQuantity(co.executedQty)
+      ? co.executedQty
+      : o.executedQty
+    const cummulativeQuoteQty = statesQuantity(co.cummulativeQuoteQty)
+      ? co.cummulativeQuoteQty
+      : o.cummulativeQuoteQty
+    // Deliberately the PAYLOAD's own figures, not the fallbacks above: a
+    // venue that states an executed quantity but no executed value has always
+    // been priced as `co.price * co.executedQty`, and substituting our stale
+    // `cummulativeQuoteQty` there would silence that derivation with a `'0'`.
+    // The fallbacks decide what the ORDER carries; this decides its price.
     const quote =
       co.cummulativeQuoteQty && !this.sizedInContracts
         ? +co.cummulativeQuoteQty
@@ -4542,15 +6068,54 @@ class MainBot<T extends IMainBot> {
     const base = +co.executedQty
     let price = this.coinm
       ? +(o.avgPrice || '0') || +o.price
-      : +quote !== 0 && base !== 0
+      : // `Number.isFinite` and not `!== 0`: NaN is not equal to 0 either, so
+        // the old test PASSED for a payload stating neither figure and priced
+        // the order at `round(NaN / NaN)` -> NaN -> 0, writing a zero over the
+        // real limit price (spec 028 §4.4). Unresolvable now falls back to our
+        // own price, exactly like the zero case always has.
+        Number.isFinite(quote) &&
+          quote !== 0 &&
+          Number.isFinite(base) &&
+          base !== 0
         ? this.math.round(
             quote / base,
             (await this.getExchangeInfo(o.symbol))?.priceAssetPrecision,
           )
         : +o.price
     price = isNaN(price) ? 0 : price
+    // A `FILLED` the payload does nothing to support is not an answer about a
+    // fill, and acting on it is irreversible: the row goes terminal, the deal
+    // closes on it, and nothing re-opens either (spec 028 §4.2). Keep what we
+    // know and let the next poll — which normally carries real numbers —
+    // promote the order properly. NOT `quarantine`, which means "stop polling"
+    // and is the opposite of what this order needs.
+    const evidenceFreeFill =
+      co.status === 'FILLED' && o.status !== 'FILLED' && isFillEvidenceFree(co)
+    if (evidenceFreeFill) {
+      // The only narration this write path has ever had is `handleDebug`,
+      // which the bot services do not run at — so a promotion that stranded a
+      // deal left no log line anywhere at all. This one names itself.
+      this.handleWarn(
+        `Order ${o.clientOrderId} (${o.typeOrder}): ${this.data?.exchange} answered FILLED with no fill evidence ` +
+          `(executedQty ${co.executedQty}, cummulativeQuoteQty ${co.cummulativeQuoteQty}, updateTime ${co.updateTime}, ` +
+          `${co.fills?.length ?? 0} fill(s)) — keeping local status ${o.status} and re-asking`,
+      )
+    }
     return {
       ...co,
+      // An observed fee already on the local order must survive a lookup that
+      // reports none. `{ ...co }` rebuilds the order from the exchange payload,
+      // so without this an order whose fee arrived on the user stream — the
+      // only source Binance has for a resting fill — would have it erased by
+      // the next poll, silently, and book as an estimate again. Only a payload
+      // that actually states a fee is allowed to overwrite one.
+      ...observedFeeOf(hasObservedFee(co) ? co : o),
+      // The trade-id watermark only ever moves forward and is never rebuilt
+      // from an exchange payload, so it has to be carried across explicitly.
+      // Losing it would let an already-counted stream trade be added a second
+      // time; keeping a stale one can only ever skip an old trade, which is
+      // the safe direction to be wrong in.
+      feeTradeId: o.feeTradeId,
       _id: o._id,
       // Our local order id is authoritative — never let the exchange's echoed
       // clientOrderId win. For most exchanges co.clientOrderId === o.clientOrderId
@@ -4569,6 +6134,10 @@ class MainBot<T extends IMainBot> {
       quoteAsset: o.quoteAsset,
       origPrice: o.origPrice,
       price: `${price}` || o.price,
+      executedQty,
+      cummulativeQuoteQty,
+      status: evidenceFreeFill ? o.status : co.status,
+      updateTime: evidenceFreeFill ? o.updateTime : co.updateTime,
       tpSlTarget: o.tpSlTarget,
       minigridId: o.minigridId,
       minigridBudget: o.minigridBudget,
@@ -4578,11 +6147,44 @@ class MainBot<T extends IMainBot> {
     }
   }
 
+  /**
+   * A client order id the venue can actually carry.
+   *
+   * Each arm is a venue's own ceiling, not a preference. Kraken SPOT's is the
+   * tightest: Kraken accepts a native `cl_ord_id` in exactly three forms — long
+   * UUID (8-4-4-4-12 hex), short UUID (32 hex, no dashes), or FREE ASCII TEXT
+   * of at most 18 characters. The default 35-character id is none of them, 17
+   * over the free-text ceiling, so the connector had to hash it to
+   * `sha256(id).slice(0,32)` before it could be sent — which resolves fine, but
+   * means the id on our order row is NOT the id Kraken holds, and every call
+   * site that wants to address the order has to re-derive the encoding. Fitting
+   * the id inside 18 characters removes the encoding: what we store is what the
+   * venue was told.
+   *
+   * The random tail is `18 - prefix.length - 1`, so the longest prefix in the
+   * codebase (`GRID-STAB`) still gets 8 characters out of `utils.id()`'s
+   * 62-character alphabet — 62^8 ≈ 2.2e14, against the tens of orders a bot
+   * holds at once. That bound is asserted over the prefixes actually in use by
+   * `krakenOrderId.spec.ts`, so a longer prefix fails the suite instead of
+   * silently eating the entropy. Spot only: Kraken futures and every paper
+   * variant have no such limit.
+   *
+   * See `specs/010.kraken-spot-client-order-id-length.md` and the connector's
+   * `specs/003.kraken-spot-native-cl-ord-id.md` (the three-way discriminator
+   * that reads this length back).
+   */
   getOrderId(prefix: string) {
     if (this.hyperliquid) {
       return '0x' + crypto.randomBytes(16).toString('hex')
     }
-    const maxLength = this.okx || this.mexc ? 32 : 36
+    // `maxLength` is a budget the id stops one character short of — the tail is
+    // `maxLength - prefix.length - 2` — so the 36 default yields 35 characters.
+    // Kraken spot therefore asks for its 18-character ceiling plus one.
+    const maxLength = this.krakenSpot
+      ? KRAKEN_CL_ORD_ID_MAX_LENGTH + 1
+      : this.okx || this.mexc
+        ? 32
+        : 36
     const exchangePrefix =
       this.okx ||
       this.data?.exchange === ExchangeEnum.binance ||
@@ -4687,7 +6289,47 @@ class MainBot<T extends IMainBot> {
     if (count >= 20) {
       return order
     }
-    if (order.reduceOnly) {
+    // ⚠️ DO NOT lift this for futures / reduce-only orders in general. It was
+    // tried and reverted; the reason it exists is real, it just was never
+    // written down.
+    //
+    // `diff` below is derived from the ORDER (`origQty - executedQty`) — spot
+    // semantics, per this method's original design ("difference between initial
+    // balances and current balances"). That quantity does NOT describe a futures
+    // POSITION, so a reduce-only remainder order for it can be refused outright
+    // rather than clamped to what remains.
+    //
+    // Measured on prod 2026-08-30, with this gate narrowed to let `dealTP`
+    // through: 15 reduce-only remainder orders went out over 18.3h across
+    // binanceUsdm / krakenUsdm / bybitLinear / bitgetUsdm, and ALL 15 came back
+    // with `executedQty: 0`. But the rejection reasons split in a way that
+    // matters: binanceUsdm/bybitLinear/bitgetUsdm said `ReduceOnly Order is
+    // rejected.` — refused outright, no carve-out helps. krakenUsdm said
+    // `wouldNotReducePosition` — consistent with "the ask was bigger than the
+    // open position", which IS recoverable by asking for less. Kraken futures
+    // has no true market order; its `mkr` type is IOC with a 1% price-protection
+    // band, so a close that can't fill within the band at send time comes back
+    // `FILLED` for whatever the band allowed, with the rest cancelled by the
+    // venue itself — never `PARTIALLY_FILLED`, so this recovery path is the only
+    // one that ever sees the shortfall (spec 002).
+    //
+    // No position lookup needed: `canRecoverReduceOnlyRemainder` only lets
+    // krakenUsdm MARKET orders through, and `diff` stays order-derived as
+    // above. If that ask is still bigger than the real position, the venue
+    // rejects it, `buyRemainderOrder` below comes back falsy, and the
+    // `if (buyRemainderOrder && ...)` gate simply doesn't fire — the function
+    // falls through to `return order`, which already carries every quantity
+    // recovered by earlier, successful iterations. The other three venues stay
+    // excluded per the measurement above.
+    //
+    // The "97% of reduce-only underfills strand" statistic that motivated the
+    // original, broader attempt was computed from order-side BUY-minus-SELL
+    // sums, which do not net correctly on futures — do not trust it without
+    // re-deriving it from positions.
+    if (
+      order.reduceOnly &&
+      !canRecoverReduceOnlyRemainder(order.exchange, order)
+    ) {
       return order
     }
     if (order.typeOrder === TypeOrderEnum.rebalance) {
@@ -4767,10 +6409,14 @@ class MainBot<T extends IMainBot> {
           if (
             buyRemainderOrder &&
             (buyRemainderOrder.status === 'FILLED' ||
-              ([ExchangeEnum.bybit].includes(order.exchange) &&
-                order.type === 'MARKET' &&
-                buyRemainderOrder.status === 'CANCELED' &&
-                +buyRemainderOrder.executedQty > 0))
+              // A remainder order the venue ended after executing part of it.
+              // Anything not recognised here is dropped from the row while
+              // still having been bought — see the predicate. Spec `057` §4.5.
+              isVenueCanceledRemainderFill(
+                order.exchange,
+                order.type,
+                buyRemainderOrder,
+              ))
           ) {
             this.handleLog(
               `Buy remainder executed - ${buyRemainderOrder.clientOrderId}, ${
@@ -4813,21 +6459,55 @@ class MainBot<T extends IMainBot> {
     return order
   }
 
+  /**
+   * @param settledBaseEntry the caller is a DCA base entry the engine has
+   * already settled — the row is terminal, its quantities are venue-reported
+   * BASE amounts, and the deal it opens has not been booked yet. Only that
+   * caller may pass `true`, and it is the only way past the `coinbase` skip
+   * inside. Spec `057` §4.4.
+   */
   @IdMute(
     mutex,
     (order: Order) =>
       `${order.botId}${order.clientOrderId}fillPartiallyFilledOrder`,
   )
-  async fillPartiallyFilledOrder(order: Order): Promise<Order> {
+  async fillPartiallyFilledOrder(
+    order: Order,
+    settledBaseEntry = false,
+  ): Promise<Order> {
     if (!this.allowToProcessBr(order.clientOrderId, order.typeOrder)) {
       return order
     }
-    if (this.data?.exchange === ExchangeEnum.coinbase) {
-      return order
-    }
+    // A POST-MUTEX RE-READ, and it has to come before the venue guard below.
+    // The mutex on this method serialises the settle's call and the venue's own
+    // cancel report for the same order, so whoever arrives second is holding a
+    // snapshot taken BEFORE the remainder was merged in. `processOrderQueue`
+    // writes back whatever this returns — `deleteOrder` then `setOrder` — so a
+    // stale copy returned here replaces the merged row in the order map, and
+    // every ledger that recomputes from the map (`getAvgPrice`, the
+    // `levels.complete` recompute, `findBaseOrderByDeal`) then reads the
+    // fraction that filled on the book instead of the whole entry. The merged
+    // row stays in Mongo, so the engine and its own database disagree until the
+    // next reload: an entry for 3334.9 units that traded 100.4 on the book and
+    // bought the other 3206.1 at market priced its take profit off the safety
+    // order alone and reported one order where the deal used two. Spec `088`.
     if (this.partiallyFilledFilledSet.has(order.clientOrderId)) {
       const processed = this.getOrderFromMap(order.clientOrderId)
       return processed ?? order
+    }
+    // Undocumented, and older than this repository's history — so it is kept
+    // for the stream-driven path it was written for rather than removed on a
+    // guess. A settled base entry opts out: the remainder it sends is a fresh
+    // MARKET order, and `sendOrderToExchange` is what applies Coinbase's
+    // quote-denomination to it.
+    //
+    // Not narrowed by the re-read above, which places nothing and sends
+    // nothing — it returns a row that is already in the map. On this venue
+    // `buyRemainder` is the only thing that fills that set and is reachable
+    // only from here, with `settledBaseEntry`, so the set holds settled base
+    // entries and nothing else. Spec `057` §4.4/§5.
+    if (!settledBaseEntry && this.data?.exchange === ExchangeEnum.coinbase) {
+      return order
     }
     order = await this.buyRemainder(order)
     this.orders.set(order.clientOrderId, order)
@@ -5039,6 +6719,11 @@ class MainBot<T extends IMainBot> {
   }
 
   private async heartbeatConsumer() {
+    void this.checkUserStreamLiveness().catch((e) =>
+      this.handleWarn(
+        `user stream liveness check failed: ${(e as Error)?.message ?? e}`,
+      ),
+    )
     try {
       if (!this.redisDb || !this.data) {
         return
@@ -5311,15 +6996,32 @@ class MainBot<T extends IMainBot> {
       }
     }
 
+    // An add-funds order carries the same intent as a deal-opening signal: it
+    // was asked for at a moment and a price, so re-sending it after a cooldown
+    // averages the deal into a position the instruction never described. One
+    // production account drives additions from TradingView webhooks, where a
+    // two-hour-late 1,529 USDT top-up is a trade nobody asked for.
+    //
+    // Keyed on `addFundsId` rather than on `typeOrder`: ordinary DCA safety
+    // orders are also `dealRegular`, but they are price-triggered rather than
+    // point-in-time and must keep their retry budget, or a refused safety order
+    // would silently never be placed.
+    const isAddFunds = !!order.addFundsId
     const budget = isDealStart
       ? await this.quantRulesRetryBudget(order)
-      : QUANT_RULES_RETRY_BUDGET_DEFAULT
+      : isAddFunds
+        ? 0
+        : QUANT_RULES_RETRY_BUDGET_DEFAULT
 
     // A deal whose entry was a point-in-time instruction has no business being
     // re-sent later, and every such re-send is both a stale trade and more
     // herd. Its own trigger will fire again when it means to.
     if (budget <= 0) {
-      await giveUp('this deal opens on its own trigger, which will fire again')
+      await giveUp(
+        isAddFunds
+          ? 'an add-funds order is a point-in-time instruction; a later re-send would average the deal at a price the signal never asked for'
+          : 'this deal opens on its own trigger, which will fire again',
+      )
       return
     }
     if (attempt > budget) {
@@ -5644,6 +7346,13 @@ class MainBot<T extends IMainBot> {
           ],
           this.data?.exchange,
         )
+        // `findUSDRate` returns `Number(undefined)` = NaN when it is handed no
+        // exchange, and every caller multiplies the result straight into a
+        // persisted USD figure. Fall back to the same `return 1` the misses
+        // below use rather than letting a NaN rate out.
+        if (!Number.isFinite(rate)) {
+          return 1
+        }
         if (rate) {
           this.setLastUsdData(key, { price: rate, time: +new Date() })
         }
@@ -5946,6 +7655,27 @@ class MainBot<T extends IMainBot> {
     }
   }
 
+  /**
+   * OKX USDT-margined swaps state an order's filled value as
+   * `avgPx × accFillSz`, and `accFillSz` counts CONTRACTS — both the connector
+   * and the user stream forward it that way. {@link convertOrderExecutedQty}
+   * divides the quantity by {@link getOKXDenominator}; the value must be
+   * divided by the same figure or it is booked `1 / ctVal` times too large
+   * (too small where `ctVal > 1`). KuCoin futures derives its quote from the
+   * converted quantity instead and is left to its own branches. Spec 102.
+   */
+  async convertOrderQuoteQty(symbol: string, quote?: string) {
+    if (
+      this.data?.exchange !== ExchangeEnum.okxLinear ||
+      !this.sizedInContracts ||
+      !quote ||
+      !Number.isFinite(+quote)
+    ) {
+      return quote
+    }
+    return `${+quote / (await this.getOKXDenominator(symbol))}`
+  }
+
   async convertOrderExecutedQty(order: Order | CommonOrder) {
     const ed = await this.getExchangeInfo(order.symbol)
     let executedQty = order.executedQty
@@ -6054,6 +7784,128 @@ class MainBot<T extends IMainBot> {
     }
   }
   /**
+   * Has an operator armed bulk CANCEL for this bot? See `batchFlags.ts` and
+   * spec `082` §5.
+   *
+   * The FLAG only — the venue check lives at each call site, so that the two
+   * conditions can be seen, and tested, apart: an armed bot on the wrong venue
+   * must still ask nothing.
+   */
+  protected isBatchCancelArmed(): boolean {
+    return batchCancelEnabled(this.botId)
+  }
+
+  /** The same question for bulk PLACEMENT. */
+  protected isBatchPlaceArmed(): boolean {
+    return batchPlaceEnabled(this.botId)
+  }
+
+  /**
+   * Which orders of a burst may share one venue call — decided ONCE, serially,
+   * before any of them is sent. Spec `082` §7.2.
+   *
+   * `eligible` is the caller's own pre-send skip checks, passed in so this
+   * asks precisely what that loop asks and in the same order. Everything else
+   * here is a refusal that belongs to batching itself:
+   *
+   * - **`market`** — the venue's batch route places LIMIT orders only, and a
+   *   market order's whole point is that it does not wait for company.
+   * - **the shape guard** — the loops' duplicate checks (`isOrderExist`,
+   *   `isOrderExistInDeal`) match on (price, side, qty, type), not on the
+   *   client order id. Run sequentially, the second of two identically shaped
+   *   orders sees the first one's row and skips; run together, neither sees
+   *   the other and BOTH are placed. That is the one way concurrency here
+   *   could produce a duplicate live order, so identically shaped orders are
+   *   never batched together — the second takes the sequential path and meets
+   *   the same check it always did.
+   *
+   * Minigrid orders ARE batched, across every minigrid of the burst. Their
+   * body removes itself from a list shared by the whole minigrid
+   * (`pendingOrdersList`), but it does so in one synchronous statement, before
+   * the body's first `await` — so concurrent bodies run those removals one
+   * after another and none is lost. A combo counter-order burst is made of
+   * nothing else, so refusing them left combo bots entirely on the per-order
+   * path.
+   *
+   * Fewer than two survivors means there is nothing to coalesce, and the
+   * caller runs its loop exactly as it does today.
+   */
+  protected batchablePlacements(
+    orders: Grid[],
+    ...eligible: ((order: Grid) => boolean)[]
+  ): Grid[] {
+    if (!this.exchange || !this.krakenSpot || !this.isBatchPlaceArmed()) {
+      return []
+    }
+    const picked: Grid[] = []
+    const shapes = new Set<string>()
+    for (const order of orders) {
+      if (!order?.newClientOrderId || order.market) {
+        continue
+      }
+      if (!eligible.every((check) => check(order))) {
+        continue
+      }
+      const shape = `${order.side}|${order.price}|${order.qty}|${order.type}`
+      if (shapes.has(shape)) {
+        continue
+      }
+      shapes.add(shape)
+      picked.push(order)
+    }
+    if (picked.length < 2) {
+      return []
+    }
+    this.handleDebug(
+      `Batch placement: ${picked.length} of ${orders.length} order(s) share one venue call`,
+    )
+    return picked
+  }
+
+  /**
+   * Install a coalescer for ONE burst of placements and return it.
+   *
+   * The caller owns the lifetime: it names the participants up front, runs
+   * their bodies, and removes the batcher in a `finally`. While installed, the
+   * send site in {@link MainBot#sendOrderToExchange} routes exactly these
+   * client order ids through it and every other placement in the process is
+   * untouched.
+   *
+   * All the orders of one burst share a symbol by construction — a grid bot
+   * has one pair, a deal has one symbol — so the batch is addressed with the
+   * first one's. The exchange client owns every fallback from here: the caller
+   * gets one answer per order whatever the venue, the connector or the
+   * transport does.
+   */
+  protected installOpenBatcher(clientOrderIds: string[]): OpenOrderBatcher {
+    const batcher = new OpenOrderBatcher(
+      clientOrderIds,
+      async (orders) =>
+        this.exchange
+          ? this.exchange.openOrdersBatch({
+              symbol: orders[0].symbol,
+              orders,
+            })
+          : orders.map(() => ({
+              status: StatusEnum.notok as StatusEnum.notok,
+              reason: 'No exchange instance',
+              data: null,
+            })),
+      { onDebug: (m) => this.handleDebug(m) },
+    )
+    this.openBatcher = batcher
+    return batcher
+  }
+
+  /** Take the batcher back out. Idempotent, and safe to call from a `finally`. */
+  protected removeOpenBatcher(batcher: OpenOrderBatcher) {
+    if (this.openBatcher === batcher) {
+      this.openBatcher = null
+    }
+    batcher.dispose()
+  }
+
+  /**
    * Send order to exchange
    */
 
@@ -6080,6 +7932,71 @@ class MainBot<T extends IMainBot> {
     skipBr?: boolean,
   ): Promise<Order | string | void> {
     const _id = this.startMethod('sendOrderToExchange')
+    // Spec `025` §4.1 (#715). The money-safety boundary: this method has no
+    // opinion about the numbers it is handed, and on 2026-09-08 it took a
+    // take-profit whose quantity was NaN, wrote it ahead to `orders` and sent
+    // it (`limitOrders() ... qty NaN, price 0.000001, side SELL`). No venue
+    // has ever accepted a non-finite quantity, so refusing one here cannot
+    // cost a fill — but NOT refusing it costs twice: the position is left
+    // without its exit, and the write-ahead row survives as the STRING "NaN"
+    // (mongoose `String` fields accept it), after which every later deal
+    // aggregate that casts it back to Number fails and the deal document
+    // stops saving at all (spec `023` §2.2).
+    //
+    // Deliberately the last line of defence rather than the only one: the
+    // producers are guarded too (the DCA ladder, spec `025` §4.2/§4.3, and
+    // `getTPOrder`, spec `023`). This one is what bounds a producer nobody has
+    // found yet, and it is venue-independent.
+    //
+    // The price arm is skipped for MARKET orders: their `price` is not what
+    // gets filled and some connectors drop it entirely, so a missing one there
+    // is not proof of a broken order the way a missing quantity always is.
+    const sendQty = parseFloat(`${order.origQty}`)
+    const sendPrice = parseFloat(`${order.price}`)
+    if (
+      !Number.isFinite(sendQty) ||
+      (order.type !== 'MARKET' && !Number.isFinite(sendPrice))
+    ) {
+      // Same string `addDealFunds` already refuses its own quantity with, so
+      // `bot/utils.ts` errorDict classifies it as `orderParams` unchanged.
+      const reason = `Order qty is not a number. Order ${order.clientOrderId} ${order.symbol} qty ${order.origQty}, price ${order.price}, side ${order.side}`
+      await this.handleOrderErrors(
+        reason,
+        order,
+        'sendOrderToExchange()',
+        `Send new order request ${order.clientOrderId}`,
+        false,
+        false,
+      )
+      this.endMethod(_id)
+      return returnError ? reason : undefined
+    }
+    // Spec `084` §4.3 (#871). The same boundary, one value further along: a
+    // quantity of ZERO is finite, so the guard above waves it through. On
+    // 2026-09-20 `sellRemainder` floored a remainder onto a coarse base step
+    // and this method wrote `origQty '0'` ahead and sent it (`qty 0, price
+    // 108.7, side BUY`); Bitget answered `parameter verification exception
+    // delegateamount`. No venue accepts a zero-size order, so refusing one
+    // here cannot cost a fill either — and it bounds the next producer that
+    // rounds a size away, the way the guard above bounds the next one that
+    // produces a NaN.
+    //
+    // Its own string rather than the one above: zero IS a number, and that
+    // message is asserted on by four other specs. `bot/utils.ts` maps both to
+    // the same `Order params` subtype, so nothing downstream reclassifies.
+    if (sendQty <= 0) {
+      const reason = `Order qty must be greater than zero. Order ${order.clientOrderId} ${order.symbol} qty ${order.origQty}, price ${order.price}, side ${order.side}`
+      await this.handleOrderErrors(
+        reason,
+        order,
+        'sendOrderToExchange()',
+        `Send new order request ${order.clientOrderId}`,
+        false,
+        false,
+      )
+      this.endMethod(_id)
+      return returnError ? reason : undefined
+    }
     const ed = await this.getExchangeInfo(order.symbol)
     if (
       this.isBitget &&
@@ -6155,9 +8072,31 @@ class MainBot<T extends IMainBot> {
         requestData.type === 'MARKET'
       ) {
         requestData.quantity = this.math.round(
-          requestData.quantity * requestData.price,
+          // Spec `113`. Bitget fills `⌊amount ÷ ask⌋` on the base step, so an
+          // amount of exactly `qty × last` comes back one step short at any ask
+          // above the last trade, and a one-step top-up converts to zero.
+          (this.data.exchange === ExchangeEnum.bitget
+            ? bitgetSpotMarketBuyQty(
+                requestData.quantity,
+                ed?.baseAsset.step,
+              )
+            : requestData.quantity) * requestData.price,
           this.data.exchange === ExchangeEnum.bitget
-            ? (ed?.quoteAsset.precision ?? 0)
+            ? // Spec `084` §4.2 (#871). Bitget's own `quotePrecision` is NOT
+              // the scale its order-entry validator enforces on the amount
+              // field. `ICPUSDT` publishes `quotePrecision 7` and refused
+              // `4.9999286` with `checkbdscale error value=4.9999286
+              // checkscale=6`, so every market buy on a symbol above the cap
+              // is rejected outright. Bitget lists 409 of its 2706 spot
+              // symbols with a `quotePrecision` over 6, up to 13.
+              //
+              // A CAP on the scale, not a change of rounding: the amount is
+              // still rounded to nearest, and for the 2297 symbols already at
+              // 6 or below this is the precision they always had.
+              Math.min(
+                ed?.quoteAsset.precision ?? 0,
+                BITGET_SPOT_QUOTE_MAX_SCALE,
+              )
             : (ed?.priceAssetPrecision ?? 0),
         )
       }
@@ -6486,7 +8425,45 @@ class MainBot<T extends IMainBot> {
             }
           }
         }
-        request = request ?? (await this.exchange.openOrder(requestData))
+        // The batch seam (spec `082` §6). A burst loop that has installed a
+        // coalescer for THIS order parks here instead of sending on its own,
+        // and gets back an answer for its own order that is indistinguishable
+        // from `openOrder`'s. Everything above — every pre-send gate, each of
+        // which short-circuits by setting `request` — is untouched, and an
+        // order held back by one of them never reaches this line at all (the
+        // loop's wrapper bails it, so the rest of the burst does not wait for
+        // it).
+        //
+        // LIMIT only, because the venue's batch endpoint is; `count === 0`
+        // only, because a re-entry with `count > 0` is a RETRY of an order
+        // whose first attempt has already been through the burst — the
+        // tick-size, quantity-decimals and MARKET_LOT_SIZE branches below all
+        // re-enter this method — and the burst it belonged to is long gone.
+        const batcher =
+          order.type === 'LIMIT' && count === 0 ? this.openBatcher : null
+        request =
+          request ??
+          (batcher?.has(requestData.newClientOrderId)
+            ? await batcher.send(requestData)
+            : await this.exchange.openOrder(requestData))
+        // Accepted, but the venue said something the user should know (a
+        // Bitget Reality token with nobody on the other side of its book, so
+        // the order will wait). The order stands; this is a warning only.
+        if (request.status === StatusEnum.ok && request.data?.notice) {
+          await this.processError(
+            this.botId,
+            'Order waiting for liquidity',
+            (this.data?.settings as DCABotSettings)?.type ===
+              DCATypeEnum.terminal,
+            false,
+            true,
+            request.data.notice,
+            +new Date(),
+            request.data.notice,
+            false,
+            requestData.symbol,
+          )
+        }
         // Open/widen the cooldown only for a REAL, venue-returned hard-auth
         // rejection — never a replayed one, or the window would slide forward
         // forever and never self-heal.
@@ -6701,6 +8678,108 @@ class MainBot<T extends IMainBot> {
               }
             }
           }
+          // The QUANTITY twin of the tick-size branch above, and it exists for
+          // the same reason with one extra twist: the cached filter is not
+          // merely stale, it can be the WRONG VENUE's filter. `pairs` holds one
+          // `baseAsset.step` per exchange+pair, loaded from the public
+          // instrument list, but Bybit's regional hosts do not publish the same
+          // filters — measured live, api.bybit.eu lists 133 spot symbols to
+          // api.bybit.com's 538, gives 34 of the shared ones a coarser
+          // basePrecision (SOLUSDC 0.001 vs 0.0001), and does not list SOLUSDT
+          // at all. An account on the `eu` host therefore has every quantity we
+          // compute refused with `Order quantity has too many decimals.`, and
+          // no refresh can fix it: re-reading the .com list returns the same
+          // step, and there is no EU row for the pair to read instead.
+          //
+          // So the refusal itself is the source of truth. A quantity with `d`
+          // decimals that the venue refused proves it accepts at most `d-1`;
+          // we record that against this connection+symbol, re-quantize DOWN
+          // (never up — a SELL must not exceed the position, a BUY must not
+          // exceed the budget) and resubmit. `getExchangeInfo` then serves the
+          // learned step to every later sizing decision, so the NEXT order is
+          // right the first time rather than costing another refusal.
+          //
+          // Termination needs no counter: each pass strictly lowers the decimal
+          // count and stops at zero, and a re-quantization that changes nothing
+          // (or empties the order) falls through to normal error handling.
+          // `count` is passed through unchanged, exactly as the tick-size branch
+          // does, so the coin-M conversion and the write-ahead persist keep
+          // their `count === 0` semantics.
+          //
+          // Guarded on the sent quantity still BEING the base quantity: the
+          // coin-M, OKX-contract and Bybit market-buy paths above send a
+          // converted number, and deriving a base-asset precision from one of
+          // those would learn a fiction.
+          if (
+            isQtyDecimalsRefusal(request.reason) &&
+            requestData.quantity === parseFloat(order.origQty)
+          ) {
+            const accepted = deriveAcceptedDecimals(requestData.quantity)
+            if (accepted !== null) {
+              const learned = await QtyStepGuard.record(
+                this.data.exchangeUUID,
+                order.symbol,
+                accepted,
+              )
+              const requantized = this.math.round(
+                +order.origQty,
+                learned ?? accepted,
+                true,
+              )
+              if (requantized > 0 && requantized !== +order.origQty) {
+                this.handleLog(
+                  `Order ${order.clientOrderId} refused on quantity decimals. ${order.symbol} quantity precision learned as ${
+                    learned ?? accepted
+                  }, re-quantized ${order.origQty} -> ${requantized}, retry`,
+                )
+                order.origQty = `${requantized}`
+                this.endMethod(_id)
+                return this.sendOrderToExchange(order, returnError, count)
+              }
+            }
+          }
+          // The POSITION MODE twin of the two branches above: another cached
+          // property of the account went stale, and the venue is the only one
+          // who can say what it is now. `user.exchanges[].hedge` is written
+          // when the connection is added and when the user flips the mode
+          // through Gainium — never when they flip it at the exchange — so a
+          // bot can hold the wrong mode for as long as the account lives, and
+          // every order it builds is refused: OKX `Parameter posSide error`
+          // (51000), Binance USD-M/COIN-M `-4061`. Both directions of the
+          // disagreement produce it.
+          //
+          // Re-read the mode, store it so the next load and every other bot on
+          // this connection start from the truth, and re-send this order under
+          // it. Self-limiting with no counter, exactly like the tick-size
+          // branch: the resubmission carries the mode we just read, so a second
+          // refusal finds nothing left to change and falls through to normal
+          // error handling.
+          //
+          // Refuses to act rather than guess when the bot's settings name no
+          // single leg (a NEUTRAL grid): on a hedge account a wrong leg does
+          // not fail, it opens a position on the other side.
+          if (this.futures && isPositionSideRefusal(request.reason)) {
+            const fresh = await this.readAccountHedge(
+              this.hedge,
+              HEDGE_REFUSAL_MAX_AGE_MS,
+            )
+            if (fresh.data !== this.hedge) {
+              this.hedge = fresh.data
+              const corrected = fresh.data
+                ? hedgeLegForSettings(this.data.settings as any)
+                : PositionSide.BOTH
+              if (corrected && corrected !== order.positionSide) {
+                this.handleLog(
+                  `Order ${order.clientOrderId} refused on position side. Exchange reports ${
+                    fresh.data ? 'hedge' : 'one-way'
+                  } mode, re-sending as ${corrected}`,
+                )
+                order.positionSide = corrected
+                this.endMethod(_id)
+                return this.sendOrderToExchange(order, returnError, count)
+              }
+            }
+          }
           if (
             (request.reason.toLowerCase().indexOf('duplicate') !== -1 ||
               request.reason
@@ -6812,6 +8891,33 @@ class MainBot<T extends IMainBot> {
           // The local short-circuits are exempt — those rejections were served
           // by this process, the venue never saw the order, and there is nothing
           // to ask about.
+          //
+          // Before asking, honour the answer we may already hold. An order we
+          // are still tracking whose `orderId` is no longer the `-1` placeholder
+          // got that id from ONE place: the venue, either in a placement
+          // response or on the user stream. That is a stronger statement than
+          // any classification of the failure text, so it is checked first and
+          // without consulting `isAmbiguousOrderFailure` at all. The same
+          // predicate the duplicate and "not found after execution" branches
+          // above already use.
+          //
+          // This is the half of forum #5097 no error-string change can cover:
+          // on 2026-08-26 our own HL user stream reported the order `open` at
+          // 05:41:09.994 — 10.7s BEFORE the `unknownOid` placement result
+          // arrived at 05:41:20.743 — and we deleted it anyway.
+          const streamAcked = this.getOrderFromMap(order.clientOrderId)
+          if (
+            this.orders &&
+            this.orders.size > 0 &&
+            streamAcked &&
+            streamAcked.orderId !== noExchangeOrderId
+          ) {
+            this.handleWarn(
+              `Order ${order.clientOrderId} failed with "${request.reason}", but ${this.data.exchange} has already given it order id ${streamAcked.orderId} — keeping it instead of writing it off`,
+            )
+            this.endMethod(_id)
+            return streamAcked
+          }
           if (
             this.orders &&
             this.orders.size > 0 &&
@@ -6826,11 +8932,13 @@ class MainBot<T extends IMainBot> {
             const settled = await this._handleUnknownOrder(
               order.clientOrderId,
               order.symbol,
+              true,
             )
             // Held after the ladder means the venue answered that it HAS the
-            // order; the ladder has already reconciled its status. Anything else
-            // means the venue gave a definitive negative and the ladder recorded
-            // CANCELED itself.
+            // order, or never gave a definitive negative about an order it was
+            // handed seconds ago; either way the ladder left the local record
+            // alone. Anything else means the venue gave a definitive negative
+            // and the ladder recorded CANCELED itself.
             const stillHeld = this.getOrderFromMap(order.clientOrderId)
             if (settled || stillHeld) {
               this.handleLog(
@@ -6844,18 +8952,39 @@ class MainBot<T extends IMainBot> {
             this.deleteOrder(order.clientOrderId)
             // Only persist a CANCELED record for an order that actually
             // reached the venue. When a local guard served the rejection the
-            // order never existed anywhere but in this process, and
-            // `updateOrderOnDb` UPSERTS on a clientOrderId that is freshly
-            // minted per attempt — so every suppressed retry created a brand
-            // new row describing an order that never was. Production carried
-            // ~6.6k-10.7k such rows/hour, and 2.5M of them from ten bots
-            // accounted for 20.3% of the whole `orders` collection.
+            // order never existed anywhere but in this process, so there is
+            // nothing to write off — but there IS something to take back.
+            //
+            // `sendOrderToExchange` persists the order at `count === 0` (:6870)
+            // BEFORE any of these guards is consulted, as a write-ahead record
+            // so a crash mid-placement still leaves a trace of an order the
+            // venue might be holding. That write is what CREATES the row; the
+            // `updateOrderOnDb` below only ever RETIRED it. Merely skipping the
+            // retire (commit 3f7ae42, which read the upsert as the creator)
+            // therefore removed no rows at all — it stranded them at the
+            // `status: 'NEW'`, `orderId: '-1'` shape `saveOrderToDb` left, which
+            // the dashboard renders as an open order and `loadOrders` (:4022,
+            // `status: { $nin: ['CANCELED', 'EXPIRED'] }`) reloads into the bot
+            // on every restart. Prod went from 0 such rows/day before the
+            // 2026-08-06T07:37Z rollout to ~130k/day after it, 3.97M live
+            // against 32k genuinely open orders (bug #673).
+            //
+            // So DELETE the write-ahead row instead. That honours what 3f7ae42
+            // was actually after — no row for an order that never was — while
+            // leaving nothing behind for the UI or the reload to trip over.
+            //
+            // Scoped to the untouched placeholder shape on purpose: if the user
+            // stream or a reconcile has given this row a real exchange id or a
+            // terminal status in the meantime, the order DID reach the venue and
+            // the filter matches nothing, so the record survives.
             if (
               !notEnoughBalanceShortCircuit &&
               !complianceShortCircuit &&
               !authShortCircuit
             ) {
               this.updateOrderOnDb({ ...order, status: 'CANCELED' })
+            } else {
+              await this.deleteOrderFromDb(order.clientOrderId)
             }
           }
           // Every other venue refusal lands here — min-notional, price band,
@@ -7039,10 +9168,26 @@ class MainBot<T extends IMainBot> {
         if (
           !skipBr &&
           !(this.kucoinFutures || this.okx || (this.coinm && !this.isBitget)) &&
-          [ExchangeEnum.bybit].includes(this.data.exchange) &&
           requestData.type === 'MARKET' &&
-          ['CANCELED'].includes(processedOrder.status) &&
-          +processedOrder.price * +processedOrder.executedQty > 0
+          (([ExchangeEnum.bybit].includes(this.data.exchange) &&
+            ['CANCELED'].includes(processedOrder.status) &&
+            +processedOrder.price * +processedOrder.executedQty > 0) ||
+            // Kraken's `mkr` order is IOC with a 1% price-protection band: a
+            // close that can't fill within it comes back FILLED for whatever
+            // the band allowed rather than PARTIALLY_FILLED, with the venue
+            // cancelling the rest itself. Route it through the same recovery
+            // as bybit's CANCELED-with-partial-fill shape above, so this
+            // synchronous response path gives `buyRemainder` the same chance
+            // the WS-driven order-status consumer already has unconditionally
+            // (spec 002 — without this, the two paths race with neither one
+            // attempting recovery).
+            isKrakenUsdmUnderfilledReduceOnlyClose(this.data.exchange, {
+              reduceOnly: order.reduceOnly,
+              type: requestData.type,
+              status: processedOrder.status,
+              executedQty: processedOrder.executedQty,
+              origQty: order.origQty,
+            }))
         ) {
           const origExecutedQty = +processedOrder.executedQty
           processedOrder = await this.fillPartiallyFilledOrder({
@@ -7103,6 +9248,14 @@ class MainBot<T extends IMainBot> {
         if (!this.kucoinFutures) {
           orderToPush.executedQty =
             await this.convertOrderExecutedQty(orderToPush)
+          // Only the venue's own figure is in contracts; a quote the payload
+          // did not state is the row we already hold, in base (spec 102 §4.4).
+          if (processedOrder.cummulativeQuoteQty) {
+            orderToPush.cummulativeQuoteQty = await this.convertOrderQuoteQty(
+              orderToPush.symbol,
+              processedOrder.cummulativeQuoteQty,
+            )
+          }
         }
         this.setOrder(orderToPush)
         this.handleLog(`Save order ${order.clientOrderId}`)
@@ -7142,12 +9295,18 @@ class MainBot<T extends IMainBot> {
    * Cancel grid on exchange
    */
 
-  async cancelGridOnExchange(
-    order: Grid,
-    cancelPartiallyFilled = false,
-    removeFromLocal = true,
-  ) {
-    const find = this.getOrdersByStatusAndDealId({
+  /**
+   * The resting order a grid level refers to, or undefined.
+   *
+   * Extracted from {@link MainBot#cancelGridOnExchange} so that a caller
+   * priming a bulk cancel asks for exactly the orders that method will later
+   * look up. Same reason {@link MainBot#venueOrderId} exists: a prefetch keyed
+   * on a second, independently written copy of the same resolution silently
+   * stops hitting the moment the two drift apart, and nothing fails — it just
+   * quietly costs what it was meant to save.
+   */
+  protected findOrderForGrid(order: Grid, cancelPartiallyFilled = false) {
+    return this.getOrdersByStatusAndDealId({
       status: cancelPartiallyFilled ? ['NEW', 'PARTIALLY_FILLED'] : 'NEW',
       dealId: order.dealId,
     })?.find(
@@ -7159,6 +9318,14 @@ class MainBot<T extends IMainBot> {
             orderT.tpSlTarget === order.tpSlTarget)) &&
         orderT.side === order.side,
     )
+  }
+
+  async cancelGridOnExchange(
+    order: Grid,
+    cancelPartiallyFilled = false,
+    removeFromLocal = true,
+  ) {
+    const find = this.findOrderForGrid(order, cancelPartiallyFilled)
     if (find) {
       const result = await this.cancelOrderOnExchange(
         find,
@@ -7175,40 +9342,89 @@ class MainBot<T extends IMainBot> {
 
   /**
    * Cancel order on exchange
+   *
+   * @param promotePartialToFilled When the venue reports the cancelled order
+   * carried fills, treat it as `FILLED` (the default, and what every close /
+   * teardown caller wants). Pass `false` when the cancel is a deliberate
+   * RE-SIZE of a still-live order — a DCA take-profit being replaced after a
+   * safety order filled. There the fills are a partial take profit, already
+   * carried in `tpHistory`; calling it `FILLED` sends it to
+   * `processFilledOrder` -> `closeDeal`, which would close the deal on
+   * whatever fraction happened to have sold and strand the rest. See
+   * `dcaHelper.placeOrders` and spec `006.dca-tp-replace-partially-filled`.
    */
-
   async cancelOrderOnExchange(
     order: Order,
     setErrors = true,
     removeFromLocal = true,
+    promotePartialToFilled = true,
   ) {
     const _id = this.startMethod('cancelOrderOnExchange')
     if (this.exchange) {
-      const request = await this.exchange.cancelOrder({
-        symbol: order.symbol,
-        // Address the venue by the id it can resolve UNAMBIGUOUSLY. Kraken
-        // spot has no client-order-id lookup at all: the connector falls back
-        // to `userref = parseInt(clientOrderId.substring(0, 8), 16)`, and every
-        // Gainium client id starts with a shared non-hex prefix, so parseInt
-        // stops at the first `-` and ALL `D-*` ids collapse to userref 13 (all
-        // `CMB-*` to 12). `getOrder()` then returns whichever same-userref
-        // order the account happens to list first and we cancel THAT one —
-        // a cancel aimed at order A silently cancels order B. Bug #535: 41
-        // distinct `D-RO-*` cancels on one ETHEUR DCA bot all resolved to the
-        // single stale txid ONK6O3-BF63X-24VAON, so not one of the intended
-        // orders was ever cancelled. The stored `orderId` IS the Kraken txid,
-        // which the connector routes through its exact `isKrakenSpotTxid()` ->
-        // `getSpotOrderByTxid()` lookup. This is the same swap
-        // `_handleUnknownOrder` already makes for kraken in its `byId` set —
-        // v1.32.4 added it there and to nothing else, leaving the cancel that
-        // feeds it still addressed by client id.
-        newClientOrderId:
-          this.data?.exchange === ExchangeEnum.coinbase ||
-          this.data?.exchange === ExchangeEnum.kraken ||
-          this.kucoinFullFutures
-            ? `${order.orderId}`
-            : order.clientOrderId,
-      })
+      // Address the venue by the id it can resolve UNAMBIGUOUSLY. Kraken
+      // spot has no client-order-id lookup at all: the connector falls back
+      // to `userref = parseInt(clientOrderId.substring(0, 8), 16)`, and every
+      // Gainium client id starts with a shared non-hex prefix, so parseInt
+      // stops at the first `-` and ALL `D-*` ids collapse to userref 13 (all
+      // `CMB-*` to 12). `getOrder()` then returns whichever same-userref
+      // order the account happens to list first and we cancel THAT one —
+      // a cancel aimed at order A silently cancels order B. Bug #535: 41
+      // distinct `D-RO-*` cancels on one ETHEUR DCA bot all resolved to the
+      // single stale txid ONK6O3-BF63X-24VAON, so not one of the intended
+      // orders was ever cancelled. The stored `orderId` IS the Kraken txid,
+      // which the connector routes through its exact `isKrakenSpotTxid()` ->
+      // `getSpotOrderByTxid()` lookup. This is the same swap
+      // `_handleUnknownOrder` already makes for kraken in its `byId` set —
+      // v1.32.4 added it there and to nothing else, leaving the cancel that
+      // feeds it still addressed by client id.
+      const byExchangeId =
+        this.data?.exchange === ExchangeEnum.coinbase ||
+        this.data?.exchange === ExchangeEnum.kraken ||
+        this.kucoinFullFutures
+      // …and when that id is still the `-1` placeholder there IS no venue-side
+      // identifier, so there is nothing to ask. Both siblings that build this
+      // same id already say so — `venueOrderId()` returns null, the unknown-order
+      // ladder sets `neverReachedExchange` — and this was the last path left
+      // spending a rate-limited private call to learn what the local row says.
+      // Bug #671: 39 Kraken grid orders (all refused at placement with
+      // `EAccount:Invalid permissions`) plus 27k Coinbase rows each sent the
+      // literal `'-1'` as the order id. The answer is the same either way — this
+      // message contains `Order not found`, so `unknownOrderMessages` below
+      // still routes it to `_handleUnknownOrder` and the order is retired — but
+      // the venue's answer is not GUARANTEED to be that: a timeout or rate-limit
+      // on the wasted call matches nothing, error-states the bot over an order
+      // that provably never existed, and leaves the phantom row NEW.
+      // Substituted as a response rather than returned early so the routing
+      // below stays the single place that decides what "not found" means.
+      //
+      // Served from the bulk cancel this loop already made, when it made one.
+      // Keyed by the exchange order id — the same id the call below would be
+      // addressed with — so the prime and the consume cannot disagree about
+      // what was asked for. Consumed ONCE: a venue confirmation describes the
+      // moment it was fetched, and an entry left in the map could otherwise
+      // answer a cancel issued later for a different order that happens to
+      // carry the same id. Everything below this line runs UNCHANGED for a
+      // primed result: the field copy, the re-size promotion guard, the
+      // CANCELED-with-fills promotion, the emit, `setOrder`/`deleteOrder` and
+      // the DB write are what make a cancelled order cancelled locally, and a
+      // batched order that skipped any of them would be a subtly different
+      // order. Spec `082` §4.
+      this.noteOwnCancel(order.clientOrderId)
+      const primed = this.cancelBatch?.get(`${order.orderId}`)
+      if (primed) {
+        this.cancelBatch?.delete(`${order.orderId}`)
+      }
+      const request =
+        byExchangeId && order.orderId === noExchangeOrderId
+          ? this.exchange.returnBad()(new Error(orderNeverReachedExchange))
+          : primed
+            ? this.exchange.returnGood<CommonOrder>()(primed)
+            : await this.exchange.cancelOrder({
+                symbol: order.symbol,
+                newClientOrderId: byExchangeId
+                  ? `${order.orderId}`
+                  : order.clientOrderId,
+              })
       if (request.status === StatusEnum.notok) {
         for (const m of unknownOrderMessages) {
           if (request.reason.toLowerCase().indexOf(m.toLowerCase()) !== -1) {
@@ -7261,8 +9477,39 @@ class MainBot<T extends IMainBot> {
               }
             }
           })
+          // `promotePartialToFilled: false` is the CALLER'S INTENT — this
+          // cancel is a deliberate re-size, never a close — and the guard below
+          // reads `order.status`, which the copy loop has just overwritten with
+          // whatever the venue's cancel RESPONSE said. A venue that answers
+          // `FILLED` therefore walks straight past the opt-out: the row is
+          // persisted FILLED and the flag never runs. B3-USDC deal
+          // `6a90e161…` on 2026-09-08 — the #696 tp-coverage repair cancelled
+          // `D-TP-TNTUX…` with the opt-out at 13:18:25.597Z, the row was written
+          // FILLED at 13:18:26.055Z, and the venue's own user-stream event 37 ms
+          // later said CANCELED. Only `dealOutcome`'s `dealLeftOpenSize` guard
+          // stopped 54103 of a 989459 position from closing the deal.
+          //
+          // So decide it from what we asked for, not from what came back. The
+          // response's `executedQty` is still trusted — it is the fills, and
+          // they are a partial take profit `tpHistory` already carries. `origQty`
+          // is the row's own (the copy loop excludes it), so this compares the
+          // venue's fills against the size we placed: short of it, the cancel
+          // won and the row is terminal-CANCELED. At or past it the venue filled
+          // the order out from under the cancel, which IS a close — left FILLED
+          // so `placeOrders`' `result.status === 'FILLED'` handling still sees
+          // it. Spec `026`, issue #717.
+          if (
+            !promotePartialToFilled &&
+            order.status !== 'CANCELED' &&
+            +order.executedQty < +order.origQty
+          ) {
+            order.status = 'CANCELED'
+          }
           if (+order.executedQty !== 0 && order.status === 'CANCELED') {
-            if (await this.setFilledInsteadOfCanceled(order)) {
+            if (
+              promotePartialToFilled &&
+              (await this.setFilledInsteadOfCanceled(order))
+            ) {
               order.status = 'FILLED'
             }
             order.executedQty = await this.convertOrderExecutedQty(order)
@@ -7312,6 +9559,43 @@ class MainBot<T extends IMainBot> {
               false,
             )
           }
+        }
+      })
+  }
+
+  /**
+   * Remove the write-ahead row `saveOrderToDb` created for an order that never
+   * reached the exchange.
+   *
+   * Deliberately filtered on the untouched placeholder shape — `NEW` with the
+   * `noExchangeOrderId` placeholder — rather than on the client order id alone.
+   * An order carrying a real exchange id got it from the venue (placement
+   * response or user stream) and must keep its record; so must one already in a
+   * terminal state. In those cases this matches nothing and is a no-op.
+   *
+   * `deleteManyData` rather than `deleteData` because `clientOrderId` is
+   * uniquely indexed, so the filter can only ever match one row, and
+   * `deleteData` reports a no-match as `'Server error'` — which is the normal
+   * outcome here whenever the row has legitimately moved on.
+   */
+
+  async deleteOrderFromDb(clientOrderId: string) {
+    await this.ordersDb
+      .deleteManyData({
+        clientOrderId,
+        status: 'NEW',
+        orderId: noExchangeOrderId,
+      })
+      .then((res) => {
+        if (res.status === StatusEnum.notok) {
+          this.handleErrors(
+            res.reason,
+            'limitOrders()',
+            `Error removing never-sent order ${clientOrderId}`,
+            false,
+            false,
+            false,
+          )
         }
       })
   }
@@ -7464,13 +9748,23 @@ class MainBot<T extends IMainBot> {
    * the common path costs no extra request. Returns `available` unchanged for
    * every non-pooled venue and on any error: a venue with no opinion must
    * never widen or block sizing. The pooled figure is USD-denominated, so it
-   * is trusted only when USD actually is the quote asset.
+   * is trusted only for a USD or USDC quote (`poolCoversQuote`).
+   *
+   * COIN-M: `available` is in the base coin, so the pool is converted at
+   * `price` (exchange-connector spec 028 — a Bitget Unified account in
+   * `multi_assets` mode margins inverse contracts from USDT). Isolated bots
+   * draw on it too: the pool is the account's, and the venue refuses an
+   * isolated position it cannot fund — no worse than refusing it here.
    */
   protected async pooledMarginOrKeep(
     quoteAsset: string,
     available: number,
+    price?: number,
   ): Promise<number> {
-    if (!this.futures || this.coinm || quoteAsset !== 'USD' || !this.exchange) {
+    if (!this.futures || !poolCoversQuote(quoteAsset) || !this.exchange) {
+      return available
+    }
+    if (this.coinm && !price) {
       return available
     }
     const res = await this.exchange.getMarginAvailableUsd()
@@ -7479,7 +9773,27 @@ class MainBot<T extends IMainBot> {
     }
     // The venue already nets margin committed to open positions, so this is
     // what can actually be committed now. Never shrink what the caller found.
-    return Math.max(available, res.data)
+    return widenByPool(available, res.data, this.coinm, price)
+  }
+
+  /**
+   * The balance row a percent-of-balance order is sized from, widened by the
+   * account's pooled collateral (see `pooledMarginOrKeep`). An account that
+   * holds none of `asset` still sizes from the pool; `held` is returned
+   * untouched whenever the venue reports no pool.
+   */
+  protected async withPooledCollateral(
+    asset: string,
+    quoteAsset: string,
+    held: { asset: string; free: number; locked: number } | undefined,
+    price: number,
+  ): Promise<{ asset: string; free: number; locked: number } | undefined> {
+    const free = held?.free ?? 0
+    const pooled = await this.pooledMarginOrKeep(quoteAsset, free, price)
+    if (pooled <= free) {
+      return held
+    }
+    return { asset, free: pooled, locked: held?.locked ?? 0 }
   }
 
   /**
@@ -7510,7 +9824,12 @@ class MainBot<T extends IMainBot> {
     quoteAsset: string,
     cachedFree: number,
   ): Promise<number> {
-    if (!this.futures || this.coinm || quoteAsset !== 'USD' || !this.exchange) {
+    if (
+      !this.futures ||
+      this.coinm ||
+      !poolCoversQuote(quoteAsset) ||
+      !this.exchange
+    ) {
       return cachedFree
     }
     const now = +new Date()
@@ -7883,6 +10202,7 @@ class MainBot<T extends IMainBot> {
     overrideRound?: boolean,
     newSell = false,
   ) {
+    this.lastGridSizing = null
     if (!this.data) {
       return
     }
@@ -7921,12 +10241,19 @@ class MainBot<T extends IMainBot> {
         )
         let quoteAmount = 0
         let baseAmount = 0
+        // Budget-derived size of one level BEFORE any exchange-minimum floor
+        // below overwrites it. Observed only — no quantity depends on it.
+        let sizingWanted: { unit: 'base' | 'quote'; wanted: number } | null =
+          null
         if (profitCurrency === 'base') {
           if (orderFixedIn === 'base') {
-            let tempSellQty = this.math.round(
+            const rawSellQty =
               budget /
-                (initialPriceStart * sellCount +
-                  buys.reduce((acc, v) => (acc += v.buy), 0) * (1 + gs)),
+              (initialPriceStart * sellCount +
+                buys.reduce((acc, v) => (acc += v.buy), 0) * (1 + gs))
+            sizingWanted = { unit: 'base', wanted: rawSellQty }
+            let tempSellQty = this.math.round(
+              rawSellQty,
               quotedAssetPrecision,
               true,
             )
@@ -7980,6 +10307,7 @@ class MainBot<T extends IMainBot> {
                 initialPriceStart +
                 buyCount * f)
           }
+          sizingWanted = { unit: 'quote', wanted: quoteAmount }
           if (quoteAmount < symbol.quoteAsset.minAmount) {
             quoteAmount = symbol.quoteAsset.minAmount * f
           }
@@ -7996,6 +10324,7 @@ class MainBot<T extends IMainBot> {
               : budget /
                 (sellCount * initialPriceStart +
                   buys.reduce((acc, v) => acc + v.buy, 0))
+            sizingWanted = { unit: 'base', wanted: baseAmount }
             const round = this.math.round(
               baseAmount,
               quotedAssetPrecision,
@@ -8013,6 +10342,20 @@ class MainBot<T extends IMainBot> {
         }
         if (this.coinm && !this.isBitget) {
           baseAmount = budget / +levels
+          sizingWanted = { unit: 'base', wanted: baseAmount }
+        }
+        if (sizingWanted) {
+          this.lastGridSizing = {
+            ...sizingWanted,
+            minimum: gridLevelMinimum({
+              unit: sizingWanted.unit,
+              minNotional: symbol.quoteAsset.minAmount,
+              minQty: symbol.baseAsset.minAmount,
+              step: symbol.baseAsset.step,
+              lowestPrice: Math.min(...initialGrids.map((g) => g.price.buy)),
+              highestPrice: Math.max(...initialGrids.map((g) => g.price.sell)),
+            }),
+          }
         }
         const basicInitialGrid = initialGrids.find((g) =>
           _side === OrderSideEnum.buy
@@ -8020,6 +10363,23 @@ class MainBot<T extends IMainBot> {
             : lastPrice === g.price.sell,
         )
         lastPrice = basicInitialGrid?.price?.buy ?? _lastPrice
+        /**
+         * Spec 086. A combo minigrid splits ONE budget across its levels, and on
+         * futures `comboHelper.getBaseOrder` then re-sizes the base order to the
+         * sum of those levels so the position equals the ladder that unwinds it.
+         * Flooring each level to the lot step on its own therefore loses up to
+         * one step PER LEVEL off the position itself. Carry the residual: each
+         * level takes the floored cumulative target minus what the earlier
+         * levels actually took, so the grid lands within one lot step of the
+         * budget and, the target being floored, never over it.
+         *
+         * Spot keeps the independent floor — there the floor is what holds a
+         * sell ladder inside the base the deal really has, and the base order is
+         * only ever raised from the grid, never replaced by it. Coin-margined
+         * sizing is decided by the `coinm` branch below, not here.
+         */
+        const carryLotResidual = combo && this.futures && !this.coinm
+        let allocatedBase = 0
         let i = 0
         for (const g of initialGrids) {
           if (initialGrids) {
@@ -8125,12 +10485,24 @@ class MainBot<T extends IMainBot> {
 
             if (profitCurrency === 'quote') {
               if (orderFixedIn === 'base') {
-                qty = this.math.round(
-                  baseAmount,
-                  quotedAssetPrecision,
-                  combo,
-                  overrideRound ?? !this.futures,
-                )
+                qty = carryLotResidual
+                  ? // Re-quantised: the subtraction of two floats leaves noise
+                    // that the callers' `qtyByGrids` ceiling would turn into a
+                    // whole extra lot step on the sum.
+                    this.math.round(
+                      this.math.round(
+                        baseAmount * (i + 1),
+                        quotedAssetPrecision,
+                        true,
+                      ) - allocatedBase,
+                      quotedAssetPrecision,
+                    )
+                  : this.math.round(
+                      baseAmount,
+                      quotedAssetPrecision,
+                      combo,
+                      overrideRound ?? !this.futures,
+                    )
               }
             }
             if (this.coinm && !this.isBitget) {
@@ -8199,6 +10571,19 @@ class MainBot<T extends IMainBot> {
                   true,
                 )
               }
+            }
+            /**
+             * Spec 086 §4.2/§5.3. Track what the level ACTUALLY got, after the
+             * minimum-quantity and min-notional clamps above — a level the venue
+             * forced upward is then repaid by the levels after it instead of
+             * compounding, and a grid the venue minimum already governs is left
+             * exactly where it was.
+             */
+            if (carryLotResidual) {
+              allocatedBase = this.math.round(
+                allocatedBase + grid.qty,
+                quotedAssetPrecision,
+              )
             }
             grids.push(grid)
           }

@@ -72,6 +72,10 @@ import {
 } from '../exchange/keyPermissionPolicy'
 import { getExchangeTradeType } from '../exchange/helpers'
 import {
+  buildVerifyFailureReason,
+  isOkxOriginSuspect,
+} from '../exchange/verifyFailureMessage'
+import {
   snapshotReadSeries,
   snapshotReadPerExchange,
 } from '../archive/snapshotRead'
@@ -80,6 +84,7 @@ import {
   balanceDb,
   botDb,
   botEventDb,
+  changeTrailDb,
   dcaBotDb,
   dcaDealsDb,
   favoritePairsDb,
@@ -100,7 +105,6 @@ import {
   dcaBacktestRequestDb,
   comboBacktestRequestDb,
   gridBacktestRequestDb,
-  botProfitChartDb,
   userProfitByHourDb,
   hedgeComboBotDb,
   globalVarsDb,
@@ -110,7 +114,7 @@ import {
   hedgeDcaBacktestDb,
   brokerCodesDb,
 } from '../db/dbInit'
-import { errorAccess } from './errorResponse'
+import { backtestNotFound, errorAccess } from './errorResponse'
 import {
   createPaperUser,
   isPaper,
@@ -127,6 +131,7 @@ import {
   sealConnection,
 } from '../utils/credentials'
 import logger from '../utils/logger'
+import { keyFingerprint } from '../utils/keyFingerprint'
 import { verifyPassword } from './handlers/password'
 // ⚠️ Note the two similarly-named helpers now in scope. `verifyPassword`
 // directly above is the SYNCHRONOUS strength/format validator and takes ONE
@@ -141,7 +146,10 @@ import {
 } from '../utils/password'
 import { createOrUpdateUser, findUser as _findUser } from './handlers/user'
 import { resetUser } from '../utils/user'
-import { mapDataGridOptionsToMongoOptions } from '../db/utils'
+import {
+  mapBacktestListOptions,
+  mapDataGridOptionsToMongoOptions,
+} from '../db/utils'
 import Exchange from '../exchange/exchange'
 import ExchangeChooser from '../exchange/exchangeChooser'
 import { updateOkxEuPairs } from '../utils/cron/exchange'
@@ -153,7 +161,8 @@ import {
   getAllOpenPositions,
   placeOrderOnExchange,
 } from './handlers/orders.handler'
-import { isCoinm, isServiceUnreachable } from '../utils'
+import { isCoinm, isServiceUnreachable, isValidTimezone } from '../utils'
+import { dealReturnPercentage, type DealReturnDeal } from '../utils/dealReturn'
 import {
   BACKTEST_SERVICE_TARGET,
   sendServerSideRequest,
@@ -166,6 +175,9 @@ import moment from 'moment-timezone'
 import { getBotsByGlobalVar } from '../bot/utils'
 import { JWT_SECRET } from '../config'
 import { DataResponse, ErrorResponse } from '../db/crud'
+import { LargeAccountService } from '../bot/largeAccount/largeAccountService'
+import { getInPositions } from './handlers/inPositions.handler'
+import { DEAL_TOTALS_ARGS } from '../bot/dealListFilter'
 
 /**
  * The single reply every failed password login gets, whatever went wrong.
@@ -219,6 +231,72 @@ if (!JWT_SECRET) {
 }
 
 const rabbitClient = new Rabbit()
+
+/** Key under which `botDashboardStats` hands its arguments to the type resolvers. */
+const IN_POSITIONS_ARGS = '__inPositionsArgs'
+
+type InPositionsParent = {
+  [IN_POSITIONS_ARGS]?: {
+    userId: string
+    type: BotType
+    paperContext: boolean
+    terminal?: boolean
+  }
+  __inPositions?: ReturnType<typeof getInPositions>
+}
+
+/** One computation per `botDashboardStats` result, shared by its three fields. */
+const inPositionsOf = (parent: InPositionsParent) => {
+  const args = parent?.[IN_POSITIONS_ARGS]
+  if (!args) return Promise.resolve(null)
+  if (!parent.__inPositions) {
+    parent.__inPositions = getInPositions(
+      args.userId,
+      args.type,
+      args.paperContext,
+      args.terminal,
+    )
+  }
+  return parent.__inPositions
+}
+
+type DealTotalsParent = {
+  [DEAL_TOTALS_ARGS]?: { combo: boolean; search: object }
+}
+
+/** Totals over the filtered deal set (main-app spec 020 §3), on demand only. */
+const dealTotalsOf = (parent: DealTotalsParent) => {
+  const args = parent?.[DEAL_TOTALS_ARGS]
+  if (!args) return null
+  return BotInstance.getInstance().getDealListTotals(args.combo, args.search)
+}
+
+/**
+ * Field resolvers on object types. Exported so a host that assembles its own
+ * resolver map (main-app) can spread them next to `Query`/`Mutation`.
+ */
+export const typeResolvers = {
+  botDashboardStats: {
+    inPositionsUsd: async (parent: InPositionsParent) =>
+      (await inPositionsOf(parent))?.inPositionsUsd ?? null,
+    inPositionsCount: async (parent: InPositionsParent) =>
+      (await inPositionsOf(parent))?.inPositionsCount ?? null,
+    inPositionsUnpriced: async (parent: InPositionsParent) =>
+      (await inPositionsOf(parent))?.inPositionsUnpriced ?? null,
+  },
+  dcaDeal: {
+    updatedAt: (deal: { updated?: Date | null }) => deal?.updated ?? null,
+  },
+  getDCADealsResponse: {
+    totals: (parent: DealTotalsParent) => dealTotalsOf(parent),
+  },
+  getComboDealsResponse: {
+    totals: (parent: DealTotalsParent) => dealTotalsOf(parent),
+  },
+  comboDeal: {
+    updatedAt: (deal: { updated?: Date | null }) => deal?.updated ?? null,
+  },
+}
 
 const resolvers = <
   R extends UserSchema = UserSchema,
@@ -290,24 +368,88 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const result = await botProfitChartDb.readData(
+      /*
+       * DERIVED FROM THE CLOSED DEALS, NOT FROM `botProfitChart`.
+       *
+       * `botProfitChart` is a denormalized one-row-per-closed-deal shadow that
+       * only `DCABotHelper.botUpdateStats` writes — and that method returns
+       * EARLY, before the write, for any deal whose `createTime` predates the
+       * bot's `resetStatsAfter`. Changing order sizing (baseOrderSize /
+       * orderSize / ordersCount / volumeScale / maxNumberOfOpenDeals) stamps
+       * `resetStatsAfter`, which is correct for the aggregate Statistics tab
+       * ("stats since the sizing changed") but silently and PERMANENTLY erased
+       * every deal that happened to be open at that instant from this chart —
+       * while the deals table next to it still listed all of them. Bug #564:
+       * a bot with 363 closed deals had 212 rows, and because the deals open
+       * longest are the ones most likely to straddle a settings change, the
+       * points it lost were the best ones — the scatter topped out at 1.77%
+       * against a real best deal of 8.14%.
+       *
+       * Deriving here fixes existing history too: no backfill can reconstruct
+       * rows that were never written, but the deals themselves were never lost
+       * (they are not cold-archived — only orders/transactions are), so the
+       * series is recomputable in full, for every bot, on the next read.
+       */
+      const combo =
+        input.type === BotType.combo || input.type === BotType.hedgeCombo
+      const dealsDb = combo ? comboDealsDb : dcaDealsDb
+      const result = await dealsDb.aggregate<
+        DealReturnDeal & { closeTime?: number; updateTime?: number }
+      >([
         {
-          userId: `${user.data._id}`,
-          botId: input.id,
-          type: input.type,
+          $match: {
+            userId: `${user.data._id}`,
+            botId: input.id,
+            // Same set the deals table calls "closed" (Bot.getBotDeals), so
+            // the chart and the table below it describe the same deals.
+            status: {
+              $in: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
+            },
+          },
         },
-        { value: 1, time: 1 },
-        { sort: { time: -1 }, limit: 500 },
-        true,
-      )
+        // Project BEFORE the sort: only these fields have to be held in memory
+        // to order a long-lived bot's whole deal history.
+        {
+          $project: {
+            _id: 0,
+            'profit.total': 1,
+            'usage.max.base': 1,
+            'usage.max.quote': 1,
+            'usage.current.base': 1,
+            'usage.current.quote': 1,
+            avgPrice: 1,
+            strategy: 1,
+            closeTime: 1,
+            updateTime: 1,
+            'settings.futures': 1,
+            'settings.coinm': 1,
+            'settings.profitCurrency': 1,
+            'settings.comboTpBase': 1,
+            'settings.useTp': 1,
+            'settings.useSl': 1,
+          },
+        },
+        { $sort: { closeTime: -1 } },
+        // Unchanged cap — the consumers (both dashboards' Deal Returns panel)
+        // have always plotted at most the newest 500 deals.
+        { $limit: 500 },
+      ])
+      if (result.status !== StatusEnum.ok) {
+        return {
+          status: result.status,
+          reason: `Cannot get profit chart data`,
+          data: null,
+        }
+      }
+      const data = (result.data?.result ?? []).flatMap((deal) => {
+        const value = dealReturnPercentage(deal, combo)
+        const time = deal.closeTime ?? deal.updateTime
+        return value === null || !time ? [] : [{ value, time }]
+      })
       return {
-        status: result.status,
-        reason:
-          result.status === StatusEnum.ok
-            ? null
-            : `Cannot get profit chart data`,
-        data:
-          result.status === StatusEnum.ok ? (result.data?.result ?? []) : null,
+        status: StatusEnum.ok,
+        reason: null,
+        data,
       }
     },
     getServerSideBacktestRequests: async (
@@ -626,13 +768,21 @@ const resolvers = <
         return user
       }
       if (!input?.skipSnapshot) {
-        await userUtils.userSnapshots(
+        // Bounded wait: a venue that never answers must not hold this mutation
+        // past the dashboard's 30s client timeout, or the user gets a failed
+        // request instead of a slow one (#572 — 163s here). On the deadline we
+        // fall through and return the last STORED snapshot; the refresh keeps
+        // running and lands for the next read. See `awaitSnapshotRefresh`.
+        await userUtils.awaitSnapshotRefresh(
+          userUtils.userSnapshots(
+            user.data._id.toString(),
+            paperContext,
+            true,
+            undefined,
+            undefined,
+            input?.uuid,
+          ),
           user.data._id.toString(),
-          paperContext,
-          true,
-          undefined,
-          undefined,
-          input?.uuid,
         )
       }
       const result = await snapshotDb.readData(
@@ -867,12 +1017,54 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      return await Bot.botDashboardStats(
+      const result = await Bot.botDashboardStats(
         `${user.data._id}`,
         input.type,
         !!paperContext,
         input.terminal,
       )
+      if (result.status !== StatusEnum.ok || !result.data) {
+        return result
+      }
+      // Read by the `botDashboardStats` type resolvers below, only when a
+      // client selects an In positions field (main-app spec 019 §4).
+      return {
+        ...result,
+        data: {
+          ...result.data,
+          [IN_POSITIONS_ARGS]: {
+            userId: `${user.data._id}`,
+            type: input.type,
+            paperContext: !!paperContext,
+            terminal: input.terminal,
+          },
+        },
+      }
+    },
+    largeAccount: async (
+      _parent: any,
+      _args: any,
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const data = await LargeAccountService.getInstance().getLargeAccount(
+        `${user.data._id}`,
+        !!paperContext,
+      )
+      if (!data) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'User not found',
+          data: null,
+        }
+      }
+      return { status: StatusEnum.ok, reason: null, data }
     },
     dealDashboardStats: async (
       _parent: any,
@@ -1189,6 +1381,54 @@ const resolvers = <
         paperContext,
         input.shareId,
       )
+    },
+    /**
+     * The change trail of one bot (optionally one deal), newest first.
+     * Owner-scoped: only the caller's own entries are ever returned.
+     * `before` is a `created` cursor in ms for the next page.
+     */
+    changeTrail: async (
+      _parent: any,
+      {
+        botId,
+        dealId,
+        limit,
+        before,
+      }: { botId: string; dealId?: string; limit?: number; before?: number },
+      { token, req }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const size = Math.max(1, Math.min(100, Math.floor(limit ?? 50) || 50))
+      const search: Record<string, unknown> = {
+        userId: `${user.data._id}`,
+        botId,
+      }
+      if (dealId) {
+        search.dealId = dealId
+      }
+      if (before && isFinite(before)) {
+        search.created = { $lt: new Date(before) }
+      }
+      const result = await changeTrailDb.readData(
+        search,
+        {},
+        { sort: { created: -1 }, limit: size },
+        true,
+      )
+      if (result.status === StatusEnum.notok) {
+        return result
+      }
+      return {
+        status: StatusEnum.ok,
+        reason: null,
+        data: result.data.result,
+      }
     },
     getBotEvents: async (
       _parent: any,
@@ -1780,6 +2020,40 @@ const resolvers = <
         paperContext,
       )
     },
+    getBotPairStats: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: {
+          id: string
+          type: BotType
+          shareId?: string
+          from?: number
+          to?: number
+        }
+      },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      // Same rule as getComboBot: a share-link visitor has no user, and the
+      // share id is then the only credential `getBot` accepts.
+      if (user.status === StatusEnum.notok && !input.shareId) {
+        return user
+      }
+      return await Bot.getBotPairStats(
+        user.data?._id.toString() ?? '',
+        input.type,
+        input.id,
+        input.shareId,
+        token === 'demo',
+        paperContext,
+        { from: input.from, to: input.to },
+      )
+    },
     getComboBotDealsStats: async (
       _parent: any,
       {
@@ -2072,7 +2346,7 @@ const resolvers = <
     },
     getTradingTerminalBotsList: async (
       _parent: any,
-      {},
+      { input }: { input?: { dataGridInput?: DataGridFilterInput } },
       { token, req, paperContext }: InputRequest,
     ) => {
       if (token !== 'demo' && !req.user?.authorized) {
@@ -2085,6 +2359,7 @@ const resolvers = <
       return await Bot.getTradingTerminalBotsList(
         user.data._id.toString(),
         paperContext,
+        input?.dataGridInput,
       )
     },
     userFee: async (
@@ -3812,7 +4087,7 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { filter, ...rest } = mapDataGridOptionsToMongoOptions(input)
+      const { filter, ...rest } = mapBacktestListOptions(input)
       const result = await backtestDb.readData(
         { userId: user.data._id.toString(), ...filter },
         undefined,
@@ -3839,7 +4114,7 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { filter, ...rest } = mapDataGridOptionsToMongoOptions(input)
+      const { filter, ...rest } = mapBacktestListOptions(input)
       const result = await comboBacktestDb.readData(
         { userId: user.data._id.toString(), ...filter },
         undefined,
@@ -3866,7 +4141,7 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { filter, ...rest } = mapDataGridOptionsToMongoOptions(input)
+      const { filter, ...rest } = mapBacktestListOptions(input)
       const result = await hedgeComboBacktestDb.readData(
         { userId: user.data._id.toString(), ...filter },
         undefined,
@@ -3893,7 +4168,7 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { filter, ...rest } = mapDataGridOptionsToMongoOptions(input)
+      const { filter, ...rest } = mapBacktestListOptions(input)
       const result = await hedgeDcaBacktestDb.readData(
         { userId: user.data._id.toString(), ...filter },
         undefined,
@@ -3953,6 +4228,53 @@ const resolvers = <
             find.okxSource,
           ).futures_leverageBracket(),
       )
+    },
+    /**
+     * USD the connection can still commit when its collateral is pooled across
+     * coins (Kraken Futures flex, Bitget Unified `multi_assets` — see
+     * exchange-connector spec 028); `data: null` when it is not. The trading
+     * terminal asks only after its own per-coin check came up short.
+     */
+    getPooledMarginAvailable: async (
+      _parent: any,
+      { input: { uuid } }: { input: { uuid: string } },
+      { token, req }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const find = user.data.exchanges.find((e) => e.uuid === uuid)
+      if (!find) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Exchange not exist on user',
+          data: null,
+        }
+      }
+      if (!isFutures(find.provider) || isPaper(find.provider)) {
+        return { status: StatusEnum.ok, reason: null, data: null }
+      }
+      const result = await new Exchange(
+        find.provider,
+        find.key,
+        find.secret,
+        find.passphrase,
+        undefined,
+        undefined,
+        find.okxSource,
+      ).getMarginAvailableUsd()
+      return {
+        status: StatusEnum.ok,
+        reason: null,
+        data:
+          result.status === StatusEnum.ok && typeof result.data === 'number'
+            ? result.data
+            : null,
+      }
     },
     getBacktestByShareId: async (
       _parent: any,
@@ -4025,7 +4347,7 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { filter, ...rest } = mapDataGridOptionsToMongoOptions(input)
+      const { filter, ...rest } = mapBacktestListOptions(input)
       const result = await gridBacktestDb.readData(
         { userId: user.data._id.toString(), ...filter },
         undefined,
@@ -4196,6 +4518,24 @@ const resolvers = <
     },
   }
   const Mutation = {
+    setLargeAccountMode: async (
+      _parent: any,
+      { input }: { input: { mode: string } },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return LargeAccountService.getInstance().setUserMode(
+        `${user.data._id}`,
+        input?.mode,
+        !!paperContext,
+      )
+    },
     resetAccount: async (
       _parents: any,
       { input }: { input: { type: ResetAccountTypeEnum } },
@@ -4979,6 +5319,35 @@ const resolvers = <
         rest,
       )
     },
+    executeNextDca: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: {
+          dealId: string
+          botId: string
+          expectedLevel?: number
+        }
+      },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const { botId, dealId, expectedLevel } = input
+      return await Bot.executeNextDcaLevel(
+        botId,
+        dealId,
+        user.data._id.toString(),
+        paperContext,
+        { expectedLevel },
+      )
+    },
     reduceDealFunds: async (
       _parent: any,
       {
@@ -5069,6 +5438,33 @@ const resolvers = <
         paperContext,
       )
     },
+    buyDealBaseRemainder: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: {
+          dealId: string
+          botId: string
+        }
+      },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const { botId, dealId } = input
+      return await Bot.buyDealBaseRemainder(
+        botId,
+        dealId,
+        user.data._id.toString(),
+        paperContext,
+      )
+    },
     resetShowError: async (
       _parent: any,
       { input: { data } }: { input: { data: { id: string; type: BotType }[] } },
@@ -5082,18 +5478,35 @@ const resolvers = <
         return user
       }
 
-      for (const d of data) {
-        const instance =
-          d.type === BotType.dca
-            ? dcaBotDb
-            : d.type === BotType.combo
-              ? comboBotDb
-              : botDb
-        //@ts-ignore
-        instance.updateData(
-          { _id: d.id },
-          { $set: { showErrorWarning: 'none' } },
-        )
+      const userId = user.data._id.toString()
+      // The flag is written by the bot a worker runs — for a hedge bot, its
+      // legs — so hedge types are cleared in their legs' collection. Every
+      // write is scoped to the caller. An id that cannot be an ObjectId could
+      // never match, and inside an `$in` it would fail the whole write.
+      const idsFor = (...types: BotType[]) =>
+        (data ?? [])
+          .filter(
+            (d) => d && types.includes(d.type) && Types.ObjectId.isValid(d.id),
+          )
+          .map((d) => d.id)
+      const dcaIds = idsFor(BotType.dca, BotType.hedgeDca)
+      const comboIds = idsFor(BotType.combo, BotType.hedgeCombo)
+      const gridIds = idsFor(BotType.grid)
+      const reset = { $set: { showErrorWarning: 'none' as const } }
+      const results = await Promise.all([
+        dcaIds.length
+          ? dcaBotDb.updateManyData({ _id: { $in: dcaIds }, userId }, reset)
+          : null,
+        comboIds.length
+          ? comboBotDb.updateManyData({ _id: { $in: comboIds }, userId }, reset)
+          : null,
+        gridIds.length
+          ? botDb.updateManyData({ _id: { $in: gridIds }, userId }, reset)
+          : null,
+      ])
+      const failed = results.find((r) => r?.status === StatusEnum.notok)
+      if (failed) {
+        return failed
       }
 
       return {
@@ -5257,7 +5670,8 @@ const resolvers = <
       { input }: { input: { username: string; password: string } },
       { userAgent, ip }: InputRequest,
     ) => {
-      const { username, password } = input
+      const { password } = input
+      let username = input.username.trim()
 
       const validRegex =
         /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$/
@@ -5270,14 +5684,27 @@ const resolvers = <
         }
       }
 
-      const findUser = await userDb.readData({
+      let findUser = await userDb.readData({
         username,
       })
+      // Sign-up stores emails lowercase, but a password manager can autofill
+      // the address with capitals. Exact match first so a legacy mixed-case
+      // account still resolves, then the lowercased form.
+      const lowered = username.toLowerCase()
+      if (
+        lowered !== username &&
+        findUser.status === StatusEnum.ok &&
+        findUser.data &&
+        !findUser.data.result
+      ) {
+        findUser = await userDb.readData({ username: lowered })
+      }
       if (
         findUser.status === StatusEnum.ok &&
         findUser.data &&
         findUser.data.result
       ) {
+        username = findUser.data.result.username
         const stored = findUser.data.result.password
         if (await verifyPasswordHash(password, stored)) {
           // Transparent migration: if the stored value is still legacy AES
@@ -5475,6 +5902,15 @@ const resolvers = <
         lastName,
         nickname,
       } = input
+      // Same guard as `setTimezone` — this mutation writes the same field, so
+      // it is the second way an unresolvable zone reaches the account. The
+      // whole call is refused so a settings save never lands half-applied.
+      if (timezone && !isValidTimezone(timezone)) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Invalid timezone',
+        }
+      }
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
@@ -5702,11 +6138,50 @@ const resolvers = <
             }
             if (!verifyResult.status) {
               logger.error(
-                `Add exchange verify response ${verifyResult.reason}, user ${user.data._id} (${user.data.username}), key: "${key}", exchange: "${provider}" `,
+                // The key is fingerprinted, never written down: this line
+                // fires on a FAILED verification, and a key the venue refused
+                // for an IP restriction or a missing permission is still a
+                // live credential. The fingerprint is enough to tell two
+                // attempts apart and matches the connector's for the same key.
+                `Add exchange verify response ${verifyResult.reason}, user ${user.data._id} (${user.data.username}), key#${keyFingerprint(key)}, exchange: "${provider}" `,
               )
+              // The venue almost always says exactly what is wrong — wrong
+              // OKX origin, unmatched IP, missing spot permission — and all of
+              // it used to be discarded in favour of this one message.
+              // buildVerifyFailureReason unwraps the connector envelope and
+              // prepends guidance when a rule recognises the error, while
+              // always keeping the venue's own words underneath it.
+              // OKX refuses a key issued by one of its OTHER regional
+              // platforms exactly as it refuses a key that does not exist, and
+              // the origin selector sits behind an "Advanced Settings"
+              // disclosure defaulting to okx.com. Sweep the other origins and
+              // name the one that authenticates. Narrowly gated so a timeout
+              // never triggers a re-probe (see probeOkxOrigins).
+              const detectedOkxSource = isOkxOriginSuspect(
+                provider,
+                verifyResult.reason,
+              )
+                ? await verify.probeOkxOrigins(
+                    tt,
+                    provider,
+                    key,
+                    secret,
+                    passphrase || '',
+                    okxSource,
+                  )
+                : undefined
               return {
                 status: StatusEnum.notok,
-                reason: `API keys not valid for ${tt}`,
+                reason: buildVerifyFailureReason({
+                  provider,
+                  tradeType: tt,
+                  reason: verifyResult.reason,
+                  key,
+                  secret,
+                  keysType,
+                  okxSource,
+                  detectedOkxSource,
+                }),
                 data: null,
               }
             }
@@ -6727,6 +7202,16 @@ const resolvers = <
         return errorAccess()
       }
       const { timezone, weekStart } = input
+      // The stored zone is the day boundary the profit resolvers bucket by,
+      // and an unresolvable one degrades to UTC without saying so — refuse it
+      // here rather than storing it and reporting it saved. Empty stays
+      // accepted: "never chosen" is a valid state.
+      if (timezone && !isValidTimezone(timezone)) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Invalid timezone',
+        }
+      }
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
@@ -8632,10 +9117,23 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      // Two ways the id resolves to nothing, both ordinary. A backtest that
+      // is not `savePermanent` is swept 30 days after it ran, while the
+      // dashboard keeps listing its own copy of the row; and a run whose save
+      // never reached the server is listed under a `<SYMBOL>-<time>` id the
+      // dashboard synthesized, which Mongo cannot cast. Neither is a `notok`
+      // read — a miss comes back as a SUCCESSFUL read holding an undefined
+      // result — so `status` alone does not say the document is there.
+      if (!Types.ObjectId.isValid(input._id)) {
+        return backtestNotFound()
+      }
       const filter = { _id: input._id, userId: user.data._id.toString() }
       const get = await backtestDb.readData(filter)
       if (get.status === StatusEnum.notok) {
         return get
+      }
+      if (!get.data.result) {
+        return backtestNotFound()
       }
       if (get.data.result.shareId) {
         return {
@@ -8671,10 +9169,16 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      if (!Types.ObjectId.isValid(input._id)) {
+        return backtestNotFound()
+      }
       const filter = { _id: input._id, userId: user.data._id.toString() }
       const get = await comboBacktestDb.readData(filter)
       if (get.status === StatusEnum.notok) {
         return get
+      }
+      if (!get.data.result) {
+        return backtestNotFound()
       }
       if (get.data.result.shareId) {
         return {
@@ -8709,10 +9213,16 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      if (!Types.ObjectId.isValid(input._id)) {
+        return backtestNotFound()
+      }
       const filter = { _id: input._id, userId: user.data._id.toString() }
       const get = await hedgeComboBacktestDb.readData(filter)
       if (get.status === StatusEnum.notok) {
         return get
+      }
+      if (!get.data.result) {
+        return backtestNotFound()
       }
       if (get.data.result.shareId) {
         return {
@@ -8747,10 +9257,16 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      if (!Types.ObjectId.isValid(input._id)) {
+        return backtestNotFound()
+      }
       const filter = { _id: input._id, userId: user.data._id.toString() }
       const get = await hedgeDcaBacktestDb.readData(filter)
       if (get.status === StatusEnum.notok) {
         return get
+      }
+      if (!get.data.result) {
+        return backtestNotFound()
       }
       if (get.data.result.shareId) {
         return {
@@ -8785,10 +9301,16 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      if (!Types.ObjectId.isValid(input._id)) {
+        return backtestNotFound()
+      }
       const filter = { _id: input._id, userId: user.data._id.toString() }
       const get = await gridBacktestDb.readData(filter)
       if (get.status === StatusEnum.notok) {
         return get
+      }
+      if (!get.data.result) {
+        return backtestNotFound()
       }
       if (get.data.result.shareId) {
         return {
@@ -9118,6 +9640,7 @@ const resolvers = <
   return {
     Query,
     Mutation,
+    ...typeResolvers,
   }
 }
 

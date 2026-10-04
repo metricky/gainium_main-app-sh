@@ -3,6 +3,7 @@ import {
   BotMarginTypeEnum,
   BotStartTypeEnum,
   BotStatusEnum,
+  LWConditionEnum,
   CloseConditionEnum,
   CloseDCATypeEnum,
   ComboTpBase,
@@ -831,6 +832,11 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
     enum: ['top', 'bottom', 'any'],
   },
+  lwCondition: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(LWConditionEnum),
+  },
   percentile: {
     required: false,
     validators: [ValidatorsEnum.shouldBeBoolean],
@@ -1481,6 +1487,28 @@ export const dcaBotSchemaConfig: Record<
     ],
     min: 1,
   },
+  useCloseAfterXconsecutiveWin: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  closeAfterXconsecutiveWin: {
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.shouldBeValidNumber,
+      ValidatorsEnum.shouldBeInteger,
+      ValidatorsEnum.shouldBePositive,
+    ],
+    min: 1,
+  },
+  useCloseAfterXconsecutiveLoss: {
+    validators: [ValidatorsEnum.shouldBeBoolean],
+  },
+  closeAfterXconsecutiveLoss: {
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.shouldBeValidNumber,
+      ValidatorsEnum.shouldBeInteger,
+      ValidatorsEnum.shouldBePositive,
+    ],
+    min: 1,
+  },
   useMulti: { validators: [ValidatorsEnum.shouldBeBoolean] },
   maxDealsPerPair: {
     validators: [
@@ -1959,6 +1987,16 @@ export const dcaBotSchemaConfig: Record<
     min: -1,
     max: 200,
   },
+  allowRaiseToExchangeMin: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  reduceToAvailableBalance: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  reduceToAvailableMinSize: {
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.canBeEmptyString,
+      ValidatorsEnum.shouldBeValidNumber,
+    ],
+    min: 0,
+  },
   dcaByMarket: { validators: [ValidatorsEnum.shouldBeBoolean] },
 }
 
@@ -2045,6 +2083,9 @@ export const COMBO_EXCLUDED_FIELDS: (keyof typeof COMBO_FORM_DEFAULTS)[] = [
   'useRiskReward',
   'riskMaxSl',
   'riskMinSl',
+  'allowRaiseToExchangeMin',
+  'reduceToAvailableBalance',
+  'reduceToAvailableMinSize',
   'dcaByMarket',
   'useLimitPrice',
   'baseSlOn',
@@ -2082,6 +2123,10 @@ export const TERMINAL_DEAL_EXCLUDED_FIELDS: (keyof typeof DCA_FORM_DEFAULTS)[] =
     'closeAfterXprofitValue',
     'useCloseAfterXwin',
     'closeAfterXwin',
+    'useCloseAfterXconsecutiveWin',
+    'closeAfterXconsecutiveWin',
+    'useCloseAfterXconsecutiveLoss',
+    'closeAfterXconsecutiveLoss',
     'useMulti',
     'maxDealsPerPair',
     'useCloseAfterXopen',

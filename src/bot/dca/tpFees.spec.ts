@@ -21,23 +21,23 @@ process.env.NODE_ENV = 'testing'
  * (2) has no symptom a user can report, so it is pinned here rather than left
  * to review.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        core/src/bot/dca/tpFees.spec.ts
+ * Run: `npm test` (mocha).
  */
-import { tpPriceDisplacement, worstFee } from './tpFees'
+import { describe, it } from 'mocha'
+import { expect } from 'chai'
+import {
+  quantityFeeIsThirdAssetOnly,
+  ordersFeeIsThirdAssetOnly,
+  comboEntryBaseFee,
+  tpPriceDisplacement,
+  worstFee,
+} from './tpFees'
+import type { Order } from '../../../types'
 
-let failures = 0
-
-function check(name: string, actual: number, expected: number) {
-  const ok = Math.abs(actual - expected) < 1e-12
-  if (!ok) {
-    failures++
-  }
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${name}` +
-      (ok ? '' : `\n      expected ${expected}, got ${actual}`),
-  )
-}
+const order = (overrides: Partial<Order>): Partial<Order> => ({
+  executedQty: '1',
+  ...overrides,
+})
 
 // Binance USD-M standard tier.
 const futuresFee = { maker: 0.0002, taker: 0.0005 }
@@ -46,64 +46,195 @@ const promoFee = { maker: 0.001, taker: 0.0004 }
 // The quantity leg's value on futures — what the price leg must NOT read.
 const zeroedFee = { maker: 0, taker: 0 }
 
-console.log('\n-- worstFee: neither side may be assumed cheaper --')
-check('takes taker when taker is worse', worstFee(futuresFee), 0.0005)
-check('takes maker under promo pricing', worstFee(promoFee), 0.001)
-check('missing fee is zero, not NaN', worstFee(undefined), 0)
-check(
-  'partial fee object falls back per side',
-  worstFee({ maker: 0.0003 }),
-  0.0003,
-)
+const closeTo = (actual: number, expected: number, eps = 1e-12) =>
+  expect(Math.abs(actual - expected) < eps).to.equal(true)
 
-console.log(
-  '\n-- tpPriceDisplacement: a long is pushed away from entry, a short toward it --',
-)
-check(
-  'long covers the round trip',
-  tpPriceDisplacement(futuresFee, true),
-  1 + 0.001,
-)
-check(
-  'short covers the round trip',
-  tpPriceDisplacement(futuresFee, false),
-  1 - 0.001,
-)
-check(
-  'zero-fee account needs no displacement',
-  tpPriceDisplacement(zeroedFee, true),
-  1,
-)
+describe('tpFees', () => {
+  describe('worstFee: neither side may be assumed cheaper', () => {
+    it('takes taker when taker is worse', () => {
+      closeTo(worstFee(futuresFee), 0.0005)
+    })
+    it('takes maker under promo pricing', () => {
+      closeTo(worstFee(promoFee), 0.001)
+    })
+    it('missing fee is zero, not NaN', () => {
+      closeTo(worstFee(undefined), 0)
+    })
+    it('partial fee object falls back per side', () => {
+      closeTo(worstFee({ maker: 0.0003 }), 0.0003)
+    })
+  })
 
-console.log('\n-- the regression itself --')
-// A futures TP fed the zeroed quantity fee lands exactly at the configured
-// percentage, pocketing none of the round trip. This is the bug: it must not
-// be what a real futures fee produces.
-check(
-  'zeroed fee collapses displacement (the bug shape)',
-  tpPriceDisplacement(zeroedFee, true),
-  1,
-)
-const real = tpPriceDisplacement(futuresFee, true)
-console.log(
-  `${real > 1 ? 'PASS' : 'FAIL'}  a real futures fee must NOT collapse to 1 (got ${real})`,
-)
-if (!(real > 1)) {
-  failures++
-}
+  describe('tpPriceDisplacement: a long is pushed away from entry, a short toward it', () => {
+    it('long covers the round trip', () => {
+      closeTo(tpPriceDisplacement(futuresFee, true), 1 + 0.001)
+    })
+    it('short covers the round trip', () => {
+      closeTo(tpPriceDisplacement(futuresFee, false), 1 - 0.001)
+    })
+    it('zero-fee account needs no displacement', () => {
+      closeTo(tpPriceDisplacement(zeroedFee, true), 1)
+    })
+  })
 
-// The user-visible consequence, at the TP size that makes it legible: a 0.12%
-// TP on a 100.00 average entry. Compensated, the order rests 0.10% higher.
-const avg = 100
-const tpPerc = 0.0012
-const compensated = avg * (1 + tpPerc) * tpPriceDisplacement(futuresFee, true)
-const uncompensated = avg * (1 + tpPerc) * tpPriceDisplacement(zeroedFee, true)
-check(
-  '0.12% TP on futures rests above the uncompensated price',
-  compensated,
-  100.22012,
-)
-check('uncompensated price is the bare target', uncompensated, 100.12)
+  describe('the regression itself', () => {
+    // A futures TP fed the zeroed quantity fee lands exactly at the configured
+    // percentage, pocketing none of the round trip. This is the bug: it must not
+    // be what a real futures fee produces.
+    it('zeroed fee collapses displacement (the bug shape)', () => {
+      closeTo(tpPriceDisplacement(zeroedFee, true), 1)
+    })
+    it('a real futures fee must NOT collapse to 1', () => {
+      const real = tpPriceDisplacement(futuresFee, true)
+      expect(real > 1).to.equal(true)
+    })
 
-console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}\n`)
-process.exit(failures === 0 ? 0 : 1)
+    // The user-visible consequence, at the TP size that makes it legible: a 0.12%
+    // TP on a 100.00 average entry. Compensated, the order rests 0.10% higher.
+    const avg = 100
+    const tpPerc = 0.0012
+    it('0.12% TP on futures rests above the uncompensated price', () => {
+      const compensated =
+        avg * (1 + tpPerc) * tpPriceDisplacement(futuresFee, true)
+      closeTo(compensated, 100.22012)
+    })
+    it('uncompensated price is the bare target', () => {
+      const uncompensated =
+        avg * (1 + tpPerc) * tpPriceDisplacement(zeroedFee, true)
+      closeTo(uncompensated, 100.12)
+    })
+  })
+
+  // Spec 015 §2: a deal whose fees have ALL been paid in a third asset
+  // (BNB/BGB/KCS) never had base or quote debited for a fee — the same
+  // precondition that already zeroes the quantity fee for futures (file
+  // header) happens to also hold here, for an unrelated reason. This is
+  // deliberately narrower than "use the real fee" — see spec 015 §4 for why
+  // a per-order real-fee swap is out of scope.
+  describe('quantityFeeIsThirdAssetOnly: the ONE case safe to zero the quantity gross-up for', () => {
+    it('every observed fee off-pair, none on-pair → true', () => {
+      expect(
+        quantityFeeIsThirdAssetOnly(
+          [{ asset: 'BNB', total: 0.001, totalUsd: 0.25 }],
+          0,
+          { base: 0, quote: 0 },
+        ),
+      ).to.equal(true)
+    })
+    it('an on-pair fee alongside an off-pair one → false (mixed, keep the gross-up)', () => {
+      expect(
+        quantityFeeIsThirdAssetOnly(
+          [{ asset: 'BNB', total: 0.001, totalUsd: 0.25 }],
+          0,
+          { base: 0.00002, quote: 0 },
+        ),
+      ).to.equal(false)
+    })
+    it('commission already booked (from an earlier on-pair fee), no feeByAsset → false', () => {
+      expect(
+        quantityFeeIsThirdAssetOnly(undefined, 0.05, { base: 0, quote: 0.05 }),
+      ).to.equal(false)
+    })
+    it('nothing observed yet (no fills) → false, not vacuously true', () => {
+      expect(
+        quantityFeeIsThirdAssetOnly(undefined, 0, { base: 0, quote: 0 }),
+      ).to.equal(false)
+    })
+  })
+
+  // Spec 015 correction (post-review): the persisted feeByAsset/commission/
+  // feePaid fields only get written when closeDeal runs (a TP fill) — after
+  // the TP being sized is already built. ordersFeeIsThirdAssetOnly answers
+  // the same question live, from the orders themselves, so a deal's FIRST
+  // TP (built right after the base order fills, before closeDeal has ever
+  // run) still sees a third-asset-only base order.
+  describe('ordersFeeIsThirdAssetOnly: the live equivalent, from orders not persisted fields', () => {
+    it('a single filled order with an off-pair fee → true', () => {
+      expect(
+        ordersFeeIsThirdAssetOnly(
+          [order({ feePaid: '0.001', feeAsset: 'BNB' })],
+          'BTC',
+          'USDT',
+        ),
+      ).to.equal(true)
+    })
+    it('a single filled order with an on-pair fee → false', () => {
+      expect(
+        ordersFeeIsThirdAssetOnly(
+          [order({ feePaid: '0.5', feeAsset: 'USDT' })],
+          'BTC',
+          'USDT',
+        ),
+      ).to.equal(false)
+    })
+    it('an early off-pair fee and a later on-pair fee → false (mixed, keep the gross-up)', () => {
+      expect(
+        ordersFeeIsThirdAssetOnly(
+          [
+            order({ feePaid: '0.001', feeAsset: 'BNB' }),
+            order({ feePaid: '0.4', feeAsset: 'USDT' }),
+          ],
+          'BTC',
+          'USDT',
+        ),
+      ).to.equal(false)
+    })
+    it('two off-pair fees on two different orders → true', () => {
+      expect(
+        ordersFeeIsThirdAssetOnly(
+          [
+            order({ feePaid: '0.001', feeAsset: 'BNB' }),
+            order({ feePaid: '0.0002', feeAsset: 'BNB' }),
+          ],
+          'BTC',
+          'USDT',
+        ),
+      ).to.equal(true)
+    })
+    it('no orders at all → false, not vacuously true', () => {
+      expect(ordersFeeIsThirdAssetOnly([], 'BTC', 'USDT')).to.equal(false)
+    })
+    it('an order with no fee observed at all → false', () => {
+      expect(ordersFeeIsThirdAssetOnly([order({})], 'BTC', 'USDT')).to.equal(
+        false,
+      )
+    })
+  })
+
+  describe('comboEntryBaseFee (spec 097)', () => {
+    const bo = order({ executedQty: '1000' })
+    it('§4.1 zero rate, venue reported the fee in base → the observed fee', () => {
+      expect(
+        comboEntryBaseFee(
+          [{ ...bo, feePaid: '1', feeAsset: 'PEPE' }],
+          0,
+          'PEPE',
+          'USDT',
+        ),
+      ).to.equal(1)
+    })
+    it('§4.1 estimate larger than the observed leg → the estimate', () => {
+      expect(
+        comboEntryBaseFee(
+          [{ ...bo, feePaid: '0.5', feeAsset: 'PEPE' }],
+          0.001,
+          'PEPE',
+          'USDT',
+        ),
+      ).to.equal(1)
+    })
+    it('§4.1 fee in quote or unknown → the estimate alone', () => {
+      expect(
+        comboEntryBaseFee(
+          [{ ...bo, feePaid: '5', feeAsset: 'USDT' }, bo],
+          0.001,
+          'PEPE',
+          'USDT',
+        ),
+      ).to.equal(2)
+    })
+    it('§4.1 zero rate and no fee data → 0', () => {
+      expect(comboEntryBaseFee([bo], 0, 'PEPE', 'USDT')).to.equal(0)
+    })
+  })
+})

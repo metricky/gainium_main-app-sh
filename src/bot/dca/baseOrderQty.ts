@@ -18,11 +18,12 @@
  *  - Sized before the order map was populated, the same fallback produced the
  *    nominal ALONE: 1786.1 against the same 3711.30.
  *
- * The deal's own books already know the answer. `deal.size` is the position it
- * still holds and the closed quantity is separately tracked, so whatever those
- * two account for beyond the counted safety fills IS the base order — exactly,
- * with no reference to settings. The nominal survives only for its original
- * case: a deal that holds nothing yet because its opening order has not landed.
+ * The deal's own books already know the answer. `deal.size` is the volume the
+ * deal entered — gross of what it has since sold, which is tracked separately
+ * ({@link grossEntryVolume}) — so whatever it accounts for beyond the counted
+ * safety fills IS the base order: exactly, with no reference to settings. The
+ * nominal survives only for its original case: a deal that holds nothing yet
+ * because its opening order has not landed.
  *
  * Pure so `baseOrderQty.spec.ts` can pin it against the real prod numbers.
  */
@@ -33,6 +34,13 @@ export type BaseOrderQtySource =
   | 'order'
   /** Derived from the deal's position: the volume the fills do not explain. */
   | 'deal'
+  /**
+   * The base order's row WAS found, and the deal still holds more base than it
+   * and the counted fills explain — so entry rows are missing from the order
+   * map and the position wins. Distinct from `deal` only so the caller's log
+   * line can say which happened; the quantity is derived identically.
+   */
+  | 'position'
   /** The deal has traded and holds nothing unaccounted for: contributes 0. */
   | 'accounted'
   /** Nothing held and nothing filled: the settings-derived stopgap. */
@@ -41,19 +49,37 @@ export type BaseOrderQtySource =
 /**
  * Gross entry volume a deal is known to have taken on.
  *
- * `deal.size` is NET of everything already closed, while the take-profit sum is
- * expressed GROSS (`add` subtracts the closed quantity again further down), so
- * the closed quantity has to be added back. `add` as `getTPOrder` builds it is
- * negative and already folds in `pendingReduceFunds`, which is QUEUED and not
- * yet executed — that part is still in the position, so it must not be counted
- * as closed.
+ * `deal.size` is already GROSS of every partial take-profit: on B3-USDC deal
+ * `6a90e161…` the base order executed 204177 and the nine safety orders 785282,
+ * and `deal.size` reads 989458.9999999998 — the sum, to the unit — while the
+ * 54103 the deal had already sold sits in `tpHistory` and nowhere else. That
+ * holds fleet-wide: on 2026-09-08, 20 of the 21 open deals carrying a partial
+ * `tpHistory` had `|deal.size|` equal to their summed entry fills exactly, and
+ * `tpCoverageReconcile.trackedPosition` (spec `013`) already reads it that way.
+ * So the closed quantity must NOT be added back here — `getTPOrder`'s `add`
+ * term subtracts it once, downstream, and that is the only time it should be
+ * counted.
+ *
+ * `reduceFunds` is the opposite case and is why this is not simply
+ * `Math.abs(dealSize)`: an EXECUTED reduce-funds withdrawal does leave
+ * `deal.size` (DOGEUSDT `size 4141` against 9073 entered and 4932 withdrawn),
+ * so it has to come back to reach the entry volume. A QUEUED one has not
+ * happened yet, is still in the position, and is already included — pass only
+ * the executed ones.
+ *
+ * This used to take `getTPOrder`'s `add` and negate it, which bundled all three
+ * quantities together and got two of the three wrong. Adding the take-profit
+ * closes back over-stated the base order's contribution by exactly what had
+ * been sold, and once spec `017` started COMPARING that against the base-order
+ * row the over-statement became live for every deal with a partial take-profit:
+ * `6a90e161…` rested three take-profits for 988153 against the 935356 it held,
+ * and all three were cancelled. Spec `026`, issue #717.
  */
 export function grossEntryVolume(
   dealSize: number,
-  add: number,
-  pendingReduceFundsBase: number,
+  reduceFundsBase: number,
 ): number {
-  return Math.abs(dealSize) - add - pendingReduceFundsBase
+  return Math.abs(dealSize) + reduceFundsBase
 }
 
 export function resolveBaseOrderQty({
@@ -61,23 +87,68 @@ export function resolveBaseOrderQty({
   filledQty,
   dealSize,
   grossEntry,
+  heldEntry,
   floor = (n: number) => n,
 }: {
   /** `executedQty` (else `origQty`) of the base order row, or 0 if there is none. */
   boFromOrder: number
   /** Gross base already counted from this deal's entry fills, base order excluded. */
   filledQty: number
-  /** `|deal.size|` — the position the deal still holds. */
+  /** `|deal.size|` — the volume the deal entered, gross of what it has sold. */
   dealSize: number
   /** Result of {@link grossEntryVolume}. */
   grossEntry: number
+  /**
+   * Gross entry volume as the deal's BASE ledger records it
+   * (`currentBalances.base` plus what it has already closed), when the
+   * caller can state it. Caps the `position` branch: `deal.size` is derived
+   * through the average price on a spot long, and an average that leaves an
+   * entry row out over-states it. Spec `128` §4.3.
+   */
+  heldEntry?: number
   /** Round DOWN to the pair's base precision, so a sub-step residue reads as 0. */
   floor?: (n: number) => number
 }): { qty: number; source: BaseOrderQtySource } {
+  const fromDeal = floor(Math.max(0, grossEntry - filledQty))
   if (boFromOrder > 0) {
+    // The row was found — but the order map is a cache, and the SAFETY-order
+    // rows can be missing from it just as the base order's can (it is rebuilt
+    // per worker restart, from a Redis snapshot whose staleness is documented
+    // at `main.ts:4017`, or from a DB query that has repeatedly turned out to
+    // exclude rows it needed). When they are, `filledQty` collapses and
+    // `getTPOrder` sizes the close at the base order alone: AIXBTUSDT
+    // `6a301c7ca999bdafb2ad8055` armed a 510 take-profit while both rows were
+    // known, it EXPIRED, and the replacement rests at 250 — the base order, to
+    // the unit — leaving 260 of the 510 with nothing covering it. 61 open deals
+    // across 8 users were in that state on 2026-09-08, 92% of the position
+    // uncovered on average. Issue #702, spec `017`.
+    //
+    // So keep asking the deal's own books, which are persisted and do not
+    // depend on what this process happens to hold in RAM. Compared through
+    // `floor` on both sides so the float noise `deal.size` carries from summing
+    // fills (`452.20000000000005`) cannot look like a missing order.
+    //
+    // One-way on purpose: this can only ever RAISE the contribution to the
+    // position, never lower it below the row. An over-stated close is rejected
+    // by the venue and leaves the deal with NO take-profit at all — the AIOZ
+    // failure this module was written for — and across 8,740 live deals holding
+    // a resting take-profit `deal.size` and the entry rows agree within 0.5% on
+    // 8,704, so on a complete order map this branch is inert.
+    //
+    // Never above what the deal's base ledger says it entered, though: a
+    // `deal.size` computed through an average that left the settled base
+    // order out claimed 4736.1 against 4682.6 held, and the venue rejected the
+    // close for balance. Spec `128` §4.3. Still one-way — the cap cannot take
+    // the result below the row.
+    const fromPosition =
+      heldEntry !== undefined && isFinite(heldEntry)
+        ? Math.min(fromDeal, floor(Math.max(0, heldEntry - filledQty)))
+        : fromDeal
+    if (fromPosition > floor(boFromOrder)) {
+      return { qty: fromPosition, source: 'position' }
+    }
     return { qty: boFromOrder, source: 'order' }
   }
-  const fromDeal = floor(Math.max(0, grossEntry - filledQty))
   if (fromDeal > 0) {
     return { qty: fromDeal, source: 'deal' }
   }

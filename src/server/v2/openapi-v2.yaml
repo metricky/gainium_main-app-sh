@@ -2,91 +2,57 @@ openapi: 3.1.0
 info:
   title: Gainium API v2.0
   version: 2.0.0
-  description: >
+  description: |
     # Gainium API v2.0 with Field Selection
-
 
     API v2.0 introduces efficient field selection to reduce payload size by 70-90%.
 
-
     ## Authentication
-
 
     All REST requests must contain the following headers:
 
-
     - **token**: Public key of the user  
-
     - **time**: Timestamp of the request in ms  
-
     - **signature**: The base64-encoded signature  
-
 
     ### To sign a request:
 
-
     1. Use API-Secret to encrypt the prehash string {body+method+endpoint+timestamp} with sha256 HMAC
-
     2. The request body is a JSON string and need to be the same with the parameters passed by the API
-
     3. After that, use base64-encode to encrypt the result in step 1 again
 
-
     **Example:**
-
     ```javascript
-
     crypto.createHmac('sha256', secret).update(body + method + endpoint + time).digest('base64')
-
     ```
-
 
     ## Field Selection
 
-
     All GET endpoints in v2 support field selection via the `fields` query parameter.
-
 
     ### Field Presets
 
-
     - **minimal**: Essential fields only (IDs, names, status)
-
     - **standard**: Commonly requested fields (default)
-
     - **extended**: Additional useful fields
-
     - **full**: All available fields
-
 
     ### Custom Fields
 
-
     Specify custom fields with comma-separated list:
-
     ```
-
     ?fields=_id,uuid,settings.name,profit.total
-
     ```
-
 
     Supports dot notation for nested fields:
-
     ```
-
     ?fields=settings.name,settings.pair,profit.total,profit.totalUsd
-
     ```
-
 
     ### Response Metadata
 
-
     All responses include metadata with selected fields:
-
     ```json
-
     {
       "status": "OK",
       "reason": null,
@@ -99,130 +65,75 @@ info:
         "fields": ["_id", "uuid", "settings.name", ...]
       }
     }
-
     ```
-
 
     ### Benefits
 
-
     - **70-90% smaller payloads** with minimal/standard presets
-
     - **Faster response times** via MongoDB projection
-
     - **Reduced network bandwidth** usage
-
     - **Better API performance** overall
-
 
     ## V1 to V2 Migration Guide
 
-
-    V2 introduces REST-compliant endpoints with proper HTTP methods and resource-oriented URLs. All v1 endpoints remain
-    available for backward compatibility.
-
+    V2 introduces REST-compliant endpoints with proper HTTP methods and resource-oriented URLs. All v1 endpoints remain available for backward compatibility.
 
     ### Paper Trading Context
 
-
     - **V1**: `paperContext` as query parameter or body field
-
     - **V2**: `paper-context` header (optional, defaults to `false`)
-
 
     ### Bot Operations
 
-
     #### Get Bots
-
     - **V1**: `GET /api/bots/dca` → **V2**: `GET /api/v2/bots/dca`
-
     - **V1**: `GET /api/bots/combo` → **V2**: `GET /api/v2/bots/combo`
-
     - **V1**: `GET /api/bots/grid` → **V2**: `GET /api/v2/bots/grid`
 
-
     #### Update Bots
-
     - **V1**: `POST /api/updateDCABot` → **V2**: `PUT /api/v2/bots/dca/{botId}`
-
     - **V1**: `POST /api/updateComboBot` → **V2**: `PUT /api/v2/bots/combo/{botId}`
 
-
     #### Bot Actions
-
     - **V1**: `POST /api/startBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/start`
-
     - **V1**: `POST /api/stopBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/stop`
-
     - **V1**: `POST /api/archiveBot` → **V2**: `DELETE /api/v2/bots/{dca|combo|grid}/{botId}`
-
     - **V1**: `POST /api/restoreBot` → **V2**: `POST /api/v2/bots/{dca|combo|grid}/{botId}/restore`
-
     - **V1**: `POST /api/cloneDCABot` → **V2**: `POST /api/v2/bots/dca/{botId}/clone`
-
     - **V1**: `POST /api/cloneComboBot` → **V2**: `POST /api/v2/bots/combo/{botId}/clone`
-
     - **V1**: not exist → **V2**: `POST /api/v2/bots/grid/{botId}/clone`
-
     - **V1**: `POST /api/changeBotPairs` → **V2**: `PUT /api/v2/bots/dca/{botId}/pairs`
-
 
     ### Deal Operations
 
-
     #### Get Deals
-
     - **V1**: `GET /api/deals` → **V2**: `GET /api/v2/deals/{dca|combo|terminal}`
 
-
     #### Update Deals
-
     - **V1**: `POST /api/updateDCADeal` → **V2**: `PUT /api/v2/deals/dca/{dealId}`
-
     - **V1**: `POST /api/updateComboDeal` → **V2**: `PUT /api/v2/deals/combo/{dealId}`
 
-
     #### Deal Actions
-
     - **V1**: `POST /api/startDeal` → **V2**: `POST /api/v2/deals/{dca|combo}/{dealId}/start`
-
     - **V1**: `POST /api/addFunds` → **V2**: `POST /api/v2/deals/add-funds`
-
     - **V1**: `POST /api/reduceFunds` → **V2**: `POST /api/v2/deals/reduce-funds`
-
-    - **V1**: `POST /api/closeDeal/{dealId}` → **V2**: `DELETE
-    /api/v2/deals/{dca|combo|terminal}/{dealId}?type=closeByMarket`
-
+    - **V1**: `POST /api/closeDeal/{dealId}` → **V2**: `DELETE /api/v2/deals/{dca|combo|terminal}/{dealId}?type=closeByMarket`
     - **V1**: `POST /api/cancelDeal/{dealId}` → **V2**: `DELETE /api/v2/deals/{dca|combo|terminal}/{dealId}?type=cancel`
-
 
     ### User Operations
 
-
     #### Get User Data
-
     - **V1**: `GET /api/user/exchanges` → **V2**: `GET /api/v2/user/exchanges`
-
     - **V1**: `GET /api/user/balances` → **V2**: `GET /api/v2/user/balances`
-
 
     ### Key Differences
 
-
     1. **HTTP Methods**: V2 uses proper REST methods (GET, POST, PUT, DELETE) instead of POST for everything
-
     2. **URL Structure**: Resource-oriented paths (`/bots/dca/{botId}`) instead of action verbs (`/updateDCABot`)
-
     3. **Bot Type in Path**: Bot type is now part of the URL path for better API documentation and clarity
-
     4. **Headers vs Parameters**: Cross-cutting concerns like `paperContext` moved to headers
-
     5. **Field Selection**: V2 supports efficient field selection on all GET endpoints
-
-    6. **Deal Type Specification**: V1 used a single `/api/deals` endpoint; V2 separates by type (`/deals/dca`,
-    `/deals/combo`, `/deals/terminal`)
-
+    6. **Deal Type Specification**: V1 used a single `/api/deals` endpoint; V2 separates by type (`/deals/dca`, `/deals/combo`, `/deals/terminal`)
     7. **Bot Creation**: V2 creates bots via `POST /api/v2/bots/{type}` (implemented in future version)
 servers:
   - url: http://localhost:7503
@@ -730,9 +641,15 @@ components:
           type: string
           example: null
         profitCurrency:
-          type: object
+          type: string
+          enum:
+            - quote
+            - base
         orderFixedIn:
-          type: object
+          type: string
+          enum:
+            - quote
+            - base
         pair:
           type: string
           description: Trading pair symbol
@@ -826,41 +743,59 @@ components:
               description: Enable advance order placement
               example: true
             prioritize:
-              type: object
+              type: string
               description: Prioritization settings
-              example: volume
+              enum:
+                - gridStep
+                - level
+              example: gridStep
             sellDisplacement:
               type: number
               description: Displacement for sell orders
               example: 0.5
             gridType:
-              type: object
+              type: string
               description: Type of grid
+              enum:
+                - geometric
+                - arithmetic
               example: arithmetic
             tpSl:
               type: boolean
               description: Combined TP/SL for grid
               example: false
             tpSlCondition:
-              type: object
+              type: string
               description: Condition for TP/SL trigger
-              example: any
+              enum:
+                - valueChanged
+                - priceReached
+              example: priceReached
             tpSlAction:
-              type: object
+              type: string
               description: Action for TP/SL
-              example: close
+              enum:
+                - stop
+                - stopAndSell
+              example: stop
             sl:
               type: boolean
               description: Enable stop loss for grid
               example: false
             slCondition:
-              type: object
+              type: string
               description: Stop loss trigger condition
-              example: price
+              enum:
+                - valueChanged
+                - priceReached
+              example: priceReached
             slAction:
-              type: object
+              type: string
               description: Stop loss action
-              example: closeAll
+              enum:
+                - stop
+                - stopAndSell
+              example: stop
             tpPerc:
               type: number
               description: Take profit percentage
@@ -1006,21 +941,14 @@ components:
       $ref: "#/components/schemas/DCADealStandard"
     CreateComboBotInput:
       type: object
-      description: >
-        Input schema for creating a new Combo bot. Inherits all ComboBotSettings properties plus additional required
-        fields for creation.
+      description: |
+        Input schema for creating a new Combo bot. Inherits all ComboBotSettings properties plus additional required fields for creation.
 
-
-        Combo bots extend DCA bots with additional grid-level functionality. Some settings in ComboBotSettings type are
-        not used - refer to API documentation for excluded fields list.
-
+        Combo bots extend DCA bots with additional grid-level functionality. Some settings in ComboBotSettings type are not used - refer to API documentation for excluded fields list.
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -1041,9 +969,7 @@ components:
                 properties:
                   path:
                     type: string
-                    description: >-
-                      Path to the variable in bot settings or stats. For example, "orderSize" or
-                      "indicators.{uuid}.value"
+                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
                     example: orderSize
                   variable:
                     type: string
@@ -1063,17 +989,12 @@ components:
                 example: BTC_USDT
     CreateDCABotInput:
       type: object
-      description: >
-        Input schema for creating a new DCA bot. Inherits all DCABotSettings properties plus additional required fields
-        for creation.
-
+      description: |
+        Input schema for creating a new DCA bot. Inherits all DCABotSettings properties plus additional required fields for creation.
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -1094,9 +1015,7 @@ components:
                 properties:
                   path:
                     type: string
-                    description: >-
-                      Path to the variable in bot settings or stats. For example, "orderSize" or
-                      "indicators.{uuid}.value"
+                    description: Path to the variable in bot settings or stats. For example, "orderSize" or "indicators.{uuid}.value"
                     example: orderSize
                   variable:
                     type: string
@@ -1116,17 +1035,12 @@ components:
                 example: BTC_USDT
     CreateGridBotInput:
       type: object
-      description: >
-        Input schema for creating a new Grid bot. Grid bots automatically buy and sell assets within a configured price
-        range.
-
+      description: |
+        Input schema for creating a new Grid bot. Grid bots automatically buy and sell assets within a configured price range.
 
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -1154,24 +1068,16 @@ components:
               example: BTC_USDT
     CreateTerminalDealInput:
       type: object
-      description: >
-        Input schema for creating a new Terminal Deal (one-time trade). Inherits all DCABotSettings properties plus
-        additional required fields.
-
+      description: |
+        Input schema for creating a new Terminal Deal (one-time trade). Inherits all DCABotSettings properties plus additional required fields.
 
         Terminal deals are one-time trades that execute immediately and don't continue running like regular bots.
-
         The type field will be automatically set to 'terminal'.
 
-
         Note: The following properties are auto-generated and should NOT be provided in the request:
-
         - `futures` (auto-detected from exchange configuration)
-
         - `coinm` (auto-detected from exchange configuration)
-
         - `type` (automatically set to 'terminal')
-
         - `paperContext` (provided via paper-context header)
       required:
         - exchangeUUID
@@ -1264,7 +1170,7 @@ components:
                 - monitoring
               nullable: true
               description: Previous bot status
-              example: null
+              example: open
             currentBalances:
               type: array
               nullable: true
@@ -1741,6 +1647,22 @@ components:
               type: string
               description: Number of losses before closing
               example: "3"
+            useCloseAfterXconsecutiveWin:
+              type: boolean
+              description: Stop the bot after a run of consecutive winning deals
+              example: false
+            closeAfterXconsecutiveWin:
+              type: string
+              description: Number of consecutive winning deals before stopping
+              example: "3"
+            useCloseAfterXconsecutiveLoss:
+              type: boolean
+              description: Stop the bot after a run of consecutive losing deals
+              example: false
+            closeAfterXconsecutiveLoss:
+              type: string
+              description: Number of consecutive losing deals before stopping
+              example: "3"
             useCloseAfterXprofit:
               type: boolean
               description: Close after reaching profit
@@ -1822,7 +1744,8 @@ components:
               description: Bot status for stopping
               enum:
                 - closed
-              example: monitoring
+                - monitoring
+              example: closed
             dealCloseCondition:
               type: string
               description: Condition for closing deal
@@ -2272,6 +2195,18 @@ components:
               type: string
               description: Max under deals per symbol
               example: "3"
+            allowRaiseToExchangeMin:
+              type: boolean
+              description: Raise base/safety orders to the exchange minimum when the configured size is below it. When false (default), a deal whose orders would be raised is not opened on that pair and a notification is sent
+              example: false
+            reduceToAvailableBalance:
+              type: boolean
+              description: When the free balance cannot fund the whole deal (base order plus all safety orders), open it scaled down to the available balance instead of skipping it. Base and safety orders shrink by the same ratio. Fixed order sizes (base, quote, usd) only
+              example: false
+            reduceToAvailableMinSize:
+              type: string
+              description: "Smallest base order a reduced deal may open with, in the base order size unit. Below it the deal is skipped. Empty or 0: no floor beyond the exchange minimum"
+              example: "20"
             dcaByMarket:
               type: boolean
               description: Execute DCA orders at market price
@@ -2395,11 +2330,13 @@ components:
                 baseOrderSize:
                   type: string
                   example: "100"
-                safetyOrderSize:
+                orderSize:
                   type: string
+                  description: Safety order size
                   example: "100"
-                maxSafetyTradesCount:
+                ordersCount:
                   type: integer
+                  description: Maximum number of safety trades
                   example: 5
             initialBalances:
               type: object
@@ -2418,9 +2355,32 @@ components:
                 BTC: 0.0118
                 USDT: 575
             feePaid:
-              type: number
-              description: Total fees paid
-              example: 2.5
+              type: object
+              description: Total base/quote fees paid, as an estimate or (when observed) the venue's own reported fee
+              properties:
+                base:
+                  type: number
+                quote:
+                  type: number
+              example:
+                base: 0
+                quote: 2.5
+            feeByAsset:
+              type: array
+              description: Per-asset fee ledger — one entry per asset a fee was ever observed to be paid in (spec 014). New deals only.
+              items:
+                type: object
+                properties:
+                  asset:
+                    type: string
+                  total:
+                    type: number
+                  totalUsd:
+                    type: number
+              example:
+                - asset: BNB
+                  total: 0.001
+                  totalUsd: 0.62
             usage:
               type: object
               description: Resource usage stats
@@ -2559,6 +2519,43 @@ components:
               nullable: true
               description: Deal close timestamp (null if active)
               example: null
+            trailingClose:
+              type: object
+              nullable: true
+              description: "Present only when a trailing take-profit close was refused by the exchange. `retrying` means the bot is re-sending the closing order on a progressive backoff (up to 5 retries, 30s to 1m apart) and nothing else will close the deal meanwhile. `paused` means every retry was refused: the deal is still open, the trail has been disarmed, and it will not arm again until the price crosses back over the take-profit level - the deal needs managing in the meantime. Absent on a deal whose trailing take profit has not failed."
+              properties:
+                status:
+                  type: string
+                  enum:
+                    - retrying
+                    - paused
+                  example: paused
+                attempts:
+                  type: integer
+                  description: Failed close attempts, the first one included
+                  example: 6
+                since:
+                  type: number
+                  description: First refusal in this run (ms)
+                  example: 1705823400000
+                lastAttempt:
+                  type: number
+                  description: Most recent refusal (ms)
+                  example: 1705823625000
+                nextAttempt:
+                  type: number
+                  nullable: true
+                  description: When the next retry is due (ms). `retrying` only
+                  example: 1705823685000
+                reason:
+                  type: string
+                  description: The exchange's own rejection text
+                  example: EGeneral:Temporary lockout
+                rearmReady:
+                  type: boolean
+                  nullable: true
+                  description: "`paused` only. True once the price has been seen back on the far side of the take-profit level, so the next crossing re-arms the trail."
+                  example: false
     DcaBacktestRequest:
       type: object
       required:
@@ -2690,9 +2687,8 @@ components:
               example: real
     FieldDefinition:
       type: object
-      description: >
-        Describes a single field on a bot settings or indicator object. `type` is the runtime JS type; `validators` are
-        the constraint labels; `enum` lists allowed values when type = "enum".
+      description: |
+        Describes a single field on a bot settings or indicator object. `type` is the runtime JS type; `validators` are the constraint labels; `enum` lists allowed values when type = "enum".
       required:
         - name
         - type
@@ -2881,6 +2877,43 @@ components:
               type: string
               nullable: true
               example: null
+            flags:
+              type: array
+              nullable: true
+              description: Feature flags gating new bot-only behaviour (spec 014 §3)
+              items:
+                type: string
+              example:
+                - feeByAsset
+            feePaid:
+              type: object
+              nullable: true
+              description: Running base/quote fee total, updated on every transaction (spec 014 §2.5). New bots only.
+              properties:
+                base:
+                  type: number
+                quote:
+                  type: number
+              example:
+                base: 0.0002
+                quote: 0
+            feeByAsset:
+              type: array
+              nullable: true
+              description: Per-asset fee ledger — one entry per asset a fee was ever observed to be paid in (spec 014). New bots only.
+              items:
+                type: object
+                properties:
+                  asset:
+                    type: string
+                  total:
+                    type: number
+                  totalUsd:
+                    type: number
+              example:
+                - asset: BNB
+                  total: 0.0002
+                  totalUsd: 0.12
     GridBotListResponse:
       allOf:
         - $ref: "#/components/schemas/APIResponse"
@@ -3018,6 +3051,228 @@ components:
               type: number
               description: Last update timestamp
               example: 1705391999999
+    HedgeBotExtended:
+      allOf:
+        - $ref: "#/components/schemas/HedgeBotStandard"
+        - type: object
+          properties:
+            sharedSettings:
+              $ref: "#/components/schemas/HedgeSharedSettings"
+            unrealizedProfit:
+              type: number
+              description: Combined unrealized PnL (USD) across both legs.
+              example: 7
+            profitToday:
+              type: object
+              description: Today's profit, summed across both legs.
+              properties:
+                start:
+                  type: number
+                end:
+                  type: number
+                totalToday:
+                  type: number
+                totalTodayUsd:
+                  type: number
+            workingTimeNumber:
+              type: number
+              description: Working time (ms) of the LONGER-running leg.
+              example: 7200000
+            cost:
+              type: number
+              description: Bot cost, summed from the two legs.
+              example: 4
+            statusReason:
+              type: string
+              nullable: true
+            flags:
+              type: array
+              items:
+                type: string
+            symbol:
+              type: array
+              description: Map serialised as key/value pairs.
+              items:
+                type: object
+            bots:
+              type: array
+              description: |
+                The two legs, long first. A hedgeCombo's legs are Combo bots, a hedgeDca's are DCA bots. Each carries its own settings, pair, exchange, profit and deal counts.
+              items:
+                $ref: "#/components/schemas/ComboBotExtended"
+    HedgeBotListResponse:
+      allOf:
+        - $ref: "#/components/schemas/APIResponse"
+        - type: object
+          required:
+            - meta
+          properties:
+            data:
+              type: array
+              description: Array of hedge bots
+              items:
+                $ref: "#/components/schemas/HedgeBotExtended"
+            meta:
+              $ref: "#/components/schemas/ResponseMeta"
+    HedgeBotMinimal:
+      type: object
+      properties:
+        _id:
+          type: string
+          example: 507f1f77bcf86cd799439011
+        uuid:
+          type: string
+        name:
+          type: string
+          description: |
+            The hedge wrapper has no name of its own; this is the long leg's name (falling back to the short leg's, then to "Hedge bot").
+          example: BTC hedge long
+        status:
+          type: string
+          enum:
+            - open
+            - closed
+            - error
+            - archive
+            - range
+            - monitoring
+        paperContext:
+          type: boolean
+    HedgeBotProfit:
+      type: object
+      description: |
+        Realized profit, SUMMED FROM THE TWO LEGS at read time. The stored value on the hedge document itself is a permanent zero and is never returned. The `*Usd` fields are always exact. The native-unit fields are only meaningful when both legs settle in the same quote asset — check `profitBasis.native`, and prefer `profitByAssets` when it is `mixed`.
+      properties:
+        total:
+          type: number
+          description: Sum in the shared quote asset. 0 when `profitBasis.native` is `mixed`.
+          example: 80.25
+        totalUsd:
+          type: number
+          example: 80.25
+        freeTotal:
+          type: number
+        freeTotalUsd:
+          type: number
+        pureBase:
+          type: number
+        pureQuote:
+          type: number
+    HedgeBotStandard:
+      allOf:
+        - $ref: "#/components/schemas/HedgeBotMinimal"
+        - type: object
+          properties:
+            profit:
+              $ref: "#/components/schemas/HedgeBotProfit"
+            profitByAssets:
+              type: array
+              description: |
+                Per-asset profit, merged across both legs. Always exact, whatever the legs' quote assets are — the figure to use when `profitBasis.native` is `mixed`.
+              items:
+                type: object
+                properties:
+                  asset:
+                    type: string
+                    example: USDT
+                  total:
+                    type: number
+                  totalUsd:
+                    type: number
+            profitBasis:
+              $ref: "#/components/schemas/HedgeProfitBasis"
+            dealsInBot:
+              type: object
+              description: Deal counts summed across both legs.
+              properties:
+                all:
+                  type: number
+                active:
+                  type: number
+            created:
+              type: string
+              format: date-time
+            updated:
+              type: string
+              format: date-time
+    HedgeCloneInput:
+      type: object
+      description: |
+        Overrides for a hedge clone. A hedge bot is two independent legs with their own pairs, exchanges and settings, so overrides are given PER LEG rather than as one flat object. A flat body is rejected with a 400 that says so, rather than being silently ignored. Any key you omit is copied from the source bot; leg names get " (clone)" appended unless you override `name`.
+      properties:
+        long:
+          type: object
+          description: Settings to override on the long leg.
+          additionalProperties: true
+        short:
+          type: object
+          description: Settings to override on the short leg.
+          additionalProperties: true
+        sharedSettings:
+          $ref: "#/components/schemas/HedgeSharedSettings"
+    HedgeLegAction:
+      type: string
+      enum:
+        - useBalance
+        - buyForAll
+        - buyDiff
+        - sellForAll
+        - sellDiff
+        - noAction
+        - useOppositeBalance
+    HedgeProfitBasis:
+      type: object
+      description: How far the native-unit numbers on `profit` can be trusted.
+      properties:
+        native:
+          type: string
+          enum:
+            - exact
+            - mixed
+          description: |
+            `exact` — both legs settle in the same quote asset, so the native-unit sums on `profit` are meaningful. `mixed` — they do not; those fields are 0 and only the `*Usd` fields and `profitByAssets` are trustworthy.
+          example: exact
+        quoteAssets:
+          type: array
+          description: Distinct quote assets seen across both legs.
+          items:
+            type: string
+          example:
+            - USDT
+    HedgeSharedSettings:
+      type: object
+      description: Take-profit / stop-loss settings the hedge wrapper applies across both legs.
+      properties:
+        useTp:
+          type: boolean
+        tpPerc:
+          type: string
+        useSl:
+          type: boolean
+        slPerc:
+          type: string
+        comboTpBase:
+          type: string
+        comboTpLimit:
+          type: boolean
+        comboSlLimit:
+          type: boolean
+        dealCloseCondition:
+          type: string
+        dealCloseConditionSL:
+          type: string
+    HedgeStartInput:
+      type: object
+      description: |
+        Optional per-leg instruction for what each leg should do with the position it is already holding when it starts. Omit to leave both legs' existing action untouched.
+      properties:
+        hedgeConfig:
+          type: object
+          properties:
+            LONG:
+              $ref: "#/components/schemas/HedgeLegAction"
+            SHORT:
+              $ref: "#/components/schemas/HedgeLegAction"
     IndicatorDefinition:
       allOf:
         - $ref: "#/components/schemas/IndicatorSummary"
@@ -3049,19 +3304,14 @@ components:
         - description
         - rules
         - fields
-      description: >-
-        Documents the indicatorGroups mechanism. Every indicator must reference a group via its groupId field. The group
-        object lives in the settings.indicatorGroups array and ties one or more indicators together under a shared
-        action+section with AND/OR logic.
+      description: Documents the indicatorGroups mechanism. Every indicator must reference a group via its groupId field. The group object lives in the settings.indicatorGroups array and ties one or more indicators together under a shared action+section with AND/OR logic.
       properties:
         description:
           type: string
           description: Plain-English explanation of how groups work and why they are required.
         rules:
           type: array
-          description: >-
-            Validation rules that must hold between each indicator and its group. An AI agent must follow all of these
-            when constructing bot settings.
+          description: Validation rules that must hold between each indicator and its group. An AI agent must follow all of these when constructing bot settings.
           items:
             type: string
           example:
@@ -3107,9 +3357,7 @@ components:
             type: string
         supportedIntervals:
           type: array
-          description: >-
-            Only present when the `?exchange=` query parameter is supplied. Lists the candlestick intervals available on
-            that exchange.
+          description: Only present when the `?exchange=` query parameter is supplied. Lists the candlestick intervals available on that exchange.
           items:
             type: string
           example:
@@ -3474,7 +3722,7 @@ components:
             - OBFVG
             - SESSION
             - LW
-          example: regular
+          example: RSI
         indicatorLength:
           type: number
           description: Indicator period length
@@ -3485,7 +3733,7 @@ components:
           example: "70"
         indicatorCondition:
           type: string
-          description: Comparison condition
+          description: "Comparison condition: gt = greater than, lt = lower than, cu = crossing up, cd = crossing down. For MA the rule reads <maType> <indicatorCondition> <maCrossingValue>, i.e. the moving average is compared to the reference."
           enum:
             - cd
             - cu
@@ -3507,7 +3755,7 @@ components:
             - 8h
             - 1d
             - 1w
-          example: oneH
+          example: 1h
         groupId:
           type: string
           description: Indicator group ID
@@ -3540,7 +3788,7 @@ components:
           example: 1
         maType:
           type: string
-          description: Moving average type
+          description: "Moving average being compared (left side of an MA rule: <maType> <indicatorCondition> <maCrossingValue>)."
           enum:
             - ema
             - sma
@@ -3554,7 +3802,7 @@ components:
           example: ema
         maCrossingValue:
           type: string
-          description: MA crossing reference
+          description: "What the moving average is compared to (right side of an MA rule): price = current price, or another MA. Example, price above EMA 100: maType ema, indicatorLength 100, indicatorCondition lt, maCrossingValue price."
           enum:
             - ema
             - sma
@@ -3589,7 +3837,7 @@ components:
         maUUID:
           type: string
           description: MA indicator UUID reference
-          example: "123e4567"
+          example: 123e4567
         bbCrossingValue:
           type: string
           description: Bollinger Band line to cross
@@ -3792,7 +4040,7 @@ components:
         xoUUID:
           type: string
           description: Cross oscillator UUID
-          example: "123e4567"
+          example: 123e4567
         mar1length:
           type: number
           description: First MA length for ratio
@@ -4182,10 +4430,11 @@ components:
           description: Skip balance check
         startCondition:
           type: string
-          description: Start deal condition
+          description: Start deal condition. TechnicalIndicators requires at least one `startDeal` indicator (send it in `indicators` in the same request if the bot has none).
           enum:
             - ASAP
             - Manual
+            - TechnicalIndicators
         maxNumberOfOpenDeals:
           type: string
           description: Max number of open deals
@@ -4200,14 +4449,10 @@ components:
           description: Maximum price for open deal
         useDynamicPriceFilter:
           type: boolean
-          description: >-
-            Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or
-            dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
         dynamicPriceFilterDirection:
           type: string
-          description: >-
-            Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require
-            dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
           enum:
             - over
             - under
@@ -4297,6 +4542,17 @@ components:
           enum:
             - full
             - filled
+        indicators:
+          type: array
+          description: |
+            Technical indicators. **Replaces the bot's whole indicator list** — there is no merge by `uuid`. To keep an existing indicator, send it back with its `uuid`; send `[]` to remove them all; omit the field to leave them unchanged. Items follow the same rules as on bot creation (per-type defaults are filled in; a stored `_id` is ignored), including safety-order indicators (`indicatorAction: startDca`, `section: dca`) and their `minPercFromLast`. The result is validated against the bot's other settings — e.g. a `TechnicalIndicators` start still needs a `startDeal` indicator. Bot variables linked to a removed indicator are unlinked.
+          items:
+            $ref: "#/components/schemas/SettingsIndicators"
+        indicatorGroups:
+          type: array
+          description: Groups of indicator conditions. Replaces the bot's whole group list, like `indicators`. Every group must be referenced by at least one indicator and every indicator `groupId` must resolve to a group with the same action and section.
+          items:
+            $ref: "#/components/schemas/SettingsIndicatorGroup"
     UpdateComboDealsInput:
       type: object
       properties:
@@ -4531,10 +4787,11 @@ components:
           description: Skip balance check
         startCondition:
           type: string
-          description: Start deal condition
+          description: Start deal condition. TechnicalIndicators requires at least one `startDeal` indicator (send it in `indicators` in the same request if the bot has none).
           enum:
             - ASAP
             - Manual
+            - TechnicalIndicators
         maxNumberOfOpenDeals:
           type: string
           description: Max number of open deals
@@ -4549,14 +4806,10 @@ components:
           description: Maximum price for open deal
         useDynamicPriceFilter:
           type: boolean
-          description: >-
-            Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or
-            dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
+          description: Use dynamic price filter. Require dynamicPriceFilterDirection, dynamicPriceFilterOverValue or dynamicPriceFilterUnderValue or both, dynamicPriceFilterPriceType
         dynamicPriceFilterDirection:
           type: string
-          description: >-
-            Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require
-            dynamicPriceFilterUnderValue field, overAndUnder require both fields
+          description: Direction of the price filter. Over require dynamicPriceFilterOverValue field, under require dynamicPriceFilterUnderValue field, overAndUnder require both fields
           enum:
             - over
             - under
@@ -4723,10 +4976,11 @@ components:
           example: 5
         dcaCondition:
           type: string
-          description: DCA Type. For deal available options - percentage, custom. Custom required dcaCustom array.
+          description: DCA Type - percentage, custom or indicators. Custom requires the dcaCustom array; indicators requires at least one `startDca` indicator in section `dca` (send it in `indicators` in the same request if the bot has none).
           enum:
             - percentage
             - custom
+            - indicators
         dcaCustom:
           type: array
           description: DCA custom objects.
@@ -4745,6 +4999,17 @@ components:
               uuid:
                 type: string
                 description: Unique Id of the level
+        indicators:
+          type: array
+          description: |
+            Technical indicators. **Replaces the bot's whole indicator list** — there is no merge by `uuid`. To keep an existing indicator, send it back with its `uuid`; send `[]` to remove them all; omit the field to leave them unchanged. Items follow the same rules as on bot creation (per-type defaults are filled in; a stored `_id` is ignored), including safety-order indicators (`indicatorAction: startDca`, `section: dca`) and their `minPercFromLast`. The result is validated against the bot's other settings — e.g. a `TechnicalIndicators` start still needs a `startDeal` indicator. Bot variables linked to a removed indicator are unlinked.
+          items:
+            $ref: "#/components/schemas/SettingsIndicators"
+        indicatorGroups:
+          type: array
+          description: Groups of indicator conditions. Replaces the bot's whole group list, like `indicators`. Every group must be referenced by at least one indicator and every indicator `groupId` must resolve to a group with the same action and section.
+          items:
+            $ref: "#/components/schemas/SettingsIndicatorGroup"
     UpdateDCADealsInput:
       type: object
       properties:
@@ -5059,8 +5324,8 @@ paths:
 
         **Field Presets:**
         - `minimal`: _id, uuid, settings.name, status, exchange, exchangeUUID, paperContext
-        - `standard`: minimal + settings.pair, profit.*, deals.*, createdAt, updatedAt
-        - `extended`: standard + settings configuration, cost, workingTimeNumber, profitToday, dealsStatsForBot
+        - `standard`: minimal + settings.pair, profit.*, deals.*, created, updated
+        - `extended`: standard + settings.baseOrderSize, stop loss (settings.useSl, settings.slPerc), trailing exits (settings.trailingTp, settings.trailingTpPerc, settings.trailingSl), safety orders (settings.ordersCount, settings.activeOrdersCount), cost, workingTimeNumber, profitToday, statusReason, dealsStatsForBot
         - `full`: All available fields
       tags:
         - Bots - Combo
@@ -5337,8 +5602,8 @@ paths:
 
         **Field Presets:**
         - `minimal`: _id, uuid, settings.name, status, exchange, exchangeUUID, paperContext
-        - `standard`: minimal + settings.pair, profit.*, deals.*, createdAt, updatedAt
-        - `extended`: standard + settings.baseOrderSize, cost, workingTimeNumber, profitToday, statusReason
+        - `standard`: minimal + settings.pair, profit.*, deals.*, created, updated
+        - `extended`: standard + settings.baseOrderSize, stop loss (settings.useSl, settings.slPerc), trailing exits (settings.trailingTp, settings.trailingTpPerc, settings.trailingSl), safety orders (settings.ordersCount, settings.activeOrdersCount), cost, workingTimeNumber, profitToday, statusReason
         - `full`: All available fields
 
         **Performance:** Using `minimal` reduces response size by ~85%, `standard` by ~70%
@@ -5840,9 +6105,8 @@ paths:
   /api/v2/discovery/bots/{botType}:
     get:
       summary: Get schema definition for a single bot type
-      description: >
-        Returns the full schema for the given bot type. Pass `?section=<id>` to retrieve only a single section (e.g.
-        `?section=take_profit`).
+      description: |
+        Returns the full schema for the given bot type. Pass `?section=<id>` to retrieve only a single section (e.g. `?section=take_profit`).
       tags:
         - Discovery
       operationId: getDiscoveryBot
@@ -5883,10 +6147,8 @@ paths:
   /api/v2/discovery/bots/{botType}/sections:
     get:
       summary: List sections for a bot type
-      description: >
-        Returns a lightweight summary of every section for the given bot type: `id`, `name`, `description`, and
-        `fieldCount`. Use this to discover available section ids before requesting a specific one with `GET
-        /api/v2/discovery/bots/{botType}?section={id}`.
+      description: |
+        Returns a lightweight summary of every section for the given bot type: `id`, `name`, `description`, and `fieldCount`. Use this to discover available section ids before requesting a specific one with `GET /api/v2/discovery/bots/{botType}?section={id}`.
       tags:
         - Discovery
       operationId: getDiscoveryBotSections
@@ -5920,10 +6182,8 @@ paths:
   /api/v2/discovery/bots:
     get:
       summary: List all bot schema definitions
-      description: >
-        Returns schema definitions for all bot types (dca, combo, grid). Each definition contains sections; each section
-        contains fields with type, validators, constraints, default value and an example. Use this endpoint to
-        understand what fields a bot creation/update payload accepts.
+      description: |
+        Returns schema definitions for all bot types (dca, combo, grid). Each definition contains sections; each section contains fields with type, validators, constraints, default value and an example. Use this endpoint to understand what fields a bot creation/update payload accepts.
       tags:
         - Discovery
       operationId: getDiscoveryBots
@@ -5945,10 +6205,8 @@ paths:
   /api/v2/discovery/indicators/{type}:
     get:
       summary: Get full field definition for an indicator type
-      description: >
-        Returns the complete field definition for a single indicator type, including core fields (shared by all
-        indicators) and type-specific fields. Pass `?exchange=` to restrict the `indicatorInterval` enum in `coreFields`
-        to only the intervals supported by that exchange.
+      description: |
+        Returns the complete field definition for a single indicator type, including core fields (shared by all indicators) and type-specific fields. Pass `?exchange=` to restrict the `indicatorInterval` enum in `coreFields` to only the intervals supported by that exchange.
       tags:
         - Discovery
       operationId: getDiscoveryIndicator
@@ -5963,9 +6221,7 @@ paths:
         - name: exchange
           in: query
           required: false
-          description: >-
-            When provided, the `indicatorInterval` field enum in `coreFields` is filtered to only include intervals
-            supported by the given exchange (e.g. `binance`, `bybit`, `kucoin`).
+          description: When provided, the `indicatorInterval` field enum in `coreFields` is filtered to only include intervals supported by the given exchange (e.g. `binance`, `bybit`, `kucoin`).
           schema:
             type: string
           example: binance
@@ -5986,11 +6242,8 @@ paths:
   /api/v2/discovery/indicators:
     get:
       summary: List all indicator types
-      description: >
-        Returns a summary of every supported indicator type: its type key, display name, description, supported actions
-        and sections. Use `GET /api/v2/discovery/indicators/{type}` to get full field definitions. Filter by `?action=`
-        to narrow to indicators usable in a specific context. Pass `?exchange=` to include a `supportedIntervals` field
-        on each item.
+      description: |
+        Returns a summary of every supported indicator type: its type key, display name, description, supported actions and sections. Use `GET /api/v2/discovery/indicators/{type}` to get full field definitions. Filter by `?action=` to narrow to indicators usable in a specific context. Pass `?exchange=` to include a `supportedIntervals` field on each item.
       tags:
         - Discovery
       operationId: getDiscoveryIndicators
@@ -5999,18 +6252,14 @@ paths:
         - name: action
           in: query
           required: false
-          description: >-
-            Filter indicators to those whose `supportedActions` list includes this value (e.g. `startDca`, `closeDeal`,
-            `stopBot`).
+          description: Filter indicators to those whose `supportedActions` list includes this value (e.g. `startDca`, `closeDeal`, `stopBot`).
           schema:
             type: string
           example: startDca
         - name: exchange
           in: query
           required: false
-          description: >-
-            When provided, each summary item will include a `supportedIntervals` array listing the candlestick intervals
-            available on that exchange (e.g. `binance`, `bybit`, `kucoin`).
+          description: When provided, each summary item will include a `supportedIntervals` array listing the candlestick intervals available on that exchange (e.g. `binance`, `bybit`, `kucoin`).
           schema:
             type: string
           example: binance
@@ -6142,8 +6391,8 @@ paths:
 
         **Field Presets:**
         - `minimal`: _id, uuid, settings.name, status, exchange, exchangeUUID, paperContext
-        - `standard`: minimal + settings.symbol, profit.*, levels.*, createdAt, updatedAt
-        - `extended`: standard + grid configuration (gridLevels, lowerPrice, upperPrice), cost, prices
+        - `standard`: minimal + settings.pair, symbol, profit.*, levels.*, created, updated
+        - `extended`: standard + every setting `POST /api/v2/bots/grid` accepts, so the response can be edited and posted back without losing configuration — grid definition (settings.levels, settings.lowPrice, settings.topPrice, settings.gridType, settings.gridStep, settings.budget, settings.ordersInAdvance, settings.useOrderInAdvance, settings.prioritize, settings.sellDisplacement, settings.profitCurrency, settings.orderFixedIn, settings.feeOrder, settings.useStartPrice, settings.startPrice, settings.skipBalanceCheck), take profit / stop loss configuration and thresholds (settings.tpSl, settings.tpSlCondition, settings.tpSlAction, settings.sl, settings.slCondition, settings.slAction, settings.tpPerc, settings.slPerc, settings.tpTopPrice, settings.slLowPrice, settings.tpSlLimit, settings.slLimit), futures configuration (settings.futures, settings.coinm, settings.marginType, settings.leverage, settings.strategy, settings.futuresStrategy), cost, prices. `settings.updatedBudget` and `settings.newProfit` are deliberately not returned — the create endpoint rejects them.
         - `full`: All available fields
       tags:
         - Bots - Grid
@@ -6184,7 +6433,11 @@ paths:
                         uuid: 550e8400-e29b-41d4-a716-446655440000
                         settings:
                           name: BTC Grid 30k-35k
+                          pair: BTCUSDT
+                        symbol:
                           symbol: BTCUSDT
+                          baseAsset: BTC
+                          quoteAsset: USDT
                         status: open
                         exchange: binance
                         exchangeUUID: 650e8400-e29b-41d4-a716-446655440001
@@ -6206,11 +6459,12 @@ paths:
                         - _id
                         - uuid
                         - settings.name
-                        - settings.symbol
                         - status
                         - exchange
                         - exchangeUUID
                         - paperContext
+                        - settings.pair
+                        - symbol
                         - profit.total
                         - profit.totalUsd
                         - levels.active
@@ -6283,6 +6537,182 @@ paths:
                       botId:
                         type: string
                         example: 507f1f77bcf86cd799439011
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v2/bots/hedgeCombo/details:
+    get:
+      summary: Get HedgeCombo Bot by ID
+      description: |
+        Retrieve a single HedgeCombo bot by its MongoDB ObjectId or UUID, with both
+        legs populated and profit aggregated across them.
+      tags:
+        - Bots - Hedge
+      operationId: getHedgeComboBotById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: botId
+          in: query
+          required: true
+          description: Bot MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single HedgeCombo bot object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HedgeBotExtended"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v2/bots/hedgeCombo:
+    get:
+      summary: Get HedgeCombo Bots
+      description: |
+        Retrieve a list of HedgeCombo bots with optional field selection.
+
+        A hedge bot is a WRAPPER over two child bots — one long, one short —
+        which are returned under `bots`. Its `name`, `profit`, `profitByAssets`,
+        `profitToday`, `unrealizedProfit`, `workingTimeNumber` and `dealsInBot`
+        are AGGREGATED FROM THOSE LEGS at read time; the wrapper's own stored
+        copies are never updated by the engine and are not returned.
+
+        The legs themselves are deliberately absent from
+        `GET /api/v2/bots/combo` — a hedge leg is not a standalone bot.
+
+        **Field Presets:** `minimal` | `standard` | `extended` | `full`
+      tags:
+        - Bots - Hedge
+      operationId: getHedgeComboBots
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+        - name: status
+          in: query
+          required: false
+          description: Filter by bot status
+          schema:
+            type: string
+            enum:
+              - open
+              - closed
+              - error
+              - archive
+              - range
+              - monitoring
+      responses:
+        "200":
+          description: List of HedgeCombo bots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HedgeBotListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v2/bots/hedgeDca/details:
+    get:
+      summary: Get HedgeDca Bot by ID
+      description: |
+        Retrieve a single HedgeDca bot by its MongoDB ObjectId or UUID, with both
+        legs populated and profit aggregated across them.
+      tags:
+        - Bots - Hedge
+      operationId: getHedgeDcaBotById
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - name: botId
+          in: query
+          required: true
+          description: Bot MongoDB ObjectId or UUID
+          schema:
+            type: string
+          example: 507f1f77bcf86cd799439011
+      responses:
+        "200":
+          description: Single HedgeDca bot object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HedgeBotExtended"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v2/bots/hedgeDca:
+    get:
+      summary: Get HedgeDca Bots
+      description: |
+        Retrieve a list of HedgeDca bots with optional field selection.
+
+        A hedge bot is a WRAPPER over two child bots — one long, one short —
+        which are returned under `bots`. Its `name`, `profit`, `profitByAssets`,
+        `profitToday`, `unrealizedProfit`, `workingTimeNumber` and `dealsInBot`
+        are AGGREGATED FROM THOSE LEGS at read time; the wrapper's own stored
+        copies are never updated by the engine and are not returned.
+
+        The legs themselves are deliberately absent from
+        `GET /api/v2/bots/dca` — a hedge leg is not a standalone bot.
+
+        **Field Presets:** `minimal` | `standard` | `extended` | `full`
+      tags:
+        - Bots - Hedge
+      operationId: getHedgeDcaBots
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/PageParam"
+        - name: status
+          in: query
+          required: false
+          description: Filter by bot status
+          schema:
+            type: string
+            enum:
+              - open
+              - closed
+              - error
+              - archive
+              - range
+              - monitoring
+      responses:
+        "200":
+          description: List of HedgeDca bots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HedgeBotListResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -7183,6 +7613,126 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
+  /api/v2/bots/hedgeCombo/{botId}/clone:
+    post:
+      summary: Clone HedgeCombo Bot
+      description: |
+        Clone an existing HedgeCombo bot, both legs, with optional PER-LEG settings
+        overrides. The clone is created stopped.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: cloneHedgeComboBot
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/BotIdParam"
+      requestBody:
+        required: false
+        description: Optional per-leg settings to override from the source bot
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HedgeCloneInput"
+            example:
+              long:
+                name: BTC hedge long v2
+                baseOrderSize: "250"
+              short:
+                baseOrderSize: "750"
+              sharedSettings:
+                tpPerc: "4"
+      responses:
+        "200":
+          description: Bot cloned successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+                  data:
+                    type: object
+                    properties:
+                      botId:
+                        type: string
+                        example: 507f1f77bcf86cd799439013
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
+  /api/v2/bots/hedgeDca/{botId}/clone:
+    post:
+      summary: Clone HedgeDca Bot
+      description: |
+        Clone an existing HedgeDca bot, both legs, with optional PER-LEG settings
+        overrides. The clone is created stopped.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: cloneHedgeDcaBot
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/BotIdParam"
+      requestBody:
+        required: false
+        description: Optional per-leg settings to override from the source bot
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HedgeCloneInput"
+            example:
+              long:
+                name: BTC hedge long v2
+                baseOrderSize: "250"
+              short:
+                baseOrderSize: "750"
+              sharedSettings:
+                tpPerc: "4"
+      responses:
+        "200":
+          description: Bot cloned successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+                  data:
+                    type: object
+                    properties:
+                      botId:
+                        type: string
+                        example: 507f1f77bcf86cd799439013
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
   /api/v2/backtest/combo/estimate-cost:
     post:
       summary: Estimate Combo Bot Backtest Cost
@@ -7654,6 +8204,27 @@ paths:
         - **1-hour timeout exceeded** — returns `{ requestId, message }` so the client can
           poll `GET /api/v2/backtest/dca/requests/{id}` manually when ready.
 
+
+        The connection is kept alive while it waits, so a proxy or CDN in front of the API does
+        not cut it off for being idle (Cloudflare, for one, gives up at ~100 seconds). Two
+        formats, chosen by the `Accept` header:
+
+        - **`Accept: application/json`** (the default, and what every existing client gets) —
+          the response is unchanged. A newline is emitted every 20 seconds while waiting; that
+          is insignificant whitespace ahead of the JSON document, so parsers skip it and no
+          client change is needed.
+        - **`Accept: text/event-stream`** — the same result delivered as Server-Sent Events.
+          `event: accepted` carries `{ requestId }` immediately, *before* the wait, then
+          `: ping` comments every 20 seconds, then `event: result` with the same envelope the
+          JSON form returns. Use this if you want the request id up front: should the connection
+          drop mid-run, the backtest keeps going and you can still collect it from
+          `GET /api/v2/backtest/{botType}/requests/{id}`. Served over POST, so browser
+          `EventSource` cannot consume it — read the response body as a stream.
+
+        Because the response head is sent before the outcome is known, the status code is always
+        `200` once the wait has begun; a failure after that point is reported in the body as
+        `status: "notok"` with `data: { requestId }`.
+
         If the backtest fails, credits are already unlocked server-side.
 
         Requires write permission of API keys.
@@ -7798,6 +8369,27 @@ paths:
         - **1-hour timeout exceeded** — returns `{ requestId, message }` so the client can
           poll `GET /api/v2/backtest/dca/requests/{id}` manually when ready.
 
+
+        The connection is kept alive while it waits, so a proxy or CDN in front of the API does
+        not cut it off for being idle (Cloudflare, for one, gives up at ~100 seconds). Two
+        formats, chosen by the `Accept` header:
+
+        - **`Accept: application/json`** (the default, and what every existing client gets) —
+          the response is unchanged. A newline is emitted every 20 seconds while waiting; that
+          is insignificant whitespace ahead of the JSON document, so parsers skip it and no
+          client change is needed.
+        - **`Accept: text/event-stream`** — the same result delivered as Server-Sent Events.
+          `event: accepted` carries `{ requestId }` immediately, *before* the wait, then
+          `: ping` comments every 20 seconds, then `event: result` with the same envelope the
+          JSON form returns. Use this if you want the request id up front: should the connection
+          drop mid-run, the backtest keeps going and you can still collect it from
+          `GET /api/v2/backtest/{botType}/requests/{id}`. Served over POST, so browser
+          `EventSource` cannot consume it — read the response body as a stream.
+
+        Because the response head is sent before the outcome is known, the status code is always
+        `200` once the wait has begun; a failure after that point is reported in the body as
+        `status: "notok"` with `data: { requestId }`.
+
         If the backtest fails, credits are already unlocked server-side.
 
         Requires write permission of API keys.
@@ -7938,6 +8530,27 @@ paths:
           field selection.
         - **1-hour timeout exceeded** — returns `{ requestId, message }` so the client can
           poll `GET /api/v2/backtest/dca/requests/{id}` manually when ready.
+
+
+        The connection is kept alive while it waits, so a proxy or CDN in front of the API does
+        not cut it off for being idle (Cloudflare, for one, gives up at ~100 seconds). Two
+        formats, chosen by the `Accept` header:
+
+        - **`Accept: application/json`** (the default, and what every existing client gets) —
+          the response is unchanged. A newline is emitted every 20 seconds while waiting; that
+          is insignificant whitespace ahead of the JSON document, so parsers skip it and no
+          client change is needed.
+        - **`Accept: text/event-stream`** — the same result delivered as Server-Sent Events.
+          `event: accepted` carries `{ requestId }` immediately, *before* the wait, then
+          `: ping` comments every 20 seconds, then `event: result` with the same envelope the
+          JSON form returns. Use this if you want the request id up front: should the connection
+          drop mid-run, the backtest keeps going and you can still collect it from
+          `GET /api/v2/backtest/{botType}/requests/{id}`. Served over POST, so browser
+          `EventSource` cannot consume it — read the response body as a stream.
+
+        Because the response head is sent before the outcome is known, the status code is always
+        `200` once the wait has begun; a failure after that point is reported in the body as
+        `status: "notok"` with `data: { requestId }`.
 
         If the backtest fails, credits are already unlocked server-side.
 
@@ -8091,6 +8704,80 @@ paths:
       responses:
         "200":
           description: Bot restored successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
+  /api/v2/bots/hedgeCombo/{botId}/restore:
+    post:
+      summary: Restore HedgeCombo Bot
+      description: |
+        Restore an archived HedgeCombo bot back to the stopped state.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: restoreHedgeComboBot
+      parameters:
+        - $ref: "#/components/parameters/BotIdParam"
+      responses:
+        "200":
+          description: Bot restored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
+  /api/v2/bots/hedgeDca/{botId}/restore:
+    post:
+      summary: Restore HedgeDca Bot
+      description: |
+        Restore an archived HedgeDca bot back to the stopped state.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: restoreHedgeDcaBot
+      parameters:
+        - $ref: "#/components/parameters/BotIdParam"
+      responses:
+        "200":
+          description: Bot restored
           content:
             application/json:
               schema:
@@ -8316,6 +9003,104 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
+  /api/v2/bots/hedgeCombo/{botId}/start:
+    post:
+      summary: Start HedgeCombo Bot
+      description: |
+        Start a stopped HedgeCombo bot. BOTH legs are started.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: startHedgeComboBot
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/BotIdParam"
+      requestBody:
+        required: false
+        description: Optional per-leg position handling
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HedgeStartInput"
+            example:
+              hedgeConfig:
+                LONG: noAction
+                SHORT: useBalance
+      responses:
+        "200":
+          description: Bot scheduled to start
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
+  /api/v2/bots/hedgeDca/{botId}/start:
+    post:
+      summary: Start HedgeDca Bot
+      description: |
+        Start a stopped HedgeDca bot. BOTH legs are started.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: startHedgeDcaBot
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/BotIdParam"
+      requestBody:
+        required: false
+        description: Optional per-leg position handling
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HedgeStartInput"
+            example:
+              hedgeConfig:
+                LONG: noAction
+                SHORT: useBalance
+      responses:
+        "200":
+          description: Bot scheduled to start
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
   /api/v2/bots/combo/{botId}/stop:
     post:
       summary: Stop Combo Bot
@@ -8430,38 +9215,135 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
+  /api/v2/bots/hedgeCombo/{botId}/stop:
+    post:
+      summary: Stop HedgeCombo Bot
+      description: |
+        Stop an active HedgeCombo bot. BOTH legs are stopped, and `closeType` is
+        forwarded to each of them.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: stopHedgeComboBot
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/BotIdParam"
+        - name: closeType
+          in: query
+          required: false
+          description: What to do with open deals on each leg. Defaults to `leave`.
+          schema:
+            type: string
+            enum:
+              - cancel
+              - closeByLimit
+              - closeByMarket
+              - leave
+        - name: cancelPartiallyFilled
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Bot scheduled to stop
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
+  /api/v2/bots/hedgeDca/{botId}/stop:
+    post:
+      summary: Stop HedgeDca Bot
+      description: |
+        Stop an active HedgeDca bot. BOTH legs are stopped, and `closeType` is
+        forwarded to each of them.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: stopHedgeDcaBot
+      parameters:
+        - $ref: "#/components/parameters/PaperContextHeader"
+        - $ref: "#/components/parameters/BotIdParam"
+        - name: closeType
+          in: query
+          required: false
+          description: What to do with open deals on each leg. Defaults to `leave`.
+          schema:
+            type: string
+            enum:
+              - cancel
+              - closeByLimit
+              - closeByMarket
+              - leave
+        - name: cancelPartiallyFilled
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Bot scheduled to stop
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
   /api/v2/backtest/{botType}/validate:
     post:
       summary: Validate bot settings without creating a bot or backtest
-      description: >
+      description: |
         Runs the **exact same validation** as `POST /api/v2/bots/{botType}` but
-
         does **not** create a bot, DB record, or dispatch to the backtest queue.
 
-
         Validation steps performed (in order):
-
         1. Bot type check (`dca`, `combo`, `grid`)
-
         2. Exchange / paper-context / user lookup (`validateBotCreationContext`)
-
         3. Default-settings merge (same defaults as the create endpoint)
-
-        4. Full semantic field validation (`validateCreateDCABotInput` / `validateCreateComboBotInput` /
-        `validateCreateGridBotInput`)
-
+        4. Full semantic field validation (`validateCreateDCABotInput` / `validateCreateComboBotInput` / `validateCreateGridBotInput`)
 
         On success the response includes the **normalised settings object** that
-
         would be passed to the backtest — useful for confirming exactly what the
-
         platform would use after defaults are applied.
 
-
         This endpoint is designed for the AI-agent workflow:
-
         **discover schema → build settings → validate → submit backtest**
-
 
         Requires write permission of API keys.
       tags:
@@ -8482,9 +9364,7 @@ paths:
         - $ref: "#/components/parameters/PaperContextHeader"
       requestBody:
         required: true
-        description: >-
-          Same body shape as `POST /api/v2/backtest/{botType}/request`. The `settings` object inside `payload.data` is
-          the bot configuration to validate.
+        description: Same body shape as `POST /api/v2/backtest/{botType}/request`. The `settings` object inside `payload.data` is the bot configuration to validate.
         content:
           application/json:
             schema:
@@ -8515,9 +9395,7 @@ paths:
                           example: 550e8400-e29b-41d4-a716-446655440000
                         settings:
                           type: object
-                          description: >-
-                            Bot settings to validate. Must include at minimum `pair` (array). All other fields are
-                            optional and will be filled with defaults.
+                          description: Bot settings to validate. Must include at minimum `pair` (array). All other fields are optional and will be filled with defaults.
                           required:
                             - pair
                           properties:
@@ -8579,9 +9457,7 @@ paths:
                             example: dca
                           settings:
                             type: object
-                            description: >-
-                              Normalised bot settings after defaults are applied. This is the exact object that would be
-                              passed to the backtest.
+                            description: Normalised bot settings after defaults are applied. This is the exact object that would be passed to the backtest.
               example:
                 status: OK
                 reason: null
@@ -8707,6 +9583,8 @@ paths:
       summary: Update Combo Bot
       description: |
         Update an existing Combo bot's settings.
+
+        `indicators` and `indicatorGroups` are full replacements: send the complete list you want the bot to have (keep an indicator by sending it back with its `uuid`).
 
         Requires write permission of API keys.
       tags:
@@ -8901,6 +9779,8 @@ paths:
       summary: Update DCA Bot
       description: |
         Update an existing DCA bot's settings.
+
+        `indicators` and `indicatorGroups` are full replacements: send the complete list you want the bot to have (keep an indicator by sending it back with its `uuid`).
 
         Requires write permission of API keys.
       tags:
@@ -9419,6 +10299,82 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Bot not found
+  /api/v2/bots/hedgeCombo/{botId}:
+    delete:
+      summary: Archive HedgeCombo Bot
+      description: |
+        Archive a HedgeCombo bot. Only a STOPPED bot can be archived — archiving a
+        running one is rejected with a 400.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: archiveHedgeComboBot
+      parameters:
+        - $ref: "#/components/parameters/BotIdParam"
+      responses:
+        "200":
+          description: Bot archived
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
+  /api/v2/bots/hedgeDca/{botId}:
+    delete:
+      summary: Archive HedgeDca Bot
+      description: |
+        Archive a HedgeDca bot. Only a STOPPED bot can be archived — archiving a
+        running one is rejected with a 400.
+
+        Requires write permission of API keys.
+      tags:
+        - Bots - Hedge
+      operationId: archiveHedgeDcaBot
+      parameters:
+        - $ref: "#/components/parameters/BotIdParam"
+      responses:
+        "200":
+          description: Bot archived
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - OK
+                    example: OK
+                  reason:
+                    type: string
+                    nullable: true
+                    example: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Bot not found
 security:
   - ApiKeyAuth: []
     SecretAuth: []
@@ -9429,6 +10385,9 @@ tags:
     description: Combo bot management endpoints
   - name: Bots - Grid
     description: Grid bot management endpoints
+  - name: Bots - Hedge
+    description: |
+      Hedge bot (hedgeCombo / hedgeDca) management endpoints. A hedge bot wraps two child bots, one long and one short.
   - name: Backtest
     description: Server side backtest endpoints for strategy testing
   - name: Deals - DCA

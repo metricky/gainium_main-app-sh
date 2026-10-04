@@ -54,6 +54,7 @@ export const BasicSchema = /* GraphQL */ `
     crossAvailable: Boolean
     assetCategory: String
     isCanonical: Boolean
+    underlying: String
     source: String
   }
   type getPairResponse implements BasicResponse {
@@ -90,6 +91,7 @@ export const BasicSchema = /* GraphQL */ `
     crossAvailable: Boolean
     assetCategory: String
     isCanonical: Boolean
+    underlying: String
     source: String
   }
   type allPairInfo {
@@ -717,6 +719,10 @@ export const UserSchema = /* GraphQL */ `
     asset: String
     free: String
     locked: String
+    # ISO time of the last write to this balance (stream event or REST
+    # refresh); the oldest row when the asset is summed across exchanges.
+    # Null only for rows that predate the field.
+    updated: String
     exchange: String
     exchangeUUID: String
     exchangeName: String
@@ -744,6 +750,9 @@ export const UserSchema = /* GraphQL */ `
 
 export const BotSchema = /* GraphQL */ `
   type Query {
+    # Large account mode for the request's trading context (main-app spec 019).
+    # Its own root field so a client can probe for it on older backends.
+    largeAccount: largeAccountResponse
     searchByBotName(input: searchByBotNameInput!): searchByBotNameResponse
     getServerSideBacktestRequests(
       input: getServerSideBacktestRequestsInput
@@ -785,6 +794,7 @@ export const BotSchema = /* GraphQL */ `
     ): botComboDealsResponse
     getDCABotDealsById(input: getComboBotDealsByIdInput): botDealsResponse
     getBotDealsStats(input: getBotDealsStatsInput): botDealsStatsResponse
+    getBotPairStats(input: getBotPairStatsInput!): botPairStatsResponse
     getComboBotDealsStats(input: getBotDealsStatsInput): botDealsStatsResponse
     getHedgeComboBotDealsStats(
       input: getBotDealsStatsInput
@@ -806,7 +816,9 @@ export const BotSchema = /* GraphQL */ `
     resetComboDealSettings(
       input: resetDealSettingsInput
     ): resetDealSettingsResponse
-    getTradingTerminalBotsList: getTradingTerminalBotsListResponse
+    getTradingTerminalBotsList(
+      input: getTradingTerminalBotsListInput
+    ): getTradingTerminalBotsListResponse
     restartBot(input: restartBotInput!): restartResponse
     getBacktests(input: DataGridFilterInput): getBacktestsResponse
     getComboBacktests(input: DataGridFilterInput): getComboBacktestsResponse
@@ -820,6 +832,9 @@ export const BotSchema = /* GraphQL */ `
     getLeverageBracketsByUUID(
       input: getLeverageInput
     ): getLeverageBracketResponse
+    getPooledMarginAvailable(
+      input: getLeverageInput!
+    ): getPooledMarginAvailableResponse
     getBacktestByShareId(
       input: getBacktestsInput!
     ): getBacktestByShareIdResponse
@@ -847,6 +862,12 @@ export const BotSchema = /* GraphQL */ `
     ): getHedgeComboBotSettingsResponse
     getGridBotSettings(input: getBotSettingsInput!): getGridBotSettingsResponse
     getBotEvents(input: getBotEventsInput!): getBotEventsResponse
+    changeTrail(
+      botId: String!
+      dealId: String
+      limit: Float
+      before: Float
+    ): changeTrailResponse
     getAllOpenOrders(input: getAllOpenOrdersInput): getAllOpenOrdersResponse
     getAllOpenPositions(
       input: getAllOpenOrdersInput
@@ -857,6 +878,7 @@ export const BotSchema = /* GraphQL */ `
     compareBalances(input: compareBalancesInput!): compareBalancesResponse
   }
   type Mutation {
+    setLargeAccountMode(input: setLargeAccountModeInput!): largeAccountResponse
     moveDealToTerminal(
       input: moveDealToTerminalInput!
     ): moveDealToTerminalResponse
@@ -869,11 +891,15 @@ export const BotSchema = /* GraphQL */ `
     ): requestOnboardingBacktestResponse
     addDealFunds(input: addDealFundsInput!): addFundsResponse
     reduceDealFunds(input: addDealFundsInput!): addFundsResponse
+    executeNextDca(input: executeNextDcaInput!): addFundsResponse
     cancelTerminalDealOrder(
       input: cancelTerminalDealOrderInput!
     ): cancelTerminalDealOrderResponse
     cancelPendingAddFundsDealOrder(
       input: cancelTerminalDealOrderInput!
+    ): cancelTerminalDealOrderResponse
+    buyDealBaseRemainder(
+      input: buyDealBaseRemainderInput!
     ): cancelTerminalDealOrderResponse
     createBot(input: createBotInput!): createBotResponse
     createDCABot(input: createDCABotInput!): createDCABotResponse
@@ -1067,6 +1093,10 @@ export const BotSchema = /* GraphQL */ `
     eighty: Float
     max: Float
     unrealizedProfit: Float
+    # Sum of the fee-inclusive stats.unrealizedProfitNet (main-app spec 019 §5)
+    # and how many of the deals carry it yet.
+    unrealizedProfitNet: Float
+    unrealizedProfitNetDeals: Float
   }
   type dealDashboardStats {
     result: [dealDashboardStatsResult]
@@ -1086,6 +1116,49 @@ export const BotSchema = /* GraphQL */ `
   }
   type botDashboardStats {
     result: [botDashboardStatsResult]
+    # In positions, USD (main-app spec 019 §4). Computed only when selected.
+    inPositionsUsd: Float
+    inPositionsCount: Int
+    inPositionsUnpriced: Int
+  }
+  input setLargeAccountModeInput {
+    # 'on' | 'auto'. 'off' is refused for users.
+    mode: String!
+  }
+  type largeAccountCounts {
+    activeBots: Int!
+    openDeals: Int!
+    terminalBots: Int!
+  }
+  type largeAccountThreshold {
+    enter: Int!
+    leave: Int!
+  }
+  type largeAccountThresholds {
+    activeBots: largeAccountThreshold!
+    openDeals: largeAccountThreshold!
+    terminalBots: largeAccountThreshold!
+  }
+  type largeAccount {
+    active: Boolean!
+    source: String!
+    reason: String
+    override: String!
+    overrideBy: String
+    canUserEnable: Boolean!
+    canUserRevert: Boolean!
+    paperContext: Boolean!
+    counts: largeAccountCounts!
+    thresholds: largeAccountThresholds!
+    computedAt: Date
+  }
+  type largeAccountResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: largeAccount
+  }
+  input getTradingTerminalBotsListInput {
+    dataGridInput: DataGridFilterInput
   }
   type botDashboardStatsResponse implements BasicResponse {
     status: Status
@@ -1180,10 +1253,25 @@ export const BotSchema = /* GraphQL */ `
     asset: String!
     type: String
   }
+  """
+  Execute a DCA deal's next safety order immediately, at market.
+  expectedLevel is the level the dashboard showed the user; the engine refuses
+  if the deal has moved on since, so a confirmation can never execute a
+  different level than the one it quoted.
+  """
+  input executeNextDcaInput {
+    dealId: String!
+    botId: String!
+    expectedLevel: Int
+  }
   input cancelTerminalDealOrderInput {
     dealId: String!
     botId: String!
     orderId: String!
+  }
+  input buyDealBaseRemainderInput {
+    dealId: String!
+    botId: String!
   }
   type addFundsResponse implements BasicResponse {
     status: Status
@@ -1249,6 +1337,15 @@ export const BotSchema = /* GraphQL */ `
     reason: String
     data: String
   }
+  """
+  USD a connection can still commit when its collateral is pooled across
+  coins; data is null when it is not.
+  """
+  type getPooledMarginAvailableResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: Float
+  }
   type getLeverageBracketResponse implements BasicResponse {
     status: Status
     reason: String
@@ -1277,10 +1374,41 @@ export const BotSchema = /* GraphQL */ `
     baseAssetName: String
     quoteAssetName: String
     positionId: String!
+    """
+    First claim only, kept for the legacy dashboard. Use linkedBots.
+    """
     botId: String
+    """
+    First claim only, kept for the legacy dashboard. Use linkedBots.
+    """
+    botName: String
+    """
+    First claim only, kept for the legacy dashboard. Use linkedBots.
+    """
+    botType: String
+    """
+    Every Gainium deal mapping onto this venue position, with the size each
+    one holds. A venue position is shared whenever more than one deal has the
+    same symbol/side/leverage/margin on the same exchange, and the remainder
+    (quantity - sum of sizes) is held outside Gainium.
+    """
+    linkedBots: [linkedPositionBot!]
+    marginType: BotMarginTypeEnum
+  }
+  type linkedPositionBot {
+    botId: String!
     botName: String
     botType: String
-    marginType: BotMarginTypeEnum
+    dealId: String
+    """
+    Base quantity this deal currently holds.
+    """
+    size: Float
+    """
+    ASAP bots re-open a deal as soon as one closes.
+    """
+    startCondition: String
+    botStatus: String
   }
   type openOrder {
     symbol: String!
@@ -1392,6 +1520,51 @@ export const BotSchema = /* GraphQL */ `
     id: String!
     shareId: String
   }
+  input getBotPairStatsInput {
+    id: String!
+    type: botTypeEnum!
+    shareId: String
+    """
+    Window on the CLOSED deals, by close time (ms). Open deals are always
+    included — they are the pair's current position, not history.
+    """
+    from: Float
+    to: Float
+  }
+  """
+  One pair of a bot, derived from its deals. Money is USD unless named
+  otherwise; fees are in the pair's quote asset.
+  """
+  type botPairStats {
+    symbol: String
+    baseAsset: String
+    quoteAsset: String
+    closedDeals: Int
+    wins: Int
+    losses: Int
+    realizedProfitUsd: Float
+    grossProfitUsd: Float
+    grossLossUsd: Float
+    profitFactor: FloatOrInfinity
+    feesQuote: Float
+    """
+    Most capital the pair had committed at once: the peak of the summed
+    capital of its deals open at the same time.
+    """
+    peakCapitalUsd: Float
+    avgDealDuration: Float
+    maxDealDuration: Float
+    "Worst intra-deal drawdown of any deal of this pair, as a fraction."
+    maxDrawdownPerc: Float
+    openDeals: Int
+    unrealizedProfitUsd: Float
+    openCapitalUsd: Float
+  }
+  type botPairStatsResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [botPairStats]
+  }
   type fullOrders {
     orders: [botOrder]
     page: Int
@@ -1440,6 +1613,36 @@ export const BotSchema = /* GraphQL */ `
     recent: Float
     deals: Float
     alerts: Float
+  }
+  type changeTrailActor {
+    type: String!
+    runId: String
+    messageId: String
+    decisionId: String
+  }
+  type changeTrailChange {
+    path: String!
+    before: StringOrAny
+    after: StringOrAny
+  }
+  type changeTrailEntry {
+    _id: String
+    userId: String!
+    botId: String!
+    botType: String!
+    dealId: String
+    scope: String!
+    action: String!
+    actor: changeTrailActor!
+    changes: [changeTrailChange]
+    reason: String
+    paperContext: Boolean
+    created: Date
+  }
+  type changeTrailResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [changeTrailEntry]
   }
   type getBotEventsResponse implements BasicResponse {
     status: Status
@@ -1922,8 +2125,18 @@ export const BotSchema = /* GraphQL */ `
     maxDealDuration: SplitTime
     avgDealDuration: SplitTime
   }
+  "The process that produced a stored backtest result, when it is not a plain backtest"
+  type backtestResultSource {
+    kind: String
+    id: String
+    variant: String
+    status: String
+    "0 … 100"
+    progress: Float
+  }
   type backtest {
     serverSide: Boolean
+    source: backtestResultSource
     noData: Boolean
     maxLeverage: Float
     _id: String
@@ -1965,6 +2178,7 @@ export const BotSchema = /* GraphQL */ `
     deals: SymbolStatsDeals
   }
   type comboBacktest {
+    source: backtestResultSource
     serverSide: Boolean
     noData: Boolean
     maxLeverage: Float
@@ -2842,6 +3056,9 @@ export const BotSchema = /* GraphQL */ `
     profit: Profit
     funding: Funding
     profitByAssets: [ProfitByAssets]
+    flags: [String]
+    feePaid: FeePaid
+    feeByAsset: [FeeByAsset]
     symbol: Symbol
     profitToday: ProfitToday
     public: Boolean
@@ -2852,6 +3069,7 @@ export const BotSchema = /* GraphQL */ `
     shareId: String
     workingTimeTotal: Float
     position: BotPosition
+    closeEntry: BotCloseEntry
     exchangeUnassigned: Boolean
     vars: botVars
     stats: profitLossStats
@@ -2867,6 +3085,12 @@ export const BotSchema = /* GraphQL */ `
     side: String
     qty: Float
     price: Float
+  }
+  type BotCloseEntry {
+    side: String
+    qty: Float
+    price: Float
+    entry: Float
   }
   type indicatorGroupsType {
     id: String
@@ -3129,6 +3353,10 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXwin: String
     useCloseAfterXloss: Boolean
     closeAfterXloss: String
+    useCloseAfterXconsecutiveWin: Boolean
+    closeAfterXconsecutiveWin: String
+    useCloseAfterXconsecutiveLoss: Boolean
+    closeAfterXconsecutiveLoss: String
     useCloseAfterXprofit: Boolean
     closeAfterXprofitValue: String
     closeAfterXprofitCond: String
@@ -3151,6 +3379,11 @@ export const BotSchema = /* GraphQL */ `
     minTp: String
     closeDealType: CloseDCATypeEnum
     closeOrderType: OrderTypeEnum
+    allowRaiseToExchangeMin: Boolean
+    reduceToAvailableBalance: Boolean
+    reduceToAvailableMinSize: String
+    rejectBelowExchangeMin: Boolean
+      @deprecated(reason: "Renamed with inverted meaning; use allowRaiseToExchangeMin. Always null.")
     dcaByMarket: Boolean
     terminalDealType: TerminalDealTypeEnum
     useMultiTp: Boolean
@@ -3299,6 +3532,10 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXwin: String
     useCloseAfterXloss: Boolean
     closeAfterXloss: String
+    useCloseAfterXconsecutiveWin: Boolean
+    closeAfterXconsecutiveWin: String
+    useCloseAfterXconsecutiveLoss: Boolean
+    closeAfterXconsecutiveLoss: String
     useCloseAfterXprofit: Boolean
     closeAfterXprofitValue: String
     closeAfterXprofitCond: String
@@ -3540,6 +3777,8 @@ export const BotSchema = /* GraphQL */ `
     dailyProfitPerc: Float
     winRate: Float
     profitFactor: FloatOrInfinity
+    grossProfit: usdAssetNumber
+    grossLoss: usdAssetNumber
   }
   type botSymbolsStatsDuration {
     maxDealDuration: Float
@@ -3595,6 +3834,16 @@ export const BotSchema = /* GraphQL */ `
     hodlIgnoreAt: Boolean
     stats: botStats
     symbolStats: [botSymbolsStats]
+    """
+    ms epoch of the last stats reset; null when stats were never reset.
+    Changing order sizing (baseOrderSize / orderSize / ordersCount /
+    volumeScale / orderSizeType / useDca / maxNumberOfOpenDeals) or
+    profitCurrency clears stats + symbolStats and stamps this, after which
+    botUpdateStats skips every deal created before it. So stats describe deals
+    SINCE this instant while the deals list still holds all of them — the
+    dashboards need it to say which sample the Statistics tab is reporting on.
+    """
+    resetStatsAfter: Float
     dealsReduceForBot: [dealsReduceForBot]
     notEnoughBalance: botNotEnoughBalance
     cost: Float
@@ -3633,6 +3882,7 @@ export const BotSchema = /* GraphQL */ `
     lastPrice: Float
     profit: Profit
     feePaid: FeePaid
+    feeByAsset: [FeeByAsset]
     avgPrice: Float
     createTime: Float
     updateTime: Float
@@ -3726,6 +3976,11 @@ export const BotSchema = /* GraphQL */ `
     hodlIgnoreAt: Boolean
     stats: botStats
     symbolStats: [botSymbolsStats]
+    """
+    ms epoch of the last stats reset; see fullDCABot.resetStatsAfter. Combo
+    bots reset on the same settings changes (Bot.saveBot, combo branch).
+    """
+    resetStatsAfter: Float
     useAssets: Boolean
     notEnoughBalance: botNotEnoughBalance
     cost: Float
@@ -3932,6 +4187,7 @@ export const BotSchema = /* GraphQL */ `
     closeByTimerValue: Float
     closeByTimerUnits: CooldownUnits
     dcaCustom: [dcaCustomType]
+    dcaIndicatorLevels: [dcaIndicatorLevelType]
     baseOrderSize: String
     baseOrderPrice: String
     useLimitPrice: Boolean
@@ -4005,6 +4261,7 @@ export const BotSchema = /* GraphQL */ `
     closeByTimerValue: Float
     closeByTimerUnits: CooldownUnits
     dcaCustom: [dcaCustomType]
+    dcaIndicatorLevels: [dcaIndicatorLevelType]
     baseOrderSize: String
     baseOrderPrice: String
     useLimitPrice: Boolean
@@ -4075,6 +4332,13 @@ export const BotSchema = /* GraphQL */ `
     timeCountStart: String
     currentCount: String
     unrealizedProfit: Float
+    usage: Float
+    maxUsage: Float
+    # Fee-inclusive (main-app spec 019 §5); USD, percent, USD.
+    unrealizedProfitNet: Float
+    unrealizedPercentNet: Float
+    valueUsd: Float
+    updatedAt: Date
   }
   type dynamicAr {
     value: Float
@@ -4113,12 +4377,15 @@ export const BotSchema = /* GraphQL */ `
     profit: Profit
     funding: Funding
     feePaid: FeePaid
+    feeByAsset: [FeeByAsset]
     avgPrice: Float
     displayAvg: Float
     commission: Float
     createTime: Date
     updateTime: Date
     closeTime: Date
+    # Last write to the deal (Mongo \`updated\`); null on deals that never had one.
+    updatedAt: Date
     levels: dcaLevels
     usage: Usage
     settings: dcaDealSettings
@@ -4189,6 +4456,8 @@ export const BotSchema = /* GraphQL */ `
     limitPrice: String
     asset: String
     id: String
+    baseRemainder: Boolean
+    baseTotal: String
   }
   type dealFunds {
     price: Float
@@ -4216,12 +4485,15 @@ export const BotSchema = /* GraphQL */ `
     profit: Profit
     funding: Funding
     feePaid: FeePaid
+    feeByAsset: [FeeByAsset]
     avgPrice: Float
     displayAvg: Float
     commission: Float
     createTime: Date
     updateTime: Date
     closeTime: Date
+    # Last write to the deal (Mongo \`updated\`); null on deals that never had one.
+    updatedAt: Date
     levels: dcaLevels
     usage: Usage
     settings: comboDealSettings
@@ -4282,17 +4554,32 @@ export const BotSchema = /* GraphQL */ `
     reason: String
     data: getDCADealsResult
     total: Float
+    # Over the FILTERED set, not the page (main-app spec 020). Only computed
+    # when selected, and only on dcaDealList / comboDealList.
+    totals: dealListTotals
   }
   type getComboDealsResponse implements BasicResponse {
     status: Status
     reason: String
     data: getComboDealsResult
     total: Float
+    totals: dealListTotals
+  }
+  type dealListTotals {
+    count: Int
+    # Sum of the Cost column in quote units, as-is across quote assets.
+    cost: Float
+    costUsd: Float
+    costUsdDeals: Int
+    realizedProfitUsd: Float
+    unrealizedProfitNet: Float
+    unrealizedProfitNetDeals: Int
   }
   type getTradingTerminalBotsListResponse implements BasicResponse {
     status: Status
     reason: String
     data: [fullDCABot]
+    total: Float
   }
   type dcaLevels {
     all: Int
@@ -4349,6 +4636,11 @@ export const BotSchema = /* GraphQL */ `
     gridProfitUsd: FloatOrInfinity
   }
   type ProfitByAssets {
+    asset: String
+    total: FloatOrInfinity
+    totalUsd: FloatOrInfinity
+  }
+  type FeeByAsset {
     asset: String
     total: FloatOrInfinity
     totalUsd: FloatOrInfinity
@@ -4700,6 +4992,10 @@ export const BotSchema = /* GraphQL */ `
     size: String
     step: String
   }
+  type dcaIndicatorLevelType {
+    orderSize: String
+    minPercFromLast: String
+  }
   input createDCABotInput {
     vars: botVarsInput
     pair: [String!]!
@@ -4817,6 +5113,10 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXwin: String
     useCloseAfterXloss: Boolean
     closeAfterXloss: String
+    useCloseAfterXconsecutiveWin: Boolean
+    closeAfterXconsecutiveWin: String
+    useCloseAfterXconsecutiveLoss: Boolean
+    closeAfterXconsecutiveLoss: String
     useCloseAfterXprofit: Boolean
     closeAfterXprofitValue: String
     closeAfterXprofitCond: String
@@ -4839,6 +5139,14 @@ export const BotSchema = /* GraphQL */ `
     minTp: String
     closeDealType: CloseDCATypeEnum
     closeOrderType: OrderTypeEnum
+    allowRaiseToExchangeMin: Boolean
+    reduceToAvailableBalance: Boolean
+    reduceToAvailableMinSize: String
+    """
+    Deprecated and ignored: renamed with inverted meaning to allowRaiseToExchangeMin.
+    Accepted only so dashboards built before the rename can still save.
+    """
+    rejectBelowExchangeMin: Boolean
     dcaByMarket: Boolean
     terminalDealType: TerminalDealTypeEnum
     useMultiTp: Boolean
@@ -5029,6 +5337,10 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXwin: String
     useCloseAfterXloss: Boolean
     closeAfterXloss: String
+    useCloseAfterXconsecutiveWin: Boolean
+    closeAfterXconsecutiveWin: String
+    useCloseAfterXconsecutiveLoss: Boolean
+    closeAfterXconsecutiveLoss: String
     useCloseAfterXprofit: Boolean
     closeAfterXprofitValue: String
     closeAfterXprofitCond: String
@@ -5221,6 +5533,10 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXwin: String
     useCloseAfterXloss: Boolean
     closeAfterXloss: String
+    useCloseAfterXconsecutiveWin: Boolean
+    closeAfterXconsecutiveWin: String
+    useCloseAfterXconsecutiveLoss: Boolean
+    closeAfterXconsecutiveLoss: String
     useCloseAfterXprofit: Boolean
     closeAfterXprofitValue: String
     closeAfterXprofitCond: String
@@ -5242,6 +5558,14 @@ export const BotSchema = /* GraphQL */ `
     minTp: String
     closeDealType: CloseDCATypeEnum
     closeOrderType: OrderTypeEnum
+    allowRaiseToExchangeMin: Boolean
+    reduceToAvailableBalance: Boolean
+    reduceToAvailableMinSize: String
+    """
+    Deprecated and ignored: renamed with inverted meaning to allowRaiseToExchangeMin.
+    Accepted only so dashboards built before the rename can still save.
+    """
+    rejectBelowExchangeMin: Boolean
     dcaByMarket: Boolean
     orderSizeType: OrderSizeTypeEnum
     useMultiTp: Boolean
@@ -5392,6 +5716,10 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXwin: String
     useCloseAfterXloss: Boolean
     closeAfterXloss: String
+    useCloseAfterXconsecutiveWin: Boolean
+    closeAfterXconsecutiveWin: String
+    useCloseAfterXconsecutiveLoss: Boolean
+    closeAfterXconsecutiveLoss: String
     useCloseAfterXprofit: Boolean
     closeAfterXprofitValue: String
     closeAfterXprofitCond: String

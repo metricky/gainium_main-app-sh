@@ -59,7 +59,11 @@ export const getBalances = async (
     }
   }
   let final: typeof balance.data.result = []
-  const userExchanges = user.exchanges.map((e) => e.uuid)
+  // Summed reads skip rows under linked legs: those are the source's wallet
+  // counted again. A single-leg read already resolved the link above.
+  const userExchanges = user.exchanges
+    .filter((e) => !!uuid || !e.linkedTo)
+    .map((e) => e.uuid)
   const rows = balance.data.result.filter((b) =>
     userExchanges.includes(b.exchangeUUID),
   )
@@ -105,6 +109,9 @@ export const getBalances = async (
       if (find) {
         find.free += b.free
         find.locked += b.locked
+        if (b.updated && (!find.updated || b.updated < find.updated)) {
+          find.updated = b.updated
+        }
         final = [...final.filter((f) => f.asset !== b.asset), find]
       }
     })
@@ -130,6 +137,10 @@ export const getBalances = async (
         asset: d.asset,
         free: `${d.free}`,
         locked: `${d.locked}`,
+        // When the row was last written by a stream event or a REST refresh.
+        // For a summed asset this is the OLDEST of its rows, so the dashboard
+        // staleness marker reflects the least fresh venue behind the figure.
+        updated: d.updated ? new Date(d.updated).toISOString() : null,
         exchange: shouldSumBalance ? '' : outExchange,
         exchangeUUID: shouldSumBalance ? '' : outUuid,
         exchangeName: shouldSumBalance

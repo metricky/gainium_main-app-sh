@@ -2,6 +2,7 @@ import { Schema } from 'mongoose'
 import type {
   BalancesSchema,
   BotEventSchema,
+  ChangeTrailSchema,
   ReconcileSweepSchema,
   QuantRulesEventSchema,
   BotMessageSchema,
@@ -216,6 +217,44 @@ const botEventSchema: Schema<BotEventSchema> = new Schema({
   ...CreatedUpdated,
 })
 
+// Change trail: every bot/deal settings change with its actor and
+// before/after values. Append-only; rows expire after 365 days (see
+// registerIndexes). The collection name is pinned so readers outside this
+// codebase do not depend on mongoose's pluralisation.
+const changeTrailSchema: Schema<ChangeTrailSchema> = new Schema(
+  {
+    userId: RequiredString,
+    botId: RequiredString,
+    botType: { ...RequiredString, enum: BotType },
+    dealId: String,
+    scope: { ...RequiredString, enum: ['bot', 'deal'] },
+    action: RequiredString,
+    // A sub-schema, not an inline object: a nested key literally named
+    // `type` would otherwise be read as the SchemaType of `actor` itself.
+    actor: new Schema(
+      {
+        type: { type: String, required: true },
+        runId: String,
+        messageId: String,
+        decisionId: String,
+      },
+      { _id: false },
+    ),
+    changes: [
+      {
+        _id: false,
+        path: RequiredString,
+        before: Schema.Types.Mixed,
+        after: Schema.Types.Mixed,
+      },
+    ],
+    reason: String,
+    paperContext: Boolean,
+    ...CreatedUpdated,
+  },
+  { collection: 'changeTrail' },
+)
+
 // Append-only record of reconciliation-sweep catches (a fill the user stream
 // dropped that the periodic sweep recovered). Powers the admin user-stream
 // health page; rows expire via TTL (see registerIndexes).
@@ -266,6 +305,30 @@ const quantRulesEventSchema: Schema<QuantRulesEventSchema> = new Schema(
 
 const userSchema: Schema<UserSchema> = new Schema({
   bigAccount: Boolean,
+  // Large account mode (main-app spec 019). V1 keeps reading `bigAccount`.
+  largeAccountOverride: {
+    type: String,
+    enum: ['auto', 'on', 'off'],
+    default: 'auto',
+  },
+  largeAccountOverrideBy: { type: String, enum: ['user', 'admin', null] },
+  largeAccountOverrideAt: Date,
+  largeAccountStats: {
+    live: {
+      activeBots: Number,
+      openDeals: Number,
+      terminalBots: Number,
+      autoActive: Boolean,
+      computedAt: Date,
+    },
+    paper: {
+      activeBots: Number,
+      openDeals: Number,
+      terminalBots: Number,
+      autoActive: Boolean,
+      computedAt: Date,
+    },
+  },
   username: {
     ...RequiredString,
     unique: true,
@@ -423,6 +486,22 @@ const profitByAssets = [
     totalUsd: Number,
   },
 ]
+
+/**
+ * Spec 015 §7.3 — see `FeeSizingFallback` in `types.ts`. `_id: false` for
+ * the same reason as `startBlocked`: a plain value object, not a sub-doc.
+ */
+const feeSizingFallback = {
+  type: {
+    status: String,
+    since: Number,
+    confirmedAt: Number,
+    reason: String,
+    triggeredByOrderId: String,
+  },
+  _id: false,
+  required: false,
+}
 
 const BuyTypeEnumDB = [BuyTypeEnum.X, BuyTypeEnum.all, BuyTypeEnum.proceed]
 
@@ -608,6 +687,13 @@ const botSettings = new Schema({
 
 const botSchema: Schema<BotSchema> = new Schema({
   ...botCommon,
+  flags: [String],
+  feeByAsset: profitByAssets,
+  feePaid: {
+    base: Number,
+    quote: Number,
+  },
+  feeSizingFallback,
   feeBalance: Number,
   settings: botSettings,
   initialPrice: Number,
@@ -648,6 +734,14 @@ const botSchema: Schema<BotSchema> = new Schema({
     side: { type: String, enum: PositionSide },
     qty: Number,
     price: Number,
+  },
+  // Spec 124: the close entry the value-changed TP/SL values `position`
+  // against, keyed to the position it was computed for.
+  closeEntry: {
+    side: { type: String, enum: PositionSide },
+    qty: Number,
+    price: Number,
+    entry: Number,
   },
   // Last few signed-position breakpoints {time, qty}, newest last. Lets the
   // funding processor rewind the position to a past settlement without reading
@@ -733,6 +827,28 @@ const orderSchema: Schema<OrderSchema> = new Schema({
         type: Schema.Types.Mixed,
         required: true,
       },
+    },
+  ],
+  /**
+   * The fee the venue actually charged for this order. Optional on purpose and
+   * with NO default: absent means "not observed", and a default of 0 would
+   * make every historical order look like a free fill and stop the consumer
+   * falling back to its estimate.
+   *
+   * `feeSide` is set by venues that name a side of the pair; `feeAsset` by
+   * venues that name a ticker — which may be neither side (BNB/BGB/KCS);
+   * `feeBreakdown` when a single order was charged in more than one currency.
+   */
+  feePaid: String,
+  feeSide: String,
+  feeAsset: String,
+  /** High-water mark for the per-trade fee accumulation — see `Order`. */
+  feeTradeId: Number,
+  feeBreakdown: [
+    {
+      asset: String,
+      amount: String,
+      _id: false,
     },
   ],
   exchange: {
@@ -971,6 +1087,9 @@ const pairsSchema: Schema<PairsSchema> = new Schema({
   // Set only for Hyperliquid spot (HL-canonical or Unit-bridged); absent for
   // every other exchange => treated as canonical.
   isCanonical: Boolean,
+  // Clean equity ticker behind a tokenized-stock market (`AAPL` for `rAAPL`);
+  // see `resolveUnderlying`. Absent => the base name is the ticker.
+  underlying: String,
   ...CreatedUpdated,
 })
 
@@ -981,6 +1100,19 @@ const feesSchema: Schema<FeesSchema> = new Schema({
   userId: RequiredString,
   maker: RequiredNumber,
   taker: RequiredNumber,
+  /**
+   * Where this rate came from: `venue` = the exchange told us what THIS account
+   * pays; `ladder` = it could not, so this is the published schedule's entry
+   * rung. Optional with NO default — absent means "written before this existed",
+   * which must not be mistaken for either.
+   *
+   * Persisted so a fallback can never overwrite a real rate. On 2026-08-28 a
+   * transient Kraken `EGeneral:Temporary lockout` made TradeVolume fail for
+   * several accounts mid-sweep, and the ladder fallback was written straight
+   * over their true rates — baking a momentary outage into stored fees
+   * permanently. See the write guard in `updateUserFee`.
+   */
+  source: String,
   ...CreatedUpdated,
 })
 
@@ -1301,6 +1433,10 @@ const dcaBotSettings = new Schema({
   closeAfterXwin: String,
   useCloseAfterXloss: Boolean,
   closeAfterXloss: String,
+  useCloseAfterXconsecutiveWin: Boolean,
+  closeAfterXconsecutiveWin: String,
+  useCloseAfterXconsecutiveLoss: Boolean,
+  closeAfterXconsecutiveLoss: String,
   useCloseAfterXprofit: Boolean,
   closeAfterXprofitValue: String,
   closeAfterXprofitCond: String,
@@ -1322,6 +1458,9 @@ const dcaBotSettings = new Schema({
   minTp: String,
   closeDealType: { type: String, enum: CloseDCATypeEnum },
   closeOrderType: { type: String, enum: OrderTypeEnum },
+  allowRaiseToExchangeMin: Boolean,
+  reduceToAvailableBalance: Boolean,
+  reduceToAvailableMinSize: String,
   dcaByMarket: Boolean,
   terminalDealType: { type: String, enum: TerminalDealTypeEnum },
   useMultiTp: Boolean,
@@ -1501,6 +1640,10 @@ const comboBotSettings = new Schema<ComboBotSettings>({
   closeAfterXwin: String,
   useCloseAfterXloss: Boolean,
   closeAfterXloss: String,
+  useCloseAfterXconsecutiveWin: Boolean,
+  closeAfterXconsecutiveWin: String,
+  useCloseAfterXconsecutiveLoss: Boolean,
+  closeAfterXconsecutiveLoss: String,
   useCloseAfterXprofit: Boolean,
   closeAfterXprofitValue: String,
   closeAfterXprofitCond: String,
@@ -1708,11 +1851,15 @@ const botSymbolsStats: Schema<BotSymbolsStats> = new Schema({
       dailyProfitPerc: Number,
       winRate: Number,
       profitFactor: Number,
+      grossProfit: usdAssetNumber,
+      grossLoss: usdAssetNumber,
     },
   },
   duration: {
     maxDealDuration: Number,
     avgDealDuration: Number,
+    totalTime: Number,
+    measuredDeals: Number,
   },
   symbol: String,
 })
@@ -1877,6 +2024,9 @@ const funds = [
     type: {
       type: String,
     },
+    // Spec 111: the resting rest of a part-filled base order.
+    baseRemainder: Boolean,
+    baseTotal: String,
   },
 ]
 
@@ -1906,8 +2056,29 @@ const startBlocked = {
   required: false,
 }
 
+/**
+ * A refused trailing take-profit close and its retry — see
+ * `TrailingCloseRetry` in `types.ts`. `_id: false` for the same reason as
+ * `startBlocked`: a plain value object, not a sub-document.
+ */
+const trailingClose = {
+  type: {
+    status: String,
+    attempts: Number,
+    since: Number,
+    lastAttempt: Number,
+    nextAttempt: Number,
+    reason: String,
+    rearmReady: Boolean,
+  },
+  _id: false,
+  required: false,
+}
+
 const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
   startBlocked,
+  trailingClose,
+  feeSizingFallback,
   closeTrigger: { type: String, enum: DCACloseTriggerEnum },
   flags: [String],
   note: String,
@@ -1931,6 +2102,7 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
     base: Number,
     quote: Number,
   },
+  feeByAsset: profitByAssets,
   avgPrice: Number,
   displayAvg: Number,
   commission: Number,
@@ -1957,6 +2129,8 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
     closeByTimerValue: Number,
     closeByTimerUnits: { type: String, enum: CooldownUnits },
     dcaCustom: [{ uuid: String, step: String, size: String }],
+    dcaIndicatorLevels: [{ orderSize: String, minPercFromLast: String }],
+    dcaLevelsCap: Number,
     ordersCount: Number,
     tpPerc: String,
     slPerc: String,
@@ -2048,6 +2222,10 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
     unrealizedProfit: Number,
     usage: Number,
     maxUsage: Number,
+    unrealizedProfitNet: Number,
+    unrealizedPercentNet: Number,
+    valueUsd: Number,
+    updatedAt: Date,
   },
   tpSlTargetFilled: [String],
   tpFilledHistory: [{ qty: Number, price: Number, id: String }],
@@ -2071,6 +2249,7 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
     dca: [Number],
     origBase: Number,
     origDca: [Number],
+    reducedToAvailable: Boolean,
   },
   tags: [String],
   ac: {
@@ -2089,6 +2268,9 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
 
 const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
   startBlocked,
+  // Combo inherits the trail, and the retry with it, through the DCA mixin.
+  trailingClose,
+  feeSizingFallback,
   closeTrigger: { type: String, enum: DCACloseTriggerEnum },
   action: { type: String, enum: ActionsEnum },
   note: String,
@@ -2112,6 +2294,7 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
     base: Number,
     quote: Number,
   },
+  feeByAsset: profitByAssets,
   avgPrice: Number,
   displayAvg: Number,
   commission: Number,
@@ -2138,6 +2321,7 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
     closeByTimerValue: Number,
     closeByTimerUnits: { type: String, enum: CooldownUnits },
     dcaCustom: [{ uuid: String, step: String, size: String }],
+    dcaIndicatorLevels: [{ orderSize: String, minPercFromLast: String }],
     ordersCount: Number,
     tpPerc: String,
     slPerc: String,
@@ -2221,6 +2405,10 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
     unrealizedProfit: Number,
     usage: Number,
     maxUsage: Number,
+    unrealizedProfitNet: Number,
+    unrealizedPercentNet: Number,
+    valueUsd: Number,
+    updatedAt: Date,
   },
   lastFilledLevel: Number,
   totalAssetAmount: Number,
@@ -2448,9 +2636,19 @@ const backtestRatios = {
   cwr: Number,
 }
 
+/** See `BacktestResultSource`. */
+const backtestResultSource = {
+  kind: String,
+  id: String,
+  variant: String,
+  status: String,
+  progress: Number,
+}
+
 const backtestCommon = {
   noData: Boolean,
   serverSide: Boolean,
+  source: backtestResultSource,
   maxLeverage: Number,
   financial: backtestFinancial,
   duration: backtestDuration,
@@ -2745,6 +2943,7 @@ const comboMinigrid = new Schema<ComboMinigridSchema>({
     pureBase: Number,
     pureQuote: Number,
   },
+  feeByAsset: profitByAssets,
   feePaid: {
     base: Number,
     quote: Number,
@@ -2984,6 +3183,10 @@ export const registerIndexes = () => {
 
   botEventSchema.index({ botId: 1 })
 
+  changeTrailSchema.index({ botId: 1, created: -1 })
+  changeTrailSchema.index({ dealId: 1, created: -1 })
+  changeTrailSchema.index({ created: 1 }, { expireAfterSeconds: 31536000 }) // 365d
+
   // TTL indexes (created on prod 2026-07-03; replace the weekly cleanDb
   // age-deletes). Expiry now runs continuously instead of a weekly bulk delete.
   botEventSchema.index({ created: 1 }, { expireAfterSeconds: 2592000 }) // 30d
@@ -3004,6 +3207,11 @@ export const registerIndexes = () => {
   // {userId, exchangeUUID, asset}; with only the userId index each such op
   // scans every doc the user owns (1.5k+ for dust-heavy accounts).
   balancesSchema.index({ userId: 1, exchangeUUID: 1, asset: 1 })
+  // Backs the account-wide balances listing (no connection filter), which sorts
+  // on {asset, _id}. Neither index above can serve that order — {userId} has no
+  // asset component and the compound one is ordered by exchangeUUID first — so
+  // the sort ran in memory over every row the user owns, once per page.
+  balancesSchema.index({ userId: 1, asset: 1, _id: 1 })
 
   dcaBacktestingResult.index({ userId: 1 })
   dcaBacktestingResult.index({ shareId: 1 })
@@ -3125,8 +3333,19 @@ export const registerIndexes = () => {
   // recovery) `$unset` `bucket`. That is load-bearing: it drops the dismissed row
   // out of this index so the next occurrence inserts a fresh, visible row instead
   // of silently incrementing a tombstone the user can no longer see.
+  // `symbol` is LAST and is only in the upsert filter for the per-contract
+  // subTypes (`isPerSymbolSubType`); every other subType keys on the prefix
+  // exactly as before, finds its one row by that prefix, and `$set`s `symbol`
+  // on it. Without `symbol` here the second contract's row cannot be inserted
+  // at all — it collides on the prefix and gets folded into the first
+  // contract's row, which is the defect (spec 007).
+  //
+  // Widening the spec of a named index makes `syncIndexes()` drop and rebuild
+  // it on the next boot. Cheap here and deliberately kept so: the partial
+  // filter covers only rows that carry a `bucket` (49,429 of 108,655 on prod
+  // at the time of writing), not the whole collection.
   botMessageSchema.index(
-    { userId: 1, botId: 1, subType: 1, showUser: 1, bucket: 1 },
+    { userId: 1, botId: 1, subType: 1, showUser: 1, bucket: 1, symbol: 1 },
     {
       name: 'botMessageCoalesceKey',
       unique: true,
@@ -3158,6 +3377,10 @@ export const registerIndexes = () => {
   // instead of an in-memory sort over all of a user's bots.
   botSchema.index({ userId: 1, status: 1, created: -1 })
   botSchema.index({ userId: 1, created: -1 })
+  // Global-variable usage count — see the dcaBotSchema note below. Grid bots
+  // carry no variables today, so this index is ~empty; it is declared anyway
+  // because `getBotsByGlobalVar` counts all three collections unconditionally.
+  botSchema.index({ 'vars.list': 1 })
 
   comboBotSchema.index({ userId: 1 })
   comboBotSchema.index({ userId: 1, status: 1, created: -1 })
@@ -3165,6 +3388,8 @@ export const registerIndexes = () => {
   // Hedge-sibling lookup — see the dcaBotSchema note below; identical shape,
   // same call sites (`core/src/bot/main.ts` picks comboBotDb for combo bots).
   comboBotSchema.index({ parentBotId: 1 })
+  // Global-variable usage count — see the dcaBotSchema note below.
+  comboBotSchema.index({ 'vars.list': 1 })
 
   comboDealSchema.index({ userId: 1 })
   comboDealSchema.index({ botId: 1 })
@@ -3191,6 +3416,26 @@ export const registerIndexes = () => {
   // an anti-predicate that cannot bound an index scan, and a hedge pair is 2 docs
   // — the equality on `parentBotId` alone already takes the scan to those 2 keys.
   dcaBotSchema.index({ parentBotId: 1 })
+  // "Which bots use global variable V?" — `getBotsByGlobalVar`
+  // (`core/src/bot/utils.ts:757`) asks every bot collection
+  // `{isDeleted:{$ne:true}, 'vars.list': V}`, and `countData` turns that into
+  // Mongoose `countDocuments`, i.e. an aggregate [$match,$group]. `vars.list`
+  // had no index, so that shape had no candidate plan at all and read the
+  // whole collection — a live prod explain returned GROUP <- COLLSCAN,
+  // keysExamined 0, 51,755 docs examined to answer one count, and the shape
+  // ran 12,043 times in the slow-query window at p50 380ms / max 2.8s. It is
+  // called once per variable on the bot from bot create/save/clone/delete
+  // (`core/src/bot/index.ts`), paper reset and user maintenance, so one bot
+  // save at the measured average of 7.4 variables per bot costs ~22 full
+  // collection scans. Measured on prod dcabots: 9,465 of 51,755 bots carry a
+  // variable, over 447 distinct variables and 69,740 (variable,bot) pairs —
+  // 156 bots per variable on average and 1,320 for the most-used one, so the
+  // scan is 39x larger than the largest possible answer and ~330x the average
+  // one. NOT compound with `isDeleted`: the `$ne` is an anti-predicate that
+  // cannot bound an index scan (same reasoning as `parentBotId` above), and
+  // `isDeleted` is mutable while `vars.list` changes only when a user attaches
+  // or detaches a variable — never on a per-tick or per-fill write.
+  dcaBotSchema.index({ 'vars.list': 1 })
 
   hedgeComboBotSchema.index({ userId: 1 })
   hedgeComboBotSchema.index({ userId: 1, status: 1, created: -1 })
@@ -3208,6 +3453,14 @@ export const registerIndexes = () => {
     { userId: 1, createTime: -1 },
     { partialFilterExpression: { status: 'open' } },
   )
+  // Deals list with a status filter — the closed tab and its date filters
+  // (find({userId, status:{$in:[...]}, ...}).sort({createTime:-1})). Without
+  // it the closed tab reads every deal the user has through {userId}.
+  // Already built on the cloud database under its default name
+  // `userId_1_status_1_createTime_-1`: keep the keys, their order and the
+  // absence of options exactly as they are, or `syncIndexes()` drops and
+  // rebuilds it on the next start.
+  dcaDealSchema.index({ userId: 1, status: 1, createTime: -1 })
 
   favoritePairsSchema.index({ userId: 1 })
 
@@ -3217,6 +3470,37 @@ export const registerIndexes = () => {
 
   orderSchema.index({ userId: 1 })
   orderSchema.index({ botId: 1 })
+
+  // Per-deal order lookups. `orders` had NO dealId index, so every
+  // deal-scoped question COLLSCANned the whole collection (11.9M docs on
+  // prod): {dealId,typeOrder}, {dealId,status,typeOrder} (find AND
+  // $match/$group), {dealId,side}, {dealId} sort={transactTime}, and
+  // {created:{$gte,$lt},dealId,typeOrder} are one family that a single
+  // {dealId:1} serves — dealId equality is the only indexable predicate any of
+  // them has. Measured on prod 2026-08-28: 72,735s of slow-op time over 18,556
+  // ops in ~24h, 69% of ALL slow-query time on the database, ~220 billion docs
+  // examined to return ~429 rows, p50 3.9s / max 11.3s. Reproduced on a seeded
+  // 300k-doc collection: 300,000 docsExamined -> 1 returned, 249ms, and
+  // rejectedPlans=0 — the planner is not choosing badly, it has no candidate.
+  //
+  // NOT compound with `status`/`typeOrder`. `status` is MUTABLE (NEW ->
+  // PARTIALLY_FILLED -> FILLED bumps it repeatedly while an order works) and
+  // indexing mutable order fields regressed writes badly once before (2026-07
+  // audit) because the entry MOVES in the btree on every change — the same
+  // reasoning that made latestOrders_filled and fillFailsafe_resting partial
+  // rather than compound. `dealId` is effectively write-once: it is set when
+  // the order doc is created, and `updateOrderOnDb` rewrites it with the SAME
+  // value on every fill event, which does not move a btree entry. The one real
+  // reassignment is `mergeDeals`, which re-points a handful of orders onto the
+  // merged deal — rare and user-initiated, not the per-fill churn path.
+  // A deal holds a handful of orders, so equality on dealId alone already takes
+  // the scan to those keys and the remaining predicates are cheap residuals.
+  //
+  // Declared here rather than created by hand on prod on purpose: a manual
+  // `createIndex` in 2026-08 reported success while building nothing and the
+  // gap re-fired at 20x the cost (#516 -> #557). syncIndexes()
+  // (core/src/db/model.ts) builds it at boot and keeps it.
+  orderSchema.index({ dealId: 1 })
 
   // Latest-orders list (getLatestOrders resolver: find({userId,status:'FILLED',
   // paperContext}).sort({updateTime:-1}).limit(10)). With only {userId:1} the planner
@@ -3297,6 +3581,7 @@ const schema = {
   globalVariables: globalVariablesSchema,
   user: userSchema,
   botEvent: botEventSchema,
+  changeTrail: changeTrailSchema,
   reconcileSweep: reconcileSweepSchema,
   quantRulesEvent: quantRulesEventSchema,
   favoritePairs: favoritePairsSchema,

@@ -15,6 +15,7 @@ import * as ts from 'typescript'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as yaml from 'js-yaml'
+import { findEnumExampleMismatches } from './openapiEnumExamples'
 
 interface EnumInfo {
   name: string
@@ -146,6 +147,21 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
   dcaByMarket: {
     description: 'Execute DCA orders at market price',
     example: false,
+  },
+  allowRaiseToExchangeMin: {
+    description:
+      'Raise base/safety orders to the exchange minimum when the configured size is below it. When false (default), a deal whose orders would be raised is not opened on that pair and a notification is sent',
+    example: false,
+  },
+  reduceToAvailableBalance: {
+    description:
+      'When the free balance cannot fund the whole deal (base order plus all safety orders), open it scaled down to the available balance instead of skipping it. Base and safety orders shrink by the same ratio. Fixed order sizes (base, quote, usd) only',
+    example: false,
+  },
+  reduceToAvailableMinSize: {
+    description:
+      'Smallest base order a reduced deal may open with, in the base order size unit. Below it the deal is skipped. Empty or 0: no floor beyond the exchange minimum',
+    example: '20',
   },
 
   // Start conditions
@@ -284,6 +300,22 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
   useCloseAfterXloss: { description: 'Close after X losses', example: false },
   closeAfterXloss: {
     description: 'Number of losses before closing',
+    example: '3',
+  },
+  useCloseAfterXconsecutiveWin: {
+    description: 'Stop the bot after a run of consecutive winning deals',
+    example: false,
+  },
+  closeAfterXconsecutiveWin: {
+    description: 'Number of consecutive winning deals before stopping',
+    example: '3',
+  },
+  useCloseAfterXconsecutiveLoss: {
+    description: 'Stop the bot after a run of consecutive losing deals',
+    example: false,
+  },
+  closeAfterXconsecutiveLoss: {
+    description: 'Number of consecutive losing deals before stopping',
     example: '3',
   },
   useCloseAfterXprofit: {
@@ -458,7 +490,7 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
   stopType: { description: 'How to stop the bot', example: 'cancel' },
   stopStatus: {
     description: 'Bot status for stopping',
-    example: 'monitoring',
+    example: 'closed',
   },
   dealCloseCondition: {
     description: 'Condition for closing deal',
@@ -482,7 +514,7 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
     description: 'How pairs are prioritized',
     example: 'alphabetical',
   },
-  prioritize: { description: 'Prioritization settings', example: 'volume' },
+  prioritize: { description: 'Prioritization settings', example: 'gridStep' },
 
   // Futures specific
   futures: { description: 'Enable futures trading', example: false },
@@ -579,11 +611,17 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
     example: true,
   },
   tpSl: { description: 'Combined TP/SL for grid', example: false },
-  tpSlCondition: { description: 'Condition for TP/SL trigger', example: 'any' },
-  tpSlAction: { description: 'Action for TP/SL', example: 'close' },
+  tpSlCondition: {
+    description: 'Condition for TP/SL trigger',
+    example: 'priceReached',
+  },
+  tpSlAction: { description: 'Action for TP/SL', example: 'stop' },
   sl: { description: 'Enable stop loss for grid', example: false },
-  slCondition: { description: 'Stop loss trigger condition', example: 'price' },
-  slAction: { description: 'Stop loss action', example: 'closeAll' },
+  slCondition: {
+    description: 'Stop loss trigger condition',
+    example: 'priceReached',
+  },
+  slAction: { description: 'Stop loss action', example: 'stop' },
   tpTopPrice: { description: 'Take profit top price', example: 60000 },
   slLowPrice: { description: 'Stop loss bottom price', example: 40000 },
   lastPriceRangeAlert: {
@@ -594,8 +632,12 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
   // Indicator specific fields
   indicatorLength: { description: 'Indicator period length', example: 14 },
   indicatorValue: { description: 'Indicator value threshold', example: '70' },
-  indicatorCondition: { description: 'Comparison condition', example: 'gt' },
-  indicatorInterval: { description: 'Chart timeframe', example: 'oneH' },
+  indicatorCondition: {
+    description:
+      'Comparison condition: gt = greater than, lt = lower than, cu = crossing up, cd = crossing down. For MA the rule reads <maType> <indicatorCondition> <maCrossingValue>, i.e. the moving average is compared to the reference.',
+    example: 'gt',
+  },
+  indicatorInterval: { description: 'Chart timeframe', example: '1h' },
   groupId: { description: 'Indicator group ID', example: 'group-1' },
   uuid: {
     description: 'Unique identifier',
@@ -614,8 +656,16 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
   },
 
   // MA specific
-  maType: { description: 'Moving average type', example: 'ema' },
-  maCrossingValue: { description: 'MA crossing reference', example: 'sma' },
+  maType: {
+    description:
+      'Moving average being compared (left side of an MA rule: <maType> <indicatorCondition> <maCrossingValue>).',
+    example: 'ema',
+  },
+  maCrossingValue: {
+    description:
+      'What the moving average is compared to (right side of an MA rule): price = current price, or another MA. Example, price above EMA 100: maType ema, indicatorLength 100, indicatorCondition lt, maCrossingValue price.',
+    example: 'price',
+  },
   maCrossingLength: { description: 'Crossing MA length', example: 50 },
   maCrossingInterval: { description: 'Crossing MA timeframe', example: '4h' },
   maUUID: { description: 'MA indicator UUID reference', example: '123e4567' },
@@ -832,9 +882,24 @@ const fieldMetadata: Record<string, { description: string; example?: any }> = {
   size: { description: 'Custom order size', example: '150' },
 }
 
+// Per-schema overrides of fieldMetadata, for a field name that means different
+// things on different schemas (the flat map above is keyed by field name only).
+const schemaFieldMetadata: Record<
+  string,
+  Record<string, Partial<{ description: string; example: any }>>
+> = {
+  SettingsIndicators: {
+    type: { example: 'RSI' },
+  },
+}
+
 class SchemaGenerator {
   private sourceFile: ts.SourceFile
   private enums: Map<string, EnumInfo> = new Map()
+  // Type aliases that are a union of string literals — documented as a string
+  // enum, exactly like a TS enum. Kept apart from `enums` because they are not
+  // enum declarations and must not be reported as generated enum schemas.
+  private stringLiteralUnions: Map<string, string[]> = new Map()
   private types: Map<string, TypeInfo> = new Map()
   // Schema types that can be referenced via $ref
   private referenceableSchemas = new Set([
@@ -859,14 +924,18 @@ class SchemaGenerator {
   }
 
   parse() {
-    // First pass: collect all enums
+    // First pass: collect all enums and string-literal union aliases
     ts.forEachChild(this.sourceFile, (node) => {
       if (ts.isEnumDeclaration(node)) {
         this.parseEnum(node)
+      } else if (ts.isTypeAliasDeclaration(node)) {
+        this.parseStringLiteralUnion(node)
       }
     })
 
-    console.log(`\nParsed ${this.enums.size} enums\n`)
+    console.log(
+      `\nParsed ${this.enums.size} enums and ${this.stringLiteralUnions.size} string unions\n`,
+    )
 
     // Second pass: parse interfaces and type aliases (now all enums are available)
     ts.forEachChild(this.sourceFile, (node) => {
@@ -894,6 +963,36 @@ class SchemaGenerator {
 
     if (values.length > 0) {
       this.enums.set(name, { name, values })
+    }
+  }
+
+  private literalText(type: ts.TypeNode): string | null {
+    return ts.isLiteralTypeNode(type) && ts.isStringLiteral(type.literal)
+      ? type.literal.text
+      : null
+  }
+
+  /**
+   * `export type TpSlAction = 'stop' | 'stopAndSell'` carries a closed set of
+   * values just like an enum, but it is a type alias, so `parseEnum` never sees
+   * it and `parseTypeNode` used to fall through to `{ type: 'object' }` — the
+   * published field then had no `enum` at all.
+   */
+  private parseStringLiteralUnion(node: ts.TypeAliasDeclaration) {
+    const members = ts.isUnionTypeNode(node.type)
+      ? node.type.types
+      : [node.type]
+
+    const values: string[] = []
+    for (const member of members) {
+      const text = this.literalText(member)
+      // Any non-string-literal member means this is not a closed string set.
+      if (text === null) return
+      values.push(text)
+    }
+
+    if (values.length > 0) {
+      this.stringLiteralUnions.set(node.name.text, values)
     }
   }
 
@@ -1067,14 +1166,21 @@ class SchemaGenerator {
           t.kind === ts.SyntaxKind.NullKeyword,
       )
 
-      // Get the actual type (non-null/undefined)
-      const actualType = types.find(
+      // Get the actual types (non-null/undefined)
+      const actualTypes = types.filter(
         (t) =>
           t.kind !== ts.SyntaxKind.UndefinedKeyword &&
           t.kind !== ts.SyntaxKind.NullKeyword,
       )
+      const actualType = actualTypes[0]
+      const literals = actualTypes.map((t) => this.literalText(t))
 
-      if (actualType) {
+      // An inline closed string set (`'closed' | 'monitoring'`) keeps every
+      // member — parsing only the first one published a one-value enum.
+      if (literals.length > 0 && literals.every((t) => t !== null)) {
+        propType = 'string'
+        enumValues = literals as string[]
+      } else if (actualType) {
         const parsed = this.parseTypeNode(actualType)
         propType = parsed.type
         enumValues = parsed.enum
@@ -1122,6 +1228,14 @@ class SchemaGenerator {
         return {
           type: 'string',
           enum: enumValues,
+        }
+      }
+
+      // Closed string sets declared as a union type alias
+      if (this.stringLiteralUnions.has(typeName)) {
+        return {
+          type: 'string',
+          enum: this.stringLiteralUnions.get(typeName)!,
         }
       }
 
@@ -1214,7 +1328,7 @@ class SchemaGenerator {
         }
         // Add properties to the second object in allOf
         typeInfo.properties.forEach((prop) => {
-          const propSchema = this.propertyToOpenAPI(prop)
+          const propSchema = this.propertyToOpenAPI(prop, typeName)
           schema.allOf[1].properties[prop.name] = propSchema
         })
         return schema
@@ -1234,19 +1348,22 @@ class SchemaGenerator {
     }
 
     typeInfo.properties.forEach((prop) => {
-      schema.properties[prop.name] = this.propertyToOpenAPI(prop)
+      schema.properties[prop.name] = this.propertyToOpenAPI(prop, typeName)
     })
 
     return schema
   }
 
-  private propertyToOpenAPI(prop: PropertyInfo): any {
+  private propertyToOpenAPI(prop: PropertyInfo, typeName: string): any {
     const schema: any = {
       type: prop.type,
     }
 
     // Add description from metadata or property info
-    const metadata = fieldMetadata[prop.name]
+    const metadata = fieldMetadata[prop.name] && {
+      ...fieldMetadata[prop.name],
+      ...schemaFieldMetadata[typeName]?.[prop.name],
+    }
     if (metadata?.description) {
       schema.description = metadata.description
     } else if (prop.description) {
@@ -1379,6 +1496,17 @@ async function main() {
       console.log(`✓ Updated schema: ${schemaName}`)
     }
   })
+
+  // An example outside its enum is a value the API rejects — refuse to publish it
+  const mismatches = findEnumExampleMismatches(
+    openApiSpec.components.schemas,
+    'components.schemas',
+  )
+  if (mismatches.length) {
+    throw new Error(
+      `OpenAPI examples not in their enum:\n  ${mismatches.join('\n  ')}`,
+    )
+  }
 
   // Write back to openapi-v2.yaml
   const yamlOutput = yaml.dump(openApiSpec, {

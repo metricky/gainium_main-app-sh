@@ -128,6 +128,10 @@ export const DCA_FORM_DEFAULTS: DCABotSettings = {
   closeAfterXprofitValue: '20',
   useCloseAfterXwin: false,
   closeAfterXwin: '20',
+  useCloseAfterXconsecutiveWin: false,
+  closeAfterXconsecutiveWin: '3',
+  useCloseAfterXconsecutiveLoss: false,
+  closeAfterXconsecutiveLoss: '3',
   useMulti: false,
   maxDealsPerPair: '1',
   useCloseAfterXopen: false,
@@ -238,6 +242,9 @@ export const DCA_FORM_DEFAULTS: DCABotSettings = {
   useSeparateMaxDealsOverAndUnderPerSymbol: false,
   maxDealsOverPerSymbol: '1',
   maxDealsUnderPerSymbol: '1',
+  allowRaiseToExchangeMin: false,
+  reduceToAvailableBalance: false,
+  reduceToAvailableMinSize: '',
   dcaByMarket: false,
 }
 

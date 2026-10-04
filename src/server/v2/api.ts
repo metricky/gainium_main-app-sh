@@ -11,6 +11,8 @@
  */
 
 import type { Request, Response } from 'express'
+import type { ChangeTrailActor } from '../../../types'
+import { openSyncStream, syncStreamMode } from './syncStream'
 import { Types, isValidObjectId } from 'mongoose'
 import {
   StatusEnum,
@@ -36,6 +38,8 @@ import {
   BaseReturn,
   ComboBotSettings,
   BotSettings,
+  ActionsEnum,
+  StrategyEnum,
 } from '../../../types'
 import BotInstance from '../../bot'
 import allAPI from '../api'
@@ -44,7 +48,7 @@ import {
   checkDCADealSettings,
   checkDCABotSettings,
   checkPairs,
-  isXperpPair,
+  findPairBySymbol,
 } from '../../bot/utils'
 import {
   dcaBotDb,
@@ -59,10 +63,18 @@ import {
   pairDb,
 } from '../../db/dbInit'
 import DB from '../../db'
-import { buildProjection, type FieldSelection } from './fieldUtils'
+import {
+  buildProjection,
+  filterFields,
+  filterFieldsArray,
+  parseFieldsParam,
+  type FieldSelection,
+} from './fieldUtils'
+import { endpointForBotType } from './fieldConfig'
 import { fieldSelectionMiddlewares, paperContextMiddleware } from './middleware'
 import { isFutures, isCoinm, isPaper, isServiceUnreachable } from '../../utils'
 import { priceBalancesUsd } from '../../utils/user'
+import { walletUuidOf } from '../../utils/sharedWallet'
 import {
   DCA_FORM_DEFAULTS,
   COMBO_FORM_DEFAULTS,
@@ -76,6 +88,7 @@ import {
   validateCreateTerminalDealInput,
   validateCreateGridBotInput,
 } from './validators/bots'
+import { applyIndicatorSettingsUpdate } from './validators/indicatorUpdate'
 import {
   validateBotCreationContext,
   findConflictingFuturesPosition,
@@ -86,6 +99,7 @@ import {
   addAditionalFields,
   addIndicatorsDefaults,
   applyGridFuturesConstraints,
+  clonedBotPair,
   sortFields,
 } from './helpers'
 import RedisClient from '../../db/redis'
@@ -111,15 +125,36 @@ import {
   indicatorDefinitions,
   indicatorGroupFieldDefinitions,
 } from './definitions/generated'
+import {
+  ALL_BOT_TYPES,
+  HEDGE_BOT_TYPES,
+  cloneHedgeBot,
+  hedgeDbFor,
+  invalidBotTypeResponse,
+  isHedgeBotType,
+  serializeHedgeBot,
+} from './hedge'
 
+/**
+ * Express 5 types every route param as `string | string[]`, because a wildcard
+ * or repeated segment can match more than once. Every route registered here —
+ * and every v1 route folded in at the bottom of `v2API` — uses only simple
+ * `:name` segments, which always resolve to a single string, so handlers narrow
+ * to `Record<string, string>` instead of guarding an array case that no
+ * registered route can produce. Adding a wildcard (`*rest`) or repeated segment
+ * would break that assumption: type its params explicitly at the handler.
+ */
 type APIMap = Map<
   string,
   {
-    handler: (req: Request, res: Response) => void
+    handler: (req: Request<Record<string, string>>, res: Response) => void
     middlewares: any[]
     ignoreMiddlewares?: any[]
   }
 >
+
+/** Change-trail actor for everything the public REST API changes. */
+const apiActor: ChangeTrailActor = { type: 'api' }
 
 const defaultPaginations = {
   bots: 10,
@@ -285,7 +320,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await dcaBotDb.readData(
           filter,
           projection,
-          { sort: { created: -1 }, skip, limit },
+          { sort: { created: -1, _id: -1 }, skip, limit },
           true, // returnArray
           true, // count
         )
@@ -382,7 +417,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await comboBotDb.readData(
           filter,
           projection,
-          { sort: { created: -1 }, skip, limit },
+          { sort: { created: -1, _id: -1 }, skip, limit },
           true,
           true,
         )
@@ -531,14 +566,14 @@ const v2API = <R extends UserSchema = UserSchema>(
           ? await comboDealsDb.readData(
               filter,
               projection,
-              { sort: { createTime: -1 }, skip, limit },
+              { sort: { createTime: -1, _id: -1 }, skip, limit },
               true,
               false,
             )
           : await dcaDealsDb.readData(
               filter,
               projection,
-              { sort: { createTime: -1 }, skip, limit },
+              { sort: { createTime: -1, _id: -1 }, skip, limit },
               true,
               false,
             )
@@ -831,9 +866,25 @@ const v2API = <R extends UserSchema = UserSchema>(
         userId: `${user.id}`,
       }
 
+      // A linked leg's wallet is stored under its source connection.
+      let walletUuid = exchangeId
+      let requestedProvider: string | undefined
       if (exchangeId) {
-        filter.exchangeUUID = exchangeId
+        const owner = await userDb.readData(
+          { _id: new Types.ObjectId(user.id) },
+          { exchanges: 1 },
+        )
+        const userExchanges =
+          owner.status === StatusEnum.ok
+            ? owner.data?.result?.exchanges
+            : undefined
+        walletUuid = walletUuidOf(userExchanges, exchangeId)
+        requestedProvider = userExchanges?.find(
+          (e) => e.uuid === exchangeId,
+        )?.provider
+        filter.exchangeUUID = walletUuid
       }
+      const relinked = !!exchangeId && walletUuid !== exchangeId
 
       if (!exchangeId) {
         filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
@@ -849,7 +900,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const balances = await balanceDb.readData(
           filter,
           projection,
-          { sort: { asset: 1 }, skip: (page - 1) * limit, limit },
+          { sort: { asset: 1, _id: 1 }, skip: (page - 1) * limit, limit },
           true,
           true,
         )
@@ -875,6 +926,13 @@ const v2API = <R extends UserSchema = UserSchema>(
           const priced = withUsd
             ? usdMap.get(`${b.exchangeUUID ?? ''}:${b.asset}`)
             : undefined
+          // Rows read through a link are reported as the leg asked for.
+          if (relinked) {
+            if ('exchangeUUID' in b) b = { ...b, exchangeUUID: exchangeId }
+            if ('exchange' in b) {
+              b = { ...b, exchange: requestedProvider ?? b.exchange }
+            }
+          }
           return {
             ...b,
             exchangeMarket: isFutures(b.exchange) ? 'futures' : 'spot',
@@ -939,7 +997,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await globalVarsDb.readData(
           filter,
           {},
-          { sort: { created: -1 }, skip, limit },
+          { sort: { created: -1, _id: -1 }, skip, limit },
           true,
           true,
         )
@@ -1040,7 +1098,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await botDb.readData(
           filter,
           projection,
-          { sort: { created: -1 }, skip, limit },
+          { sort: { created: -1, _id: -1 }, skip, limit },
           true,
           true,
         )
@@ -1074,6 +1132,123 @@ const v2API = <R extends UserSchema = UserSchema>(
   })
 
   /**
+   * GET /api/v2/bots/hedgeCombo
+   * GET /api/v2/bots/hedgeDca
+   *
+   * List hedge bots with field selection and pagination.
+   *
+   * A hedge bot wraps two child bots (long + short), so unlike the dca/combo/
+   * grid lists this one populates the legs and returns them under `bots`, and
+   * the top-level `profit` / `dealsInBot` / `name` are aggregated from those
+   * legs rather than read off the wrapper (the wrapper's stored copies are
+   * never updated by the engine — see `bot/hedgeAggregate.ts`).
+   *
+   * Query params:
+   * - fields: Field selection (minimal|standard|extended|full|custom list)
+   * - status: Filter by bot status
+   * - page: Page number (default 1)
+   *
+   * Headers:
+   * - paper-context: true|false (optional, defaults to false)
+   */
+  for (const hedgeType of HEDGE_BOT_TYPES) {
+    get.set(`/api/v2/bots/${hedgeType}`, {
+      middlewares: [
+        paperContextMiddleware,
+        ...fieldSelectionMiddlewares(endpointForBotType(hedgeType)),
+      ],
+      handler: async (req, res) => {
+        const {
+          status,
+          page: _page,
+        }: {
+          status?: BotStatusEnum
+          page?: string
+        } = req.query
+
+        const user = req.userData
+        const fields = req.fieldSelection
+        const paperContext = req.paperContext || false
+
+        const validStatuses = [
+          BotStatusEnum.closed,
+          BotStatusEnum.error,
+          BotStatusEnum.open,
+          BotStatusEnum.archive,
+          BotStatusEnum.range,
+          BotStatusEnum.monitoring,
+        ]
+        if (status && !validStatuses.includes(status)) {
+          res.status(400).send({
+            status: StatusEnum.notok,
+            reason: 'Invalid status parameter',
+            data: null,
+          })
+          return
+        }
+
+        const page = _page && !isNaN(+_page) ? +_page : 1
+
+        const filter: Record<string, any> = {
+          userId: user.id,
+          isDeleted: { $ne: true },
+        }
+
+        if (status) {
+          filter.status = status
+        }
+
+        filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
+
+        const limit = defaultPaginations.bots
+        const skip = (page - 1) * limit
+
+        try {
+          // No Mongo projection here: the response is BUILT from the populated
+          // legs, so the document has to come back whole. Field selection is
+          // applied to the assembled object afterwards instead.
+          const result = await hedgeDbFor(hedgeType).readData(
+            filter,
+            undefined,
+            { sort: { created: -1, _id: -1 }, skip, limit, populate: 'bots' },
+            true,
+            true,
+          )
+
+          if (result.status === StatusEnum.notok) {
+            res.status(500).send(result)
+            return
+          }
+
+          const serialized = result.data.result.map((bot) =>
+            serializeHedgeBot(bot as any),
+          )
+
+          const meta: ResponseMeta = {
+            page,
+            total: Math.ceil(result.data.count / limit),
+            count: result.data.count,
+            onPage: serialized.length,
+          }
+
+          res.send({
+            status: StatusEnum.ok,
+            reason: null,
+            data: filterFieldsArray(serialized as any, fields || null),
+            meta,
+          })
+        } catch (error) {
+          res.status(500).send({
+            status: StatusEnum.notok,
+            reason: 'Internal server error',
+            data: null,
+          })
+        }
+      },
+    })
+  }
+
+  /**
    * GET /api/v2/bots/:botType/details
    *
    * Fetch a single bot by its ID.
@@ -1089,18 +1264,17 @@ const v2API = <R extends UserSchema = UserSchema>(
   get.set('/api/v2/bots/:botType/details', {
     middlewares: [
       paperContextMiddleware,
-      ...fieldSelectionMiddlewares('bots.dca'), // field presets are the same across all bot types
+      // `:botType` is only known per request, so the preset bound here is a
+      // placeholder: the handler re-resolves it with `endpointForBotType` and
+      // overwrites `req.fieldSelection` before anything reads it.
+      ...fieldSelectionMiddlewares('bots.dca'),
     ],
     handler: async (req, res) => {
       const { botType } = req.params
       const { botId }: { botId?: string } = req.query
 
-      if (!['dca', 'combo', 'grid'].includes(botType)) {
-        res.status(400).send({
-          status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
-          data: null,
-        })
+      if (!ALL_BOT_TYPES.includes(botType as BotType)) {
+        res.status(400).send(invalidBotTypeResponse(ALL_BOT_TYPES))
         return
       }
 
@@ -1114,8 +1288,18 @@ const v2API = <R extends UserSchema = UserSchema>(
       }
 
       const user = req.userData
-      const fields = req.fieldSelection
       const paperContext = req.paperContext || false
+      // The bot type is a path parameter, so the preset the middleware above
+      // bound at registration time cannot be the right one for every type —
+      // re-resolve the caller's `fields` against this bot type's own config.
+      // Written back onto the request so the response metadata names the
+      // preset that was actually used.
+      const endpointType = endpointForBotType(botType)
+      const fields = parseFieldsParam(
+        req.query.fields as string | undefined,
+        endpointType,
+      )
+      req.fieldSelection = fields
 
       const filter: Record<string, any> = {
         userId: user.id,
@@ -1129,6 +1313,48 @@ const v2API = <R extends UserSchema = UserSchema>(
       filter.paperContext = paperContext ? { $eq: true } : { $ne: true }
 
       const projection = buildProjection(fields || null)
+
+      if (isHedgeBotType(botType)) {
+        try {
+          // Whole document + populated legs: the response is assembled from
+          // the legs, so a Mongo projection would starve it. Field selection
+          // is applied to the assembled object instead.
+          const hedge = await hedgeDbFor(botType).readData(
+            filter,
+            undefined,
+            { populate: 'bots' },
+            false,
+            false,
+          )
+          if (hedge.status === StatusEnum.notok) {
+            res.status(500).send(hedge)
+            return
+          }
+          if (!hedge.data?.result) {
+            res.status(404).send({
+              status: StatusEnum.notok,
+              reason: 'Bot not found',
+              data: null,
+            })
+            return
+          }
+          res.send({
+            status: StatusEnum.ok,
+            reason: null,
+            data: filterFields(
+              serializeHedgeBot(hedge.data.result as any) as any,
+              fields || null,
+            ),
+          })
+        } catch (error) {
+          res.status(500).send({
+            status: StatusEnum.notok,
+            reason: 'Internal server error',
+            data: null,
+          })
+        }
+        return
+      }
 
       try {
         const db =
@@ -1268,7 +1494,7 @@ const v2API = <R extends UserSchema = UserSchema>(
         const result = await requestDb.readData(
           { userId: user.id },
           requestProjection,
-          { sort: { created: -1 }, skip, limit },
+          { sort: { created: -1, _id: -1 }, skip, limit },
           true,
           true,
         )
@@ -2555,6 +2781,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           symbol,
           fundsType,
           dealId,
+          apiActor,
         )
 
         return res.status(200).json(result)
@@ -2664,6 +2891,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           symbol,
           fundsType,
           dealId,
+          apiActor,
         )
 
         return res.status(200).json(result)
@@ -2703,11 +2931,16 @@ const v2API = <R extends UserSchema = UserSchema>(
       const { botId, botType } = req.params
       const settings = req.body
 
-      // Validate botType
+      // Validate botType. Hedge bots are deliberately excluded: their settings
+      // are two independent legs plus the wrapper's `sharedSettings`, so they
+      // cannot be updated through a single flat settings body. Say so rather
+      // than listing the accepted types and leaving the caller to guess.
       if (!['dca', 'combo'].includes(botType)) {
         return res.status(400).json({
           status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo',
+          reason: isHedgeBotType(botType)
+            ? 'Hedge bots cannot be updated through this endpoint — their settings are per leg. Update each leg, or clone the bot with per-leg overrides.'
+            : 'Invalid bot type. Must be one of: dca, combo',
         })
       }
 
@@ -2755,7 +2988,16 @@ const v2API = <R extends UserSchema = UserSchema>(
           return res.status(400).json(check)
         }
 
-        const { pair, ...rest } = settings
+        const indicatorUpdate = applyIndicatorSettingsUpdate(
+          bot.data.result.settings,
+          settings,
+          bot.data.result.vars,
+        )
+        if (indicatorUpdate.status === StatusEnum.notok) {
+          return res.status(400).json(indicatorUpdate)
+        }
+
+        const { pair, ...rest } = indicatorUpdate.settings
         let pairToUse = pair
 
         if (pair?.length) {
@@ -2786,20 +3028,24 @@ const v2API = <R extends UserSchema = UserSchema>(
                   ...rest,
                   pair: pairToUse,
                   id: botId,
-                  vars: bot.data.result.vars,
+                  vars: indicatorUpdate.vars,
                 },
                 user.id,
                 !!bot.data.result.paperContext,
+                undefined,
+                apiActor,
               )
             : await Bot.changeDCABot(
                 {
                   ...rest,
                   pair: pairToUse,
                   id: botId,
-                  vars: bot.data.result.vars,
+                  vars: indicatorUpdate.vars,
                 },
                 user.id,
                 !!bot.data.result.paperContext,
+                undefined,
+                apiActor,
               )
 
         if (result && result.status === StatusEnum.notok) {
@@ -2827,13 +3073,20 @@ const v2API = <R extends UserSchema = UserSchema>(
   /**
    * POST /api/v2/bots/:botType/:botId/start
    *
-   * Start a bot (DCA, Combo, or Grid)
+   * Start a bot.
    *
    * URL params:
-   * - botType: Type of bot (dca, combo, grid)
+   * - botType: dca | combo | grid | hedgeCombo | hedgeDca
    * - botId: ID of the bot to start
    *
    * Query: ?paperContext=true|false (optional)
+   *
+   * Body (hedge bots only, optional):
+   * - hedgeConfig: { LONG: <action>, SHORT: <action> } — what each leg should
+   *   do with the position it already holds when it comes back up. One of
+   *   useBalance | buyForAll | buyDiff | sellForAll | sellDiff | noAction |
+   *   useOppositeBalance. Omit to leave both legs' existing action untouched.
+   *   Starting a hedge bot starts BOTH legs.
    *
    * Response:
    * - 200: Bot scheduled to start
@@ -2848,12 +3101,8 @@ const v2API = <R extends UserSchema = UserSchema>(
       const paperContext = req.paperContext || false
 
       // Validate botType
-      if (!['dca', 'combo', 'grid'].includes(botType)) {
-        return res.status(400).json({
-          status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
-          data: null,
-        })
+      if (!ALL_BOT_TYPES.includes(botType as BotType)) {
+        return res.status(400).json(invalidBotTypeResponse(ALL_BOT_TYPES))
       }
 
       if (!botId) {
@@ -2872,6 +3121,36 @@ const v2API = <R extends UserSchema = UserSchema>(
         })
       }
 
+      // Hedge bots may carry a per-leg "what to do with the position you're
+      // already holding" instruction. Validate it here rather than letting an
+      // unknown string reach the leg's `action` field, where nothing would
+      // reject it and the leg would silently misbehave on start.
+      let hedgeConfig: { [x in StrategyEnum]: ActionsEnum } | undefined
+      if (isHedgeBotType(botType)) {
+        const raw = (req.body ?? {}).hedgeConfig
+        if (raw !== undefined && raw !== null) {
+          const actions = Object.values(ActionsEnum) as string[]
+          const long = raw[StrategyEnum.long]
+          const short = raw[StrategyEnum.short]
+          const bad = [long, short].filter(
+            (a) => a !== undefined && !actions.includes(a),
+          )
+          if (typeof raw !== 'object' || Array.isArray(raw) || bad.length) {
+            return res.status(400).json({
+              status: StatusEnum.notok,
+              reason:
+                `Invalid hedgeConfig. Expected { "LONG": <action>, "SHORT": <action> } ` +
+                `with action one of: ${actions.join(', ')}`,
+              data: null,
+            })
+          }
+          hedgeConfig = {
+            [StrategyEnum.long]: long,
+            [StrategyEnum.short]: short,
+          } as { [x in StrategyEnum]: ActionsEnum }
+        }
+      }
+
       try {
         const result = await Bot.changeStatus(
           user.id,
@@ -2879,6 +3158,7 @@ const v2API = <R extends UserSchema = UserSchema>(
             status: BotStatusEnum.open,
             id: botId,
             type: botType as any,
+            ...(hedgeConfig ? { hedgeConfig } : {}),
           },
           paperContext,
         )
@@ -2909,11 +3189,12 @@ const v2API = <R extends UserSchema = UserSchema>(
   /**
    * POST /api/v2/bots/:botType/:botId/stop
    *
-   * Stop a bot (DCA, Combo, or Grid)
+   * Stop a bot.
    *
    * URL params:
-   * - botType: Type of bot (dca, combo, grid)
-   * - botId: ID of the bot to stop
+   * - botType: dca | combo | grid | hedgeCombo | hedgeDca
+   * - botId: ID of the bot to stop. Stopping a hedge bot stops BOTH legs;
+   *   `closeType` is forwarded to each of them.
    *
    * Query params:
    * - paperContext: true|false (optional)
@@ -2939,12 +3220,8 @@ const v2API = <R extends UserSchema = UserSchema>(
       }
 
       // Validate botType
-      if (!['dca', 'combo', 'grid'].includes(botType)) {
-        return res.status(400).json({
-          status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
-          data: null,
-        })
+      if (!ALL_BOT_TYPES.includes(botType as BotType)) {
+        return res.status(400).json(invalidBotTypeResponse(ALL_BOT_TYPES))
       }
 
       if (!botId) {
@@ -3006,7 +3283,7 @@ const v2API = <R extends UserSchema = UserSchema>(
    * Restore an archived bot
    *
    * URL params:
-   * - botType: Type of bot (dca, combo, grid)
+   * - botType: dca | combo | grid | hedgeCombo | hedgeDca
    * - botId: ID of the bot to restore
    *
    * Response:
@@ -3021,12 +3298,8 @@ const v2API = <R extends UserSchema = UserSchema>(
       const { botId, botType } = req.params
 
       // Validate botType
-      if (!['dca', 'combo', 'grid'].includes(botType)) {
-        return res.status(400).json({
-          status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
-          data: null,
-        })
+      if (!ALL_BOT_TYPES.includes(botType as BotType)) {
+        return res.status(400).json(invalidBotTypeResponse(ALL_BOT_TYPES))
       }
 
       if (!botId) {
@@ -3079,10 +3352,10 @@ const v2API = <R extends UserSchema = UserSchema>(
   /**
    * DELETE /api/v2/bots/:botType/:botId
    *
-   * Archive a bot
+   * Archive a bot. Only a stopped bot can be archived.
    *
    * URL params:
-   * - botType: Type of bot (dca, combo, grid)
+   * - botType: dca | combo | grid | hedgeCombo | hedgeDca
    * - botId: ID of the bot to archive
    *
    * Response:
@@ -3097,12 +3370,8 @@ const v2API = <R extends UserSchema = UserSchema>(
       const { botId, botType } = req.params
 
       // Validate botType
-      if (!['dca', 'combo', 'grid'].includes(botType)) {
-        return res.status(400).json({
-          status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
-          data: null,
-        })
+      if (!ALL_BOT_TYPES.includes(botType as BotType)) {
+        return res.status(400).json(invalidBotTypeResponse(ALL_BOT_TYPES))
       }
 
       if (!botId) {
@@ -3179,11 +3448,14 @@ const v2API = <R extends UserSchema = UserSchema>(
         pairsToSetMode?: PairsToSetMode
       }
 
-      // Validate botType
+      // Validate botType. Hedge bots are excluded: each leg carries its own
+      // pair list, so a single pair change has no unambiguous target here.
       if (!['dca', 'combo', 'grid'].includes(botType)) {
         return res.status(400).json({
           status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
+          reason: isHedgeBotType(botType)
+            ? 'Hedge bots have a pair list per leg — change the pairs on each leg instead.'
+            : 'Invalid bot type. Must be one of: dca, combo, grid',
         })
       }
 
@@ -3270,11 +3542,16 @@ const v2API = <R extends UserSchema = UserSchema>(
    * Clone a bot with optional setting overrides
    *
    * URL params:
-   * - botType: Type of bot (dca, combo, grid)
+   * - botType: dca | combo | grid | hedgeCombo | hedgeDca
    * - botId: ID of the bot to clone
    *
    * Query: ?paperContext=true|false (optional)
-   * Body: Partial bot settings to override (all optional)
+   * Body:
+   * - dca | combo | grid: partial bot settings to override (all optional)
+   * - hedgeCombo | hedgeDca: `{ long?, short?, sharedSettings? }` — a hedge bot
+   *   is two independent legs with their own pairs, exchanges and settings, so
+   *   overrides are given PER LEG. A flat settings object is rejected rather
+   *   than silently ignored.
    *
    * Response:
    * - 200: Bot cloned successfully with botId
@@ -3290,11 +3567,8 @@ const v2API = <R extends UserSchema = UserSchema>(
       const settingsOverrides = req.body
 
       // Validate botType
-      if (!['dca', 'combo', 'grid'].includes(botType)) {
-        return res.status(400).json({
-          status: StatusEnum.notok,
-          reason: 'Invalid bot type. Must be one of: dca, combo, grid',
-        })
+      if (!ALL_BOT_TYPES.includes(botType as BotType)) {
+        return res.status(400).json(invalidBotTypeResponse(ALL_BOT_TYPES))
       }
 
       if (!botId || typeof botId !== 'string') {
@@ -3302,6 +3576,42 @@ const v2API = <R extends UserSchema = UserSchema>(
           status: StatusEnum.notok,
           reason: 'Missing or invalid botId parameter',
         })
+      }
+
+      if (isHedgeBotType(botType)) {
+        try {
+          const cloned = await cloneHedgeBot({
+            Bot,
+            botType,
+            botId,
+            userId: user.id,
+            paperContext,
+            body: settingsOverrides,
+          })
+          if (!cloned.ok) {
+            return res.status(cloned.code).json({
+              status: StatusEnum.notok,
+              reason: cloned.reason,
+            })
+          }
+          return res.status(200).json({
+            status: StatusEnum.ok,
+            reason: null,
+            data: {
+              botId: cloned.botId,
+              message: `${botType} bot cloned successfully`,
+            },
+          })
+        } catch (error) {
+          console.error(`Error cloning ${botType} bot:`, error)
+          return res.status(500).json({
+            status: StatusEnum.notok,
+            reason:
+              error instanceof Error
+                ? error.message
+                : `Failed to clone ${botType} bot`,
+          })
+        }
       }
 
       try {
@@ -3367,8 +3677,9 @@ const v2API = <R extends UserSchema = UserSchema>(
           })
         }
 
-        const { pair: _pair, ...rest } = settingsOverrides ?? {}
+        const { pair: _pair, ...overrides } = settingsOverrides ?? {}
         let pair = _pair
+        let rest = overrides
 
         // Validate pair if provided (skip for grid bots as they have different settings type)
         const check =
@@ -3382,6 +3693,19 @@ const v2API = <R extends UserSchema = UserSchema>(
 
         if (check.status === StatusEnum.notok) {
           return res.status(400).json(check)
+        }
+
+        if (botType !== 'grid') {
+          const indicatorUpdate = applyIndicatorSettingsUpdate(
+            sourceBot.settings as DCABotSettings,
+            rest,
+            sourceBot.vars,
+          )
+          if (indicatorUpdate.status === StatusEnum.notok) {
+            return res.status(400).json(indicatorUpdate)
+          }
+          rest = indicatorUpdate.settings
+          sourceBot.vars = indicatorUpdate.vars
         }
 
         if (pair?.length) {
@@ -3399,15 +3723,10 @@ const v2API = <R extends UserSchema = UserSchema>(
         }
 
         // Combine settings: source bot + overrides
-        const symbol = sourceBot.symbol as any
         const combinedSettings = {
           ...sourceBot.settings,
-          ...(settingsOverrides ?? {}),
-          pair: pair?.length
-            ? pair
-            : botType === 'grid'
-              ? `${symbol.baseAsset}_${symbol.quoteAsset}`
-              : sourceBot.settings.pair,
+          ...(rest ?? {}),
+          pair: clonedBotPair(sourceBot.settings.pair, pair),
         }
 
         // Auto-append (clone) to name if not overridden
@@ -3624,8 +3943,20 @@ const v2API = <R extends UserSchema = UserSchema>(
         // Update deal settings
         const result =
           dealType === 'combo'
-            ? await Bot.updateComboDealSettings(user.id, '', dealId, settings)
-            : await Bot.updateDCADealSettings(user.id, '', dealId, settings)
+            ? await Bot.updateComboDealSettings(
+                user.id,
+                '',
+                dealId,
+                settings,
+                apiActor,
+              )
+            : await Bot.updateDCADealSettings(
+                user.id,
+                '',
+                dealId,
+                settings,
+                apiActor,
+              )
 
         return res.status(200).json(result)
       } catch (error) {
@@ -3795,6 +4126,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           symbol,
           fundsType,
           dealId,
+          apiActor,
         )
 
         return res.status(200).json(result)
@@ -3806,6 +4138,70 @@ const v2API = <R extends UserSchema = UserSchema>(
             error instanceof Error
               ? error.message
               : 'Failed to add funds to deal',
+        })
+      }
+    },
+  })
+
+  /**
+   * POST /api/v2/deals/dca/execute-next-dca
+   *
+   * Fill a DCA deal's next safety order now, at market, instead of waiting for
+   * price (or its indicator signal) to reach it. The deal books it as that
+   * level and continues with the next one at its original price.
+   * https://community.gainium.io/t/execute-next-dca-manually/5072
+   *
+   * Query: { dealId: string }  — required; unlike add-funds there is no
+   *   whole-bot fan-out, see `executeNextDcaLevelFromPublicApi`.
+   * Body: { expectedLevel?: number } — refuse if the deal has since moved on.
+   *
+   * Response:
+   * - 200: Execution scheduled
+   * - 400: Validation error or deal not found
+   * - 500: Internal server error
+   */
+  post.set('/api/v2/deals/dca/execute-next-dca', {
+    middlewares: [],
+    handler: async (req, res) => {
+      const user = req.userData
+      const { dealId } = req.query as { dealId?: string }
+      const { expectedLevel } = req.body as { expectedLevel?: number }
+
+      if (!dealId || typeof dealId !== 'string') {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Deal ID required',
+        })
+      }
+
+      if (
+        typeof expectedLevel !== 'undefined' &&
+        (typeof expectedLevel !== 'number' ||
+          !Number.isInteger(expectedLevel) ||
+          expectedLevel < 1)
+      ) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: 'Invalid parameters',
+        })
+      }
+
+      try {
+        const result = await Bot.executeNextDcaLevelFromPublicApi(
+          user.id,
+          dealId,
+          expectedLevel,
+        )
+
+        return res.status(200).json(result)
+      } catch (error) {
+        console.error('Error executing next DCA level:', error)
+        return res.status(500).json({
+          status: StatusEnum.notok,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'Failed to execute the next DCA level',
         })
       }
     },
@@ -3880,6 +4276,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           symbol,
           fundsType,
           dealId,
+          apiActor,
         )
 
         return res.status(200).json(result)
@@ -4003,19 +4400,7 @@ const v2API = <R extends UserSchema = UserSchema>(
       }
       const foundPairs = [payload.data.settings.pair]
         .flat()
-        .map((pp) => {
-          // X-Perp pairs (e.g. `AAVE-USD_UM_XPERP`) are already the
-          // canonical exchange-native pair string; splitting on `_` would
-          // tear the `_UM_XPERP` contract-type suffix apart instead of
-          // base/quote.
-          if (isXperpPair(pp)) {
-            return pairs.data.result?.find((p) => p.pair === pp)
-          }
-          const [base, quote] = pp.split('_')
-          return pairs.data.result?.find(
-            (p) => p.baseAsset.name === base && p.quoteAsset.name === quote,
-          )
-        })
+        .map((pp) => findPairBySymbol(pairs.data.result ?? [], pp))
         .filter((p): p is (typeof pairs.data.result)[0] => !!p)
       if (foundPairs.length !== payload.data.settings.pair.length) {
         return {
@@ -4355,19 +4740,44 @@ const v2API = <R extends UserSchema = UserSchema>(
 
       const requestId = result.data!.requestId
 
-      // Sync mode: wait for terminal status and return the full request item
+      // Sync mode: wait for terminal status and return the full request item.
+      // The wait can legitimately run for up to an hour, which no CDN will sit
+      // through in silence, so the response head is committed now and the
+      // connection is kept warm until the run finishes. See ./syncStream.ts.
       if (sync === 'sync') {
-        const itemResult = await waitForBacktestCompletion(
-          botType!,
+        const stream = openSyncStream(res, {
+          mode: syncStreamMode(req),
           requestId,
-          user.id,
-          rawFields,
-        )
-        return res.status(200).json({
-          status: StatusEnum.ok,
-          reason: null,
-          data: itemResult.data,
+          onClientGone: () =>
+            console.log(
+              `[backtest:sync] client disconnected botType=${botType} requestId=${requestId} userId=${user.id} — run continues`,
+            ),
         })
+        try {
+          const itemResult = await waitForBacktestCompletion(
+            botType!,
+            requestId,
+            user.id,
+            rawFields,
+          )
+          stream.finish({
+            status: StatusEnum.ok,
+            reason: null,
+            data: itemResult.data,
+          })
+        } catch (e) {
+          // The head is already sent, so a late failure cannot change the
+          // status code — it is reported in the envelope instead. The request
+          // id goes with it so the caller can still collect the result.
+          stream.finish({
+            status: StatusEnum.notok,
+            reason: `Backtest submitted but its result could not be read: ${
+              (e as Error)?.message || e
+            }`,
+            data: { requestId },
+          })
+        }
+        return
       }
 
       return res.status(200).json({
@@ -5106,6 +5516,7 @@ const v2API = <R extends UserSchema = UserSchema>(
                 undefined,
                 undefined,
                 DCACloseTriggerEnum.api,
+                apiActor,
               )
             : await Bot.closeDCADeal(
                 user.id,
@@ -5115,6 +5526,7 @@ const v2API = <R extends UserSchema = UserSchema>(
                 undefined,
                 undefined,
                 DCACloseTriggerEnum.api,
+                apiActor,
               )
 
         return res.status(200).json(result)

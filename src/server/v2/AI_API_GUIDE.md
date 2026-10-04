@@ -25,7 +25,7 @@ All API requests require three headers:
 | Header | Description | Example |
 |--------|-------------|---------|
 | `token` | Public API key | `your-public-key` |
-| `time` | Request timestamp (ms) | `1775468598625` |
+| `time` | Request timestamp (ms) | `1789637612989` |
 | `signature` | HMAC-SHA256 signature | `calculated-signature` |
 
 ### Signature Calculation
@@ -190,6 +190,26 @@ response = requests.post(
 )
 ```
 
+### Replace a Bot's Indicators
+`indicators` and `indicatorGroups` are **full replacements** on update and clone: send the complete list the bot should have. Keep an existing indicator by sending it back with its `uuid` (a read-modify-write of the bot's current list works as-is); `[]` removes all. The result must stay consistent with the bot's settings — e.g. `startCondition: "TechnicalIndicators"` needs a `startDeal` indicator, `dcaCondition: "indicators"` needs a `startDca` indicator in section `dca` — otherwise the call returns 400 with an `errors` list.
+```python
+response = requests.put(
+    "https://api.gainium.io/api/v2/bots/dca/550e8400-e29b-41d4-a716-446655440000",
+    json={
+        "dcaCondition": "indicators",
+        "indicators": [
+            {"type": "RSI", "uuid": "so-rsi", "groupId": "so",
+             "indicatorAction": "startDca", "section": "dca",
+             "indicatorValue": "30", "minPercFromLast": "1.5"}
+        ],
+        "indicatorGroups": [
+            {"id": "so", "logic": "and", "action": "startDca", "section": "dca"}
+        ],
+    },
+    headers=headers,
+)
+```
+
 ## API Endpoints
 
 All endpoints support field selection via `?fields=minimal|standard|extended|full` parameter.
@@ -290,6 +310,25 @@ For detailed schema references, see [SCHEMAS.md](./SCHEMAS.md).
 | POST | `/api/v2/bots/grid/{botId}/start` | Query params only | Success response | Start Grid Bot |
 | POST | `/api/v2/bots/grid/{botId}/stop` | Query params only | Success response | Stop Grid Bot |
 | DELETE | `/api/v2/bots/grid/{botId}` | Query params only | Success response | Archive Grid Bot |
+
+### Bots - Hedge
+
+| Method | URL | Input Schema | Response | Description |
+|--------|-----|--------------|----------|-------------|
+| GET | `/api/v2/bots/hedgeCombo/details` | Query params | [HedgeBotExtended](./SCHEMAS.md#hedgebotextended) | Get HedgeCombo Bot by ID |
+| GET | `/api/v2/bots/hedgeCombo` | Query params | [HedgeBotListResponse](./SCHEMAS.md#hedgebotlistresponse) | Get HedgeCombo Bots |
+| GET | `/api/v2/bots/hedgeDca/details` | Query params | [HedgeBotExtended](./SCHEMAS.md#hedgebotextended) | Get HedgeDca Bot by ID |
+| GET | `/api/v2/bots/hedgeDca` | Query params | [HedgeBotListResponse](./SCHEMAS.md#hedgebotlistresponse) | Get HedgeDca Bots |
+| POST | `/api/v2/bots/hedgeCombo/{botId}/clone` | [HedgeCloneInput](./SCHEMAS.md#hedgecloneinput) | Success response | Clone HedgeCombo Bot |
+| POST | `/api/v2/bots/hedgeDca/{botId}/clone` | [HedgeCloneInput](./SCHEMAS.md#hedgecloneinput) | Success response | Clone HedgeDca Bot |
+| POST | `/api/v2/bots/hedgeCombo/{botId}/restore` | Query params only | Success response | Restore HedgeCombo Bot |
+| POST | `/api/v2/bots/hedgeDca/{botId}/restore` | Query params only | Success response | Restore HedgeDca Bot |
+| POST | `/api/v2/bots/hedgeCombo/{botId}/start` | [HedgeStartInput](./SCHEMAS.md#hedgestartinput) | Success response | Start HedgeCombo Bot |
+| POST | `/api/v2/bots/hedgeDca/{botId}/start` | [HedgeStartInput](./SCHEMAS.md#hedgestartinput) | Success response | Start HedgeDca Bot |
+| POST | `/api/v2/bots/hedgeCombo/{botId}/stop` | Query params | Success response | Stop HedgeCombo Bot |
+| POST | `/api/v2/bots/hedgeDca/{botId}/stop` | Query params | Success response | Stop HedgeDca Bot |
+| DELETE | `/api/v2/bots/hedgeCombo/{botId}` | Query params only | Success response | Archive HedgeCombo Bot |
+| DELETE | `/api/v2/bots/hedgeDca/{botId}` | Query params only | Success response | Archive HedgeDca Bot |
 
 ### General
 
@@ -411,7 +450,7 @@ def get_all_bots():
 ---
 
 *This documentation is automatically generated from the OpenAPI specification.*  
-*Last updated: 2026-04-06T09:43:18.625Z*  
+*Last updated: 2026-09-17T09:33:32.989Z*  
 *For detailed schemas, see [SCHEMAS.md](./SCHEMAS.md)*
 
 ## Schemas
