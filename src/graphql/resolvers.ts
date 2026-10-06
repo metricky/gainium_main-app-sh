@@ -162,7 +162,11 @@ import {
   placeOrderOnExchange,
 } from './handlers/orders.handler'
 import { isCoinm, isServiceUnreachable, isValidTimezone } from '../utils'
-import { dealReturnPercentage, type DealReturnDeal } from '../utils/dealReturn'
+import {
+  dealReturnPercentage,
+  dealReturnsPipeline,
+  type DealReturnDeal,
+} from '../utils/dealReturn'
 import {
   BACKTEST_SERVICE_TARGET,
   sendServerSideRequest,
@@ -395,45 +399,7 @@ const resolvers = <
       const dealsDb = combo ? comboDealsDb : dcaDealsDb
       const result = await dealsDb.aggregate<
         DealReturnDeal & { closeTime?: number; updateTime?: number }
-      >([
-        {
-          $match: {
-            userId: `${user.data._id}`,
-            botId: input.id,
-            // Same set the deals table calls "closed" (Bot.getBotDeals), so
-            // the chart and the table below it describe the same deals.
-            status: {
-              $in: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
-            },
-          },
-        },
-        // Project BEFORE the sort: only these fields have to be held in memory
-        // to order a long-lived bot's whole deal history.
-        {
-          $project: {
-            _id: 0,
-            'profit.total': 1,
-            'usage.max.base': 1,
-            'usage.max.quote': 1,
-            'usage.current.base': 1,
-            'usage.current.quote': 1,
-            avgPrice: 1,
-            strategy: 1,
-            closeTime: 1,
-            updateTime: 1,
-            'settings.futures': 1,
-            'settings.coinm': 1,
-            'settings.profitCurrency': 1,
-            'settings.comboTpBase': 1,
-            'settings.useTp': 1,
-            'settings.useSl': 1,
-          },
-        },
-        { $sort: { closeTime: -1 } },
-        // Unchanged cap — the consumers (both dashboards' Deal Returns panel)
-        // have always plotted at most the newest 500 deals.
-        { $limit: 500 },
-      ])
+      >(dealReturnsPipeline(`${user.data._id}`, input.id))
       if (result.status !== StatusEnum.ok) {
         return {
           status: result.status,
@@ -2052,6 +2018,32 @@ const resolvers = <
         token === 'demo',
         paperContext,
         { from: input.from, to: input.to },
+      )
+    },
+    getBotWindowStats: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { id: string; type: BotType; shareId?: string }
+      },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      // Same rule as getBotPairStats: a share link's id is its credential.
+      if (user.status === StatusEnum.notok && !input.shareId) {
+        return user
+      }
+      return await Bot.getBotWindowStats(
+        user.data?._id.toString() ?? '',
+        input.type,
+        input.id,
+        input.shareId,
+        token === 'demo',
+        paperContext,
       )
     },
     getComboBotDealsStats: async (
@@ -5319,6 +5311,34 @@ const resolvers = <
         rest,
       )
     },
+    restartDeal: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: {
+          dealId: string
+          botId: string
+          combo?: boolean
+        }
+      },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return await Bot.restartDeal(
+        input.botId,
+        input.dealId,
+        user.data._id.toString(),
+        paperContext,
+        !!input.combo,
+      )
+    },
     executeNextDca: async (
       _parent: any,
       {
@@ -5659,6 +5679,13 @@ const resolvers = <
       if (update.status === StatusEnum.notok) {
         return update
       }
+      // Spec 131: running bots read the switch from their user cache, which
+      // only this notice refreshes; they re-derive `zeroFee` on it.
+      const redis = await RedisClient.getInstance()
+      redis?.publish(
+        'updateuserStore',
+        JSON.stringify({ userId: `${user.data._id}`, uuid }),
+      )
       return {
         status: StatusEnum.ok,
         reason: null,

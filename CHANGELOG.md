@@ -1,5 +1,107 @@
 # Changelog
 
+## [1.80.1] - 2026-10-06
+
+### Fixed
+
+- Stopping or deleting a bot while the exchange refuses its cancel requests for rate now re-sends each refused cancel after a back-off, so the order is recorded as cancelled (or reconciled with the exchange) instead of staying open in the bot's records after the bot's order stream has closed.
+
+## [1.80.0] - 2026-10-06
+
+### Added
+
+- Indicator condition `bw` ("between") for value-type indicators (RSI, CCI, MFI, Williams %R, ADX, AO, UO, MOM, VO, BBW, BBWP, %B, Keltner %B, MA ratio, ATR, ADR, ATH): the condition holds while the value is strictly between `indicatorValue` and the new `indicatorValue2` — one indicator instead of a "greater than" + "lower than" pair. Live bots and backtests (`@gainium/backtester` 1.11.0) evaluate it the same way. The v2 API accepts it only on those indicators, with two numeric bounds and without percentile; price, profit and uPnL conditions keep their single-value set.
+
+## [1.79.0] - 2026-10-06
+
+### Added
+
+- `restartDeal` covers hedge DCA and hedge Combo deals. The request is routed to the bot that owns the deal (a hedge bot's long or short side), read from the deal itself, so it works whichever bot id the client sends.
+
+## [1.78.1] - 2026-10-06
+
+### Fixed
+
+- `getBotWindowStats` win rate is now wins / (wins + losses), as the bot statistics count it; a break-even deal is neither.
+
+## [1.78.0] - 2026-10-06
+
+### Added
+
+- `restartDeal` (GraphQL): restart a single DCA or Combo deal. Its open safety orders and take profit are cancelled and placed again from the deal's current state — the same rebuild a deal settings save runs — without reloading the bot or touching its other deals. Useful when an order was refused (for example for lack of balance) and the funds are now there.
+
+## [1.77.0] - 2026-10-06
+
+### Added
+
+- `getBotWindowStats` (GraphQL): a DCA / Combo bot's performance over its whole life and since its stats were last reset, derived from its deals. Lifetime figures survive a sizing or profit-currency change; money is USD and return / drawdown are measured against the peak capital the bot had committed at once. A deal opened before a reset and closed after it counts in the "since" window.
+
+### Changed
+
+- Changing a bot's max active deals no longer resets its statistics. It changes how many deals run at once, not the size of any one deal.
+
+## [1.76.3] - 2026-10-06
+
+### Added
+
+- Deal lists: `isNoneOf` and `notContains` on `botName` and `pair`. A bot-name negation excludes the matching bots' deals by bot id.
+- Generic list filters (bot lists, global variables, …): `isNoneOf` and `notContains`.
+
+### Fixed
+
+- Generic list filters compared text operators against the URI-encoded value, so `contains` / `equals` / `startsWith` / `endsWith` never matched a value holding a space or another encoded character, and `isAnyOf` decoded only the first space of each listed value. Values are now decoded before matching.
+
+## [1.76.2] - 2026-10-06
+
+### Fixed
+
+- DCA LIMIT entry reposition: when the cancel of a resting base order raced a partial fill on a venue that cancels asynchronously, the bot re-placed the base order instead of opening the deal on the fill. When the fill was later picked up, the rest of the base order was not put back on the book on contract-sized and coin-margined accounts. The reposition cancel now waits for the venue to end the order and books it through the same settle as a stranded partial entry. A cancelled order that was still listed live no longer stays `NEW` in the orders collection.
+
+## [1.76.1] - 2026-10-06
+
+### Added
+
+- Change trail: the action `restart_bot` (a bot reload request).
+
+## [1.76.0] - 2026-10-06
+
+### Added
+
+- Change trail: actor type `telegram` (the owner acting from a linked Telegram chat) and the actions `start_bot` / `stop_bot`.
+
+## [1.75.3] - 2026-10-05
+
+### Fixed
+
+- Deal Returns chart: the series returned only the newest 500 closed deals, so on a bot with more closed deals the older part of the chart, which shares its time axis with the Performance chart, was empty. It now returns every closed deal.
+
+## [1.75.2] - 2026-10-05
+
+### Fixed
+
+- RabbitMQ client: a dropped connection is recovered once (on `close`) instead of twice (on `error` and `close`); its channels are forgotten instead of closed again, which logged an `IllegalOperationError: Channel closed` line per channel; the dead connection is no longer handed out until the delayed reconnect, so the next caller connects afresh; and a connection that drops while its channels are opening, or a reply consumer started on a channel that just closed, no longer raises an unhandled rejection (fatal in a worker thread).
+
+## [1.75.1] - 2026-10-05
+
+### Fixed
+
+- GraphQL `dealSizes` exposes `multiplier` and `multiplierScope`, so DCA and Combo deal queries can read the size a deal was scaled to (stored since 1.75.0).
+
+## [1.75.0] - 2026-10-05
+
+### Added
+
+- New-deal approval hooks can ask for a different deal size: an approving `approveNewDeal` may set `sizeMultiplier` (0.1–3) and `sizeScope` (`base` = the base order only, `whole` = the base order and every DCA order). The engine scales the deal on top of compound / risk-reduction sizes, then checks the balance and the exchange minimums again at the scaled size; anything that does not hold opens the deal at the configured size, with the reason in a `Deal` event. Base, quote and USD order sizes, DCA and Combo; not for terminal deals, hedge legs, risk/reward sizing or % of balance sizes. The deal stores `sizes.multiplier` / `sizes.multiplierScope`; `onNewDealSize` reports the outcome to a deployment.
+- A refusing hook may set `retryOpen` with `retryAfterMs` to re-attempt the entry later for any start condition (not only ASAP), with every engine gate run again.
+- Combo `getBaseOrder` / `createInitialDealOrders` fill the minimum-order collectors like DCA, so a Combo deal can be scaled.
+- Change trail action `open_deal`.
+
+## [1.74.4] - 2026-10-05
+
+### Fixed
+
+- Ignore Exchange Fees: turning the switch on or off for a connection only reached bots started after the change; bots already running kept the old setting until they were restarted, so they kept leaving fee dust on new deals. Running bots on that connection now pick the change up immediately, in both directions. A deal that re-places its closing order after the change also uses the new setting, as it already did after a restart.
+
 ## [1.74.3] - 2026-10-04
 
 ### Fixed

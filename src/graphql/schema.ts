@@ -795,6 +795,7 @@ export const BotSchema = /* GraphQL */ `
     getDCABotDealsById(input: getComboBotDealsByIdInput): botDealsResponse
     getBotDealsStats(input: getBotDealsStatsInput): botDealsStatsResponse
     getBotPairStats(input: getBotPairStatsInput!): botPairStatsResponse
+    getBotWindowStats(input: getBotWindowStatsInput!): botWindowStatsResponse
     getComboBotDealsStats(input: getBotDealsStatsInput): botDealsStatsResponse
     getHedgeComboBotDealsStats(
       input: getBotDealsStatsInput
@@ -892,6 +893,7 @@ export const BotSchema = /* GraphQL */ `
     addDealFunds(input: addDealFundsInput!): addFundsResponse
     reduceDealFunds(input: addDealFundsInput!): addFundsResponse
     executeNextDca(input: executeNextDcaInput!): addFundsResponse
+    restartDeal(input: restartDealInput!): addFundsResponse
     cancelTerminalDealOrder(
       input: cancelTerminalDealOrderInput!
     ): cancelTerminalDealOrderResponse
@@ -1264,6 +1266,15 @@ export const BotSchema = /* GraphQL */ `
     botId: String!
     expectedLevel: Int
   }
+  """
+  Cancel and re-place one deal's orders (safety orders and take profit)
+  without restarting the bot. Combo deals pass combo: true.
+  """
+  input restartDealInput {
+    dealId: String!
+    botId: String!
+    combo: Boolean
+  }
   input cancelTerminalDealOrderInput {
     dealId: String!
     botId: String!
@@ -1559,6 +1570,58 @@ export const BotSchema = /* GraphQL */ `
     openDeals: Int
     unrealizedProfitUsd: Float
     openCapitalUsd: Float
+  }
+  input getBotWindowStatsInput {
+    id: String!
+    type: botTypeEnum!
+    shareId: String
+  }
+  """
+  A bot's performance over a window of closed deals (by close time), derived
+  from its deals. Money is USD; percentages are fractions. Return and drawdown
+  are over the peak capital the bot had committed at once.
+  """
+  type botWindowStats {
+    "Start of the window (ms); null = lifetime."
+    from: Float
+    closedDeals: Int
+    wins: Int
+    losses: Int
+    winRate: Float
+    realizedProfitUsd: Float
+    grossProfitUsd: Float
+    grossLossUsd: Float
+    profitFactor: FloatOrInfinity
+    peakCapitalUsd: Float
+    returnOnPeakCapital: Float
+    "Deepest fall of realized equity from its peak."
+    maxDrawdownUsd: Float
+    maxDrawdownPerc: Float
+    avgDealDuration: Float
+    maxDealDuration: Float
+    maxDealProfitUsd: Float
+    maxDealLossUsd: Float
+    avgDealProfitUsd: Float
+    avgDealLossUsd: Float
+    maxConsecutiveWins: Int
+    maxConsecutiveLosses: Int
+    avgWinningDealDuration: Float
+    maxWinningDealDuration: Float
+    avgLosingDealDuration: Float
+    maxLosingDealDuration: Float
+    firstCloseTime: Float
+  }
+  type botWindowStatsData {
+    "ms epoch of the last stats reset; null if never reset."
+    resetStatsAfter: Float
+    lifetime: botWindowStats
+    "Deals closed since resetStatsAfter; null if never reset."
+    sinceChange: botWindowStats
+  }
+  type botWindowStatsResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: botWindowStatsData
   }
   type botPairStatsResponse implements BasicResponse {
     status: Status
@@ -3101,6 +3164,7 @@ export const BotSchema = /* GraphQL */ `
   type indicatorSettingsType {
     indicatorLength: Int
     indicatorValue: String
+    indicatorValue2: String
     indicatorCondition: String
     groupId: String
     indicatorInterval: String
@@ -4349,6 +4413,8 @@ export const BotSchema = /* GraphQL */ `
     dca: [Float]
     origBase: Float
     origDca: [Float]
+    multiplier: Float
+    multiplierScope: String
   }
   type filledHistory {
     id: String
@@ -4597,6 +4663,7 @@ export const BotSchema = /* GraphQL */ `
     cu
     gt
     lt
+    bw
   }
   enum rsiValueEnum {
     k
@@ -4857,6 +4924,7 @@ export const BotSchema = /* GraphQL */ `
   input indicatorSettings {
     indicatorLength: Int
     indicatorValue: String
+    indicatorValue2: String
     indicatorCondition: String
     groupId: String
     indicatorInterval: String

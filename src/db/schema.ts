@@ -1193,6 +1193,7 @@ const indicatorsSettings = new Schema({
   },
   indicatorLength: Number,
   indicatorValue: String,
+  indicatorValue2: String,
   indicatorCondition: {
     type: String,
     enum: IndicatorStartConditionEnum,
@@ -2250,6 +2251,8 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
     origBase: Number,
     origDca: [Number],
     reducedToAvailable: Boolean,
+    multiplier: Number,
+    multiplierScope: String,
   },
   tags: [String],
   ac: {
@@ -2427,6 +2430,8 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
     dca: [Number],
     origBase: Number,
     origDca: [Number],
+    multiplier: Number,
+    multiplierScope: String,
   },
   tags: [String],
   flags: [String],

@@ -406,6 +406,8 @@ export enum IndicatorStartConditionEnum {
   cu = 'cu',
   gt = 'gt',
   lt = 'lt',
+  /** value-type indicators only: indicatorValue < value < indicatorValue2 */
+  bw = 'bw',
 }
 
 export enum BBCrossingEnum {
@@ -451,6 +453,8 @@ export type SettingsIndicators = {
   type: IndicatorEnum
   indicatorLength: number
   indicatorValue: string
+  /** upper bound for IndicatorStartConditionEnum.bw */
+  indicatorValue2?: string
   indicatorCondition: IndicatorStartConditionEnum
   indicatorInterval: ExchangeIntervals
   groupId: string
@@ -1285,6 +1289,13 @@ export type Sizes = {
    * other reduced deal: the available balance goes to one deal, not split.
    */
   reducedToAvailable?: boolean
+  /**
+   * The size multiplier an approval extension applied when the deal opened
+   * (absent = 1). `base` / `dca` already hold the scaled deltas.
+   */
+  multiplier?: number
+  /** what `multiplier` scaled: the base order only, or the whole deal */
+  multiplierScope?: 'base' | 'whole'
 }
 
 export enum DCADealFlags {
@@ -1996,7 +2007,14 @@ export interface BotEventSchema extends SchemaI {
 }
 
 /** Who made a bot/deal settings change (change trail). */
-export type ChangeTrailActorType = 'user' | 'ai' | 'api' | 'webhook' | 'system'
+export type ChangeTrailActorType =
+  | 'user'
+  | 'ai'
+  | 'api'
+  | 'webhook'
+  | 'system'
+  /** the owner, from a linked Telegram chat */
+  | 'telegram'
 
 export type ChangeTrailActor = {
   type: ChangeTrailActorType
@@ -2012,6 +2030,13 @@ export type ChangeTrailAction =
   | 'add_funds'
   | 'reduce_funds'
   | 'revert'
+  /** a deal opened with a size multiple set by an extension */
+  | 'open_deal'
+  /** a bot start / stop request */
+  | 'start_bot'
+  | 'stop_bot'
+  /** a bot reload (the dashboard's Restart) */
+  | 'restart_bot'
 
 /**
  * Per-call overrides for the change-trail entry an API-layer entry point

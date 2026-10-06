@@ -117,6 +117,12 @@ import {
   type PairStatsGroup,
   type PairStatsRange,
 } from './pairStats'
+import {
+  buildBotWindowPipeline,
+  dealsClosedSince,
+  foldBotWindowStats,
+  type BotWindowDeal,
+} from './botWindowStats'
 import { IdMute, IdMutex } from '../utils/mutex'
 import { mapDataGridOptionsToMongoOptions } from '../db/utils'
 import { LargeAccountService } from './largeAccount/largeAccountService'
@@ -4878,10 +4884,11 @@ class Bot<T extends UserSchema = UserSchema> {
       (typeof settings.volumeScale !== 'undefined' &&
         oldSettings.settings.volumeScale !== settings.volumeScale) ||
       (typeof settings.orderSizeType !== 'undefined' &&
-        oldSettings.settings.orderSizeType !== settings.orderSizeType) ||
-      (typeof settings.maxNumberOfOpenDeals !== 'undefined' &&
-        oldSettings.settings.maxNumberOfOpenDeals !==
-          settings.maxNumberOfOpenDeals)
+        oldSettings.settings.orderSizeType !== settings.orderSizeType)
+    // `maxNumberOfOpenDeals` is deliberately absent: it changes how many deals
+    // run at once, not the size of any one of them, so every per-deal
+    // aggregate stays comparable. `startBalance` (seeded once from it) is kept
+    // as it was rather than re-seeded.
     const settingKeys = Object.keys(settings)
     if (settingKeys.length > 0) {
       // Seed the ATR/ADR startDca indicator when the merged result scales on
@@ -5129,10 +5136,11 @@ class Bot<T extends UserSchema = UserSchema> {
       (typeof settings.volumeScale !== 'undefined' &&
         oldSettings.settings.volumeScale !== settings.volumeScale) ||
       (typeof settings.orderSizeType !== 'undefined' &&
-        oldSettings.settings.orderSizeType !== settings.orderSizeType) ||
-      (typeof settings.maxNumberOfOpenDeals !== 'undefined' &&
-        oldSettings.settings.maxNumberOfOpenDeals !==
-          settings.maxNumberOfOpenDeals)
+        oldSettings.settings.orderSizeType !== settings.orderSizeType)
+    // `maxNumberOfOpenDeals` is deliberately absent: it changes how many deals
+    // run at once, not the size of any one of them, so every per-deal
+    // aggregate stays comparable. `startBalance` (seeded once from it) is kept
+    // as it was rather than re-seeded.
     const set: { $set: Partial<ComboBotSchema> } = {
       $set: { vars },
     }
@@ -11229,10 +11237,7 @@ class Bot<T extends UserSchema = UserSchema> {
         quoteAsset: assets.get(symbol)?.quoteAsset,
       }))
     })
-    const combo = type === BotType.combo || type === BotType.hedgeCombo
-    const dealsDb = (
-      combo ? this.comboDealsDb : this.dcaDealsDb
-    ) as typeof this.dcaDealsDb
+    const dealsDb = this.statsDealsDb(type)
     const [groups, capital] = await Promise.all([
       dealsDb.aggregate<PairStatsGroup>(buildPairStatsPipeline(botIds, range)),
       dealsDb.aggregate<PairCapitalDeal>(
@@ -11250,6 +11255,76 @@ class Bot<T extends UserSchema = UserSchema> {
       configuredPairs,
       peakCapitalBySymbol(capital.data?.result ?? []),
     )
+    return { status: StatusEnum.ok as const, reason: null, data }
+  }
+
+  private statsDealsDb(type: BotType) {
+    const combo = type === BotType.combo || type === BotType.hedgeCombo
+    return (
+      combo ? this.comboDealsDb : this.dcaDealsDb
+    ) as typeof this.dcaDealsDb
+  }
+
+  /**
+   * Lifetime and since-last-change performance of a DCA / Combo / hedge bot,
+   * folded from its deals — see `botWindowStats.ts`. `sinceChange` is null for
+   * a bot whose stats were never reset. Access is exactly `getBot`'s, as in
+   * `getBotPairStats`.
+   */
+  public async getBotWindowStats(
+    userId: string,
+    type: BotType,
+    id: string,
+    shareId?: string,
+    publicBot = false,
+    paperContext?: boolean,
+  ) {
+    if (type === BotType.grid) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Window statistics are available for DCA and Combo bots',
+        data: null,
+      }
+    }
+    const bot = (await this.getBot(
+      type,
+      userId,
+      id,
+      publicBot,
+      paperContext ?? false,
+      shareId,
+    )) as BaseReturn<Record<string, unknown>>
+    if (bot.status !== StatusEnum.ok || !bot.data) {
+      return bot
+    }
+    const hedge = type === BotType.hedgeDca || type === BotType.hedgeCombo
+    const bots = (
+      hedge ? ((bot.data.bots as Record<string, unknown>[]) ?? []) : [bot.data]
+    ).filter(Boolean)
+    const botIds = bots.map((b) => `${b._id}`)
+    // Hedge legs are reset together; the latest stamp is the hedge's change.
+    const resetStatsAfter =
+      Math.max(0, ...bots.map((b) => Number(b.resetStatsAfter) || 0)) || null
+    const dealsDb = this.statsDealsDb(type)
+    const rows = await dealsDb.aggregate<BotWindowDeal>(
+      buildBotWindowPipeline(botIds),
+    )
+    if (rows.status !== StatusEnum.ok) {
+      return rows
+    }
+    const deals = rows.data?.result ?? []
+    const now = Date.now()
+    const data = {
+      resetStatsAfter,
+      lifetime: foldBotWindowStats(deals, null, now),
+      sinceChange: resetStatsAfter
+        ? foldBotWindowStats(
+            dealsClosedSince(deals, resetStatsAfter),
+            resetStatsAfter,
+            now,
+          )
+        : null,
+    }
     return { status: StatusEnum.ok as const, reason: null, data }
   }
 
@@ -13439,6 +13514,84 @@ class Bot<T extends UserSchema = UserSchema> {
       status: StatusEnum.ok,
       reason: null,
       data: 'Execute next DCA scheduled',
+    }
+  }
+
+  /**
+   * Restart one deal: cancel and re-place its orders without reloading the
+   * whole bot. Feature request:
+   * https://community.gainium.io/t/restart-option-for-individual-deals/5302
+   *
+   * Routing only, like `executeNextDcaLevel`; a refusal (deal not open)
+   * surfaces as a bot message from the worker's `restartDeal`. Covers hedge
+   * DCA / Combo deals too: `combo` picks the deal collection and the owning
+   * child bot is read from the deal.
+   */
+  public async restartDeal(
+    botId: string,
+    dealId: string,
+    userId: string,
+    paperContext: boolean,
+    combo = false,
+  ) {
+    const botType = combo ? BotType.combo : BotType.dca
+    if (!this.useBots) {
+      return await this.callExternalBotService<BaseReturn<string>>(
+        botType,
+        'restartDeal',
+        false,
+        botId,
+        dealId,
+        userId,
+        paperContext,
+        combo,
+      )
+    }
+    // Route by the bot that OWNS the deal, not the id the client sent. A
+    // hedge bot's deals belong to its long or short child, which runs as an
+    // ordinary DCA / Combo bot; the dashboard may hand us the hedge parent.
+    const deal = await (
+      (combo ? this.comboDealsDb : this.dcaDealsDb) as typeof this.dcaDealsDb
+    ).readData({ _id: dealId, userId }, { botId: 1 })
+    if (deal.status === StatusEnum.notok) {
+      return deal
+    }
+    const ownerId = deal.data.result?.botId
+    if (!ownerId) {
+      return this.entityNotFound('Deal')
+    }
+    if (ownerId !== botId) {
+      this.handleDebug(
+        `${loggerPrefix} restartDeal | deal ${dealId} belongs to ${ownerId}, requested via ${botId}`,
+      )
+    }
+    botId = ownerId
+    const findLocal = (combo ? this.comboBots : this.dcaBots).find(
+      (d) => d.id === botId && d.userId === userId,
+    )
+    if (!findLocal) {
+      return this.entityNotFound('Bot')
+    }
+    this.botEventDb.createData({
+      userId,
+      botId,
+      botType,
+      event: 'Restart deal',
+      metadata: { dealId },
+      paperContext,
+      deal: dealId,
+    })
+    this.getWorkerById(findLocal.worker)?.postMessage({
+      do: 'method',
+      botType,
+      botId,
+      method: 'restartDeal',
+      args: [botId, dealId],
+    })
+    return {
+      status: StatusEnum.ok,
+      reason: null,
+      data: 'Deal restart scheduled',
     }
   }
 
