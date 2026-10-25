@@ -4,10 +4,13 @@ import {
   BotStartTypeEnum,
   BotStatusEnum,
   LWConditionEnum,
+  OTELegEnum,
   CloseConditionEnum,
   CloseDCATypeEnum,
+  BaseFundingEnum,
   ComboTpBase,
   CooldownOptionsEnum,
+  CooldownStopTriggerEnum,
   CooldownUnits,
   DCAConditionEnum,
   DCATypeEnum,
@@ -37,6 +40,8 @@ import {
   TradingviewAnalysisSignalEnum,
   TradingviewAnalysisConditionEnum,
   MAEnum,
+  SMOOTHING_VALUES,
+  SmoothingCompareEnum,
   BBCrossingEnum,
   rsiValueEnum,
   rsiValue2Enum,
@@ -54,7 +59,9 @@ import {
   OBFVGRefEnum,
   TrendFilterOperatorEnum,
   SessionRuleEnum,
+  SessionLevelEnum,
 } from '../../../../../types'
+import { CONDITION_INDICATOR_TYPES } from '../../../../indicators/conditions/catalog'
 import {
   COMBO_FORM_DEFAULTS,
   DCA_FORM_DEFAULTS,
@@ -188,6 +195,11 @@ export const indicatorGroupConfig: Record<
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
     enum: Object.values(IndicatorSection),
   },
+  join: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsLogicEnum),
+  },
 }
 
 // Complete field configuration for indicators
@@ -196,7 +208,7 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
   type: {
     required: true,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
-    enum: Object.values(IndicatorEnum),
+    enum: CONDITION_INDICATOR_TYPES,
   },
   indicatorLength: {
     required: true,
@@ -673,6 +685,30 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
     enum: Object.values(STConditionEnum),
   },
+  // Oscillator smoothing (smoothable indicators only). The values are matched
+  // case-insensitively, and `line` + `bw` and smoothing on other indicator
+  // types refused, by the cross-field rule in validators/logic.ts; the enum
+  // lists here are what the generated definitions and OpenAPI document.
+  smoothing: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeString],
+    enum: [...SMOOTHING_VALUES],
+  },
+  smoothingLength: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 1,
+    max: 1000,
+  },
+  smoothingCompare: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeString],
+    enum: Object.values(SmoothingCompareEnum),
+  },
   pcUp: {
     required: false,
     validators: [
@@ -819,7 +855,38 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
   sessionRule: {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
-    enum: [SessionRuleEnum.in, SessionRuleEnum.out],
+    enum: [SessionRuleEnum.in, SessionRuleEnum.out, SessionRuleEnum.levels],
+  },
+  sessionStart: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.canBeEmptyString,
+    ],
+  },
+  sessionEnd: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.canBeEmptyString,
+    ],
+  },
+  sessionTimezone: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.canBeEmptyString,
+    ],
+  },
+  sessionLevelA: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(SessionLevelEnum),
+  },
+  sessionLevelB: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(SessionLevelEnum),
   },
   lwThreshold: {
     required: false,
@@ -845,6 +912,33 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
     enum: Object.values(LWConditionEnum),
+  },
+  oteLeftBars: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+  },
+  oteMinLegSize: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+    ],
+  },
+  oteLevel: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBeNonNegative,
+    ],
+  },
+  oteLeg: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(OTELegEnum),
   },
   percentile: {
     required: false,
@@ -1425,6 +1519,10 @@ export const dcaBotSchemaConfig: Record<
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
     enum: Object.values(CooldownOptionsEnum),
   },
+  cooldownAfterDealStopTrigger: {
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(CooldownStopTriggerEnum),
+  },
   moveSL: { validators: [ValidatorsEnum.shouldBeBoolean] },
   moveSLTrigger: {
     validators: [
@@ -1496,7 +1594,9 @@ export const dcaBotSchemaConfig: Record<
     ],
     min: 1,
   },
-  useCloseAfterXconsecutiveWin: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  useCloseAfterXconsecutiveWin: {
+    validators: [ValidatorsEnum.shouldBeBoolean],
+  },
   closeAfterXconsecutiveWin: {
     validators: [
       ValidatorsEnum.shouldBeString,
@@ -1828,6 +1928,7 @@ export const dcaBotSchemaConfig: Record<
   },
   useLimitPrice: { validators: [ValidatorsEnum.shouldBeBoolean] },
   hodlHourly: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  hodlWeekdays: { validators: [ValidatorsEnum.shouldBeArray] },
   notUseLimitReposition: { validators: [ValidatorsEnum.shouldBeBoolean] },
   stopStatus: {
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
@@ -1998,6 +2099,11 @@ export const dcaBotSchemaConfig: Record<
   },
   allowRaiseToExchangeMin: { validators: [ValidatorsEnum.shouldBeBoolean] },
   reduceToAvailableBalance: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  // main-app spec 044 — short spot only; ignored elsewhere.
+  baseFunding: {
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(BaseFundingEnum),
+  },
   reduceToAvailableMinSize: {
     validators: [
       ValidatorsEnum.shouldBeString,
@@ -2007,6 +2113,18 @@ export const dcaBotSchemaConfig: Record<
     min: 0,
   },
   dcaByMarket: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  // Spec 139 — single position per pair. DCA bots only.
+  singlePosition: { validators: [ValidatorsEnum.shouldBeBoolean] },
+  maxPositionEntries: {
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.canBeEmptyString,
+      ValidatorsEnum.shouldBeValidNumber,
+    ],
+    min: 0,
+    max: 1000,
+    maxPrecision: 0,
+  },
 }
 
 // Combo Bot extends DCA Bot with some additional/overridden fields
@@ -2056,8 +2174,6 @@ export const COMBO_EXCLUDED_FIELDS: (keyof typeof COMBO_FORM_DEFAULTS)[] = [
   'trailingSl',
   'trailingTp',
   'trailingTpPerc',
-  'useMulti',
-  'maxDealsPerPair',
   'dealCloseCondition',
   'useMinTP',
   'minTp',
@@ -2084,6 +2200,7 @@ export const COMBO_EXCLUDED_FIELDS: (keyof typeof COMBO_FORM_DEFAULTS)[] = [
   'dcaVolumeMaxValue',
   'dcaCustom',
   'hodlHourly',
+  'hodlWeekdays',
   'terminalDealType',
   'useFixedTPPrices',
   'useFixedSLPrices',
@@ -2098,11 +2215,14 @@ export const COMBO_EXCLUDED_FIELDS: (keyof typeof COMBO_FORM_DEFAULTS)[] = [
   'dcaByMarket',
   'useLimitPrice',
   'baseSlOn',
+  'singlePosition',
+  'maxPositionEntries',
 ]
 
 export const TERMINAL_DEAL_EXCLUDED_FIELDS: (keyof typeof DCA_FORM_DEFAULTS)[] =
   [
     'gridLevel',
+    'baseFunding',
     'comboSmartGridsCount',
     'type',
     'comboUseSmartGrids',
@@ -2123,6 +2243,7 @@ export const TERMINAL_DEAL_EXCLUDED_FIELDS: (keyof typeof DCA_FORM_DEFAULTS)[] =
     'cooldownAfterDealStopUnits',
     'cooldownAfterDealStopInterval',
     'cooldownAfterDealStopOption',
+    'cooldownAfterDealStopTrigger',
     'useCloseAfterX',
     'closeAfterX',
     'useCloseAfterXloss',
@@ -2185,6 +2306,7 @@ export const TERMINAL_DEAL_EXCLUDED_FIELDS: (keyof typeof DCA_FORM_DEFAULTS)[] =
     'useNoOverlapDeals',
     'dcaCustom',
     'hodlHourly',
+    'hodlWeekdays',
     'stopStatus',
     'comboSlLimit',
     'comboTpLimit',
@@ -2211,6 +2333,8 @@ export const TERMINAL_DEAL_EXCLUDED_FIELDS: (keyof typeof DCA_FORM_DEFAULTS)[] =
     'useSeparateMaxDealsOverAndUnderPerSymbol',
     'maxDealsOverPerSymbol',
     'maxDealsUnderPerSymbol',
+    'singlePosition',
+    'maxPositionEntries',
   ]
 export const gridBotSchemaConfig: Record<
   keyof typeof GRID_FORM_DEFAULTS,

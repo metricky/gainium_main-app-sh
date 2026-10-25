@@ -56,29 +56,39 @@ import {
 } from '../../types'
 import {
   accrueStreamFee,
+  feeAfterAnswerFills,
   hasObservedFee,
   observedFeeOf,
   streamFeeFields,
 } from './orderFee'
 import { isFillEvidenceFree, statesQuantity } from './fillEvidence'
+import { marketReference, placementStampsOf } from './orderSlippage'
 import {
   executionReportRewindsOrder,
   executionReportUnfillsOrder,
+  heldExecutionAheadOfAnswer,
 } from './staleExecutionReport'
 import {
   canRecoverReduceOnlyRemainder,
   isKrakenUsdmUnderfilledReduceOnlyClose,
 } from './reduceOnlyRemainder'
-import { isVenueCanceledRemainderFill } from './remainderFill'
+import {
+  isBelowVenueMinOrderValue,
+  isCancelledLimitSafetyOrder,
+  isVenueCanceledRemainderFill,
+} from './remainderFill'
 import { bitgetSpotMarketBuyQty } from './bitgetMarketBuyAmount'
 import { statsAfterReset } from './dca/botStatsReset'
 import ExchangeChooser from '../exchange/exchangeChooser'
+import { withExchangeCaller } from '../exchange/requestContext'
 import Exchange from '../exchange'
 import { MathHelper } from '../utils/math'
+import { placedOrderType } from './placedOrderType'
 import utils, { isPaper } from '../utils'
 import { resolveConnection } from '../utils/credentials'
 import {
   isAmbiguousOrderFailure,
+  isPlacementReadBackMiss,
   isBatchRouteUnavailable,
   isTransportRetryExhausted,
 } from '../utils/exchange'
@@ -95,7 +105,9 @@ import {
   futuresPosition,
   getErrorSubType,
   indicatorsError,
+  webhookSignalIgnored,
 } from './utils'
+import { UserNotice, userNoticePayload, userNoticeRow } from './userNotice'
 import {
   getSubTypeBehavior,
   getSubTypeLogPolicy,
@@ -106,6 +118,7 @@ import {
 import QuantRulesGuard, { LEVEL2_VIOLATIONS } from './quantRulesGuard'
 import { poisonedSnapshotProfitField } from './redisSnapshotGuard'
 import { mergeOpenOrdersIntoSnapshot } from './orderSnapshotMerge'
+import { isSpentStatus, siblingClientOrderIds } from './clientOrderIdReissue'
 import QtyStepGuard, {
   decimalsToStep,
   deriveAcceptedDecimals,
@@ -153,7 +166,15 @@ const QUANT_RULES_RETRY_JITTER_MS = 5 * 60_000
  */
 const QUANT_RULES_VIOLATION_HEADROOM = 3
 import ComplianceGuard from './complianceGuard'
-import AuthFailureGuard, { isHardAuthFailure } from './authGuard'
+import RiskTierGuard, {
+  isRiskTierRefusal,
+  type RiskTierLevel,
+} from './riskTierGuard'
+import GridReduceOnlyGuard, {
+  type GridReduceOnlyLevel,
+} from './gridReduceOnlyGuard'
+import { isPositionAlreadyClosedReason } from './positionAlreadyClosed'
+import AuthFailureGuard, { isHardAuthFailure, isVenueLockout } from './authGuard'
 import RetryBackoff from './retryBackoff'
 import { ConditionLatch, STANDING_CONDITION_REARM_MS } from './conditionLatch'
 import { PriceStreamGapTracker } from './priceStreamGap'
@@ -207,8 +228,10 @@ import {
   type FundingComputeResult,
 } from './fundingProcessor'
 import { zeroFeeApplies } from './zeroFee'
+import { isComboFundsOrderRow } from './combo/comboDealFunds'
 import Bot from '.'
 import { SKIP_REDIS } from '../config'
+import { paceAccountLookup } from './reconcilePacing'
 
 type AccountCBFunctions = {
   sort: (a: ExecutionReport, b: ExecutionReport) => number
@@ -307,6 +330,50 @@ const isRateLimitReason = (reason: string | undefined) => {
   return rateLimitMessages.some((m) => r.indexOf(m) !== -1)
 }
 
+const isUnknownOrderReason = (reason: string | null | undefined) => {
+  const r = `${reason ?? ''}`.toLowerCase()
+  return unknownOrderMessages.some((m) => r.indexOf(m.toLowerCase()) !== -1)
+}
+
+/**
+ * The venue accepted an earlier cancel of this order and is still finishing
+ * it. Kraken spot: `WOrder:Cancel pending` is a warning, not a refusal.
+ */
+const isCancelInProgressReason = (reason: string | null | undefined) => {
+  const r = `${reason ?? ''}`
+  return (
+    r.indexOf('Order cancellation in progress') !== -1 ||
+    r.indexOf(
+      'Cancellation failed as the order is already under cancelling status',
+    ) !== -1 ||
+    r.indexOf('DUPLICATE_CANCEL_REQUEST') !== -1 ||
+    r.indexOf('Cancel pending') !== -1
+  )
+}
+
+/**
+ * The venue will never cancel this order, so sending the cancel again cannot
+ * help. Coinbase: an order it is filling as an RFQ.
+ */
+const uncancellableMessages = ['RFQ_ORDERS_CANNOT_BE_CANCELLED']
+const isUncancellableReason = (reason: string | null | undefined) =>
+  uncancellableMessages.some((m) => `${reason ?? ''}`.indexOf(m) !== -1)
+
+/**
+ * Back-off before each deferred re-send of a cancel refused as transient
+ * (spec `178`), used when the refusal states no hold of its own.
+ */
+const CANCEL_RETRY_DELAYS_MS = [30_000, 120_000, 600_000, 1_800_000]
+
+/**
+ * The hold the exchange balancer states for a Kraken key it is keeping off the
+ * venue: `… held this key off for another 405s …`. Milliseconds, or 0.
+ */
+const statedHoldMs = (reason: string | undefined) => {
+  const m = /for another (\d+)s/.exec(`${reason ?? ''}`)
+  return m ? +m[1] * 1000 : 0
+}
+
 const mutex = new IdMutex()
 
 const mutexEmit = new IdMutex(30)
@@ -342,6 +409,7 @@ type AllowedMethods =
   | 'sendDealClosedAlert'
   | 'sendDealOpenedAlert'
   | 'sendSafetyOrderFilledAlert'
+  | 'sendMaxDealsReachedAlert'
   | 'checkInDynamicRange'
   | 'checkInRange'
   | 'checkMaxDealsPerPair'
@@ -370,6 +438,7 @@ export type RedisKeys =
   | 'botData'
   | 'exchangeInfo'
   | 'userFee'
+  | 'closeSweeps'
 export const notEnoughErrors = [
   'The purchase amount of each order exceeds the estimated maximum purchase amount',
   'The sell quantity per order exceeds the estimated maximum sell quantity',
@@ -482,6 +551,41 @@ const orderQuarantineMinAgeMs = Number(
 )
 
 /**
+ * The age floor for {@link MainBot.retireUnsentOrder}. It does not need the day
+ * above: that order has no write-ahead row, so it was never sent and there is
+ * no propagation lag to wait out. The floor only keeps out an order whose
+ * write-ahead insert is still in flight in this process. Spec 172.
+ */
+const unsentOrderMinAgeMs = Number(
+  process.env.BOT_UNSENT_ORDER_MIN_AGE_MS ?? 2 * 60 * 1000,
+)
+
+/**
+ * The age floor for retiring an order still at the `'-1'` placeholder that the
+ * venue definitively reports as absent. It has a write-ahead row, so it may
+ * have been sent, but no exchange id ever came back: the process stopped
+ * before the venue's answer was recorded, or the venue never took it. A
+ * Binance or Bybit "does not exist" minutes after that is an answer, not
+ * propagation lag, and holding it to the day below left a deal with no
+ * take-profit for a day. The not-found wordings a venue gives about an order
+ * it took seconds ago ({@link isNotFoundUnreliableJustAfterPlacement}) keep the
+ * day. Spec 177 §1.2.
+ */
+const neverPlacedOrderMinAgeMs = Number(
+  process.env.BOT_NEVER_PLACED_ORDER_MIN_AGE_MS ?? 5 * 60 * 1000,
+)
+
+/**
+ * How old a `'-1'` order must be before a definitive not-found retires it.
+ * Spec 177 §1.2.
+ */
+export function neverPlacedOrderRetireMinAgeMs(reason?: string | null) {
+  return isNotFoundUnreliableJustAfterPlacement(reason)
+    ? orderQuarantineMinAgeMs
+    : neverPlacedOrderMinAgeMs
+}
+
+/**
  * Reconcile-pass tunables. See {@link MainBot.getOrderForReconcile} and
  * {@link MainBot.spreadReconcileStart} for why each exists.
  *
@@ -495,6 +599,33 @@ const reconcileLookupBackoffMs = Number(
   process.env.BOT_RECONCILE_LOOKUP_BACKOFF_MS ?? 750,
 )
 const reconcileSpreadMs = Number(process.env.BOT_RECONCILE_SPREAD_MS ?? 15_000)
+/**
+ * First backoff step after a RATE-LIMITED reconcile lookup. Longer than the
+ * ordinary step: the answer arrives after the connector has already retried
+ * the call in one-second steps, so the account's window needs real room.
+ */
+/**
+ * The reason a paced reconcile lookup carries when it was not made: the
+ * account's lookup budget had no room before the caller's deadline. The order
+ * is left for a later pass — it is neither a venue answer nor a failure.
+ */
+export const reconcileDeferredReason =
+  'Reconcile lookup deferred: exchange account lookup budget in use'
+
+export function isReconcileDeferred(res?: { reason?: string | null }) {
+  return res?.reason === reconcileDeferredReason
+}
+
+/** Longest a paced reconcile-sweep lookup waits for its account's budget. */
+const reconcileSweepPaceMaxWaitMs = Number(
+  process.env.BOT_RECONCILE_PACE_MAX_WAIT_MS ?? 15 * 60_000,
+)
+
+/** Pace paper accounts too (local testing against a simulated limit). */
+const reconcilePacePaper = process.env.BOT_RECONCILE_PACE_PAPER === 'true'
+const reconcileRateLimitBackoffMs = Number(
+  process.env.BOT_RECONCILE_RATE_LIMIT_BACKOFF_MS ?? 1500,
+)
 
 /**
  * Does this failed lookup mean "the venue says this order does not exist", as
@@ -636,6 +767,31 @@ export function isRetirableNeverPlacedOrder(
  * 853 prod warns all read "after 3 attempts" on passes far too fast to have
  * slept even once. See `reconcileUnresolvedWarn`.
  */
+/**
+ * What a reconcile lookup should do after an answer: `done` (the order was
+ * read), `stop` (asking again cannot help) or `retry`.
+ *
+ * Only an OK answer that carries the order is `done`. A venue refusal can
+ * arrive as NOTOK *with* data — Bybit's per-account rate limit does — and was
+ * read as done: the pass logged "Cannot get order … Too many visits" and
+ * skipped the order. A rate limit is retried even though it carries the
+ * transport marker: the window it is waiting on is the account's, and it does
+ * open again within seconds, which is not true of a connector that has just
+ * failed six transport attempts in a row.
+ */
+export function reconcileRetryDecision(res?: {
+  status: StatusEnum
+  reason?: string | null
+  data?: unknown
+}): 'done' | 'stop' | 'retry' {
+  if (res?.status === StatusEnum.ok && res.data) return 'done'
+  if (isDefinitiveOrderNotFound(res)) return 'stop'
+  if (isReconcileDeferred(res ?? undefined)) return 'stop'
+  if (isRateLimitReason(res?.reason ?? undefined)) return 'retry'
+  if (isTransportRetryExhausted(res?.reason)) return 'stop'
+  return 'retry'
+}
+
 export async function reconcileLookup<
   T extends { status: StatusEnum; reason?: string | null; data?: unknown },
 >(
@@ -646,6 +802,8 @@ export async function reconcileLookup<
     sleep: (ms: number) => Promise<void>
     random?: () => number
     onAttempts?: (spent: number) => void
+    /** First backoff step after a rate-limited answer. */
+    rateLimitBackoffMs?: number
   },
 ): Promise<T | undefined> {
   const attempts = Math.max(1, opts.attempts)
@@ -653,10 +811,11 @@ export async function reconcileLookup<
   let spent = 1
   let last = await fetch()
   for (let attempt = 1; attempt < attempts; attempt++) {
-    if (last?.data) break
-    if (isDefinitiveOrderNotFound(last ?? undefined)) break
-    if (isTransportRetryExhausted(last?.reason)) break
-    const base = opts.backoffMs * 2 ** (attempt - 1)
+    if (reconcileRetryDecision(last ?? undefined) !== 'retry') break
+    const step = isRateLimitReason(last?.reason ?? undefined)
+      ? Math.max(opts.backoffMs, opts.rateLimitBackoffMs ?? 0)
+      : opts.backoffMs
+    const base = step * 2 ** (attempt - 1)
     await opts.sleep(Math.round(base * (0.5 + random())))
     last = await fetch()
     spent++
@@ -761,11 +920,31 @@ const unknownOrderMaxAttempts = 5
  * round trip.
  */
 const orderNeverReachedExchange = 'Order not found: no exchange order id'
+/**
+ * The not-found for a `'-1'` order the venue was ASKED about by client order id
+ * and does not hold — unlike {@link orderNeverReachedExchange}, which is the
+ * bot's own answer given without asking. Worded so
+ * {@link isDefinitiveOrderNotFound} matches it. Spec 184 §4.3.
+ */
+const orderAbsentOnVenue =
+  'Order not found: no order under this client order id on the exchange'
 /** Key-scheme version for `MainBot.getNotEnoughOrdersIdByOrder`. Bump when the
  *  key shape changes so counters written under the old scheme are discarded.
  *  Module-level rather than a static member: adding statics to `MainBot`
  *  changes `typeof MainBot` and breaks the mixin casts in helper.ts/dcaHelper.ts. */
 const notEnoughBalanceKeyVersion = 2
+/**
+ * An adaptive-close resend: an order the engine just re-sized to the free
+ * balance it read DIRECTLY from the venue (`acAfter` is set only there). The
+ * not-enough-balance cooldown exists because our cached balance can disagree
+ * with the venue; this order was sized from the venue's own figure, so it must
+ * reach the venue. Without this the cooldown — keyed per (symbol, side) and
+ * screening at the SMALLEST size ever refused — answered the shrunk
+ * take-profit itself, and adaptive close could never place anything.
+ */
+export const isFreshlySizedResend = (order: { acAfter?: number }) =>
+  typeof order.acAfter === 'number' && order.acAfter > 0
+
 /**
  * Cooldown for orders the account cannot fund. Shares its mechanism with
  * {@link ComplianceGuard} — same shape of problem: the venue keeps rejecting
@@ -810,6 +989,16 @@ type LastMethod = {
   start: number
   end: number
 }
+/**
+ * One placement's in-flight handle. See {@link MainBot#beginPlacement}.
+ */
+type PlacementInFlight = {
+  send: (
+    send: () => Promise<BaseReturn<CommonOrder>>,
+  ) => Promise<BaseReturn<CommonOrder>>
+  settle: () => void
+}
+
 /**
  * Common functions for bot
  */
@@ -942,6 +1131,18 @@ class MainBot<T extends IMainBot> {
    */
   private unknownOrderInFlight: Map<string, Promise<null | Order>> = new Map()
   /**
+   * A client order id the venue has already seen → the id its order was re-sent
+   * under. Lets a ladder level that still carries the spent id find the order
+   * that replaced it. See `resolveLevelClientOrderId`. Spec 161.
+   */
+  protected reissuedClientOrderIds: Map<string, string> = new Map()
+  /**
+   * The venue call of each placement still waiting for its answer, by client
+   * order id, resolving to the venue's order id (null on refusal / failure).
+   * See {@link MainBot#awaitPlacementInFlight}. Spec 155 §4.1.
+   */
+  private placementsInFlight: Map<string, Promise<string | null>> = new Map()
+  /**
    * Venue-side order rows prefetched for the reconcile pass currently running,
    * keyed by the id {@link MainBot#getOrder} actually asks the venue for (the
    * translated exchange order id, not our client id). Populated by
@@ -995,6 +1196,13 @@ class MainBot<T extends IMainBot> {
   userStreamRepairPending = false
   /** Hedge mode */
   hedge = false
+  /**
+   * Spec 148: symbol → `leverage|margin|side` this instance last set on the
+   * venue successfully. A keep-orders reload (a settings save) skips symbols
+   * whose entry still matches; any other load rebuilds it from scratch. A
+   * service restart seeds it from the persisted settings (spec 149).
+   */
+  appliedFuturesSettings: Map<string, string> = new Map()
   /** pairs not found during load */
   pairsNotFound: Set<string> = new Set()
   /** ignore errors */
@@ -1107,6 +1315,19 @@ class MainBot<T extends IMainBot> {
       this.handleWarn(
         `Restart order check gave up after ${restartProbeBudgetMs}ms in ${context}: ${this.restartProbeSkipped} order(s) left unprobed — reconcile will pick them up`,
       )
+      // Make that true. Only some venues reconcile on the first user-stream
+      // subscribe, so on the others an order the probe could not reach — now
+      // routinely, when an account's lookup budget is shared by hundreds of
+      // bots — waited for the next reconnect. The sweep is paced on the same
+      // budget and collapses into one already running.
+      const sweep = this.callbackAfterUserStream
+      if (sweep) {
+        setTimeout(() => {
+          void Promise.resolve(sweep(this.botId)).catch((e) =>
+            this.handleDebug(`Post-restart reconcile failed: ${e}`),
+          )
+        }, 0)
+      }
     }
     this.restartProbeStartedAt = 0
     this.restartProbeSkipped = 0
@@ -1164,32 +1385,47 @@ class MainBot<T extends IMainBot> {
    * Record one definitive not-found for an order and quarantine it once the
    * strikes add up. Called only when {@link isDefinitiveOrderNotFound} is true
    * — never on a timeout, a rate-limit or any other transient failure.
+   *
+   * Returns true when it retired the order, so a caller can place what it
+   * stood for. Spec 177 §1.2.
    */
-  protected noteOrderNotFound(order: Order, reason: string) {
-    if (!orderQuarantineStrikes) return
+  protected noteOrderNotFound(order: Order, reason: string): boolean {
+    if (!orderQuarantineStrikes) return false
     const now = +new Date()
     const runId = this.orderCheckRunId || `${now}`
-    // Too young to judge. A venue that says "unknown order id" about an order
-    // placed minutes ago is describing its own propagation lag. Use the most
-    // recent timestamp we have, and refuse to judge at all when we have none —
-    // both choices err towards leaving the order alone.
-    const lastKnownAt = Math.max(order.transactTime ?? 0, order.updateTime ?? 0)
-    if (!lastKnownAt || now - lastKnownAt < orderQuarantineMinAgeMs) return
     // Never reached the venue and the venue confirms it: retire it, the same
     // write-off the unknown-order ladder gives a `-1` order (bug #369), so the
-    // bot stops treating it as resting. Spec 109.
-    if (isRetirableNeverPlacedOrder(order, now, orderQuarantineMinAgeMs)) {
+    // bot stops treating it as resting. Spec 109. Its own, shorter age floor
+    // unless the venue's wording is one it gives about just-placed orders.
+    // Spec 177 §1.2. Never on the bot's own "no exchange order id": that answer
+    // was given without asking the venue, so it confirms nothing. Spec 184 §4.4.
+    if (
+      reason !== orderNeverReachedExchange &&
+      isRetirableNeverPlacedOrder(
+        order,
+        now,
+        neverPlacedOrderRetireMinAgeMs(reason),
+      )
+    ) {
       this.handleLog(
         `Order ${order.clientOrderId} never reached the exchange and the exchange confirms it does not exist (${reason}) — retiring it as CANCELED`,
       )
       const retired = { ...order, status: 'CANCELED' as const }
       this.deleteOrder(order.clientOrderId)
       this.updateOrderOnDb(retired)
-      return
+      return true
+    }
+    // Too young to judge. A venue that says "unknown order id" about an order
+    // placed minutes ago is describing its own propagation lag. Use the most
+    // recent timestamp we have, and refuse to judge at all when we have none —
+    // both choices err towards leaving the order alone.
+    const lastKnownAt = Math.max(order.transactTime ?? 0, order.updateTime ?? 0)
+    if (!lastKnownAt || now - lastKnownAt < orderQuarantineMinAgeMs) {
+      return false
     }
     const current = order.quarantine
     // Already quarantined, or already struck in this run: nothing new was learned.
-    if (current?.since || (current && current.runId === runId)) return
+    if (current?.since || (current && current.runId === runId)) return false
     const next: OrderQuarantine = {
       strikes: (current?.strikes ?? 0) + 1,
       firstAt: current?.firstAt ?? now,
@@ -1204,6 +1440,36 @@ class MainBot<T extends IMainBot> {
     order.quarantine = next
     this.setOrder(order)
     this.updateOrderOnDb(order)
+    return false
+  }
+
+  /**
+   * Drop an order the venue definitively reports as absent when it provably
+   * never left this bot. That means it still carries the `'-1'` placeholder
+   * and Mongo has no row for it. `sendOrderToExchange` writes that row BEFORE
+   * the send, so a missing row means the send never happened. This is the
+   * shape a process stop leaves behind when it lands between "the order is in
+   * the map, and so in the Redis snapshot" and "the write-ahead insert". Unlike
+   * {@link MainBot.noteOrderNotFound}, there is no day to wait out. Returns
+   * whether it dropped the order, so the caller can place what it stood for.
+   * Spec 172 §1.1.3.
+   */
+  protected async retireUnsentOrder(order: Order, reason: string) {
+    if (`${order.orderId ?? ''}` !== noExchangeOrderId) return false
+    const lastKnownAt = Math.max(order.transactTime ?? 0, order.updateTime ?? 0)
+    if (!lastKnownAt || +new Date() - lastKnownAt < unsentOrderMinAgeMs) {
+      return false
+    }
+    const row = await this.ordersDb.readData(
+      { clientOrderId: order.clientOrderId },
+      { _id: 1 },
+    )
+    if (row.status !== StatusEnum.ok || row.data?.result) return false
+    this.handleLog(
+      `Order ${order.clientOrderId} was never sent: it has no exchange id and no saved record, and the exchange confirms it does not exist (${reason}) — dropping it`,
+    )
+    this.deleteOrder(order.clientOrderId)
+    return true
   }
 
   /**
@@ -1294,6 +1560,216 @@ class MainBot<T extends IMainBot> {
     return clientOrderId
   }
 
+  /**
+   * Record the venue's own id on an order that still carries the `'-1'`
+   * placeholder. Never overwrites a real id. Spec 154 §4.1.
+   *
+   * A worker restart between "the venue accepted the order" and "we processed
+   * its answer" leaves the write-ahead row at `'-1'` while the order rests on
+   * the venue. On the venues addressed by exchange id that placeholder then
+   * reads as "never placed", and the order is written off while it is live.
+   */
+  protected async adoptExchangeOrderId(
+    order: Order,
+    venueOrderId?: string | number | null,
+  ): Promise<boolean> {
+    const id = `${venueOrderId ?? ''}`
+    if (
+      `${order.orderId ?? ''}` !== noExchangeOrderId ||
+      !id ||
+      id === noExchangeOrderId
+    ) {
+      return false
+    }
+    this.handleWarn(
+      `Order ${order.clientOrderId} had no exchange order id, but ${this.data?.exchange} holds it as ${id} — recording it`,
+    )
+    order.orderId = id
+    const held = this.getOrderFromMap(order.clientOrderId)
+    if (held && held !== order) {
+      held.orderId = id
+    }
+    if (held) {
+      this.setOrder(held)
+    }
+    await this.updateOrderOnDb(held ?? order)
+    return true
+  }
+
+  /**
+   * Mark a placement as in flight from the moment its `'-1'` row is written
+   * ahead, so a cancel or the unknown-order ladder waits for its answer instead
+   * of reading the placeholder as "never placed". Spec 155 §4.1, widened by
+   * spec 192 §4.1 to cover the pre-send guards as well as the venue call.
+   *
+   * `send` runs the venue call and resolves the handle with the id the venue
+   * returned (nothing on refusal / failure). `settle` resolves it with nothing
+   * when the placement leaves without sending; call it before any follow-up
+   * work on that path, so a waiter cannot deadlock on a lock that work takes.
+   * The first of the two wins.
+   */
+  protected beginPlacement(clientOrderId: string): PlacementInFlight {
+    let resolve: (venueId: string | null) => void = () => undefined
+    const venueId = new Promise<string | null>((r) => (resolve = r))
+    const inFlight = (this.placementsInFlight ??= new Map())
+    inFlight.set(clientOrderId, venueId)
+    let settled = false
+    const settle = (id: string | null) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      if (inFlight.get(clientOrderId) === venueId) {
+        inFlight.delete(clientOrderId)
+      }
+      resolve(id)
+    }
+    return {
+      send: (
+        send: () => Promise<BaseReturn<CommonOrder>>,
+      ): Promise<BaseReturn<CommonOrder>> => {
+        const request = send()
+        request.then(
+          (r) =>
+            settle(
+              r.status === StatusEnum.ok &&
+                r.data?.orderId &&
+                `${r.data.orderId}` !== noExchangeOrderId
+                ? `${r.data.orderId}`
+                : null,
+            ),
+          () => settle(null),
+        )
+        return request
+      },
+      settle: () => settle(null),
+    }
+  }
+
+  /**
+   * When `order` still carries `'-1'` because its placement is in flight, wait
+   * for the venue's answer and record the id it returned. A refused placement
+   * leaves the order as it was. Spec 155 §4.2/§4.3.
+   */
+  protected async awaitPlacementInFlight(order: Order) {
+    const pending = this.placementsInFlight?.get(order.clientOrderId)
+    if (!pending || `${order.orderId ?? ''}` !== noExchangeOrderId) {
+      return
+    }
+    this.handleLog(
+      `Order ${order.clientOrderId} is still being placed, waiting for ${this.data?.exchange}'s answer before acting on it`,
+    )
+    const venueId = await pending
+    if (venueId) {
+      await this.adoptExchangeOrderId(order, venueId)
+    }
+  }
+
+  /**
+   * A placement reply for an order the bot had already retired as CANCELED
+   * while it still had no exchange id: no cancel ever reached the venue, so the
+   * venue holds an order no deal tracks. Cancel it there if it is still open;
+   * if it has fills, say so loudly — they belong to no deal. Spec 155 §4.4.
+   */
+  protected async cancelOrphanedPlacement(order: Order, venue: CommonOrder) {
+    const filled = +venue.executedQty || 0
+    if (filled > 0) {
+      this.handleError(
+        `Order ${order.clientOrderId} (${venue.orderId}) was written off as CANCELED while it was being placed, but ${this.data?.exchange} executed ${filled} of ${order.origQty} ${order.symbol} (${venue.status}). Deal ${order.dealId} does not hold these fills`,
+      )
+    }
+    if (
+      !this.exchange ||
+      (venue.status !== 'NEW' && venue.status !== 'PARTIALLY_FILLED')
+    ) {
+      return
+    }
+    const byExchangeId =
+      this.data?.exchange === ExchangeEnum.coinbase ||
+      this.data?.exchange === ExchangeEnum.kraken ||
+      this.kucoinFullFutures
+    this.handleWarn(
+      `Order ${order.clientOrderId} was written off as CANCELED while it was being placed, and ${this.data?.exchange} has it open as ${venue.orderId}. Cancelling it there`,
+    )
+    const res = await this.exchange.cancelOrder({
+      symbol: order.symbol,
+      newClientOrderId: byExchangeId
+        ? `${venue.orderId}`
+        : order.clientOrderId,
+    })
+    if (res.status !== StatusEnum.ok) {
+      this.handleError(
+        `Order ${order.clientOrderId} (${venue.orderId}) could not be cancelled on ${this.data?.exchange} after it was written off: ${res.reason}. It may still fill outside deal ${order.dealId}`,
+      )
+    } else if (+res.data.executedQty > filled) {
+      this.handleError(
+        `Order ${order.clientOrderId} (${venue.orderId}) executed ${res.data.executedQty} of ${order.origQty} ${order.symbol} on ${this.data?.exchange} before it was cancelled. Deal ${order.dealId} does not hold these fills`,
+      )
+    }
+  }
+
+  /**
+   * The venues {@link MainBot#venueOrderId} addresses by exchange id cannot be
+   * asked about a `'-1'` order by that id. Before such an order is treated as
+   * "never reached the venue", look for it by our client order id and adopt
+   * its real id if found. Spec 154 §4.2/§4.5, spec 184 §4.2.
+   *
+   * Kraken spot answers a client-id `getOrder` exactly, from its open AND
+   * closed orders (`cl_ord_id`), so a filled order is found too. Coinbase and
+   * KuCoin full futures expose the client id only on their open-orders list.
+   *
+   * `null` = not applicable (another venue, or the order has a real id).
+   * `ok(true|false)` = the venue answered and does / does not hold the order.
+   * `notok` = the lookup itself failed, so nothing is known.
+   */
+  protected async resolveNeverPlacedOrder(
+    order: Order,
+  ): Promise<BaseReturn<boolean> | null> {
+    if (!this.exchange || `${order.orderId ?? ''}` !== noExchangeOrderId) {
+      return null
+    }
+    if (this.data?.exchange === ExchangeEnum.kraken) {
+      const found = await this.exchange.getOrder({
+        symbol: order.symbol,
+        newClientOrderId: order.clientOrderId,
+      })
+      if (found.status === StatusEnum.ok && found.data) {
+        const adopted = await this.adoptExchangeOrderId(
+          order,
+          found.data.orderId,
+        )
+        return { status: StatusEnum.ok, reason: null, data: adopted }
+      }
+      if (isDefinitiveOrderNotFound(found)) {
+        return { status: StatusEnum.ok, reason: null, data: false }
+      }
+      return {
+        status: StatusEnum.notok,
+        reason: `Cannot look up ${order.symbol} order ${order.clientOrderId} by client order id: ${found.reason ?? 'no data'}`,
+        data: null,
+      }
+    }
+    if (
+      this.data?.exchange !== ExchangeEnum.coinbase &&
+      !this.kucoinFullFutures
+    ) {
+      return null
+    }
+    const open = await this.exchange.getAllOpenOrders(order.symbol, true)
+    if (open.status !== StatusEnum.ok || !Array.isArray(open.data)) {
+      return {
+        status: StatusEnum.notok,
+        reason: `Cannot look up open ${order.symbol} orders for ${order.clientOrderId}: ${open.reason ?? 'no data'}`,
+        data: null,
+      }
+    }
+    const live = open.data.find((o) => o.clientOrderId === order.clientOrderId)
+    const adopted = live
+      ? await this.adoptExchangeOrderId(order, live.orderId)
+      : false
+    return { status: StatusEnum.ok, reason: null, data: adopted }
+  }
+
   protected async primeReconcileBatch(orders: Order[]) {
     this.reconcileBatch = null
     if (!this.exchange || !this.data || orders.length < 2) {
@@ -1322,23 +1798,38 @@ class MainBot<T extends IMainBot> {
         symbol,
         newClientOrderIds: ids,
       })
-      if (res.status !== StatusEnum.ok || !res.data?.length) {
-        // A venue or transport that cannot batch says so once and is not asked
-        // again by this process. The reason is not inspected: every non-ok
-        // answer means "resolve these yourself", which the caller does anyway.
-        unsupportedOrderBatch.add(this.data.exchange)
+      if (res.status !== StatusEnum.ok) {
+        // Every non-ok answer means "resolve these yourself", which the caller
+        // does anyway. Only an answer that says the venue cannot batch latches
+        // that for the process: a rate limit or a timeout used to latch it too,
+        // so one bad call turned batching off until the next restart.
+        if (isBatchRouteUnavailable(res.reason)) {
+          unsupportedOrderBatch.add(this.data.exchange)
+        }
+        return
+      }
+      if (!res.data?.length) {
+        // A good answer with no rows is the venue answering, not declining:
+        // OKX resolves a batch from the open-orders list, so it comes back
+        // empty when every order has filled or been cancelled since. Those are
+        // resolved one by one this pass, and the next pass still batches.
         return
       }
       const map = new Map<string, CommonOrder>()
+      // Under both ids: `getOrder` asks by the client id on most venues but by
+      // the venue's order id where `venueOrderId` translates it (KuCoin
+      // futures, Kraken, Coinbase). Keyed by the client id alone, a row for
+      // one of those could never be found.
       for (const order of res.data) {
-        const key = order.clientOrderId || order.orderId
-        if (key) {
-          map.set(`${key}`, order)
+        for (const key of [order.clientOrderId, order.orderId]) {
+          if (key) {
+            map.set(`${key}`, order)
+          }
         }
       }
       this.reconcileBatch = map.size ? map : null
       this.handleDebug(
-        `Reconcile prefetch resolved ${map.size}/${ids.length} orders in one call`,
+        `Reconcile prefetch resolved ${new Set(map.values()).size}/${ids.length} orders in one call`,
       )
     } catch (e) {
       // Never fatal: the pass proceeds one order at a time.
@@ -1518,6 +2009,11 @@ class MainBot<T extends IMainBot> {
       fromCache?: boolean
       symbol?: string
       onAttempts?: (spent: number) => void
+      /**
+       * A bulk pass (restart probe, reconnect sweep): share the account's
+       * lookup budget with every other bot on it. See `reconcilePacing.ts`.
+       */
+      pace?: boolean
     } = {},
   ) {
     const symbol = opts.symbol ?? o.symbol
@@ -1530,15 +2026,55 @@ class MainBot<T extends IMainBot> {
       opts.onAttempts?.(1)
       return await this.getOrder(o.clientOrderId, symbol, fromCache)
     }
-    return await reconcileLookup(
-      () => this.getOrder(o.clientOrderId, symbol, fromCache),
+    // Inside the restart probe the wait may use what is left of the probe's
+    // budget and no more, so pacing never delays a bot's start beyond what the
+    // probe already allows; a sweep runs in the background and may wait longer.
+    const paceUntil = opts.pace
+      ? this.restartProbeStartedAt
+        ? this.restartProbeStartedAt + restartProbeBudgetMs
+        : Date.now() + reconcileSweepPaceMaxWaitMs
+      : undefined
+    const res = await reconcileLookup(
+      () => this.getOrder(o.clientOrderId, symbol, fromCache, paceUntil),
       {
         attempts: reconcileLookupAttempts,
         backoffMs: reconcileLookupBackoffMs,
+        rateLimitBackoffMs: reconcileRateLimitBackoffMs,
         sleep: utils.sleep,
         onAttempts: opts.onAttempts,
       },
     )
+    // Counted with the probe's other skipped orders, in its one summary line.
+    if (isReconcileDeferred(res) && this.restartProbeStartedAt) {
+      this.restartProbeSkipped += 1
+    }
+    return res
+  }
+
+  /**
+   * Hold one reconcile lookup to this bot's exchange account budget — shared
+   * with every other bot on the account, in every thread and bot service. See
+   * `reconcilePacing.ts`. Logged when it actually waited.
+   */
+  protected async paceReconcileLookup(until: number): Promise<boolean> {
+    const account = this.data?.exchangeUUID
+    if (!account) return true
+    // Paper accounts have no venue budget to protect, and one paper account
+    // routinely carries a user's whole fleet.
+    if (this.data?.paperContext && !reconcilePacePaper) return true
+    const redis = this.redisDb
+    const { waitedMs, admitted } = await paceAccountLookup(`${account}`, {
+      incr: async (key) =>
+        redis && redis.isReady ? await redis.incr(key) : undefined,
+      expire: async (key, sec) =>
+        redis && redis.isReady ? await redis.expire(key, sec) : undefined,
+      sleep: utils.sleep,
+      maxWaitMs: Math.max(0, until - Date.now()),
+    })
+    if (waitedMs >= 1000) {
+      this.handleDebug(`Reconcile lookup paced ${waitedMs}ms for its account`)
+    }
+    return admitted
   }
 
   /**
@@ -1642,6 +2178,9 @@ class MainBot<T extends IMainBot> {
           : this.botType,
         terminal,
         paperContext: !!this.data?.paperContext,
+        ...(this.data?.exchangeUUID
+          ? { exchangeUUID: this.data.exchangeUUID }
+          : {}),
       },
       { $inc: { profitUsd: usd } },
       undefined,
@@ -1814,7 +2353,9 @@ class MainBot<T extends IMainBot> {
   async setToRedis<T>(key: RedisKeys, data: T) {
     try {
       if (this.redisDb && this.redisDb.isReady) {
-        this.redisDb.hSet(this.botId, key, JSON.stringify(data))
+        // Awaited so a caller that awaits this knows the snapshot is written
+        // (a Combo funds rebuild clears its durable marker only after).
+        await this.redisDb.hSet(this.botId, key, JSON.stringify(data))
       }
     } catch (e) {
       this.handleErrors(
@@ -1831,7 +2372,7 @@ class MainBot<T extends IMainBot> {
   async removeFromRedis(key: RedisKeys) {
     try {
       if (this.redisDb && this.redisDb.isReady) {
-        this.redisDb.hDel(this.botId, key)
+        await this.redisDb.hDel(this.botId, key)
       }
     } catch (e) {
       this.handleErrors(
@@ -1993,6 +2534,24 @@ class MainBot<T extends IMainBot> {
       return
     }
     return this.orders.get(key)
+  }
+
+  /**
+   * This bot's order under a client order id: from memory, else its stored
+   * row. A failed read answers `undefined`, as for an unknown id.
+   */
+  private async findOwnOrder(clientOrderId: string): Promise<Order | undefined> {
+    const held = this.getOrderFromMap(clientOrderId)
+    if (held) {
+      return held
+    }
+    const stored = await this.ordersDb.readData({
+      clientOrderId,
+      botId: this.botId,
+    })
+    return stored.status === StatusEnum.ok
+      ? (stored.data?.result ?? undefined)
+      : undefined
   }
 
   deleteOrder(key: string, setToRedis = true) {
@@ -2507,6 +3066,11 @@ class MainBot<T extends IMainBot> {
         subaccount,
         shouldCheckAffiliate,
       )
+      this.exchange?.setRequestContext({
+        userId: this.userId,
+        botId: this.botId,
+        exchangeUUID,
+      })
       this.handleLog('Load exchange provider')
       if (update) {
         return
@@ -3194,6 +3758,98 @@ class MainBot<T extends IMainBot> {
   }
 
   /**
+   * Tell the user the engine refused, dropped or failed an action THEY asked
+   * for. Every user-initiated method calls this at an early exit that would
+   * otherwise only reach the log.
+   *
+   * Deliberately outside `handleErrors`/`processError`: those coalesce repeats
+   * into one row per window (`Not enough balance` is one row per UTC day) and
+   * back off re-raises, which is right for a condition the engine hits on its
+   * own every cycle and wrong for a click — the second click was answered with
+   * nothing. `force` only skipped the backoff, never the grouping. So this
+   * writes one shown row per call, emits it at once, and never touches the
+   * bot's status: a refused action is not a broken bot.
+   *
+   * Callers must only reach this from a user-initiated path (a click, an API
+   * call, a start/stop), never from a per-tick loop.
+   */
+  async reportUserRefusal(
+    reason: string,
+    symbol?: string,
+    type: MessageTypeEnum = MessageTypeEnum.warning,
+  ): Promise<void> {
+    if (this.ignoreErrors) {
+      return
+    }
+    this.handleWarn(`User action refused | ${reason}`)
+    this.pushLogs(reason, 'warning')
+    try {
+      const time = Date.now()
+      const notice: UserNotice = {
+        userId: this.userId,
+        botId: this.data?.parentBotId || this.botId,
+        botType: this.data?.parentBotId
+          ? this.botType === BotType.dca
+            ? BotType.hedgeDca
+            : BotType.hedgeCombo
+          : this.botType,
+        botName: this.data?.settings?.name,
+        message: reason,
+        type,
+        symbol,
+        exchange: this.data?.exchange,
+        paperContext: !!this.data?.paperContext,
+        // @ts-ignore grid settings carry no `type`
+        terminal: this.data?.settings?.type === DCATypeEnum.terminal,
+      }
+      this.botEventDb.createData({
+        userId: this.userId,
+        botId: this.botId,
+        event: 'Bot warning',
+        botType: this.botType,
+        description: `Warning: ${reason}`,
+        paperContext: !!this.data?.paperContext,
+        symbol,
+        type,
+      })
+      const saved = await this.messagesDb.createData(
+        userNoticeRow(notice, time),
+      )
+      const _id =
+        saved?.status === StatusEnum.ok && saved.data
+          ? `${saved.data._id}`
+          : v4()
+      this.emit('bot message', userNoticePayload(notice, _id, time))
+    } catch (e) {
+      this.handleWarn(
+        `Cannot report refused user action | ${(e as Error)?.message ?? e}`,
+      )
+    }
+  }
+
+  /**
+   * A webhook signal the bot's settings deliberately ignore. The semantics are
+   * unchanged — the signal is still ignored — but the user is told why, through
+   * the ordinary backoff and log policy (signals can arrive every bar).
+   */
+  reportIgnoredWebhookSignal(reason: string, symbol?: string) {
+    this.handleLog(`Webhook signal ignored | ${reason}`)
+    return this.processError(
+      this.botId,
+      webhookSignalIgnored,
+      // @ts-ignore grid settings carry no `type`
+      this.data?.settings?.type === DCATypeEnum.terminal,
+      false,
+      true,
+      reason,
+      Date.now(),
+      reason,
+      false,
+      symbol,
+    )
+  }
+
+  /**
    * Prepare message
    *
    * Send it via socket to subscribers
@@ -3527,6 +4183,36 @@ class MainBot<T extends IMainBot> {
       notEnoughBalance: this.data.notEnoughBalance,
     })
     this.checkNotEnoughBalanceErrors(this.botId)
+  }
+
+  /**
+   * Forget the not-enough-balance evidence for `symbol`, both sides, ahead of
+   * a USER-initiated re-send (restart deal). The cooldown is there to stop the
+   * engine re-asking the venue on its own; a user who has just added funds and
+   * asks for the orders again is new information. Left in place, the cooldown
+   * answered the restart from its own cache for up to `maxMs` and reported
+   * "Not enough balance" next to a free balance far above the order size.
+   * Automatic retries are untouched: if the venue still refuses, the counter
+   * re-arms the guard exactly as on a first shortfall.
+   */
+  protected async clearNotEnoughBalanceForSymbol(symbol: string) {
+    for (const side of [OrderSideEnum.buy, OrderSideEnum.sell]) {
+      const order = { symbol, side, botId: this.botId } as Order
+      const id = this.getNotEnoughOrdersIdByOrder(order)
+      const nb = this.data?.notEnoughBalance
+      if (
+        nb?.orders?.[id] !== undefined ||
+        nb?.refusedRequired?.[id] !== undefined ||
+        nb?.refusedRequiredMax?.[id] !== undefined
+      ) {
+        this.handleLog(
+          `${this.notEnoughBalanceLogPrefix} Reset not enough balance guard for ${id} on user request`,
+        )
+        await this.updateNotEnoughBalanceErrors(order, 0, true)
+      } else {
+        await notEnoughBalanceBackoff.clear([this.botId, id])
+      }
+    }
   }
 
   /**
@@ -4155,6 +4841,11 @@ class MainBot<T extends IMainBot> {
             if (allPositions) {
               this.handleLog(`Got hedge: ${hedge?.data}`)
             }
+            // Spec 148: only a keep-orders reload may trust what an earlier
+            // load of this instance already set; every other load re-applies.
+            if (!this.reload) {
+              this.appliedFuturesSettings = new Map()
+            }
             for (const symbol of [this.data.settings.pair].flat()) {
               const hedgeNull = hedge === null
               if (hedgeNull) {
@@ -4232,12 +4923,6 @@ class MainBot<T extends IMainBot> {
                   }
                 }
               }
-              if (skipFutures) {
-                continue
-              }
-              positionsRequest =
-                positionsRequest ??
-                (await this.exchange.futures_getPositions(symbol))
               const requiredSide =
                 //@ts-ignore
                 this.data.settings.futuresStrategy === FuturesStrategyEnum.long
@@ -4249,6 +4934,31 @@ class MainBot<T extends IMainBot> {
                     : this.data.settings.strategy === StrategyEnum.long
                       ? 'LONG'
                       : 'SHORT'
+              const leverage =
+                this.data.settings.marginType !== BotMarginTypeEnum.inherit
+                  ? (this.data.settings.leverage ?? 1)
+                  : 1
+              const margin =
+                this.data.settings.marginType === BotMarginTypeEnum.cross
+                  ? MarginType.CROSSED
+                  : MarginType.ISOLATED
+              const leverageSide = !hedge?.data
+                ? PositionSide.BOTH
+                : requiredSide === 'LONG'
+                  ? PositionSide.LONG
+                  : PositionSide.SHORT
+              const appliedKey = `${leverage}|${margin}|${leverageSide}`
+              if (skipFutures) {
+                // Spec 149: the previous process applied these settings and
+                // they did not change across the restart, so the first save
+                // after it is a reload like any other. A changed value, a new
+                // pair or a venue that disagrees still forces the calls below.
+                this.appliedFuturesSettings.set(symbol, appliedKey)
+                continue
+              }
+              positionsRequest =
+                positionsRequest ??
+                (await this.exchange.futures_getPositions(symbol))
               const findPosition = (positionsRequest?.data ?? []).find(
                 (p) =>
                   p.symbol === symbol &&
@@ -4414,29 +5124,37 @@ class MainBot<T extends IMainBot> {
                         : p.positionSide)
                     : true),
               )
-              const leverage =
-                this.data.settings.marginType !== BotMarginTypeEnum.inherit
-                  ? (this.data.settings.leverage ?? 1)
-                  : 1
-              const margin =
-                this.data.settings.marginType === BotMarginTypeEnum.cross
-                  ? MarginType.CROSSED
-                  : MarginType.ISOLATED
-
-              if (
+              // Spec 148: a settings save on a bot with hundreds of pairs spent
+              // minutes here, two venue round trips per pair, while holding the
+              // bot's method lock — a manual deal close queued behind it.
+              // A venue that reports this symbol at other values is corrected
+              // as before; the skip covers only "nothing reported" or "agrees".
+              const leverageMismatch =
+                !zeroPosition || +zeroPosition.leverage !== this.currentLeverage
+              const marginMismatch =
                 !zeroPosition ||
-                +zeroPosition.leverage !== this.currentLeverage
+                (zeroPosition.isolated && margin === MarginType.CROSSED) ||
+                (!zeroPosition.isolated && margin === MarginType.ISOLATED)
+              if (
+                this.reload &&
+                this.appliedFuturesSettings.get(symbol) === appliedKey &&
+                (!zeroPosition || (!leverageMismatch && !marginMismatch))
               ) {
+                this.handleDebug(
+                  `Leverage ${leverage} and margin ${margin} already set for ${symbol}`,
+                )
+                continue
+              }
+              let applied = true
+
+              if (leverageMismatch) {
                 const leverageResult = await this.exchange.changeLeverage({
                   symbol,
                   leverage,
-                  side: !hedge?.data
-                    ? PositionSide.BOTH
-                    : requiredSide === 'LONG'
-                      ? PositionSide.LONG
-                      : PositionSide.SHORT,
+                  side: leverageSide,
                 })
                 if (leverageResult.status === StatusEnum.notok) {
+                  applied = false
                   this.handleErrors(
                     `Cannot set leverage for ${symbol}: ${leverageResult.reason}`,
                     'load data',
@@ -4450,11 +5168,7 @@ class MainBot<T extends IMainBot> {
                 )
               }
 
-              if (
-                !zeroPosition ||
-                (zeroPosition.isolated && margin === MarginType.CROSSED) ||
-                (!zeroPosition.isolated && margin === MarginType.ISOLATED)
-              ) {
+              if (marginMismatch) {
                 const marginResult = await this.exchange.changeMargin({
                   symbol,
                   margin,
@@ -4466,6 +5180,7 @@ class MainBot<T extends IMainBot> {
                     -1 &&
                   marginResult.reason.indexOf('Multi-Assets') === -1
                 ) {
+                  applied = false
                   this.handleErrors(
                     `Cannot set margin for ${symbol}: ${marginResult.reason}`,
                     'load data',
@@ -4477,6 +5192,11 @@ class MainBot<T extends IMainBot> {
                 this.handleLog(
                   `No need to change margin ${margin} for ${symbol}`,
                 )
+              }
+              if (applied) {
+                this.appliedFuturesSettings.set(symbol, appliedKey)
+              } else {
+                this.appliedFuturesSettings.delete(symbol)
               }
             }
           }
@@ -4492,6 +5212,48 @@ class MainBot<T extends IMainBot> {
   }
 
   /**
+   * Every row of the given deals that a load without the Redis snapshot reads
+   * (`query`, or the default bot query), or `null` when there are none to read
+   * or the read failed — the caller then keeps the snapshot's rows.
+   */
+  private async loadDealOrdersFromDb(
+    query: QueryFilter<ClearOrderSchema> | undefined,
+    dealIds: string[],
+  ): Promise<{ dealIds: Set<string>; rows: ClearOrderSchema[] } | null> {
+    if (!dealIds.length) {
+      return null
+    }
+    const ids = [...new Set(dealIds.map((d) => `${d}`))]
+    const read = await this.ordersDb.readData(
+      {
+        $and: [
+          query ?? {
+            botId: this.botId,
+            status: { $nin: ['CANCELED', 'EXPIRED'] },
+            typeOrder: {
+              $nin: [TypeOrderEnum.liquidation, TypeOrderEnum.br],
+            },
+          },
+          { botId: this.botId, dealId: { $in: ids } },
+        ],
+      } as QueryFilter<ClearOrderSchema>,
+      undefined,
+      {},
+      true,
+    )
+    if (read.status === StatusEnum.notok) {
+      this.handleWarn(
+        `Cannot read the orders of deals ${ids.join(', ')} from DB, keeping the redis snapshot: ${read.reason}`,
+      )
+      return null
+    }
+    this.handleLog(
+      `Loaded ${read.data.result.length} orders of deals ${ids.join(', ')} from DB instead of the redis snapshot`,
+    )
+    return { dealIds: new Set(ids), rows: read.data.result }
+  }
+
+  /**
    * Read orders from {@link MainBot#ordersDb}<br />
    *
    * @returns {Promise<ClearOrderSchema[]>} Array of orders
@@ -4501,6 +5263,7 @@ class MainBot<T extends IMainBot> {
     query?: QueryFilter<ClearOrderSchema>,
     skipRedis = false,
     dealIds: string[] = [],
+    dbDealIds: string[] = [],
   ): Promise<ClearOrderSchema[]> {
     const id = this.startMethod('loadOrders main')
     // The Redis order snapshot is a COLD-START shortcut only, hence the same
@@ -4539,7 +5302,21 @@ class MainBot<T extends IMainBot> {
         // from it, and the restart check placed both again. Merge in the open
         // rows Mongo holds for these deals. Scoped by `dealId` (indexed) to
         // open statuses, so a mass restart reads no order history. Spec 109.
-        const restored = orders.map((o) => ({ ...o, _id: o._id }))
+        // Deals whose stored copy the caller found newer than the snapshot
+        // (`dbDealIds`, e.g. a Combo add / reduce funds booked but not yet
+        // rebuilt — main-app spec 047 §2.3.7) take ALL their rows from Mongo,
+        // the way a load without the snapshot does. The snapshot predates the
+        // booking: it still holds the book the booking was cancelling, and it
+        // lacks the filled funds order the deal's balances are read from.
+        // Merging only Mongo's OPEN rows left the cancelled rows live in
+        // memory, and the restart check placed them again.
+        const fromDb = await this.loadDealOrdersFromDb(query, dbDealIds)
+        const restored = orders
+          .filter((o) => !fromDb || !fromDb.dealIds.has(`${o.dealId}`))
+          .map((o) => ({ ...o, _id: o._id }))
+        if (fromDb) {
+          restored.push(...fromDb.rows)
+        }
         const ids = [
           ...new Set([
             ...dealIds,
@@ -4751,7 +5528,9 @@ class MainBot<T extends IMainBot> {
         } as BaseReturn<FreeAsset>
       }
     }
-    const result = await this.exchange.getBalance()
+    const result = await withExchangeCaller('bot.balancesFromExchange', () =>
+      this.exchange!.getBalance(),
+    )
     if (result.status === StatusEnum.notok) {
       // Open/widen the cooldown only for a real, venue-returned hard-auth
       // rejection. Everything else stays exactly as transient as it is now.
@@ -4902,6 +5681,16 @@ class MainBot<T extends IMainBot> {
   async checkAssets(
     returnData = false,
     direct = false,
+    /**
+     * Read stored balances only, counting an asset with no stored row as 0.
+     * Stored rows exist only for assets the exchange reports (absent ones are
+     * zeroed by the balance refresh), so once a connection has ANY stored row
+     * a missing one means "holds none" — not "unknown". Without this, a pair
+     * whose coin the account never held falls through to a full exchange read
+     * on every call. Still reads the exchange when the connection has no
+     * stored rows at all.
+     */
+    missingAsZero = false,
   ): Promise<Map<string, FreeAsset[0]> | undefined> {
     this.handleLog('Check assets start')
     const asset: Map<string, FreeAsset[0]> = new Map()
@@ -4973,6 +5762,8 @@ class MainBot<T extends IMainBot> {
 
           if (find.length === this.pairs.size) {
             finish = true
+          } else if (missingAsZero && b.length > 0) {
+            finish = true
           }
         } else if (balancesFromDb.status === StatusEnum.notok) {
           this.handleErrors(
@@ -5012,7 +5803,10 @@ class MainBot<T extends IMainBot> {
             return
           }
         }
-        const balances = await this.exchange.getBalance()
+        const balances = await withExchangeCaller(
+          direct ? 'bot.checkAssets.direct' : 'bot.checkAssets.dbMiss',
+          () => this.exchange!.getBalance(),
+        )
         this.handleDebug('Get balance')
         if (balances.status === StatusEnum.notok) {
           // Open/widen the cooldown only for a real, venue-returned hard-auth
@@ -5110,8 +5904,17 @@ class MainBot<T extends IMainBot> {
    * run because we wrote that freshness ourselves, so recovery is only declared
    * on a run that finds it fresh without having served it the run before.
    */
-  protected trackPriceStreamHealth(symbol: string, stale: boolean) {
-    const event = this.priceStreamGaps.note(symbol, stale, +new Date())
+  protected trackPriceStreamHealth(
+    symbol: string,
+    stale: boolean,
+    priceMoved?: boolean,
+  ) {
+    const event = this.priceStreamGaps.note(
+      symbol,
+      stale,
+      +new Date(),
+      priceMoved,
+    )
     if (!event) {
       return
     }
@@ -5366,7 +6169,16 @@ class MainBot<T extends IMainBot> {
   }
   /** Get order */
 
-  async getOrder(id: string, symbol: string, fromCache: boolean) {
+  async getOrder(
+    id: string,
+    symbol: string,
+    fromCache: boolean,
+    /**
+     * Bulk reconcile paths: hold the venue call to the account's lookup
+     * budget, until this epoch-ms deadline; past it the call is not made.
+     */
+    paceUntil?: number,
+  ) {
     const _id = this.startMethod('getOrder')
     try {
       if (fromCache && this.redisDb && this.redisDb.isReady) {
@@ -5394,10 +6206,33 @@ class MainBot<T extends IMainBot> {
       )
     }
     if (this.exchange && this.data) {
-      const venueId = this.venueOrderId(id)
+      let venueId = this.venueOrderId(id)
       if (venueId === null) {
-        this.endMethod(_id)
-        return this.exchange.returnBad()(new Error(orderNeverReachedExchange))
+        // The `'-1'` placeholder is not proof the venue lacks the order: a
+        // placement whose answer was never recorded leaves exactly this while
+        // the order rests, or fills, there. Ask by client order id first, and
+        // only answer "not found" when the venue said so. Spec 184 §4.3.
+        // An order still being placed waits for that answer first. Spec 155.
+        const local = this.getOrderFromMap(id)
+        if (local) {
+          await this.awaitPlacementInFlight(local)
+        }
+        const resolved = local
+          ? await this.resolveNeverPlacedOrder(local)
+          : null
+        if (resolved?.status === StatusEnum.notok) {
+          this.endMethod(_id)
+          return this.exchange.returnBad()(
+            new Error(resolved.reason ?? 'Client order id lookup failed'),
+          )
+        }
+        venueId = this.venueOrderId(id)
+        if (venueId === null) {
+          this.endMethod(_id)
+          return this.exchange.returnBad()(
+            new Error(resolved ? orderAbsentOnVenue : orderNeverReachedExchange),
+          )
+        }
       }
       id = venueId
       // Served from the reconcile prefetch when this pass already asked the
@@ -5411,7 +6246,14 @@ class MainBot<T extends IMainBot> {
       // question asked outside the pass that fetched it.
       const prefetched = this.reconcileBatch?.get(id)
       if (prefetched) {
+        // Both keys the row was stored under, so it stays single-use.
+        this.reconcileBatch?.delete(`${prefetched.clientOrderId}`)
+        this.reconcileBatch?.delete(`${prefetched.orderId}`)
         this.reconcileBatch?.delete(id)
+      }
+      if (!prefetched && paceUntil && !(await this.paceReconcileLookup(paceUntil))) {
+        this.endMethod(_id)
+        return this.exchange.returnBad()(new Error(reconcileDeferredReason))
       }
       const result = prefetched
         ? {
@@ -5547,6 +6389,8 @@ class MainBot<T extends IMainBot> {
     id: string,
     symbol: string,
     justPlaced = false,
+    /** Lookups actually made, when the fast path below cuts the ladder short. */
+    lookups = unknownOrderMaxAttempts,
   ): Promise<null | Order> {
     const origId = id
     if (this.data && this.exchange && this.orders) {
@@ -5569,7 +6413,7 @@ class MainBot<T extends IMainBot> {
         let find = get && get.status === 'NEW' ? get : undefined
         if (find && this.orders) {
           this.handleLog(
-            `Order not found after 5 attempts 2000 ms, order ${id} status set to CANCELED`,
+            `Order not found after ${lookups} lookup(s), order ${id} status set to CANCELED`,
           )
           find.status = 'CANCELED'
           this.deleteOrder(find.clientOrderId)
@@ -5602,22 +6446,36 @@ class MainBot<T extends IMainBot> {
       // needs `orderId` to build the request.
       let local = this.getOrderFromMap(id)
       let neverReachedExchange = false
+      let lookupFailed: string | null = null
       if (byId) {
         if (!local) {
           local = (await this.ordersDb.readData({ clientOrderId: id })).data
             ?.result
         }
         if (local) {
-          neverReachedExchange = local.orderId === noExchangeOrderId
+          // Coinbase can hold an order whose row still says `'-1'`; find it by
+          // client order id before the fast path below writes it off. A failed
+          // lookup is not an answer, so it takes the ordinary retry ladder.
+          // Spec 154 §4.5. An order still being placed waits for that answer
+          // first. Spec 155 §4.3.
+          await this.awaitPlacementInFlight(local)
+          const resolved = await this.resolveNeverPlacedOrder(local)
+          if (resolved?.status === StatusEnum.notok) {
+            lookupFailed = resolved.reason
+          }
+          neverReachedExchange =
+            !lookupFailed && local.orderId === noExchangeOrderId
           id = `${local.orderId}`
         }
       }
-      const request = neverReachedExchange
-        ? this.exchange.returnBad()(new Error(orderNeverReachedExchange))
-        : await this.exchange.getOrder({
-            symbol,
-            newClientOrderId: id,
-          })
+      const request = lookupFailed
+        ? this.exchange.returnBad()(new Error(lookupFailed))
+        : neverReachedExchange
+          ? this.exchange.returnBad()(new Error(orderNeverReachedExchange))
+          : await this.exchange.getOrder({
+              symbol,
+              newClientOrderId: id,
+            })
       if (request.status === StatusEnum.notok) {
         this.handleLog(
           `${request.reason}, handleUnknownOrder(), Send get order request ${origId}, ${symbol}, ${id}`,
@@ -5656,7 +6514,12 @@ class MainBot<T extends IMainBot> {
           local?.orderId === noExchangeOrderId
         ) {
           this.canceledMap.set(origId, unknownOrderMaxAttempts)
-          return this._runUnknownOrderLadder(origId, symbol, false)
+          return this._runUnknownOrderLadder(
+            origId,
+            symbol,
+            false,
+            getCount + 1,
+          )
         }
 
         await sleep(1000 * (getCount + 1))
@@ -6122,6 +6985,10 @@ class MainBot<T extends IMainBot> {
       // time; keeping a stale one can only ever skip an old trade, which is
       // the safe direction to be wrong in.
       feeTradeId: o.feeTradeId,
+      // A payload whose fills name the venue's trade ids decides the fee and
+      // moves the mark up to them, so the stream's reports of those same
+      // trades are not counted on top (see `feeAfterAnswerFills`).
+      ...feeAfterAnswerFills(o.exchange, o, co),
       _id: o._id,
       // Our local order id is authoritative — never let the exchange's echoed
       // clientOrderId win. For most exchanges co.clientOrderId === o.clientOrderId
@@ -6139,6 +7006,8 @@ class MainBot<T extends IMainBot> {
       baseAsset: o.baseAsset,
       quoteAsset: o.quoteAsset,
       origPrice: o.origPrice,
+      // Placement stamps never come back from a venue payload (spec 050 §3.3).
+      ...placementStampsOf(o),
       price: `${price}` || o.price,
       executedQty,
       cummulativeQuoteQty,
@@ -6149,6 +7018,7 @@ class MainBot<T extends IMainBot> {
       minigridBudget: o.minigridBudget,
       dcaLevel: o.dcaLevel,
       addFundsId: o.addFundsId,
+      positionEntry: o.positionEntry,
       liquidation: o.liquidation,
     }
   }
@@ -6338,7 +7208,12 @@ class MainBot<T extends IMainBot> {
     ) {
       return order
     }
-    if (order.typeOrder === TypeOrderEnum.rebalance) {
+    if (
+      order.typeOrder === TypeOrderEnum.rebalance ||
+      // main-app spec 044: a funding trade has no remainder to chase; what
+      // filled is what the lot records.
+      order.typeOrder === TypeOrderEnum.funding
+    ) {
       return order
     }
     if (
@@ -6352,6 +7227,13 @@ class MainBot<T extends IMainBot> {
           order.status === 'CANCELED')) &&
       !this.coinm
     ) {
+      // Cancelled, not under-filled: what filled is the order. Spec `156`.
+      if (isCancelledLimitSafetyOrder(order)) {
+        this.handleLog(
+          `Order ${order.clientOrderId} not ${order.side} full qty: executed - ${order.executedQty}, total - ${order.origQty}, the rest was cancelled on the exchange — no remainder order sent, count ${count}`,
+        )
+        return order
+      }
       const fullAmount =
         count === 1 &&
         this.botType === BotType.dca &&
@@ -6364,7 +7246,25 @@ class MainBot<T extends IMainBot> {
       let diffMore =
         diff > (ed?.baseAsset.minAmount ?? Infinity) &&
         diff * price > (ed?.quoteAsset.minAmount ?? Infinity)
-      if (!diffMore && fullAmount && ed?.baseAsset.minAmount) {
+      if (
+        !diffMore &&
+        fullAmount &&
+        ed?.baseAsset.minAmount &&
+        // Spec `153` §1.1. Bybit refuses a top-up worth less than the pair's
+        // minimum order value, so the replacement below can never fill there.
+        // It is skipped, not raised to that minimum.
+        isBelowVenueMinOrderValue(
+          order.exchange,
+          order.side,
+          ed.baseAsset.minAmount,
+          price,
+          ed.quoteAsset?.minAmount,
+        )
+      ) {
+        this.handleLog(
+          `Order ${order.clientOrderId} not ${order.side} full qty: executed - ${order.executedQty}, total - ${order.origQty}, diff - ${diff}, top-up of ${ed.baseAsset.minAmount} worth ${ed.baseAsset.minAmount * price} is below the exchange minimum order value ${ed.quoteAsset?.minAmount} and is not sent, count ${count}`,
+        )
+      } else if (!diffMore && fullAmount && ed?.baseAsset.minAmount) {
         this.handleLog(
           `Order ${order.clientOrderId} not ${order.side} full qty: executed - ${order.executedQty}, total - ${order.origQty}, diff - ${diff}, remainder is less than allowed on exchange and will be increased to exchange minimum ${ed.baseAsset.minAmount}, count ${count}`,
         )
@@ -6566,6 +7466,51 @@ class MainBot<T extends IMainBot> {
    * — a jurisdiction block that lifts must never leave a position stranded
    * behind a cooldown of ours. Same principle as the Quantitative Rules gate.
    */
+  /**
+   * The cooldown key for a safety order that a full risk tier can refuse, or
+   * `null` for an order the risk-tier gate must never hold back. Safety orders
+   * only: reduce-only orders are exactly what the venue still accepts, and the
+   * take-profit, stop and minigrid paths have their own retry logic.
+   */
+  protected riskTierLevel(order: Order): RiskTierLevel | null {
+    if (
+      !this.futures ||
+      order.reduceOnly ||
+      order.typeOrder !== TypeOrderEnum.dealRegular ||
+      !this.needToSendOrder(order)
+    ) {
+      return null
+    }
+    return {
+      botId: this.botId,
+      dealId: order.dealId,
+      symbol: order.symbol,
+      side: order.side,
+      price: order.price,
+      leverage: this.data?.settings.leverage,
+    }
+  }
+  /**
+   * Spec `186`. The cooldown key for a futures grid level sent reduce-only (the
+   * closing side of a long or short grid), or `null` for any order the gate
+   * must never hold back: grid stop/TP orders, DCA and combo orders, spot.
+   */
+  protected gridReduceOnlyLevel(order: Order): GridReduceOnlyLevel | null {
+    if (
+      !this.futures ||
+      !order.reduceOnly ||
+      order.typeOrder !== TypeOrderEnum.regular ||
+      !this.needToSendOrder(order)
+    ) {
+      return null
+    }
+    return {
+      botId: this.botId,
+      symbol: order.symbol,
+      side: order.side,
+      price: order.price,
+    }
+  }
   protected isComplianceGateable(order: Order): boolean {
     return (
       this.needToSendOrder(order) &&
@@ -6610,7 +7555,13 @@ class MainBot<T extends IMainBot> {
     }
     if (!this.lockProcessQueueMethod && this.orderQueue.length > 0) {
       const next = () => {
-        this.orderQueue.shift()
+        // Remove the report just processed, not whatever is first now:
+        // `accountCallback` re-sorts the queue while this one is awaited, and a
+        // report that sorts ahead of it (same venue time) would be dropped.
+        const at = this.orderQueue.indexOf(msg)
+        if (at !== -1) {
+          this.orderQueue.splice(at, 1)
+        }
         this.lockProcessQueueMethod = false
         this.processOrderQueue(
           this.botId,
@@ -6626,7 +7577,11 @@ class MainBot<T extends IMainBot> {
       const ed = await this.getExchangeInfo(msg.symbol)
       const orderId = this.getOrderStatus(msg)
       const base = parseFloat(msg.totalTradeQuantity)
-      const key = `${orderId}${msg.orderStatus}${base}`
+      // A venue can stamp every liquidation on an account with one client id
+      // (Binance `autoclose-…`); only its order id and side tell them apart.
+      const key = `${orderId}${msg.orderStatus}${base}${
+        msg.liquidation ? `${msg.orderId}${msg.side}` : ''
+      }`
       if (!this.processedOrders.has(key)) {
         this.processedOrders.set(key, {
           id: orderId,
@@ -7712,17 +8667,21 @@ class MainBot<T extends IMainBot> {
       // books a PHANTOM fill and silently inflates the deal's tracked position.
       // So derive the REAL filled size from the actual fills first, and only fall
       // back to origQty for other exchanges where FILLED reliably means filled.
+      // KuCoin always echoes the filled size (`dealSize`), so a FILLED/0 there
+      // is a market order the venue closed unfilled — e.g. for lack of funds.
       const fillsQty = (order.fills ?? []).reduce(
         (acc, f) => acc + (+f.qty || 0),
         0,
       )
+      const venueEchoesFill =
+        this.hyperliquid || this.kucoinSpot || this.kucoinFullFutures
       if (fillsQty > 0) {
         executedQty = `${fillsQty}`
-      } else if (!this.hyperliquid) {
+      } else if (!venueEchoesFill) {
         executedQty = order.origQty
       } else {
         this.handleLog(
-          `HL ${order.type} order ${order.clientOrderId} came back FILLED with no real fill (executedQty 0, empty fills) — keeping real qty instead of booking origQty ${order.origQty} to avoid a phantom fill`,
+          `${order.type} order ${order.clientOrderId} came back FILLED with no real fill (executedQty 0, empty fills) — keeping real qty instead of booking origQty ${order.origQty} to avoid a phantom fill`,
         )
       }
     }
@@ -7937,6 +8896,31 @@ class MainBot<T extends IMainBot> {
     force?: boolean,
     skipBr?: boolean,
   ): Promise<Order | string | void> {
+    // Spec 192 §4.2: however the attempt ends — a throw included — its
+    // placement stops counting as in flight, or a waiting cancel hangs forever.
+    const slot: { placement?: PlacementInFlight } = {}
+    try {
+      return await this._sendOrderToExchange(
+        order,
+        returnError,
+        count,
+        force,
+        skipBr,
+        slot,
+      )
+    } finally {
+      slot.placement?.settle()
+    }
+  }
+
+  private async _sendOrderToExchange(
+    order: Order,
+    returnError: boolean,
+    count: number,
+    force: boolean | undefined,
+    skipBr: boolean | undefined,
+    slot: { placement?: PlacementInFlight },
+  ): Promise<Order | string | void> {
     const _id = this.startMethod('sendOrderToExchange')
     // Spec `025` §4.1 (#715). The money-safety boundary: this method has no
     // opinion about the numbers it is handed, and on 2026-09-08 it took a
@@ -8010,7 +8994,10 @@ class MainBot<T extends IMainBot> {
       typeof ed?.priceMultiplier?.decimals !== 'undefined' &&
       ed?.priceMultiplier?.decimals !== null
     ) {
-      const mod = this.math.remainder(+order.price, ed.priceMultiplier.decimals)
+      const mod = this.math.gridRemainder(
+        +order.price,
+        ed.priceMultiplier.decimals,
+      )
       if (mod > Number.EPSILON) {
         order.price = `${this.math.round(
           +order.price - mod + ed.priceMultiplier.decimals,
@@ -8020,7 +9007,22 @@ class MainBot<T extends IMainBot> {
     }
     const fee = await this.getUserFee(order.symbol)
     if (this.data && this.exchange && fee) {
+      // The slippage reference of a MARKET order (main-app spec 050 §3.1): the
+      // price the engine holds for the symbol now, stamped with that price's
+      // OWN observation time, ahead of the write-ahead row below so it is
+      // stored whatever the venue answers. Set once: a retry or a re-sent
+      // sibling keeps the first attempt's decision price. Never derived from
+      // `order.price`, which a base order carries shifted by its protective
+      // allowance.
+      if (order.type === OrderTypeEnum.market && order.refPrice === undefined) {
+        this.stampMarketReference(order)
+      }
       this.setOrder(order)
+      // From here the row says `'-1'` while the guards below are awaited, so
+      // the placement is in flight from here, not from the venue call. Spec 192.
+      const placement = (slot.placement = this.beginPlacement(
+        order.clientOrderId,
+      ))
       if (count === 0) {
         await this.saveOrderToDb(order)
       }
@@ -8105,6 +9107,29 @@ class MainBot<T extends IMainBot> {
               )
             : (ed?.priceAssetPrecision ?? 0),
         )
+        // Spec `153` §1.2. The `sendQty <= 0` guard above runs on the base
+        // quantity, before this conversion. A small buy can still round to a
+        // quote amount of zero here (`0.00001 × 60.48` at 2 decimals), which
+        // Bybit refuses as `An unknown parameter was sent.`. Refuse it locally
+        // and take back the write-ahead row, as the local short-circuits do.
+        if (!(requestData.quantity > 0)) {
+          placement.settle()
+          this.deleteOrder(order.clientOrderId)
+          if (count === 0) {
+            await this.deleteOrderFromDb(order.clientOrderId)
+          }
+          const reason = `Order qty must be greater than zero. Order ${order.clientOrderId} ${order.symbol} qty ${order.origQty}, price ${order.price}, side ${order.side}, quote amount ${requestData.quantity}`
+          await this.handleOrderErrors(
+            reason,
+            order,
+            'sendOrderToExchange()',
+            `Send new order request ${order.clientOrderId}`,
+            false,
+            false,
+          )
+          this.endMethod(_id)
+          return returnError ? reason : undefined
+        }
       }
       let processedOrder: CommonOrder | null = null
       if (
@@ -8176,6 +9201,10 @@ class MainBot<T extends IMainBot> {
           }
         }
       }
+      if (processedOrder) {
+        // Sent as splits under their own client order ids.
+        placement.settle()
+      }
       if (!processedOrder) {
         let request: BaseReturn<CommonOrder> | undefined
         const notEnoughBalanceId = this.getNotEnoughOrdersIdByOrder(order)
@@ -8225,6 +9254,7 @@ class MainBot<T extends IMainBot> {
             this.requiredForOrder(order) >= refusedRequired
           if (
             atRefusedSize &&
+            !isFreshlySizedResend(order) &&
             (this.data.notEnoughBalance.orders?.[notEnoughBalanceId] ?? 0) >=
               this.notEnoughBalanceThreshold
           ) {
@@ -8337,6 +9367,7 @@ class MainBot<T extends IMainBot> {
                 requestData.symbol,
               )
               if (recheck.restricted) {
+                placement.settle()
                 await this.markDealStartBlocked(
                   order,
                   quantRulesRejection,
@@ -8354,6 +9385,7 @@ class MainBot<T extends IMainBot> {
               // (RECONCILE_SWEEP_ENABLED), so we cannot rely on it to re-send an
               // order that was never placed. The deferred retry below is the
               // self-heal path; it dedups on clientOrderId.
+              placement.settle()
               await this.markDealStartBlocked(
                 order,
                 quantRulesRejection,
@@ -8388,6 +9420,63 @@ class MainBot<T extends IMainBot> {
               } is under a compliance restriction cooldown until ${new Date(
                 cooldown.until ?? 0,
               ).toISOString()}. Exchange reason: ${cooldown.reason}`,
+            )
+            request = {
+              status: StatusEnum.notok,
+              reason: cooldown.reason,
+              data: null,
+            }
+          }
+        }
+        // Risk-tier short-circuit (see `riskTierGuard.ts`). A safety order the
+        // venue refused because the contract's risk tier is full is re-sent by
+        // every ladder rebuild — on a combo, every minigrid fill — until the
+        // position shrinks or the leverage changes. Inside the level's cooldown
+        // answer with the venue's own last refusal instead of asking again.
+        // Silent downstream, like the auth gate: the user was told on the real
+        // refusal, and replaying it would write a bot error per suppressed
+        // attempt — the flood itself.
+        let riskTierShortCircuit = false
+        const riskTierLevel = this.riskTierLevel(order)
+        if (!request && riskTierLevel) {
+          const cooldown = await RiskTierGuard.check(riskTierLevel)
+          if (cooldown.restricted && cooldown.reason) {
+            riskTierShortCircuit = true
+            this.handleDebug(
+              `Order ${order.clientOrderId} not sent: ${
+                requestData.symbol
+              } risk tier refused this level, cooldown until ${new Date(
+                cooldown.until ?? 0,
+              ).toISOString()} (attempt ${cooldown.attempt}). Exchange reason: ${
+                cooldown.reason
+              }`,
+            )
+            request = {
+              status: StatusEnum.notok,
+              reason: cooldown.reason,
+              data: null,
+            }
+          }
+        }
+        // Spec `186`. A futures grid level the venue refused as un-reducible is
+        // regenerated by every grid rebuild (each fill runs one) and was sent
+        // again every time. Inside the level's cooldown answer with the venue's
+        // own last refusal instead of asking again. Silent downstream, like the
+        // risk-tier gate: the user was told on the real refusal.
+        let gridReduceOnlyShortCircuit = false
+        const gridReduceOnlyLevel = this.gridReduceOnlyLevel(order)
+        if (!request && gridReduceOnlyLevel) {
+          const cooldown = await GridReduceOnlyGuard.check(gridReduceOnlyLevel)
+          if (cooldown.restricted && cooldown.reason) {
+            gridReduceOnlyShortCircuit = true
+            this.handleDebug(
+              `Order ${order.clientOrderId} not sent: ${
+                requestData.symbol
+              } refused this reduce-only grid level, cooldown until ${new Date(
+                cooldown.until ?? 0,
+              ).toISOString()} (attempt ${cooldown.attempt}). Exchange reason: ${
+                cooldown.reason
+              }`,
             )
             request = {
               status: StatusEnum.notok,
@@ -8447,11 +9536,27 @@ class MainBot<T extends IMainBot> {
         // re-enter this method — and the burst it belonged to is long gone.
         const batcher =
           order.type === 'LIMIT' && count === 0 ? this.openBatcher : null
+        const exchange = this.exchange
         request =
           request ??
-          (batcher?.has(requestData.newClientOrderId)
-            ? await batcher.send(requestData)
-            : await this.exchange.openOrder(requestData))
+          (await placement.send(async () => {
+            // MARKET only, and a MARKET order never takes the batch seam
+            // above (LIMIT only), so `sentAt` is always the moment of the
+            // venue call itself, never a batch enqueue. Spec 050 §3.2.
+            const market = order.type === OrderTypeEnum.market
+            if (market) {
+              this.stampPlacementTime(order, 'sentAt')
+            }
+            const answer = await (batcher?.has(requestData.newClientOrderId)
+              ? batcher.send(requestData)
+              : exchange.openOrder(requestData))
+            if (market) {
+              this.stampPlacementTime(order, 'ackAt')
+            }
+            return answer
+          }))
+        // A guard answered instead of the venue: nothing was sent.
+        placement.settle()
         // Accepted, but the venue said something the user should know (a
         // Bitget Reality token with nobody on the other side of its book, so
         // the order will wait). The order stands; this is a warning only.
@@ -8522,6 +9627,35 @@ class MainBot<T extends IMainBot> {
             symbol: requestData.symbol,
             reason: request.reason,
           })
+        }
+        if (riskTierLevel && !riskTierShortCircuit) {
+          // Only a REAL venue answer moves the window: a refusal opens/widens
+          // it, an acceptance drops it so the next refusal starts at `minMs`.
+          if (
+            request.status === StatusEnum.notok &&
+            isRiskTierRefusal(
+              `${request.reason}`,
+              this.getErrorSubType(`${request.reason}`),
+            )
+          ) {
+            await RiskTierGuard.record(riskTierLevel, `${request.reason}`)
+          } else if (request.status === StatusEnum.ok) {
+            await RiskTierGuard.clear(riskTierLevel)
+          }
+        }
+        if (gridReduceOnlyLevel && !gridReduceOnlyShortCircuit) {
+          // Only a REAL venue answer moves the window, as for the risk tier.
+          if (
+            request.status === StatusEnum.notok &&
+            isPositionAlreadyClosedReason(`${request.reason}`)
+          ) {
+            await GridReduceOnlyGuard.record(
+              gridReduceOnlyLevel,
+              `${request.reason}`,
+            )
+          } else if (request.status === StatusEnum.ok) {
+            await GridReduceOnlyGuard.clear(gridReduceOnlyLevel)
+          }
         }
         if (
           request.status === StatusEnum.notok &&
@@ -8826,12 +9960,81 @@ class MainBot<T extends IMainBot> {
               this.endMethod(_id)
               return findInCurrent
             }
+            // "Already exists" is the venue saying it HAS an order under this
+            // id — typically our own, accepted on a submit whose answer was
+            // lost and then re-sent. Writing it off and sending a `…2` copy
+            // leaves the original live on the venue and unregistered from the
+            // stream router, so its fill never reaches the deal. Ask first, the
+            // same way the ambiguous-failure branch below does; only a definite
+            // "no such order" falls through to the regenerated id. An invalid
+            // id is a format refusal, not a statement that the order exists.
+            if (
+              this.orders &&
+              request.reason
+                .toLowerCase()
+                .indexOf('Client order id is not valid'.toLowerCase()) === -1
+            ) {
+              const settled = await this._handleUnknownOrder(
+                order.clientOrderId,
+                order.symbol,
+                true,
+              )
+              // On a definite "no such order" the ladder hands back the order
+              // it just wrote off as CANCELED — that is not the venue having it.
+              const kept =
+                this.getOrderFromMap(order.clientOrderId) ??
+                (settled && settled.status !== 'CANCELED' ? settled : undefined)
+              if (kept) {
+                this.handleLog(
+                  `Order ${order.clientOrderId} returned as duplicate and ${this.data.exchange} has it — keeping it instead of re-sending`,
+                )
+                this.endMethod(_id)
+                return kept
+              }
+            }
             this.deleteOrder(order.clientOrderId)
             this.updateOrderOnDb({ ...order, status: 'CANCELED' })
-            order.clientOrderId = `${order.clientOrderId.slice(
-              0,
-              order.clientOrderId.length - 1,
-            )}2`
+            // Swap the last character for one it is not: a fixed `2` re-sent
+            // an id already ending in `2` (incl. one regenerated here before)
+            // unchanged, and the venue refused that copy for good (spec 145).
+            //
+            // The sibling is derived from the refused id, so a second send of
+            // that same id lands on the same sibling — and if this bot already
+            // placed it, it is this order's replacement. Live or FILLED, it is
+            // returned instead of sent: a venue that accepted it again would
+            // fill the level twice. A sibling that is spent (cancelled) is
+            // skipped for the next one, since the venue refuses that too.
+            // Spec 161 §1.3.
+            const refusedId = order.clientOrderId
+            const siblings = siblingClientOrderIds(refusedId)
+            let resendId = siblings[0]
+            for (const candidate of siblings) {
+              const held = await this.findOwnOrder(candidate)
+              if (!held) {
+                resendId = candidate
+                break
+              }
+              if (!isSpentStatus(held.status)) {
+                this.handleLog(
+                  `Order ${refusedId} is duplicate and was already re-sent as ${candidate} (${held.status}) — not sending it again`,
+                )
+                this.reissuedClientOrderIds?.set(refusedId, candidate)
+                this.endMethod(_id)
+                return held
+              }
+            }
+            this.reissuedClientOrderIds?.set(refusedId, resendId)
+            order.clientOrderId = resendId
+            // The sibling is a placement of its own (spec 169). The ladder above
+            // flipped this object to the venue's CANCELED in place; carried into
+            // the re-send, that reads as "written off while being placed" and
+            // the fill is reported as one the deal does not hold. And the
+            // re-send runs at `count === 1`, which skips the write-ahead insert
+            // while `updateOrderOnDb` never upserts, so without this row the
+            // sibling — FILLED or not — is never stored at all.
+            order.status = 'NEW'
+            const { _id: _refusedRowId, ...sibling } = order
+            await this.saveOrderToDb(sibling)
             this.endMethod(_id)
             return this.sendOrderToExchange(order, returnError, 1)
           }
@@ -8840,6 +10043,10 @@ class MainBot<T extends IMainBot> {
               order.exchange === ExchangeEnum.coinbase) &&
               count < 5) ||
               (order.exchange === ExchangeEnum.bybit && count < 2)) &&
+            // A refusal served from our own cooldown is not the venue's
+            // transient balance lag this retry waits out; re-asking would only
+            // replay the same cached answer.
+            !notEnoughBalanceShortCircuit &&
             request.reason.toLowerCase().indexOf('balance') !== -1 &&
             !order.clientOrderId.includes('D-SR')
           ) {
@@ -8930,7 +10137,10 @@ class MainBot<T extends IMainBot> {
             !notEnoughBalanceShortCircuit &&
             !complianceShortCircuit &&
             !authShortCircuit &&
-            isAmbiguousOrderFailure(request.reason)
+            !riskTierShortCircuit &&
+            !gridReduceOnlyShortCircuit &&
+            (isAmbiguousOrderFailure(request.reason) ||
+              isPlacementReadBackMiss(request.reason))
           ) {
             this.handleWarn(
               `Ambiguous outcome for order ${order.clientOrderId} (${request.reason}) — asking ${this.data.exchange} whether it has it before writing it off`,
@@ -8986,7 +10196,9 @@ class MainBot<T extends IMainBot> {
             if (
               !notEnoughBalanceShortCircuit &&
               !complianceShortCircuit &&
-              !authShortCircuit
+              !authShortCircuit &&
+              !riskTierShortCircuit &&
+              !gridReduceOnlyShortCircuit
             ) {
               this.updateOrderOnDb({ ...order, status: 'CANCELED' })
             } else {
@@ -9014,7 +10226,11 @@ class MainBot<T extends IMainBot> {
           // actionable "API keys error" — at the backoff rate (5min → 1h)
           // instead of once per order. Same call the #362 fix made for the
           // per-tick path.
-          if (!authShortCircuit) {
+          if (
+            !authShortCircuit &&
+            !riskTierShortCircuit &&
+            !gridReduceOnlyShortCircuit
+          ) {
             this.handleOrderErrors(
               request.reason,
               order,
@@ -9027,6 +10243,25 @@ class MainBot<T extends IMainBot> {
         }
         if (request.status === StatusEnum.ok) {
           processedOrder = request.data
+          // The answer is about the order this request named, whatever client
+          // id it echoes. Kraken spot's placement read-back can fall back to a
+          // lookup by txid and echo the txid as `clientOrderId`; the spread
+          // below then filed the order under the txid, left the `'-1'` copy
+          // under its real id, and the row write matched nothing. Spec 184 §4.1.
+          if (
+            processedOrder &&
+            processedOrder.clientOrderId !== order.clientOrderId
+          ) {
+            if (processedOrder.clientOrderId) {
+              this.handleWarn(
+                `Order ${order.clientOrderId} was accepted by ${this.data.exchange} as ${processedOrder.orderId}, but the answer names client order id ${processedOrder.clientOrderId} — keeping ${order.clientOrderId}`,
+              )
+            }
+            processedOrder = {
+              ...processedOrder,
+              clientOrderId: order.clientOrderId,
+            }
+          }
           // The venue took the opening order, so whatever was blocking it is
           // over. Cleared on ACCEPTANCE, not on fill: a resting limit base
           // order leaves the deal in `start` legitimately, and describing that
@@ -9070,34 +10305,11 @@ class MainBot<T extends IMainBot> {
           processedOrder.executedQty =
             await this.convertOrderExecutedQty(processedOrder)
         }
-        const orderType =
-          processedOrder.type === 'MARKET' ||
-          (processedOrder.fills?.length || 0) > 0 ||
-          (processedOrder.price &&
-            order.origPrice &&
-            !isNaN(+processedOrder.price) &&
-            isFinite(+processedOrder.price) &&
-            !isNaN(+order.origPrice) &&
-            isFinite(+order.origPrice) &&
-            +processedOrder.price !== +order.origPrice) ||
-          (processedOrder.cummulativeQuoteQty &&
-            !isNaN(+processedOrder.cummulativeQuoteQty) &&
-            isFinite(+processedOrder.cummulativeQuoteQty) &&
-            order.origPrice &&
-            !isNaN(+order.origPrice) &&
-            isFinite(+order.origPrice) &&
-            processedOrder.executedQty &&
-            !isNaN(+processedOrder.executedQty) &&
-            isFinite(+processedOrder.executedQty) &&
-            +processedOrder.cummulativeQuoteQty &&
-            +processedOrder.executedQty &&
-            +order.origPrice &&
-            this.math.round(
-              +processedOrder.cummulativeQuoteQty / +processedOrder.executedQty,
-              ed?.priceAssetPrecision,
-            ) !== +order.origPrice)
-            ? OrderTypeEnum.market
-            : OrderTypeEnum.limit
+        const orderType = placedOrderType(
+          processedOrder,
+          { type: requestData.type, origPrice: order.origPrice },
+          (value) => this.math.round(value, ed?.priceAssetPrecision),
+        )
         let price =
           orderType === OrderTypeEnum.limit
             ? ord.price
@@ -9212,6 +10424,7 @@ class MainBot<T extends IMainBot> {
             dcaLevel: order.dcaLevel,
             minigridId: order.minigridId,
             addFundsId: order.addFundsId,
+            positionEntry: order.positionEntry,
             liquidation: order.liquidation,
             sl: order.sl,
           })
@@ -9262,6 +10475,42 @@ class MainBot<T extends IMainBot> {
               processedOrder.cummulativeQuoteQty,
             )
           }
+        }
+        // The status above already keeps a fill the user stream delivered
+        // before this answer; the quantities have to as well. A limit entry
+        // that traded part of itself the moment it reached the book is
+        // answered with that part, and if the stream's later reports beat the
+        // answer here, spreading it over `ord` booked the part-fill as the
+        // whole FILLED order. Spec 193.
+        const keptExecution = heldExecutionAheadOfAnswer(ord, orderToPush)
+        if (keptExecution) {
+          this.handleLog(
+            `Order ${order.clientOrderId} placement answer states ${orderToPush.executedQty} executed (${processedOrder.status}), behind the ${ord.executedQty} (${ord.status}) the user stream already delivered. Keeping the stream's figures`,
+          )
+          Object.assign(orderToPush, keptExecution)
+        }
+        // The answer's fee is the sum of its fills, and the user stream reports
+        // the same trades again one by one. On a venue whose fills carry the
+        // stream's trade ids, settle the fee here so each trade counts once
+        // whichever arrived first: the mark moves up to the answer's highest
+        // fill, and the stream's reports of those trades then add nothing.
+        // Fills without real trade ids keep the merge above unchanged.
+        const answerFee = feeAfterAnswerFills(
+          order.exchange,
+          ord,
+          processedOrder,
+        )
+        if (answerFee) {
+          Object.assign(orderToPush, answerFee)
+        }
+        // Retired as CANCELED while it still had no exchange id, so no cancel
+        // ever reached the venue — yet the venue just accepted it. Spec 155 §4.4.
+        if (
+          ord.status === 'CANCELED' &&
+          `${ord.orderId}` === noExchangeOrderId &&
+          `${processedOrder.orderId ?? noExchangeOrderId}` !== noExchangeOrderId
+        ) {
+          await this.cancelOrphanedPlacement(orderToPush, processedOrder)
         }
         this.setOrder(orderToPush)
         this.handleLog(`Save order ${order.clientOrderId}`)
@@ -9317,6 +10566,9 @@ class MainBot<T extends IMainBot> {
       dealId: order.dealId,
     })?.find(
       (orderT) =>
+        // A Combo add / reduce funds order is never a grid level: a level
+        // priced and sized like it must not cancel it (main-app spec 047).
+        (this.botType !== BotType.combo || !isComboFundsOrderRow(orderT)) &&
         parseFloat(orderT.price) === order.price &&
         (parseFloat(orderT.origQty) === order.qty ||
           (orderT.tpSlTarget &&
@@ -9326,10 +10578,15 @@ class MainBot<T extends IMainBot> {
     )
   }
 
+  /**
+   * @param promotePartialToFilled handed straight to `cancelOrderOnExchange` —
+   * pass `false` when this cancel re-sizes a take-profit (see there).
+   */
   async cancelGridOnExchange(
     order: Grid,
     cancelPartiallyFilled = false,
     removeFromLocal = true,
+    promotePartialToFilled = true,
   ) {
     const find = this.findOrderForGrid(order, cancelPartiallyFilled)
     if (find) {
@@ -9337,6 +10594,7 @@ class MainBot<T extends IMainBot> {
         find,
         true,
         removeFromLocal,
+        promotePartialToFilled,
       )
       return result
     }
@@ -9359,6 +10617,144 @@ class MainBot<T extends IMainBot> {
 
   protected sleepBeforeCancelRetry(ms: number) {
     return sleep(ms)
+  }
+
+  /**
+   * Whether a deferred cancel re-send (spec `178`) may still go to the venue
+   * for this order. The base bot has no deals to judge by, so never; the DCA /
+   * Combo helper answers "its deal is no longer open".
+   */
+  protected cancelRetryWanted(_order: Order): boolean {
+    return false
+  }
+
+  /**
+   * Whether this cancel is the last one anything will send for the order: the
+   * bot is stopping, or the order's deal has already closed. A refusal of such
+   * a cancel is re-sent once and then looked up rather than only reported.
+   * Spec `180`.
+   */
+  protected cancelIsTeardown(order: Order): boolean {
+    return this.blockPriceCheck || this.cancelRetryWanted(order)
+  }
+
+  /** Back-off before the single re-send of a refused teardown cancel. Spec `180`. */
+  protected refusedCancelRetryDelay(): number {
+    return Math.round(2_000 * (1 + Math.random() * 0.5))
+  }
+
+  /**
+   * A deferred cancel re-send found the order filled. The base bot has no
+   * deal to settle it against; the DCA / Combo helper sells it like any other
+   * late fill. Spec `180`.
+   */
+  protected async settleLateCancelFill(_order: Order): Promise<void> {
+    return
+  }
+
+  protected cancelRetryJitter() {
+    return 1 + Math.random() * 0.25
+  }
+
+  protected scheduleCancelRetry(fn: () => Promise<unknown>, ms: number) {
+    const timer = setTimeout(() => {
+      fn().catch((e) =>
+        this.handleDebug(`Deferred cancel re-send failed: ${e?.message ?? e}`),
+      )
+    }, ms)
+    timer.unref?.()
+  }
+
+  /**
+   * One pending deferred re-send per order, and how many it has had.
+   * Lazily created so prototype-driven harnesses need not seed it.
+   */
+  private cancelRetries?: Map<string, { attempt: number; pending: boolean }>
+
+  /**
+   * A cancel the venue refused as TRANSIENT — a rate limit, or a lockout of
+   * the key (`EGeneral:Temporary lockout`, also what the balancer answers while
+   * it holds a Kraken key off) — is asked again later instead of being
+   * forgotten. Deferred, never awaited: a lockout hold runs for minutes and the
+   * caller is usually a deal close, which must not wait on it. The re-send
+   * waits out the hold the refusal states, at least the back-off step.
+   *
+   * Without this a deal that closed during a lockout left its safety orders
+   * live on the venue with nothing managing them. Spec `178`.
+   */
+  private queueCancelRetry(
+    order: Order,
+    reason: string,
+    args: [boolean, boolean, boolean],
+  ) {
+    this.cancelRetries ??= new Map()
+    const id = order.clientOrderId
+    const state = this.cancelRetries.get(id) ?? { attempt: 0, pending: false }
+    if (state.pending) {
+      return
+    }
+    if (state.attempt >= CANCEL_RETRY_DELAYS_MS.length) {
+      this.cancelRetries.delete(id)
+      this.handleLog(
+        `Send cancel request ${id}: still refused after ${state.attempt} deferred re-sends, giving up`,
+      )
+      return
+    }
+    const ms = Math.round(
+      Math.max(
+        statedHoldMs(reason) + 1_000,
+        CANCEL_RETRY_DELAYS_MS[state.attempt],
+      ) * this.cancelRetryJitter(),
+    )
+    state.attempt++
+    state.pending = true
+    this.cancelRetries.set(id, state)
+    this.handleLog(
+      `Send cancel request ${id} refused as transient. Re-send ${state.attempt}/${CANCEL_RETRY_DELAYS_MS.length} in ${ms}ms`,
+    )
+    this.scheduleCancelRetry(() => this.runCancelRetry(id, args), ms)
+  }
+
+  /**
+   * Re-send a deferred cancel, if the order still needs it: its current row
+   * (memory, else the database) is still resting and the bot no longer has an
+   * open deal that owns it. An open deal's order is left to the engine's own
+   * passes, which re-issue whatever cancels they still want. The re-send is the
+   * ordinary `cancelOrderOnExchange` call, so its answer goes through the same
+   * routing — and a further transient refusal queues the next step.
+   */
+  private async runCancelRetry(
+    id: string,
+    args: [boolean, boolean, boolean],
+  ) {
+    const state = this.cancelRetries?.get(id)
+    if (!state) {
+      return
+    }
+    state.pending = false
+    const current = await this.findOwnOrder(id)
+    if (
+      !this.exchange ||
+      !current ||
+      !['NEW', 'PARTIALLY_FILLED'].includes(current.status) ||
+      !this.cancelRetryWanted(current)
+    ) {
+      this.cancelRetries?.delete(id)
+      this.handleDebug(
+        `Deferred cancel re-send ${id} skipped: ${
+          current ? `status ${current.status}` : 'order not found'
+        }`,
+      )
+      return
+    }
+    this.handleLog(`Send cancel request ${id}: deferred re-send ${state.attempt}`)
+    const result = await this.cancelOrderOnExchange(current, ...args)
+    if (result?.status === 'FILLED') {
+      await this.settleLateCancelFill(result)
+    }
+    if (!this.cancelRetries?.get(id)?.pending) {
+      this.cancelRetries?.delete(id)
+    }
   }
 
   /**
@@ -9431,6 +10827,23 @@ class MainBot<T extends IMainBot> {
       // batched order that skipped any of them would be a subtly different
       // order. Spec `082` §4.
       this.noteOwnCancel(order.clientOrderId)
+      // On Coinbase the placeholder does NOT prove the order never reached the
+      // venue: a restart mid-placement leaves `'-1'` on an order that rests
+      // there, and writing it off left it live, locking the base asset, so no
+      // replacement take-profit could ever be funded. Look it up by client
+      // order id first; when found, the real id is now on `order` and the
+      // cancel below goes to the venue. A failed lookup is reported as a
+      // cancel failure — never as "not found" — so the order stays tracked
+      // and the next pass retries. Spec 154 §4.2–§4.4.
+      //
+      // Before either: `'-1'` is also what an order carries while its own
+      // placement is still waiting for the venue's answer. A deal closing in
+      // that window wrote it off, and the venue accepted it a moment later —
+      // an order no deal tracks. Wait for that answer first. Spec 155 §4.2.
+      await this.awaitPlacementInFlight(order)
+      const resolved = await this.resolveNeverPlacedOrder(order)
+      const lookupFailed =
+        resolved?.status === StatusEnum.notok ? resolved : null
       const primed = this.cancelBatch?.get(`${order.orderId}`)
       if (primed) {
         this.cancelBatch?.delete(`${order.orderId}`)
@@ -9442,8 +10855,9 @@ class MainBot<T extends IMainBot> {
             ? `${order.orderId}`
             : order.clientOrderId,
         })
-      let request =
-        byExchangeId && order.orderId === noExchangeOrderId
+      let request = lookupFailed
+        ? this.exchange.returnBad()(new Error(lookupFailed.reason))
+        : byExchangeId && order.orderId === noExchangeOrderId
           ? this.exchange.returnBad()(new Error(orderNeverReachedExchange))
           : primed
             ? this.exchange.returnGood<CommonOrder>()(primed)
@@ -9458,7 +10872,7 @@ class MainBot<T extends IMainBot> {
       // "does not exist" because it is already gone — goes through the routing
       // below, so the row ends up recording the venue's state. A running bot is
       // untouched (`blockPriceCheck` is set only inside `stop()`). Spec `134`.
-      if (this.blockPriceCheck && !primed) {
+      if (this.blockPriceCheck && !primed && !lookupFailed) {
         for (const delay of this.teardownCancelRetryDelays()) {
           if (
             request.status !== StatusEnum.notok ||
@@ -9473,6 +10887,52 @@ class MainBot<T extends IMainBot> {
           request = await sendCancel()
         }
       }
+      // A teardown cancel the venue refused for anything else — not "unknown
+      // order", not "already cancelling", not rate or lockout (those are
+      // spec `134` / `178`) — was only reported, and the deal close then
+      // dropped the order from memory and from the user stream while it was
+      // still live on the venue. Send it once more after a short back-off,
+      // then ask the venue what the order is. An order the venue can never
+      // cancel (RFQ) is asked straight away. A running deal is untouched: its
+      // own passes re-issue whatever cancels they still want. Spec `180`.
+      const teardown = !primed && !lookupFailed && this.cancelIsTeardown(order)
+      const refusedAtTeardown = () =>
+        teardown &&
+        request.status === StatusEnum.notok &&
+        !isUnknownOrderReason(request.reason) &&
+        !isCancelInProgressReason(request.reason) &&
+        !isRateLimitReason(request.reason) &&
+        !isVenueLockout(request.reason)
+      if (refusedAtTeardown() && !isUncancellableReason(request.reason)) {
+        const delay = this.refusedCancelRetryDelay()
+        this.handleLog(
+          `Send cancel request ${order.clientOrderId} refused during teardown: ${request.reason}. Retry in ${delay}ms`,
+        )
+        await this.sleepBeforeCancelRetry(delay)
+        request = await sendCancel()
+      }
+      if (refusedAtTeardown()) {
+        const reason = `${request.reason ?? ''}`
+        this.handleWarn(
+          `Send cancel request ${order.clientOrderId} refused during teardown: ${reason}. Ask the exchange for the order state`,
+        )
+        this.endMethod(_id)
+        const real = await this._handleUnknownOrder(
+          order.clientOrderId,
+          order.symbol,
+        )
+        // Still resting: keep asking on spec `178`'s deferred ladder until the
+        // venue says it is cancelled or filled.
+        const current = real ? null : await this.findOwnOrder(order.clientOrderId)
+        if (current && ['NEW', 'PARTIALLY_FILLED'].includes(current.status)) {
+          this.queueCancelRetry(current, reason, [
+            setErrors,
+            removeFromLocal,
+            promotePartialToFilled,
+          ])
+        }
+        return real
+      }
       if (request.status === StatusEnum.notok) {
         for (const m of unknownOrderMessages) {
           if (request.reason.toLowerCase().indexOf(m.toLowerCase()) !== -1) {
@@ -9486,13 +10946,7 @@ class MainBot<T extends IMainBot> {
             )
           }
         }
-        if (
-          request.reason.indexOf('Order cancellation in progress') !== -1 ||
-          request.reason.indexOf(
-            'Cancellation failed as the order is already under cancelling status',
-          ) !== -1 ||
-          request.reason.indexOf('DUPLICATE_CANCEL_REQUEST') !== -1
-        ) {
+        if (isCancelInProgressReason(request.reason)) {
           this.handleDebug(
             `Cancellation in progress ${order.clientOrderId}. Sleep 5s`,
           )
@@ -9502,6 +10956,16 @@ class MainBot<T extends IMainBot> {
             order.clientOrderId,
             order.symbol,
           )
+        }
+        if (
+          isRateLimitReason(request.reason) ||
+          isVenueLockout(request.reason)
+        ) {
+          this.queueCancelRetry(order, request.reason, [
+            setErrors,
+            removeFromLocal,
+            promotePartialToFilled,
+          ])
         }
         this.handleErrors(
           request.reason,
@@ -9585,6 +11049,70 @@ class MainBot<T extends IMainBot> {
   /**
    * Save order to db
    */
+
+  /**
+   * Stamp `refPrice` / `refPriceAt` on a MARKET order (spec 050 §3.1). A stamp
+   * must never cost the placement it describes, so a failure leaves the order
+   * unstamped — which readers treat as "not observed".
+   */
+  stampMarketReference(order: Order) {
+    try {
+      Object.assign(
+        order,
+        marketReference(
+          this.getLastStreamData(order.symbol),
+          +new Date(),
+          this.priceTimeout,
+        ) ?? {},
+      )
+    } catch (e) {
+      this.handleDebug(
+        `Order ${order.clientOrderId} reference price not stamped: ${e}`,
+      )
+    }
+  }
+
+  /**
+   * Record a MARKET order's placement times on our clock (spec 050 §3.2):
+   * `sentAt` immediately before the placement request leaves this process,
+   * `ackAt` when its answer comes back. Each is written as its own
+   * single-field `$set` without the status guard `updateOrderOnDb` applies,
+   * because a market order is routinely FILLED by the user stream before its
+   * placement answer returns and that guard would then drop the stamp. A
+   * retry overwrites both: the attempt that fills is the last one sent.
+   */
+  stampPlacementTime(order: Order, field: 'sentAt' | 'ackAt') {
+    // A stamp must never cost the placement it describes: nothing here is
+    // awaited, and a failure is a debug line, not an error.
+    try {
+      const at = +new Date()
+      order[field] = at
+      const held = this.getOrderFromMap(order.clientOrderId)
+      if (held && held !== order) {
+        held[field] = at
+      }
+      void Promise.resolve(
+        this.ordersDb.updateData(
+          { clientOrderId: order.clientOrderId },
+          { $set: { [field]: at } },
+        ),
+      )
+        .then((res) => {
+          if (res?.status === StatusEnum.notok) {
+            this.handleDebug(
+              `Order ${order.clientOrderId} ${field} not saved: ${res.reason}`,
+            )
+          }
+        })
+        .catch((e) =>
+          this.handleDebug(
+            `Order ${order.clientOrderId} ${field} not saved: ${e}`,
+          ),
+        )
+    } catch (e) {
+      this.handleDebug(`Order ${order.clientOrderId} ${field} not saved: ${e}`)
+    }
+  }
 
   async saveOrderToDb(order: Order) {
     await this.ordersDb
@@ -9796,7 +11324,7 @@ class MainBot<T extends IMainBot> {
    * the common path costs no extra request. Returns `available` unchanged for
    * every non-pooled venue and on any error: a venue with no opinion must
    * never widen or block sizing. The pooled figure is USD-denominated, so it
-   * is trusted only for a USD or USDC quote (`poolCoversQuote`).
+   * is trusted only for the quotes `poolCoversQuote` allows.
    *
    * COIN-M: `available` is in the base coin, so the pool is converted at
    * `price` (exchange-connector spec 028 — a Bitget Unified account in
@@ -9809,7 +11337,11 @@ class MainBot<T extends IMainBot> {
     available: number,
     price?: number,
   ): Promise<number> {
-    if (!this.futures || !poolCoversQuote(quoteAsset) || !this.exchange) {
+    if (
+      !this.futures ||
+      !poolCoversQuote(quoteAsset, this.data?.exchange) ||
+      !this.exchange
+    ) {
       return available
     }
     if (this.coinm && !price) {
@@ -9875,7 +11407,7 @@ class MainBot<T extends IMainBot> {
     if (
       !this.futures ||
       this.coinm ||
-      !poolCoversQuote(quoteAsset) ||
+      !poolCoversQuote(quoteAsset, this.data?.exchange) ||
       !this.exchange
     ) {
       return cachedFree
@@ -10572,9 +12104,14 @@ class MainBot<T extends IMainBot> {
                 ? sellQty
                 : buyQty
               : qty
-            const mod = newBalance
-              ? this.math.remainder(gridQty, symbol.baseAsset.step)
-              : gridQty % symbol.baseAsset.step
+            // An already aligned quantity has no remainder; the float `%` of an
+            // exact multiple can read as almost a whole step and gain a lot.
+            const mod =
+              this.math.gridRemainder(gridQty, symbol.baseAsset.step) === 0
+                ? 0
+                : newBalance
+                  ? this.math.remainder(gridQty, symbol.baseAsset.step)
+                  : gridQty % symbol.baseAsset.step
             if (mod > Number.EPSILON) {
               gridQty = this.math.round(
                 gridQty - mod + symbol.baseAsset.step,

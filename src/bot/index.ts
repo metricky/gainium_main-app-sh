@@ -1,3 +1,4 @@
+import { coerceBaseFundingSetting } from './baseFundingGate'
 import DB from '../db'
 import { v4 } from 'uuid'
 import { Worker, isMainThread, threadId } from 'worker_threads'
@@ -5,11 +6,27 @@ import logger from '../utils/logger'
 import {
   missingWebhookFields,
   missingWebhookFieldsReason,
+  webhookBotNotRunningReason,
+  WEBHOOK_SIGNAL_MAX_AGE_MS,
+  formatSignalCap,
+  lateCloseNoticeReason,
+  webhookCloseOpenedBefore,
+  webhookSignalMaxAgeMs,
+  type WebhookSignalNotice,
+  webhookSignalAgeMs,
+  webhookSignalDeadline,
+  webhookSignalExpired,
+  webhookSignalExpiredReason,
 } from '../server/tradeSignalContract'
 import { isPaper } from '../utils'
 import utils from '../utils'
 import { CLOSE_SETTLE, awaitDealsClosed } from './closeSettle'
+import { parseSignalDealOverrides } from './signalDealOverrides'
 import { buyDialogEventsFor } from './buyDialogEvent'
+import {
+  isStoppedForNewDeals,
+  stoppedBotNewDealMessage,
+} from './stoppedBotNewDeal'
 import {
   resolveChangeTrailActor,
   settingsChanges,
@@ -107,6 +124,17 @@ import {
 } from './utils'
 import { statsAfterReset } from './dca/botStatsReset'
 import { oldStartDcaDealsFilter } from './dca/oldStartDealsFilter'
+import type { MergeDealsOptions } from './dcaHelper'
+import {
+  pairsWithSeveralOpenDeals,
+  SINGLE_POSITION_ADOPT_COMBO_REASON,
+  SINGLE_POSITION_ADOPT_HEDGE_REASON,
+  SINGLE_POSITION_START_BOT_REASON,
+  singlePositionMultipleOpenReason,
+  singlePositionSettingsError,
+  togglesSinglePosition,
+  turnsSinglePositionOn,
+} from './dca/singlePosition'
 import {
   buildPairCapitalPipeline,
   buildPairStatsPipeline,
@@ -159,6 +187,7 @@ import ColdStoreRehydrator from '../archive/coldStoreRehydrator'
 import ColdClient, { isColdStoreEnabled } from '../archive/coldClient'
 import { coldReadOrders, coldReadTransactions } from '../archive/coldRead'
 import {
+  BOT_EARLY_WEBHOOK_INTAKE,
   BOT_RESTART_ARM_CAP_MS,
   BOT_RESTART_ARM_FALLBACK,
   BOT_RESTART_ARM_STALL_MS,
@@ -176,7 +205,17 @@ import {
   HEDGE_PER_WORKER,
 } from '../config'
 import { applyGridFuturesConstraints } from '../server/v2/helpers'
+import RedisClient from '../db/redis'
+import {
+  restartOrderProjection,
+  restartResumeOrder,
+  type RestartOrderRow,
+} from './restartResumeOrder'
 import { ensureDynamicArIndicator } from '../utils/dynamicArIndicator'
+import {
+  parseSignalFundsPrice,
+  signalFundsPriceNeedsSymbolReason,
+} from './signalFundsPrice'
 
 const PER_PAGE = 20
 
@@ -192,6 +231,34 @@ export type WebhookData = {
   pairsToSetMode?: PairsToSetMode
   closeType?: 'limit' | 'market' | 'leave' | 'cancel'
   type?: AddFundsTypeEnum
+  /**
+   * `addFunds` / `reduceFunds` only: place a resting LIMIT order at this price
+   * instead of a market order. See `signalFundsPrice.ts`.
+   */
+  price?: string | number
+  /**
+   * `startDeal` only: this deal's own base order / TP / SL, replacing the
+   * bot's. Numbers or numeric strings. See `signalDealOverrides.ts`.
+   */
+  baseOrderSize?: string | number
+  tpPerc?: string | number
+  slPerc?: string | number
+  tpPrice?: string | number
+  slPrice?: string | number
+  /**
+   * Epoch ms at which the API received the signal, stamped there on every
+   * item (whatever the sender put in it). The bot service refuses to execute
+   * a signal older than `WEBHOOK_SIGNAL_MAX_AGE_MS`.
+   */
+  receivedAt?: number
+  /** Set by the bot service on an item taken from a replay queue. */
+  replayed?: boolean
+  /**
+   * Stamped by the API on every item. A signal whose RPC timed out is still
+   * in the bot service's queue and runs when the service is back — and the
+   * API has also queued it for replay. The id lets only the first one run.
+   */
+  signalId?: string
 }
 
 const defaultBotsPerWorker = 100
@@ -213,12 +280,51 @@ const armStallMs = Number(BOT_RESTART_ARM_STALL_MS) || 120_000
 const armCapMs = Number(BOT_RESTART_ARM_CAP_MS) || 30 * 60_000
 const armWatchdogTickMs = 15_000
 const stragglerDelayMs = Number(BOT_RESTART_STRAGGLER_DELAY_MS) || 10 * 60_000
+const earlyWebhookIntake = `${BOT_EARLY_WEBHOOK_INTAKE}` !== 'false'
+/** How often a signal waiting for its re-loading bot re-checks it. */
+const restartWaitPollMs = 200
 
 const loggerPrefix = `${isMainThread ? 'Main thread' : `Worker ${threadId}`} |`
 
 const notAvailable = 'Bots service is unavailable, please try again later'
 
+/** Legacy replay queue, shared by every bot service type. See `routeLegacyReplay`. */
 const webhookQueue = 'webhookQueue'
+
+/** Where the API queues a signal its bot service could not take, per bot type. */
+export const webhookReplayQueue = (type: BotType) => `webhookQueue.${type}`
+
+/** The bot service's own queue for webhook signals, apart from its command queue. */
+export const webhookIntakeQueue = (type: BotType) => `${type}WebhookIntake`
+
+/** How long a signal id is remembered: covers any realistic replay delay. */
+const webhookSignalSeenTtlSec = 24 * 60 * 60
+
+/**
+ * How long the API waits for a bot service to answer a signal: the cap plus
+ * room for a signal that started just inside it to finish.
+ */
+const webhookRpcTimeoutMs = WEBHOOK_SIGNAL_MAX_AGE_MS + 30_000
+
+/**
+ * A bot service whose intake had a consumer this recently and now has none is
+ * taken to be a current-version service restarting, not an older one.
+ */
+const webhookIntakeRecentMs = 5 * 60_000
+
+/** Heartbeat key a current-version bot service of `type` refreshes. */
+const webhookIntakeBeatKey = (type: BotType) =>
+  `gainium:webhookIntake:alive:${type}`
+const webhookIntakeBeatMs = 30_000
+
+/** How long the API trusts "this intake queue has a consumer". */
+const webhookIntakeCheckTtlMs = 2000
+
+/** Items coming back through a replay queue run exactly as they always did. */
+const markReplayed = (data: WebhookData[] | WebhookData) => {
+  for (const d of [data].flat()) if (d && typeof d === 'object') d.replayed = true
+  return data
+}
 
 /**
  * The actions `singleWebhookProcess` actually dispatches. Kept as an explicit
@@ -434,6 +540,19 @@ class Bot<T extends UserSchema = UserSchema> {
   private restartExpectedIds = new Set<string>()
   private restartFinishedIds = new Set<string>()
   private stragglerTimer: ReturnType<typeof setTimeout> | undefined
+  // Bots handed to a worker in this window, by id. Parity is judged on this,
+  // not on a bare counter: a worker that dies mid-boot re-restarts its bots
+  // through the same callback, and counting those twice armed the listener
+  // while the dispatch loop still had bots to go (observed 2026-10-15: armed
+  // at 9859/9859 five seconds before the last bot was dispatched).
+  private restartDispatchedIds = new Set<string>()
+  // Every bot this window re-hydrates, by webhook uuid, registered before the
+  // first one is dispatched. A signal for one of them that is not back yet
+  // waits for it (bounded) instead of reading as "Bot not found" or, worse,
+  // cold-starting a second copy of a bot the dispatch loop is about to create.
+  private restartBotIdByUuid = new Map<string, string>()
+  private restartWindowOpen = false
+  private webhookIntakeOpen = false
 
   public constructor(
     protected useBots?: boolean,
@@ -705,6 +824,16 @@ class Bot<T extends UserSchema = UserSchema> {
     }
     if (data.event === 'restartFinished' && data.botId) {
       this.restartFinishedIds.add(`${data.botId}`)
+      if (
+        this.restartWindowOpen &&
+        this.restartExpectedIds.size &&
+        this.restartFinishedIds.size >= this.restartExpectedIds.size &&
+        [...this.restartExpectedIds].every((id) =>
+          this.restartFinishedIds.has(id),
+        )
+      ) {
+        this.closeRestartWindow()
+      }
     }
   }
 
@@ -1182,6 +1311,67 @@ class Bot<T extends UserSchema = UserSchema> {
     }
   }
 
+  /**
+   * Shared workers to spread a restart's bots over; 0 outside a restart
+   * dispatch. See `beginRestartSpread`.
+   */
+  protected restartSpreadWorkers = 0
+
+  /**
+   * During a restart dispatch, spread bots over all the worker threads the
+   * restart needs from the start, least-loaded first, instead of filling one
+   * thread to its limit before opening the next. The thread count is the one
+   * packing would reach anyway (ceil(bots / limit)); what changes is that every
+   * thread starts loading at once, so the first bots resumed — the ones
+   * `restartResumeOrder` puts first — are not all queued on a single thread.
+   * Personal-limit users keep their own workers and are not counted.
+   */
+  protected beginRestartSpread(type: BotType, rows: { userId?: unknown }[]) {
+    const hedge = type === BotType.hedgeDca || type === BotType.hedgeCombo
+    const limit = this.limitPerWorkerFor(type)
+    const shared = rows.filter(
+      (r) => hedge || !this.personalLimits.has(`${r.userId}`),
+    ).length
+    this.restartSpreadWorkers = limit > 0 ? Math.ceil(shared / limit) : 0
+  }
+
+  protected endRestartSpread() {
+    this.restartSpreadWorkers = 0
+  }
+
+  protected limitPerWorkerFor(type: BotType) {
+    return type === BotType.combo
+      ? this.botPerWorker.combo
+      : type === BotType.dca
+        ? this.botPerWorker.dca
+        : type === BotType.hedgeCombo
+          ? this.botPerWorker.hedgeCombo
+          : type === BotType.hedgeDca
+            ? this.botPerWorker.hedgeDca
+            : this.botPerWorker.grid
+  }
+
+  /**
+   * The worker a new bot goes to, or undefined to open a new one: the fullest
+   * one with room (packing), or — during a restart spread, for shared workers
+   * — a new one until the spread count is reached, then the emptiest.
+   */
+  protected pickWorkerForNewBot(
+    type: BotType,
+    limit: number,
+    hedge: boolean,
+    userId?: string,
+  ) {
+    const mine = this.workers.filter(
+      (w) => w.type === type && (!hedge ? w.userId === userId : true),
+    )
+    const spread = this.restartSpreadWorkers > 0 && !userId
+    if (spread && mine.length < this.restartSpreadWorkers) return undefined
+    return mine
+      .filter((w) => w.bots < limit)
+      .sort((a, b) => (spread ? a.bots - b.bots : b.bots - a.bots))?.[0]
+  }
+
   @IdMute(mutex, () => 'workerUpdate')
   protected async getWorkerForNewBot(type: BotType, userId?: string) {
     const hedge = type === BotType.hedgeDca || type === BotType.hedgeCombo
@@ -1199,14 +1389,7 @@ class Bot<T extends UserSchema = UserSchema> {
       userId && !hedge
         ? (this.personalLimits.get(userId) ?? limitPerWorker)
         : limitPerWorker
-    const lowestWorker = [
-      ...this.workers.filter(
-        (w) =>
-          w.bots < limit &&
-          w.type === type &&
-          (!hedge ? w.userId === userId : true),
-      ),
-    ].sort((a, b) => b.bots - a.bots)?.[0]
+    const lowestWorker = this.pickWorkerForNewBot(type, limit, hedge, userId)
     if (lowestWorker && lowestWorker.bots < limit) {
       lowestWorker.updated = +new Date()
       this.workers = this.workers.map((w) => {
@@ -1319,6 +1502,41 @@ class Bot<T extends UserSchema = UserSchema> {
       }
     }
   }
+  /**
+   * Tell the bot's owner about a signal that was not executed, or ran late.
+   * TradingView shows the sender a status code and nothing else, so without
+   * this the reason exists only in our logs. Core keeps no notification
+   * channel of its own; main-app overrides this. Fire-and-forget: it must
+   * never change or delay what the sender is told.
+   */
+  protected noticeWebhookSignal(notice: WebhookSignalNotice): void {
+    void Promise.resolve(this.onWebhookSignalNotice(notice)).catch((e) =>
+      logger.warn(
+        `${loggerPrefix} Webhook notice for ${notice.uuid} failed: ${(e as Error)?.message ?? e}`,
+      ),
+    )
+  }
+
+  protected async onWebhookSignalNotice(
+    _notice: WebhookSignalNotice,
+  ): Promise<void> {}
+
+  /** Stored status of the non-deleted bot holding a webhook uuid, if any. */
+  private async webhookBotStatus(uuid: string): Promise<string | undefined> {
+    const filter = { uuid, isDeleted: { $ne: true } }
+    for (const db of [
+      this.dcaBotDb,
+      this.comboBotDb,
+      hedgeComboBotDb,
+      hedgeDCABotDb,
+    ]) {
+      //@ts-ignore
+      const found = await db.readData(filter, { status: 1 })
+      if (found?.data?.result) return found.data.result.status
+    }
+    return undefined
+  }
+
   protected entityNotFound(entity?: string) {
     return {
       status: StatusEnum.notok as const,
@@ -3158,6 +3376,7 @@ class Bot<T extends UserSchema = UserSchema> {
     pairsToSet?: string[],
     pairsToSetMode?: PairsToSetMode,
     returnResult = false,
+    botType: BotType.dca | BotType.combo = BotType.dca,
   ) {
     if (
       (pairsToChange &&
@@ -3176,13 +3395,18 @@ class Bot<T extends UserSchema = UserSchema> {
     if (!user || user.status === StatusEnum.notok) {
       return this.entityNotFound('User')
     }
+    // Multi-coin combo bots share this path; their documents live in the
+    // combo collection and save through `changeComboBot`.
+    const botDb = (
+      botType === BotType.combo ? this.comboBotDb : this.dcaBotDb
+    ) as typeof this.dcaBotDb
     const bot = botId
-      ? await this.dcaBotDb.readData({
+      ? await botDb.readData({
           _id: botId,
           userId,
           isDeleted: { $ne: true },
         })
-      : await this.dcaBotDb.readData({
+      : await botDb.readData({
           'settings.name': {
             $exists: true,
             $eq: botName,
@@ -3379,7 +3603,7 @@ class Bot<T extends UserSchema = UserSchema> {
       }`
       this.botEventDb.createData({
         botId: `${bot.data.result._id}`,
-        botType: BotType.dca,
+        botType,
         event: 'Warning',
         userId,
         paperContext: !!bot.data.result.paperContext,
@@ -3396,7 +3620,25 @@ class Bot<T extends UserSchema = UserSchema> {
     }
     //@ts-ignore
     delete bot.data.result.settings._id
-    if (!returnResult) {
+    if (!returnResult && botType === BotType.combo) {
+      // Awaited, unlike the DCA save: a combo coin locks credits, and a
+      // refusal (not enough credits, beta gate) must reach the caller.
+      const saved = await this.changeComboBot(
+        {
+          id: `${bot.data.result._id}`,
+          pair: exchangeFormatPairs,
+        },
+        userId,
+        !!bot.data.result.paperContext,
+      )
+      if (!saved || saved.status === StatusEnum.notok) {
+        return {
+          status: StatusEnum.notok as const,
+          reason: saved?.reason || 'Internal error. Please try again later',
+          data: null,
+        }
+      }
+    } else if (!returnResult) {
       this.changeDCABot(
         {
           ...bot.data.result.settings,
@@ -3810,11 +4052,22 @@ class Bot<T extends UserSchema = UserSchema> {
     },
     paperContext: boolean,
   ) {
+    // Spec 044 beta gate.
+    await coerceBaseFundingSetting(userId, _settings)
     const { vars, ...rest } = _settings
     // Same invariant as changeDCABot: a bot that scales DCA on atr/adr needs
     // the startDca indicator that prices its ladder, or it can never open a
     // deal. Seed it at creation so no client can produce one without. Bug #463.
     const settings = ensureDynamicArIndicator(rest)
+    // Spec 139 §7 / §2.3.3.
+    const singlePositionError = singlePositionSettingsError(settings)
+    if (singlePositionError) {
+      return {
+        status: StatusEnum.notok as const,
+        reason: singlePositionError,
+        data: null,
+      }
+    }
     if (
       (isPaper(settings.exchange) && !paperContext) ||
       (!isPaper(settings.exchange) && paperContext)
@@ -3940,10 +4193,15 @@ class Bot<T extends UserSchema = UserSchema> {
     _settings: CreateComboBotInput,
     paperContext: boolean,
   ) {
+    // Spec 044 beta gate.
+    await coerceBaseFundingSetting(userId, _settings)
     // Combo settings extend DCA settings and comboHelper extends dcaHelper, so
     // the atr/adr ladder — and its silent-no-deal failure — applies here too.
     const { vars, ...rest } = _settings
     const settings = ensureDynamicArIndicator(rest)
+    // Spec 139 §2.4: combo bots do not take single position.
+    delete settings.singlePosition
+    delete settings.maxPositionEntries
     if (
       (isPaper(settings.exchange) && !paperContext) ||
       (!isPaper(settings.exchange) && paperContext)
@@ -4303,6 +4561,12 @@ class Bot<T extends UserSchema = UserSchema> {
     },
     paperContext: boolean,
   ) {
+    // Spec 139 §2.4: one position per side of a hedge bot is follow-up
+    // work — a leg never runs as a single-position bot.
+    for (const leg of [settings.long, settings.short]) {
+      delete leg.singlePosition
+      delete leg.maxPositionEntries
+    }
     const preparedLongBot = await this.prepareDCABot(
       userId,
       settings.long,
@@ -4827,7 +5091,15 @@ class Bot<T extends UserSchema = UserSchema> {
   }
 
   public async changeDCABot(
-    input: Partial<DCABotSettings> & { id: string; vars?: BotVars | null },
+    input: Partial<DCABotSettings> & {
+      id: string
+      vars?: BotVars | null
+      /**
+       * Spec 139 §5.1.2: switching single position on may adopt the open
+       * deals of a pair that holds more than one. Not a setting.
+       */
+      adoptOpenDeals?: boolean | null
+    },
     userId: string,
     paperContext: boolean,
     // Default OFF: a settings save must not touch the orders of deals that are
@@ -4850,7 +5122,9 @@ class Bot<T extends UserSchema = UserSchema> {
         trail,
       )
     }
-    const { id, vars, ...settings } = input
+    const { id, vars, adoptOpenDeals, ...settings } = input
+    // Spec 044 beta gate.
+    await coerceBaseFundingSetting(userId, settings)
     const bot = await this.dcaBotDb.readData({
       _id: id,
       userId,
@@ -4866,6 +5140,60 @@ class Bot<T extends UserSchema = UserSchema> {
     const oldSettings = [bot.data.result].flat()[0]
     const set: { $set: Partial<DCABotSchema> } = {
       $set: { vars },
+    }
+    // Spec 139 §2.4: a hedge leg ignores single position.
+    if (oldSettings.parentBotId) {
+      delete settings.singlePosition
+      delete settings.maxPositionEntries
+    }
+    const singlePositionError = singlePositionSettingsError({
+      ...oldSettings.settings,
+      ...settings,
+    })
+    if (singlePositionError) {
+      return {
+        status: StatusEnum.notok as const,
+        reason: singlePositionError,
+        data: null,
+      }
+    }
+    const botRunning = ['open', 'range', 'error', 'monitoring'].includes(
+      oldSettings.status,
+    )
+    const runningWorker = botRunning
+      ? this.dcaBots.find((b) => b.id === id && b.userId === userId)
+      : undefined
+    const enableSinglePosition =
+      turnsSinglePositionOn(oldSettings.settings, settings) &&
+      oldSettings.settings.type !== DCATypeEnum.terminal
+    if (enableSinglePosition) {
+      const open = await this.dcaDealsDb.readData(
+        { botId: id, userId, status: DCADealStatusEnum.open } as any,
+        { symbol: 1 },
+        {},
+        true,
+      )
+      if (open.status === StatusEnum.notok) {
+        return open
+      }
+      // §5.1.4: adoption cancels orders on the exchange — it needs the
+      // bot's worker.
+      if (open.data.result.length && !runningWorker) {
+        return {
+          status: StatusEnum.notok as const,
+          reason: SINGLE_POSITION_START_BOT_REASON,
+          data: null,
+        }
+      }
+      // §5.1.2: merging positions is never implicit.
+      const several = pairsWithSeveralOpenDeals(open.data.result)
+      if (several.length && !adoptOpenDeals) {
+        return {
+          status: StatusEnum.notok as const,
+          reason: singlePositionMultipleOpenReason(several),
+          data: null,
+        }
+      }
     }
 
     const resetStats =
@@ -4884,7 +5212,10 @@ class Bot<T extends UserSchema = UserSchema> {
       (typeof settings.volumeScale !== 'undefined' &&
         oldSettings.settings.volumeScale !== settings.volumeScale) ||
       (typeof settings.orderSizeType !== 'undefined' &&
-        oldSettings.settings.orderSizeType !== settings.orderSizeType)
+        oldSettings.settings.orderSizeType !== settings.orderSizeType) ||
+      // Spec 139 §2.5: deal counts, win rate and durations mean something
+      // else on either side of the switch.
+      togglesSinglePosition(oldSettings.settings, settings)
     // `maxNumberOfOpenDeals` is deliberately absent: it changes how many deals
     // run at once, not the size of any one of them, so every per-deal
     // aggregate stays comparable. `startBalance` (seeded once from it) is kept
@@ -4982,15 +5313,27 @@ class Bot<T extends UserSchema = UserSchema> {
           ['open', 'range', 'error', 'monitoring'].includes(oldSettings.status)
         ) {
           if (find) {
-            this.getWorkerById(find.worker)?.postMessage({
-              do: 'method',
-              botType: BotType.dca,
-              botId: id,
-              method: 'reloadBot',
-              // rebuildIndicators: the settings that define the indicator set
-              // are exactly what just changed.
-              args: [id, replaceOrders, true],
-            })
+            this.getWorkerById(find.worker)?.postMessage(
+              enableSinglePosition
+                ? {
+                    // Spec 139 §5.1.1: reloads on the new settings, then
+                    // leaves one position per pair.
+                    do: 'method',
+                    botType: BotType.dca,
+                    botId: id,
+                    method: 'enableSinglePosition',
+                    args: [id, !!adoptOpenDeals],
+                  }
+                : {
+                    do: 'method',
+                    botType: BotType.dca,
+                    botId: id,
+                    method: 'reloadBot',
+                    // rebuildIndicators: the settings that define the
+                    // indicator set are exactly what just changed.
+                    args: [id, replaceOrders, true],
+                  },
+            )
           }
         }
       }
@@ -5101,6 +5444,11 @@ class Bot<T extends UserSchema = UserSchema> {
       )
     }
     const { id, vars, ...settings } = input
+    // Spec 044 beta gate.
+    await coerceBaseFundingSetting(userId, settings)
+    // Spec 139 §2.4: combo bots do not take single position.
+    delete settings.singlePosition
+    delete settings.maxPositionEntries
     const bot = await this.comboBotDb.readData({
       _id: id,
       userId,
@@ -6784,16 +7132,18 @@ class Bot<T extends UserSchema = UserSchema> {
   }
 
   public async findActiveDCA(filter: Record<string, unknown> = {}, skip = 0) {
-    const data = await this.dcaBotDb.readData<{
-      _id: string
-      userId: string
-      exchange: ExchangeEnum
-      uuid: string
-      paperContext?: boolean
-      settings: { type: DCATypeEnum }
-      status: BotStatusEnum
-      parentBotId?: string
-    }>(
+    const data = await this.dcaBotDb.readData<
+      RestartOrderRow & {
+        _id: string
+        userId: string
+        exchange: ExchangeEnum
+        uuid: string
+        paperContext?: boolean
+        settings: { type: DCATypeEnum }
+        status: BotStatusEnum
+        parentBotId?: string
+      }
+    >(
       {
         $and: [
           {
@@ -6828,6 +7178,7 @@ class Bot<T extends UserSchema = UserSchema> {
         'settings.type': 1,
         status: 1,
         parentBotId: 1,
+        ...restartOrderProjection,
       },
       {
         limit: 1000,
@@ -6851,15 +7202,17 @@ class Bot<T extends UserSchema = UserSchema> {
   }
 
   public async findActiveCombo(filter: Record<string, unknown> = {}, skip = 0) {
-    const data = await this.comboBotDb.readData<{
-      _id: string
-      userId: string
-      exchange: ExchangeEnum
-      uuid: string
-      paperContext?: boolean
-      status: BotStatusEnum
-      parentBotId?: string
-    }>(
+    const data = await this.comboBotDb.readData<
+      RestartOrderRow & {
+        _id: string
+        userId: string
+        exchange: ExchangeEnum
+        uuid: string
+        paperContext?: boolean
+        status: BotStatusEnum
+        parentBotId?: string
+      }
+    >(
       {
         $and: [
           {
@@ -6892,6 +7245,7 @@ class Bot<T extends UserSchema = UserSchema> {
         paperContext: 1,
         status: 1,
         parentBotId: 1,
+        ...restartOrderProjection,
       },
       { limit: 1000, skip },
       true,
@@ -7327,6 +7681,10 @@ class Bot<T extends UserSchema = UserSchema> {
     status?: BotStatusEnum,
     ignoreState = false,
   ) {
+    // A bot re-restarted inside the window (its worker died mid-boot) is
+    // loading again: signals for it wait again rather than reach a bot that
+    // is not there yet.
+    if (this.restartWindowOpen) this.restartFinishedIds.delete(botId)
     if (botType === BotType.dca) {
       await this.createNewBot(
         botId,
@@ -7355,7 +7713,7 @@ class Bot<T extends UserSchema = UserSchema> {
             })
           }
           worker.postMessage(msgs)
-          this.updateRestart()
+          this.updateRestart(botId)
         },
         paperContext,
         dcaType,
@@ -7395,7 +7753,7 @@ class Bot<T extends UserSchema = UserSchema> {
             })
           }
           worker.postMessage(msgs)
-          this.updateRestart()
+          this.updateRestart(botId)
         },
         paperContext,
       )
@@ -7423,7 +7781,7 @@ class Bot<T extends UserSchema = UserSchema> {
             method: 'start',
             args: [],
           })
-          this.updateRestart()
+          this.updateRestart(botId)
         },
         paperContext,
       )
@@ -7459,7 +7817,7 @@ class Bot<T extends UserSchema = UserSchema> {
               args: [`${botId}`, status, CloseDCATypeEnum.leave, true],
             })
           }
-          this.updateRestart()
+          this.updateRestart(botId)
         },
         paperContext,
       )
@@ -7495,7 +7853,7 @@ class Bot<T extends UserSchema = UserSchema> {
               args: [`${botId}`, status, CloseDCATypeEnum.leave, true],
             })
           }
-          this.updateRestart()
+          this.updateRestart(botId)
         },
         paperContext,
       )
@@ -7506,9 +7864,9 @@ class Bot<T extends UserSchema = UserSchema> {
     if (this.useBots) {
       this.setServiceListener()
     }
-    if (this.useBots && BotServiceType !== BotType.grid) {
+    if (this.useBots && bosServiceType && BotServiceType !== BotType.grid) {
       this.rabbit.listenWithCallback<WebhookData[] | WebhookData, void>(
-        webhookQueue,
+        webhookReplayQueue(this.getServiceType()),
         (data) => {
           this.handleDebug(
             `Webhook data received for ${[data]
@@ -7516,14 +7874,175 @@ class Bot<T extends UserSchema = UserSchema> {
               .map((d) => d.uuid)
               .join(',')} after restart`,
           )
-          this.webhookProcess(data)
+          this.webhookProcess(markReplayed(data))
         },
+      )
+      // Legacy shared replay queue: an API from before the per-type queues
+      // still sends here, and every bot service type listens on it. Remove
+      // once no API sends to this name. See `routeLegacyReplay`.
+      this.rabbit.listenWithCallback<WebhookData[] | WebhookData, void>(
+        webhookQueue,
+        (data) => this.routeLegacyReplay(data),
       )
     }
   }
 
-  private updateRestart() {
-    this.restarted++
+  /**
+   * An item on the legacy shared replay queue. Such an API replays a signal
+   * only after its RPC to the bot service timed out, and that RPC is still in
+   * the service's durable command queue and runs from there — so the replay
+   * is a second copy. It used to be dropped, in practice, whenever it landed
+   * on another bot type (most of the time) and to run twice when it landed on
+   * its own. An unstamped copy is now dropped with a log line; a stamped one
+   * (which the per-signal id dedupes) goes to its own type's queue.
+   */
+  private async routeLegacyReplay(data: WebhookData[] | WebhookData) {
+    for (const d of [data].flat()) {
+      if (!d?.signalId) {
+        logger.warn(
+          `${loggerPrefix} Legacy webhook replay for ${d?.uuid} (${d?.action}) dropped: its original is still queued on the bot service's command queue and runs from there`,
+        )
+        continue
+      }
+      const type = await this.webhookBotType(d.uuid)
+      if (!type) {
+        logger.warn(
+          `${loggerPrefix} Legacy webhook replay for ${d.uuid} (${d.action}) dropped: no bot holds this uuid`,
+        )
+        continue
+      }
+      const queue = webhookReplayQueue(type)
+      logger.info(
+        `${loggerPrefix} Legacy webhook replay for ${d.uuid} forwarded to ${queue}`,
+      )
+      await this.rabbit.ensureQueue(queue)
+      this.rabbit.send(queue, d)
+    }
+  }
+
+  /** Bot type holding a webhook uuid, looked up in the order the API always used. */
+  protected async webhookBotType(uuid?: string): Promise<BotType | undefined> {
+    if (!uuid) return undefined
+    if ((await this.dcaBotDb.readData({ uuid }))?.data?.result) return BotType.dca
+    if ((await this.comboBotDb.readData({ uuid }))?.data?.result)
+      return BotType.combo
+    if ((await hedgeComboBotDb.readData({ uuid }))?.data?.result)
+      return BotType.hedgeCombo
+    if ((await hedgeDCABotDb.readData({ uuid }))?.data?.result)
+      return BotType.hedgeDca
+    return undefined
+  }
+
+  /**
+   * Hand a signal to its bot service: on the service's webhook intake queue
+   * while it has a consumer — or while the service is down altogether (no
+   * consumer on either queue) and a current-version service of that type was
+   * alive within `webhookIntakeRecentMs` (its Redis heartbeat), because a
+   * current service reads its intake as soon as it starts, while the command
+   * queue waits until every bot is back. Otherwise the command queue, as
+   * before. The heartbeat is what keeps an older service (after a rollback,
+   * its intake queue left behind) from losing every signal sent while it
+   * restarts: it never reads the intake, and never writes the heartbeat. An intake request expires in RabbitMQ when the signal's cap
+   * runs out, so nothing piles up there either way.
+   */
+  protected async sendWebhookToService(
+    type: BotType,
+    items: WebhookData[],
+    ignoreSettings: boolean,
+  ) {
+    const payload = items.length === 1 ? items[0] : items
+    const intake = webhookIntakeQueue(type)
+    if (
+      (await this.webhookIntakeAvailable(intake)) ||
+      (await this.webhookServiceDownWithIntake(type))
+    ) {
+      const receivedAt = items[0]?.receivedAt ?? Date.now()
+      const cap = Math.max(...items.map((d) => webhookSignalMaxAgeMs(d?.action)))
+      const result = await this.rabbit.sendWithCallback<
+        BotServicePayload,
+        unknown
+      >(
+        intake,
+        { method: 'webhookProcess', params: [payload, ignoreSettings] },
+        webhookRpcTimeoutMs,
+        webhookSignalDeadline(receivedAt, Date.now(), cap) - Date.now(),
+      )
+      if (!result) throw new Error(notAvailable)
+      return result.response
+    }
+    const result = await this.rabbit.sendWithCallback<
+      BotServicePayload,
+      unknown
+    >(
+      this.getRabbitQueueName(type),
+      { method: 'webhookProcess', params: [payload, ignoreSettings] },
+      webhookRpcTimeoutMs,
+    )
+    if (!result) throw new Error(notAvailable)
+    return result.response
+  }
+
+  /**
+   * No consumer on the command queue or the intake, and a current-version
+   * service of this type was alive recently — one that is restarting.
+   */
+  private async webhookServiceDownWithIntake(type: BotType) {
+    const queue = webhookIntakeQueue(type)
+    const redis = await RedisClient.getInstance().catch(() => undefined)
+    const beatAt = Number(await redis?.get(webhookIntakeBeatKey(type)))
+    const seen = beatAt || this.intakeConsumerSeenAt.get(queue)
+    if (!seen || Date.now() - seen > webhookIntakeRecentMs) return false
+    const intake = await this.rabbit.queueInfo(queue)
+    if (!intake) return false
+    const command = await this.rabbit.queueInfo(this.getRabbitQueueName(type))
+    return !intake.consumerCount && !command?.consumerCount
+  }
+
+  private webhookSignalSeen = new Map<string, number>()
+
+  /**
+   * Claim a signal id for execution: true the first time, false for any later
+   * copy. Redis keeps the claim across bot-service restarts (the copies run
+   * in different processes when a worker restarts between them); without
+   * Redis this process remembers.
+   */
+  protected async claimWebhookSignal(signalId: string): Promise<boolean> {
+    const redis = await RedisClient.getInstance().catch(() => undefined)
+    const claimed = await redis?.setNx(
+      `gainium:webhookSignal:${signalId}`,
+      '1',
+      webhookSignalSeenTtlSec,
+    )
+    if (claimed !== undefined) return claimed
+    const now = Date.now()
+    for (const [id, at] of this.webhookSignalSeen) {
+      if (now - at > webhookSignalSeenTtlSec * 1000) this.webhookSignalSeen.delete(id)
+      else break
+    }
+    if (this.webhookSignalSeen.has(signalId)) return false
+    this.webhookSignalSeen.set(signalId, now)
+    return true
+  }
+
+  private intakeConsumerCache = new Map<string, { at: number; ok: boolean }>()
+  private intakeConsumerSeenAt = new Map<string, number>()
+
+  private async webhookIntakeAvailable(queue: string): Promise<boolean> {
+    const hit = this.intakeConsumerCache.get(queue)
+    if (hit && Date.now() - hit.at < webhookIntakeCheckTtlMs) return hit.ok
+    const ok = ((await this.rabbit.queueInfo(queue))?.consumerCount ?? 0) > 0
+    this.intakeConsumerCache.set(queue, { at: Date.now(), ok })
+    if (ok) this.intakeConsumerSeenAt.set(queue, Date.now())
+    return ok
+  }
+
+  private updateRestart(botId?: string) {
+    if (botId) {
+      this.restartDispatchedIds.add(botId)
+      this.restarted = this.restartDispatchedIds.size
+    } else {
+      this.restarted++
+    }
     this.lastRestartProgressAt = Date.now()
     // `>=`, not `===`: the counter can overshoot (a worker that terminates
     // mid-boot re-restarts its bots through the same callback), and an exact
@@ -7551,13 +8070,23 @@ class Bot<T extends UserSchema = UserSchema> {
    * because they mean some bots are live but unrestarted. Kill switch:
    * `BOT_RESTART_ARM_FALLBACK=false` restores the strict (deaf-on-stall) behaviour.
    */
-  protected beginRestartWindow(estimated: number, expectedIds: string[] = []) {
+  protected beginRestartWindow(
+    estimated: number,
+    expectedIds: string[] = [],
+    bots: { id: string; uuid?: string }[] = [],
+  ) {
     this.estimatedRestart = estimated
     this.restartWindowStartedAt = Date.now()
     this.lastRestartProgressAt = this.restartWindowStartedAt
     this.restartExpectedIds = new Set(expectedIds)
     this.restartFinishedIds = new Set()
+    this.restartDispatchedIds = new Set()
+    this.restartBotIdByUuid = new Map(
+      bots.filter((b) => !!b.uuid).map((b) => [`${b.uuid}`, `${b.id}`]),
+    )
+    this.restartWindowOpen = estimated > 0
     if (this.stragglerTimer) clearTimeout(this.stragglerTimer)
+    this.openWebhookIntake()
     if (!estimated) {
       this.armCommandListener('no-bots')
       return
@@ -7629,6 +8158,7 @@ class Bot<T extends UserSchema = UserSchema> {
     if (!this.restartExpectedIds.size) return
     if (this.stragglerTimer) clearTimeout(this.stragglerTimer)
     this.stragglerTimer = setTimeout(() => {
+      this.closeRestartWindow()
       const missing = [...this.restartExpectedIds].filter(
         (id) => !this.restartFinishedIds.has(id),
       )
@@ -7671,6 +8201,95 @@ class Bot<T extends UserSchema = UserSchema> {
     _elapsedMs: number,
   ): void {}
 
+  /**
+   * Consume webhook signals on their own queue, from the moment the restart
+   * window opens and for the life of the process. The command queue is still
+   * consumed only once every bot is back (a command processed before its bot
+   * is recreated used to start the bot twice), and having signals on a queue
+   * of their own keeps them out of its prefetch: commands waiting there can
+   * never hold a signal back. A signal for a bot that is already back runs at
+   * once; one for a bot still loading waits for it, at most
+   * WEBHOOK_SIGNAL_MAX_AGE_MS. The API sends a signal here only while this
+   * queue has a consumer, and to the command queue otherwise, so an API and a
+   * bot service of different versions keep working.
+   * Kill switch: `BOT_EARLY_WEBHOOK_INTAKE=false` (signals then wait for the
+   * arm on the command queue, as before).
+   */
+  protected openWebhookIntake() {
+    if (
+      this.webhookIntakeOpen ||
+      !earlyWebhookIntake ||
+      !this.useBots ||
+      !bosServiceType ||
+      BotServiceType === BotType.grid
+    )
+      return
+    this.webhookIntakeOpen = true
+    const queue = webhookIntakeQueue(this.getServiceType())
+    this.handleLog(
+      `${loggerPrefix} Webhook intake open on ${queue}: ${this.restartBotIdByUuid.size} bots registered as restarting`,
+    )
+    // Tell the API this type runs a version that reads its intake, so the API
+    // may queue signals there while the service restarts (see
+    // `webhookServiceDownWithIntake`). An older service never writes it.
+    const beat = () =>
+      RedisClient.getInstance()
+        .then((r) =>
+          r?.set(
+            webhookIntakeBeatKey(this.getServiceType()),
+            `${Date.now()}`,
+            webhookIntakeRecentMs / 1000,
+          ),
+        )
+        .catch(() => undefined)
+    beat()
+    setInterval(beat, webhookIntakeBeatMs).unref?.()
+    this.rabbit.listenWithCallback<BotServicePayload, unknown>(
+      queue,
+      async ({ params }) =>
+        (await this.webhookProcess(
+          ...((params ?? []) as [WebhookData[] | WebhookData, boolean]),
+        )) ?? StatusEnum.ok,
+      100,
+    )
+  }
+
+  private closeRestartWindow() {
+    this.restartWindowOpen = false
+    this.restartBotIdByUuid = new Map()
+  }
+
+  /**
+   * Id of the bot holding `uuid` when it is part of the current restart and
+   * has not reported back yet; undefined when it is not restarting.
+   */
+  protected restartingBotIdForUuid(uuid: string): string | undefined {
+    if (!this.restartWindowOpen) return undefined
+    const id = this.restartBotIdByUuid.get(uuid)
+    if (!id || this.restartFinishedIds.has(id)) return undefined
+    return id
+  }
+
+  /**
+   * Wait for a restarting bot to come back, until `deadline`. `ready` when
+   * it is back (or was never restarting), `expired` when the deadline passed
+   * first — the caller must then refuse the signal, not run it.
+   */
+  protected async awaitRestartingBot(
+    uuid: string,
+    deadline: number,
+  ): Promise<'ready' | 'expired'> {
+    while (this.restartingBotIdForUuid(uuid)) {
+      if (Date.now() >= deadline) return 'expired'
+      // A plain timer, not utils.sleep: this loop must yield to the event
+      // loop even where sleep is stubbed, or it spins until the deadline.
+      await new Promise((r) =>
+        setTimeout(r, Math.max(1, Math.min(restartWaitPollMs, deadline - Date.now()))),
+      )
+    }
+    return 'ready'
+  }
+
   protected setServiceListener() {
     if (!!bosServiceType) {
       const queue = this.getRabbitQueueName()
@@ -7692,23 +8311,37 @@ class Bot<T extends UserSchema = UserSchema> {
     this.handleLog('Start finding open bots')
     const findBotsData =
       BotServiceType === BotType.grid ? await this.findActiveGrid() : []
-    const findDCABotsData =
-      BotServiceType === BotType.dca ? await this.findActiveDCA() : []
-    const findComboBotsData =
-      BotServiceType === BotType.combo ? await this.findActiveCombo() : []
+    const findDCABotsData = restartResumeOrder(
+      BotServiceType === BotType.dca ? await this.findActiveDCA() : [],
+    )
+    const findComboBotsData = restartResumeOrder(
+      BotServiceType === BotType.combo ? await this.findActiveCombo() : [],
+    )
     const findHedgeComboBotsData =
       BotServiceType === BotType.hedgeCombo
         ? await this.findActiveHedgeCombo()
         : []
     const findHedgeDcaBotsData =
       BotServiceType === BotType.hedgeDca ? await this.findActiveHedgeDca() : []
+    const restartBots = [
+      ...(findBotsData ?? []),
+      ...(findDCABotsData ?? []),
+      ...(findComboBotsData ?? []),
+      ...(findHedgeComboBotsData ?? []),
+      ...(findHedgeDcaBotsData ?? []),
+    ].map((b) => ({ id: `${b._id}`, uuid: b.uuid }))
     this.beginRestartWindow(
-      (findBotsData ?? []).length +
-        (findDCABotsData ?? []).length +
-        (findComboBotsData ?? []).length +
-        (findHedgeComboBotsData ?? []).length +
-        (findHedgeDcaBotsData ?? []).length,
+      restartBots.length,
+      restartBots.map((b) => b.id),
+      restartBots,
     )
+    this.beginRestartSpread(this.getServiceType(), [
+      ...(findBotsData ?? []),
+      ...(findDCABotsData ?? []),
+      ...(findComboBotsData ?? []),
+      ...(findHedgeComboBotsData ?? []),
+      ...(findHedgeDcaBotsData ?? []),
+    ])
     if (findDCABotsData && findDCABotsData.length > 0) {
       this.handleLog(`Found ${findDCABotsData.length} active DCA bots`)
       for (const bot of findDCABotsData) {
@@ -7808,6 +8441,7 @@ class Bot<T extends UserSchema = UserSchema> {
         )
       }
     }
+    this.endRestartSpread()
     // The empty-service case is armed by `beginRestartWindow('no-bots')`; this
     // is the belt-and-braces path for a service that found nothing to restart.
     if (!this.estimatedRestart) {
@@ -8214,6 +8848,37 @@ class Bot<T extends UserSchema = UserSchema> {
     return findDCABotsData
   }
 
+  /**
+   * A bot stopped with "leave open deals" keeps its worker alive for those
+   * deals, so it is still found among the running bots — but it will not open
+   * a new one. Refuse the manual open up front instead of reporting it as
+   * scheduled and letting the worker drop it.
+   */
+  private async manualOpenRefusedForStoppedBot(
+    type: BotType.dca | BotType.combo,
+    botId: string,
+  ): Promise<BaseReturn<string> | null> {
+    const search = { _id: new Types.ObjectId(botId) }
+    const fields = { status: 1, previousStatus: 1 } as const
+    const bot =
+      type === BotType.dca
+        ? await this.dcaBotDb.readData(search, fields)
+        : await this.comboBotDb.readData(search, fields)
+    if (
+      isStoppedForNewDeals(
+        bot.data?.result?.status,
+        bot.data?.result?.previousStatus,
+      )
+    ) {
+      return {
+        status: StatusEnum.notok,
+        reason: stoppedBotNewDealMessage,
+        data: null,
+      }
+    }
+    return null
+  }
+
   public async openDCADeal(
     userId: string,
     botId: string,
@@ -8235,6 +8900,13 @@ class Bot<T extends UserSchema = UserSchema> {
       (d) => d.id === botId && d.userId === userId,
     )
     if (findLocal) {
+      const refused = await this.manualOpenRefusedForStoppedBot(
+        BotType.dca,
+        botId,
+      )
+      if (refused) {
+        return refused
+      }
       this.getWorkerById(findLocal.worker)?.postMessage({
         do: 'method',
         botType: BotType.dca,
@@ -8286,6 +8958,13 @@ class Bot<T extends UserSchema = UserSchema> {
       (d) => d.id === botId && d.userId === userId,
     )
     if (findLocal) {
+      const refused = await this.manualOpenRefusedForStoppedBot(
+        BotType.combo,
+        botId,
+      )
+      if (refused) {
+        return refused
+      }
       this.getWorkerById(findLocal.worker)?.postMessage({
         do: 'method',
         botType: BotType.combo,
@@ -8864,6 +9543,7 @@ class Bot<T extends UserSchema = UserSchema> {
     botId: string,
     dealIds: string[],
     paperContext: boolean,
+    options?: MergeDealsOptions,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
@@ -8874,6 +9554,7 @@ class Bot<T extends UserSchema = UserSchema> {
         botId,
         dealIds,
         paperContext,
+        options,
       )
     }
     const findLocal = this.dcaBots.find((d) => d.id === botId && d.userId)
@@ -8883,7 +9564,7 @@ class Bot<T extends UserSchema = UserSchema> {
         botType: BotType.dca,
         botId: findLocal.id,
         method: 'mergeDeals',
-        args: [dealIds],
+        args: [dealIds, options],
       })
 
       this.botEventDb.createData({
@@ -8919,7 +9600,7 @@ class Bot<T extends UserSchema = UserSchema> {
             botType: BotType.dca,
             botId,
             method: 'mergeDeals',
-            args: [dealIds],
+            args: [dealIds, options],
           })
         },
         paperContext,
@@ -8945,88 +9626,129 @@ class Bot<T extends UserSchema = UserSchema> {
     }
   }
 
-  public async mergeComboDeals(
+  /**
+   * Spec 139 §4 / §5.2.4: fold open deals into the open deal `targetDealId`
+   * of bot `botId`, which keeps its id and history. The sources may belong to
+   * other bots (terminal deals each have their own), as with `mergeDeals`.
+   * Runs in the target bot's worker.
+   */
+  public async adoptDeals(
     userId: string,
     botId: string,
+    targetDealId: string,
     dealIds: string[],
     paperContext: boolean,
   ) {
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
-        BotType.combo,
-        'mergeComboDeals',
+        BotType.dca,
+        'adoptDeals',
         false,
         userId,
         botId,
+        targetDealId,
         dealIds,
         paperContext,
       )
     }
-    const findLocal = this.comboBots.find((d) => d.id === botId && d.userId)
-    if (findLocal) {
-      this.getWorkerById(findLocal.worker)?.postMessage({
-        do: 'method',
-        botType: BotType.combo,
-        botId,
-        method: 'mergeDeals',
-        args: [dealIds],
-      })
-
-      this.botEventDb.createData({
-        userId: userId,
-        botId: botId,
-        botType: BotType.combo,
-        event: 'Merge Combo deals',
-        description: `Combo deals was merged: ${dealIds.join(' ')}`,
-        paperContext,
-      })
-      return {
-        status: StatusEnum.ok as StatusEnum.ok,
-        reason: null,
-        data: `Request to merge ${dealIds.length} deals sent`,
-      }
-    }
-    const botData = await this.comboBotDb.readData({
+    const notok = (reason: string) => ({
+      status: StatusEnum.notok as const,
+      reason,
+      data: null,
+    })
+    const botData = await this.dcaBotDb.readData({
       _id: botId,
       userId,
       isDeleted: { $ne: true },
     })
-    if (botData.data?.result) {
+    if (botData.status === StatusEnum.notok) {
+      return botData
+    }
+    if (!botData.data?.result) {
+      const combo = await this.comboBotDb.readData({ _id: botId, userId })
+      return combo.data?.result
+        ? notok(SINGLE_POSITION_ADOPT_COMBO_REASON)
+        : this.entityNotFound('Bot')
+    }
+    if (botData.data.result.parentBotId) {
+      return notok(SINGLE_POSITION_ADOPT_HEDGE_REASON)
+    }
+    const sources = [...new Set((dealIds ?? []).map((d) => `${d}`))].filter(
+      (d) => d !== `${targetDealId}`,
+    )
+    if (!sources.length) {
+      return notok('No deals to adopt')
+    }
+    const target = await this.dcaDealsDb.readData({
+      _id: targetDealId,
+      userId,
+    } as any)
+    if (target.status === StatusEnum.notok) {
+      return target
+    }
+    if (
+      !target.data?.result ||
+      `${target.data.result.botId}` !== `${botId}` ||
+      target.data.result.status !== DCADealStatusEnum.open
+    ) {
+      return notok(`Deal ${targetDealId} must be an open deal of this bot`)
+    }
+    const dispatch = {
+      do: 'method',
+      botType: BotType.dca,
+      botId,
+      method: 'adoptDeals',
+      args: [targetDealId, sources],
+    }
+    const findLocal = this.dcaBots.find(
+      (d) => d.id === botId && d.userId === userId,
+    )
+    if (findLocal) {
+      this.getWorkerById(findLocal.worker)?.postMessage(dispatch)
+    } else {
       await this.createNewBot(
         botId,
-        BotType.combo,
+        BotType.dca,
         userId,
         botData.data.result.exchange,
-        botData.data?.result?.uuid || '',
+        botData.data.result.uuid || '',
         [botId, botData.data.result.exchange],
-        (worker) => {
-          worker.postMessage({
-            do: 'method',
-            botType: BotType.combo,
-            botId,
-            method: 'mergeDeals',
-            args: [dealIds],
-          })
-        },
-        !!paperContext,
-      )
-
-      this.botEventDb.createData({
-        userId: userId,
-        botId: botId,
-        botType: BotType.combo,
-        event: 'Merge Combo deals',
-        description: `Combo deals was merged: ${dealIds.join(' ')}`,
+        (worker) => worker.postMessage(dispatch),
         paperContext,
-      })
-    } else {
-      return this.entityNotFound('Bot')
+        botData.data.result.settings.type ?? DCATypeEnum.regular,
+      )
     }
-
+    this.botEventDb.createData({
+      userId,
+      botId,
+      botType: BotType.dca,
+      event: 'Adopt DCA deals',
+      description: `DCA deals adopted into ${targetDealId}: ${sources.join(' ')}`,
+      paperContext,
+    })
     return {
-      status: StatusEnum.ok as StatusEnum.ok,
+      status: StatusEnum.ok as const,
       reason: null,
-      data: 'Deal scheduled to be closed',
+      data: `Request to adopt ${sources.length} deals sent`,
+    }
+  }
+
+  /**
+   * Combo deals are not merged — a combo position is spread over its
+   * minigrids, which one merged deal cannot take over (spec 138 §2.4). The
+   * mutation stays in the schema so existing clients get a reason, not an
+   * unknown field.
+   */
+  public async mergeComboDeals(
+    _userId: string,
+    _botId: string,
+    _dealIds: string[],
+    _paperContext: boolean,
+  ) {
+    return {
+      status: StatusEnum.notok as StatusEnum.notok,
+      reason: 'Merging deals is not available for combo bots',
+      data: null,
     }
   }
 
@@ -9035,107 +9757,29 @@ class Bot<T extends UserSchema = UserSchema> {
     ignoreSettings = false,
   ) {
     if (!this.useBots) {
-      try {
-        const dcas: WebhookData[] = []
-        const combos: WebhookData[] = []
-        const hedgeCombos: WebhookData[] = []
-        const hedgeDcas: WebhookData[] = []
-        for (const d of [data].flat()) {
-          const dca = await this.dcaBotDb.readData({ uuid: d.uuid })
-          if (dca?.data?.result) {
-            dcas.push(d)
-          } else {
-            const combo = await this.comboBotDb.readData({ uuid: d.uuid })
-            if (combo?.data?.result) {
-              combos.push(d)
-            } else {
-              const hedgeCombo = await hedgeComboBotDb.readData({
-                uuid: d.uuid,
-              })
-              if (hedgeCombo?.data?.result) {
-                hedgeCombos.push(d)
-              } else {
-                const hedgeDca = await hedgeDCABotDb.readData({
-                  uuid: d.uuid,
-                })
-                if (hedgeDca?.data?.result) {
-                  hedgeDcas.push(d)
-                }
-              }
-            }
-          }
+      // The API is where a signal is received: stamp it here, over anything
+      // the sender put in the field (logging only), and never let a sender
+      // mark its own signal as a replay.
+      const receivedAt = Date.now()
+      for (const d of [data].flat()) {
+        if (d && typeof d === 'object') {
+          d.receivedAt = receivedAt
+          d.signalId = v4()
+          delete d.replayed
         }
-        if (
-          dcas.length &&
-          combos.length &&
-          hedgeCombos.length &&
-          hedgeDcas.length
-        ) {
-          await this.callExternalBotService(
-            BotType.dca,
-            'webhookProcess',
-            false,
-            dcas,
-            ignoreSettings,
-          )
-          await this.callExternalBotService(
-            BotType.combo,
-            'webhookProcess',
-            false,
-            combos,
-            ignoreSettings,
-          )
-          await this.callExternalBotService(
-            BotType.hedgeCombo,
-            'webhookProcess',
-            false,
-            hedgeCombos,
-            ignoreSettings,
-          )
-          return await this.callExternalBotService(
-            BotType.hedgeDca,
-            'webhookProcess',
-            false,
-            hedgeDcas,
-            ignoreSettings,
-          )
-        }
-        if (dcas.length) {
-          return await this.callExternalBotService(
-            BotType.dca,
-            'webhookProcess',
-            false,
-            dcas,
-            ignoreSettings,
-          )
-        }
-        if (combos.length) {
-          return await this.callExternalBotService(
-            BotType.combo,
-            'webhookProcess',
-            false,
-            combos,
-            ignoreSettings,
-          )
-        }
-        if (hedgeCombos.length) {
-          return await this.callExternalBotService(
-            BotType.hedgeCombo,
-            'webhookProcess',
-            false,
-            hedgeCombos,
-            ignoreSettings,
-          )
-        }
-        if (hedgeDcas.length) {
-          return await this.callExternalBotService(
-            BotType.hedgeDca,
-            'webhookProcess',
-            false,
-            hedgeDcas,
-            ignoreSettings,
-          )
-        }
+      }
+      const byType: [BotType, WebhookData[]][] = [
+        [BotType.dca, []],
+        [BotType.combo, []],
+        [BotType.hedgeCombo, []],
+        [BotType.hedgeDca, []],
+      ]
+      for (const d of [data].flat()) {
+        const type = await this.webhookBotType(d?.uuid)
+        byType.find(([t]) => t === type)?.[1].push(d)
+      }
+      const toSend = byType.filter(([, items]) => items.length)
+      if (!toSend.length) {
         // Not one item resolved to a bot. This used to answer StatusEnum.ok,
         // so /trade_signal replied 200 to a signal it then dropped on the
         // floor — the single most misleading response the endpoint had, since
@@ -9150,20 +9794,74 @@ class Bot<T extends UserSchema = UserSchema> {
             .join(', ')} matched no bot`,
         )
         return this.entityNotFound('Bot')
-      } catch (e) {
-        if ((e as Error)?.message === notAvailable) {
-          this.handleWarn(
-            'External service not available in webhook process. Will add to the queue',
+      }
+      let result: unknown
+      for (let i = 0; i < toSend.length; i++) {
+        const [type, items] = toSend[i]
+        try {
+          result = await this.sendWebhookToService(type, items, ignoreSettings)
+        } catch (e) {
+          if ((e as Error)?.message !== notAvailable) return
+          // The bot service did not answer. Past the cap the signal is
+          // dropped: the service also drops any copy it takes that late.
+          const ageMs = webhookSignalAgeMs(receivedAt, Date.now())
+          const pending = toSend.slice(i).flatMap(([, rest]) => rest)
+          const cap = Math.max(
+            ...pending.map((d) => webhookSignalMaxAgeMs(d?.action)),
           )
-          this.rabbit.send(webhookQueue, data)
+          if (webhookSignalExpired(receivedAt, Date.now(), cap)) {
+            const action = [data].flat()[0]?.action ?? 'signal'
+            logger.warn(
+              `${loggerPrefix} Webhook ${action} not answered by the ${type} bot service; ${ageMs}ms since received, dropped, not replayed`,
+            )
+            const reason = `Bot service did not answer. "${action}" runs only if it can start within ${formatSignalCap(cap)} of arrival; otherwise it is dropped, not executed late.`
+            for (const d of pending) {
+              if (d?.uuid && d.action) {
+                this.noticeWebhookSignal({
+                  uuid: d.uuid,
+                  action: d.action,
+                  kind: 'expired',
+                  reason: webhookSignalExpiredReason(d.action, ageMs),
+                  receivedAt,
+                })
+              }
+            }
+            return { status: StatusEnum.notok as const, reason, data: null }
+          }
+          // Otherwise queued and replayed once the service is back, as
+          // before — this type's items and every type's not tried yet, each
+          // still held to the cap. A type whose service runs this version (its
+          // webhook intake has a consumer) gets its own replay queue; otherwise
+          // the legacy shared queue, which an older service handles as it
+          // always did and a current one routes to the right type
+          // (`routeLegacyReplay`).
+          logger.warn(
+            `${loggerPrefix} External service not available in webhook process. Queued ${toSend
+              .slice(i)
+              .map(([t]) => t)
+              .join(', ')} for replay`,
+          )
+          for (const [t, rest] of toSend.slice(i)) {
+            const queue = (await this.webhookIntakeAvailable(
+              webhookIntakeQueue(t),
+            ))
+              ? webhookReplayQueue(t)
+              : webhookQueue
+            await this.rabbit.ensureQueue(queue)
+            this.rabbit.send(queue, rest.length === 1 ? rest[0] : rest)
+          }
+          return
         }
       }
-      return
+      return result
     }
     if (BotServiceType === BotType.grid) {
       return StatusEnum.ok
     }
     const items = [data].flat()
+    // The restart wait is measured from here, before the per-bot lock, so a
+    // second signal queued behind the first does not get a fresh budget.
+    const intakeAt = Date.now()
     for (let i = 0; i < items.length; i++) {
       // Spec 078: only wait for a close to settle when something in THIS
       // payload still has to run against the account it is flattening. A
@@ -9175,6 +9873,7 @@ class Bot<T extends UserSchema = UserSchema> {
         items[i],
         ignoreSettings,
         i < items.length - 1,
+        intakeAt,
       )
       if (items.length === 1) {
         return result ?? StatusEnum.ok
@@ -9245,12 +9944,37 @@ class Bot<T extends UserSchema = UserSchema> {
     }
   }
 
+  /**
+   * How many pairs a webhook's bot trades, read only when a funds `price`
+   * arrives without a `symbol`. Anything unreadable counts as "not one", so
+   * the signal is refused rather than priced against the wrong pair.
+   */
+  private async webhookBotPairCount(bot: {
+    id: string
+    type: BotType
+  }): Promise<number | undefined> {
+    const res =
+      bot.type === BotType.dca
+        ? await this.dcaBotDb.readData({ _id: bot.id }, { 'settings.pair': 1 })
+        : bot.type === BotType.combo
+          ? await this.comboBotDb.readData(
+              { _id: bot.id },
+              { 'settings.pair': 1 },
+            )
+          : undefined
+    return res?.status === StatusEnum.ok
+      ? res.data?.result?.settings?.pair?.length
+      : undefined
+  }
+
   @IdMute(mutex, (data?: WebhookData) => `${data?.uuid}singleWebhookProcess`)
   private async singleWebhookProcess(
     data: WebhookData,
     ignoreSettings = false,
     /** Spec 078: another action in this payload runs after this one. */
     moreToRun = false,
+    /** When this bot service took the signal; bounds the restart wait. */
+    intakeAt = Date.now(),
   ) {
     if (!data) {
       return {
@@ -9285,6 +10009,68 @@ class Bot<T extends UserSchema = UserSchema> {
       }
     }
     if (action && uuid) {
+      // A signal runs within WEBHOOK_SIGNAL_MAX_AGE_MS of reaching the API or
+      // not at all, on every path: taken late from a queue, replayed after
+      // its bot service came back, or waiting for a bot still re-loading.
+      const now = Date.now()
+      const maxAgeMs = webhookSignalMaxAgeMs(action)
+      if (webhookSignalExpired(data.receivedAt, now, maxAgeMs)) {
+        const ageMs = webhookSignalAgeMs(data.receivedAt, now)
+        logger.warn(
+          `${loggerPrefix} Webhook ${action} for ${uuid} dropped, not executed: ${ageMs}ms since received${data.replayed ? ' (replay)' : ''}`,
+        )
+        const reason = webhookSignalExpiredReason(action, ageMs)
+        this.noticeWebhookSignal({
+          uuid,
+          action,
+          kind: 'expired',
+          reason,
+          receivedAt: data.receivedAt,
+        })
+        return { status: StatusEnum.notok as const, reason, data: null }
+      }
+      // A bot this restart is still re-loading: wait for it inside the
+      // signal's remaining budget, then refuse rather than run it late. This
+      // used to answer "Bot not found" at once (not dispatched yet) or queue
+      // behind the bot's load and run whenever it finished.
+      if (this.restartingBotIdForUuid(uuid)) {
+        const waitStart = Date.now()
+        const outcome = await this.awaitRestartingBot(
+          uuid,
+          webhookSignalDeadline(data.receivedAt, intakeAt, maxAgeMs),
+        )
+        const ageMs = webhookSignalAgeMs(data.receivedAt, Date.now())
+        if (outcome === 'expired') {
+          const reason = webhookBotNotRunningReason(
+            await this.webhookBotStatus(uuid),
+            action,
+          )
+          logger.warn(
+            `${loggerPrefix} Webhook ${action} for ${uuid} not executed: bot still re-loading after ${Date.now() - waitStart}ms wait, ${ageMs}ms since received (${reason})`,
+          )
+          this.noticeWebhookSignal({
+            uuid,
+            action,
+            kind: 'expired',
+            reason,
+            receivedAt: data.receivedAt,
+          })
+          return { status: StatusEnum.notok as const, reason, data: null }
+        }
+        logger.info(
+          `${loggerPrefix} Webhook ${action} for ${uuid} waited ${Date.now() - waitStart}ms for its bot to re-load, ${ageMs}ms since received`,
+        )
+      }
+      if (data.signalId && !(await this.claimWebhookSignal(data.signalId))) {
+        logger.warn(
+          `${loggerPrefix} Webhook ${action} for ${uuid} skipped: signal ${data.signalId} already ran (${data.replayed ? 'replay' : 'queued original'} of a signal the API also replayed)`,
+        )
+        return {
+          status: StatusEnum.notok as const,
+          reason: `This "${action}" signal was already executed.`,
+          data: null,
+        }
+      }
       let call: (() => unknown) | undefined
       // The cold-start path posts to the worker directly instead of setting
       // `call`, so it has to say so explicitly — otherwise the
@@ -9459,10 +10245,23 @@ class Bot<T extends UserSchema = UserSchema> {
         action !== WebhookActionEnum.startBot &&
         action !== WebhookActionEnum.changePairs
       ) {
+        const status = await this.webhookBotStatus(uuid)
+        const reason = webhookBotNotRunningReason(status, action)
         this.handleDebug(
-          `Received ${action} signal for ${uuid}, but bot is not running`,
+          `Received ${action} signal for ${uuid}, but bot is not running: ${reason}`,
         )
-        return this.entityNotFound('Bot')
+        // Only a bot that exists is told: a sender repeating a dead uuid
+        // has no one to tell.
+        if (status) {
+          this.noticeWebhookSignal({
+            uuid,
+            action,
+            kind: 'refused',
+            reason,
+            receivedAt: data.receivedAt,
+          })
+        }
+        return { status: StatusEnum.notok as const, reason, data: null }
       }
       if (
         !findBot &&
@@ -9509,17 +10308,30 @@ class Bot<T extends UserSchema = UserSchema> {
         event.botType = findBot.type
         event.paperContext = findBot.paperContext
         if (action === WebhookActionEnum.start) {
-          event.metadata = JSON.stringify({ action, symbol })
-          this.handleDebug(`Received ${action} signal for ${uuid}`)
-          call = () =>
-            findBot &&
-            this.getWorkerById(findBot.worker)?.postMessage({
-              do: 'method',
-              botType: findBot.type,
-              botId: findBot.id,
-              method: 'openDealBySignal',
-              args: [findBot.id, symbol, ignoreSettings],
+          // Validated here, before anything is dispatched, so a malformed
+          // value comes back to the sender as a 400 instead of a deal opened
+          // without the exit it asked for.
+          const parsed = parseSignalDealOverrides(data, findBot.type)
+          if (parsed.error) {
+            failReason = parsed.error
+          } else {
+            const overrides = parsed.overrides
+            event.metadata = JSON.stringify({
+              action,
+              symbol,
+              ...(overrides ?? {}),
             })
+            this.handleDebug(`Received ${action} signal for ${uuid}`)
+            call = () =>
+              findBot &&
+              this.getWorkerById(findBot.worker)?.postMessage({
+                do: 'method',
+                botType: findBot.type,
+                botId: findBot.id,
+                method: 'openDealBySignal',
+                args: [findBot.id, symbol, ignoreSettings, overrides],
+              })
+          }
         }
         if (
           action === WebhookActionEnum.close ||
@@ -9528,6 +10340,28 @@ class Bot<T extends UserSchema = UserSchema> {
           event.metadata = JSON.stringify({ action, symbol })
           event.symbol = symbol
           this.handleDebug(`Received ${action} signal for ${uuid}`)
+          // Past the ordinary cap a close may still run (its own cap is
+          // longer), but only against deals that were already open when the
+          // signal arrived — never one a newer signal opened in between.
+          const openedBefore = webhookCloseOpenedBefore(
+            data.receivedAt,
+            Date.now(),
+          )
+          if (openedBefore && data.receivedAt) {
+            const reason = lateCloseNoticeReason(
+              action,
+              data.receivedAt,
+              Date.now(),
+            )
+            logger.warn(`${loggerPrefix} Webhook ${action} for ${uuid}: ${reason}`)
+            this.noticeWebhookSignal({
+              uuid,
+              action,
+              kind: 'lateClose',
+              reason,
+              receivedAt: data.receivedAt,
+            })
+          }
           call = () =>
             findBot &&
             this.getWorkerById(findBot.worker)?.postMessage({
@@ -9539,6 +10373,7 @@ class Bot<T extends UserSchema = UserSchema> {
                 symbol,
                 ignoreSettings,
                 action === WebhookActionEnum.closeSl,
+                openedBefore,
               ],
             })
         }
@@ -9574,44 +10409,55 @@ class Bot<T extends UserSchema = UserSchema> {
             })
         }
         if (
-          action === WebhookActionEnum.addFunds &&
+          (action === WebhookActionEnum.addFunds ||
+            action === WebhookActionEnum.reduceFunds) &&
           qty &&
           qty !== '' &&
           asset &&
           asset !== ''
         ) {
-          event.metadata = JSON.stringify({ action, symbol, qty, asset })
-          event.symbol = symbol
-          this.handleDebug(`Received ${action} signal for ${uuid}`)
-          call = () =>
-            findBot &&
-            this.getWorkerById(findBot.worker)?.postMessage({
-              do: 'method',
-              botType: findBot.type,
-              botId: findBot.id,
-              method: 'addFundsForAllDeals',
-              args: [qty, asset as OrderSizeTypeEnum, symbol, type, true],
+          // Optional `price`: a resting limit order instead of a market one.
+          // Refused rather than downgraded to market when it is malformed, or
+          // when it cannot say which pair of a multi-pair bot it is for.
+          const funds = parseSignalFundsPrice(data)
+          if (funds.error) {
+            failReason = funds.error
+          } else if (
+            funds.needsSymbol &&
+            (await this.webhookBotPairCount(findBot)) !== 1
+          ) {
+            failReason = signalFundsPriceNeedsSymbolReason
+          } else {
+            const limitPrice = funds.price
+            event.metadata = JSON.stringify({
+              action,
+              symbol,
+              qty,
+              asset,
+              ...(limitPrice ? { price: limitPrice } : {}),
             })
-        }
-        if (
-          action === WebhookActionEnum.reduceFunds &&
-          qty &&
-          qty !== '' &&
-          asset &&
-          asset !== ''
-        ) {
-          event.metadata = JSON.stringify({ action, symbol, qty, asset })
-          event.symbol = symbol
-          this.handleDebug(`Received ${action} signal for ${uuid}`)
-          call = () =>
-            findBot &&
-            this.getWorkerById(findBot.worker)?.postMessage({
-              do: 'method',
-              botType: findBot.type,
-              botId: findBot.id,
-              method: 'reduceFundsInAllDeals',
-              args: [qty, asset as OrderSizeTypeEnum, symbol, type, true],
-            })
+            event.symbol = symbol
+            this.handleDebug(`Received ${action} signal for ${uuid}`)
+            call = () =>
+              findBot &&
+              this.getWorkerById(findBot.worker)?.postMessage({
+                do: 'method',
+                botType: findBot.type,
+                botId: findBot.id,
+                method:
+                  action === WebhookActionEnum.addFunds
+                    ? 'addFundsForAllDeals'
+                    : 'reduceFundsInAllDeals',
+                args: [
+                  qty,
+                  asset as OrderSizeTypeEnum,
+                  symbol,
+                  type,
+                  true,
+                  limitPrice,
+                ],
+              })
+          }
         }
         if (
           action === WebhookActionEnum.changePairs &&
@@ -9694,10 +10540,16 @@ class Bot<T extends UserSchema = UserSchema> {
     type?: AddFundsTypeEnum,
     dealId?: string,
     actor?: ChangeTrailActor,
+    /** Place a resting LIMIT at this price instead of a MARKET order. */
+    price?: string,
+    /** Main-app spec 047: the target is a Combo deal / bot; resolved when omitted. */
+    combo?: boolean,
   ) {
+    const isCombo =
+      combo ?? (await this.fundsDealIsCombo(userId, dealId, botId))
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
-        BotType.dca,
+        isCombo ? BotType.combo : BotType.dca,
         'addDealFundsFromPublicApi',
         false,
         userId,
@@ -9708,11 +10560,37 @@ class Bot<T extends UserSchema = UserSchema> {
         type,
         dealId,
         actor,
+        price,
+        isCombo,
       )
+    }
+    if (isCombo && price !== undefined && price !== null && `${price}` !== '') {
+      return {
+        status: StatusEnum.notok as const,
+        reason:
+          'A limit price is not supported for Combo deals. Send it without a price to use a market order',
+        data: null,
+      }
+    }
+    const funds = parseSignalFundsPrice({
+      price,
+      // One deal is one pair; only a bot-wide call can be ambiguous.
+      symbol: dealId ? dealId : symbol,
+    })
+    if (funds.error) {
+      return {
+        status: StatusEnum.notok as const,
+        reason: funds.error,
+        data: null,
+      }
     }
     let botIdToUse = botId
     if (!botIdToUse && dealId) {
-      const findDeal = await this.dcaDealsDb.readData({
+      const findDeal = await (
+        (isCombo
+          ? this.comboDealsDb
+          : this.dcaDealsDb) as typeof this.dcaDealsDb
+      ).readData({
         _id: dealId,
         userId,
       })
@@ -9725,13 +10603,9 @@ class Bot<T extends UserSchema = UserSchema> {
       botIdToUse = findDeal.data.result.botId
     }
     if (botId) {
-      const bot = await this.dcaBotDb.readData(
-        { userId, _id: botId },
-        undefined,
-        {},
-        false,
-        false,
-      )
+      const bot = await (
+        (isCombo ? this.comboBotDb : this.dcaBotDb) as typeof this.dcaBotDb
+      ).readData({ userId, _id: botId }, undefined, {}, false, false)
       if (bot.reason === StatusEnum.notok) {
         return bot
       }
@@ -9739,11 +10613,29 @@ class Bot<T extends UserSchema = UserSchema> {
         return this.entityNotFound('Bot')
       }
     }
-    const findBot = this.dcaBots.find((b) => b.id === botIdToUse)
+    const botType = isCombo ? BotType.combo : BotType.dca
+    const bots: {
+      id: string
+      worker: number
+      type: BotType
+      paperContext: boolean
+    }[] = isCombo ? this.comboBots : this.dcaBots
+    const findBot = bots.find((b) => b.id === botIdToUse)
+    if (
+      findBot &&
+      funds.needsSymbol &&
+      (await this.webhookBotPairCount(findBot)) !== 1
+    ) {
+      return {
+        status: StatusEnum.notok as const,
+        reason: signalFundsPriceNeedsSymbolReason,
+        data: null,
+      }
+    }
     if (findBot) {
       this.getWorkerById(findBot.worker)?.postMessage({
         do: 'method',
-        botType: BotType.dca,
+        botType,
         botId: findBot.id,
         method: 'addFundsForAllDeals',
         args: [
@@ -9752,7 +10644,7 @@ class Bot<T extends UserSchema = UserSchema> {
           symbol,
           type,
           undefined,
-          undefined,
+          funds.price,
           undefined,
           dealId,
         ],
@@ -9762,7 +10654,7 @@ class Bot<T extends UserSchema = UserSchema> {
         this.recordChangeTrail({
           userId,
           botId: botIdToUse,
-          botType: BotType.dca,
+          botType,
           dealId,
           scope: dealId ? 'deal' : 'bot',
           action: 'add_funds',
@@ -9771,7 +10663,13 @@ class Bot<T extends UserSchema = UserSchema> {
             {
               path: 'addFunds',
               before: null,
-              after: { qty, asset, symbol, type },
+              after: {
+                qty,
+                asset,
+                symbol,
+                type,
+                ...(funds.price ? { price: funds.price } : {}),
+              },
             },
           ],
           paperContext: !!findBot.paperContext,
@@ -9862,10 +10760,16 @@ class Bot<T extends UserSchema = UserSchema> {
     type?: AddFundsTypeEnum,
     dealId?: string,
     actor?: ChangeTrailActor,
+    /** Place a resting LIMIT at this price instead of a MARKET order. */
+    price?: string,
+    /** Main-app spec 047: the target is a Combo deal / bot; resolved when omitted. */
+    combo?: boolean,
   ) {
+    const isCombo =
+      combo ?? (await this.fundsDealIsCombo(userId, dealId, botId))
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
-        BotType.dca,
+        isCombo ? BotType.combo : BotType.dca,
         'reduceDealFundsFromPublicApi',
         false,
         userId,
@@ -9876,11 +10780,37 @@ class Bot<T extends UserSchema = UserSchema> {
         type,
         dealId,
         actor,
+        price,
+        isCombo,
       )
+    }
+    if (isCombo && price !== undefined && price !== null && `${price}` !== '') {
+      return {
+        status: StatusEnum.notok as const,
+        reason:
+          'A limit price is not supported for Combo deals. Send it without a price to use a market order',
+        data: null,
+      }
+    }
+    const funds = parseSignalFundsPrice({
+      price,
+      // One deal is one pair; only a bot-wide call can be ambiguous.
+      symbol: dealId ? dealId : symbol,
+    })
+    if (funds.error) {
+      return {
+        status: StatusEnum.notok as const,
+        reason: funds.error,
+        data: null,
+      }
     }
     let botIdToUse = botId
     if (!botIdToUse && dealId) {
-      const findDeal = await this.dcaDealsDb.readData({
+      const findDeal = await (
+        (isCombo
+          ? this.comboDealsDb
+          : this.dcaDealsDb) as typeof this.dcaDealsDb
+      ).readData({
         _id: dealId,
         userId,
       })
@@ -9893,13 +10823,9 @@ class Bot<T extends UserSchema = UserSchema> {
       botIdToUse = findDeal.data.result.botId
     }
     if (botId) {
-      const bot = await this.dcaBotDb.readData(
-        { userId, _id: botId },
-        undefined,
-        {},
-        false,
-        false,
-      )
+      const bot = await (
+        (isCombo ? this.comboBotDb : this.dcaBotDb) as typeof this.dcaBotDb
+      ).readData({ userId, _id: botId }, undefined, {}, false, false)
       if (bot.reason === StatusEnum.notok) {
         return bot
       }
@@ -9907,11 +10833,29 @@ class Bot<T extends UserSchema = UserSchema> {
         return this.entityNotFound('Bot')
       }
     }
-    const findBot = this.dcaBots.find((b) => b.id === botIdToUse)
+    const botType = isCombo ? BotType.combo : BotType.dca
+    const bots: {
+      id: string
+      worker: number
+      type: BotType
+      paperContext: boolean
+    }[] = isCombo ? this.comboBots : this.dcaBots
+    const findBot = bots.find((b) => b.id === botIdToUse)
+    if (
+      findBot &&
+      funds.needsSymbol &&
+      (await this.webhookBotPairCount(findBot)) !== 1
+    ) {
+      return {
+        status: StatusEnum.notok as const,
+        reason: signalFundsPriceNeedsSymbolReason,
+        data: null,
+      }
+    }
     if (findBot) {
       this.getWorkerById(findBot.worker)?.postMessage({
         do: 'method',
-        botType: BotType.dca,
+        botType,
         botId: findBot.id,
         method: 'reduceFundsInAllDeals',
         args: [
@@ -9920,7 +10864,7 @@ class Bot<T extends UserSchema = UserSchema> {
           symbol,
           type,
           undefined,
-          undefined,
+          funds.price,
           undefined,
           dealId,
         ],
@@ -9930,7 +10874,7 @@ class Bot<T extends UserSchema = UserSchema> {
         this.recordChangeTrail({
           userId,
           botId: botIdToUse,
-          botType: BotType.dca,
+          botType,
           dealId,
           scope: dealId ? 'deal' : 'bot',
           action: 'reduce_funds',
@@ -9939,7 +10883,13 @@ class Bot<T extends UserSchema = UserSchema> {
             {
               path: 'reduceFunds',
               before: null,
-              after: { qty, asset, symbol, type },
+              after: {
+                qty,
+                asset,
+                symbol,
+                type,
+                ...(funds.price ? { price: funds.price } : {}),
+              },
             },
           ],
           paperContext: !!findBot.paperContext,
@@ -11499,7 +12449,9 @@ class Bot<T extends UserSchema = UserSchema> {
       _id: { finished: boolean; dcas: number; configured: number }
       deals: number
     }>([
-      { $match: match },
+      // A merged deal carries a synthetic one-level ladder; the DCAs were
+      // filled by its sources, which stay in (spec 138 §2.2.2).
+      { $match: { ...match, parent: { $ne: true } } },
       {
         $group: {
           _id: {
@@ -11940,10 +12892,21 @@ class Bot<T extends UserSchema = UserSchema> {
       paperContext ?? false,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
+      // The caller's own deals only: the deal read carries their userId as
+      // well as the bot id. An id that is not an ObjectId matches nothing
+      // rather than throwing.
+      const ids = (Array.isArray(id) ? id : [])
+        .slice(0, 200)
+        .filter((i) => typeof i === 'string' && /^[0-9a-f]{24}$/i.test(i))
+        .map((i) => new Types.ObjectId(i))
+      if (!ids.length) {
+        return { status: StatusEnum.ok, data: { deals: [] } }
+      }
       const findTransactionsRequest = await this.comboDealsDb.readData(
         {
           botId: botId.toString(),
-          _id: { $in: id.slice(0, 200).map((ids) => new Types.ObjectId(ids)) },
+          userId,
+          _id: { $in: ids },
         },
         undefined,
         {},
@@ -11979,10 +12942,21 @@ class Bot<T extends UserSchema = UserSchema> {
       paperContext ?? false,
     )
     if (bot.status === StatusEnum.ok && bot.data) {
+      // The caller's own deals only: the deal read carries their userId as
+      // well as the bot id. An id that is not an ObjectId matches nothing
+      // rather than throwing.
+      const ids = (Array.isArray(id) ? id : [])
+        .slice(0, 200)
+        .filter((i) => typeof i === 'string' && /^[0-9a-f]{24}$/i.test(i))
+        .map((i) => new Types.ObjectId(i))
+      if (!ids.length) {
+        return { status: StatusEnum.ok, data: { deals: [] } }
+      }
       const findTransactionsRequest = await this.dcaDealsDb.readData(
         {
           botId: botId.toString(),
-          _id: { $in: id.slice(0, 200).map((ids) => new Types.ObjectId(ids)) },
+          userId,
+          _id: { $in: ids },
         },
         undefined,
         {},
@@ -13359,12 +14333,28 @@ class Bot<T extends UserSchema = UserSchema> {
     settings: AddFundsSettings,
     fromWebhook = false,
     actor?: ChangeTrailActor,
+    /** Main-app spec 047: the deal is a Combo deal; resolved when omitted. */
+    combo?: boolean,
   ) {
+    const isCombo = combo ?? (await this.fundsDealIsCombo(userId, dealId))
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
-        BotType.dca,
+        isCombo ? BotType.combo : BotType.dca,
         'addDealFunds',
         false,
+        botId,
+        dealId,
+        userId,
+        paperContext,
+        settings,
+        fromWebhook,
+        actor,
+        isCombo,
+      )
+    }
+    if (isCombo) {
+      return this.dispatchComboDealFunds(
+        'addDealFunds',
         botId,
         dealId,
         userId,
@@ -13518,6 +14508,123 @@ class Bot<T extends UserSchema = UserSchema> {
   }
 
   /**
+   * Main-app spec 047: does this add / reduce funds request target a Combo
+   * deal (or, with no deal, a Combo bot)? DCA is looked up first, so a DCA
+   * request routes exactly as it did before Combo was accepted.
+   */
+  private async fundsDealIsCombo(
+    userId: string,
+    dealId?: string,
+    botId?: string,
+  ): Promise<boolean> {
+    if (dealId) {
+      const dca = await this.dcaDealsDb.readData(
+        { _id: dealId, userId },
+        { _id: 1 },
+      )
+      if (dca.status === StatusEnum.ok && dca.data?.result) {
+        return false
+      }
+      const combo = await this.comboDealsDb.readData(
+        { _id: dealId, userId },
+        { _id: 1 },
+      )
+      return combo.status === StatusEnum.ok && !!combo.data?.result
+    }
+    if (botId) {
+      const dca = await this.dcaBotDb.readData(
+        { _id: botId, userId },
+        { _id: 1 },
+      )
+      if (dca.status === StatusEnum.ok && dca.data?.result) {
+        return false
+      }
+      const combo = await this.comboBotDb.readData(
+        { _id: botId, userId },
+        { _id: 1 },
+      )
+      return combo.status === StatusEnum.ok && !!combo.data?.result
+    }
+    return false
+  }
+
+  /**
+   * Main-app spec 047: route a Combo add / reduce funds to the worker that
+   * owns the deal — the bot read from the deal, as `restartDeal` does, so a
+   * hedge parent id sent by a client still reaches its child.
+   */
+  private async dispatchComboDealFunds(
+    method: 'addDealFunds' | 'reduceDealFunds',
+    botId: string,
+    dealId: string,
+    userId: string,
+    paperContext: boolean,
+    settings: AddFundsSettings,
+    fromWebhook: boolean,
+    actor?: ChangeTrailActor,
+  ) {
+    const deal = await this.comboDealsDb.readData(
+      { _id: dealId, userId },
+      { botId: 1 },
+    )
+    if (deal.status === StatusEnum.notok) {
+      return deal
+    }
+    const ownerId = deal.data.result?.botId
+    if (!ownerId) {
+      return this.entityNotFound('Deal')
+    }
+    if (ownerId !== botId) {
+      this.handleDebug(
+        `${loggerPrefix} ${method} | deal ${dealId} belongs to ${ownerId}, requested via ${botId}`,
+      )
+    }
+    const findLocal = this.comboBots.find(
+      (d) => d.id === ownerId && d.userId === userId,
+    )
+    if (!findLocal) {
+      return {
+        status: StatusEnum.notok,
+        reason: 'Bot is not running',
+        data: null,
+      }
+    }
+    this.getWorkerById(findLocal.worker)?.postMessage({
+      do: 'method',
+      botType: BotType.combo,
+      botId: ownerId,
+      method,
+      args: [ownerId, dealId, settings, fromWebhook],
+    })
+    const add = method === 'addDealFunds'
+    this.recordChangeTrail({
+      userId,
+      botId: ownerId,
+      botType: BotType.combo,
+      dealId,
+      scope: 'deal',
+      action: add ? 'add_funds' : 'reduce_funds',
+      actor: resolveChangeTrailActor(
+        actor,
+        fromWebhook ? { type: 'webhook' } : undefined,
+      ),
+      changes: [
+        {
+          path: add ? 'addFunds' : 'reduceFunds',
+          before: null,
+          after: settings,
+        },
+      ],
+      paperContext,
+    })
+    return {
+      status: StatusEnum.ok,
+      reason: null,
+      data: add ? 'Add funds scheduled' : 'Reduce funds scheduled',
+    }
+  }
+
+  /**
    * Restart one deal: cancel and re-place its orders without reloading the
    * whole bot. Feature request:
    * https://community.gainium.io/t/restart-option-for-individual-deals/5302
@@ -13603,12 +14710,28 @@ class Bot<T extends UserSchema = UserSchema> {
     settings: AddFundsSettings,
     fromWebhook = false,
     actor?: ChangeTrailActor,
+    /** Main-app spec 047: the deal is a Combo deal; resolved when omitted. */
+    combo?: boolean,
   ) {
+    const isCombo = combo ?? (await this.fundsDealIsCombo(userId, dealId))
     if (!this.useBots) {
       return await this.callExternalBotService<BaseReturn<string>>(
-        BotType.dca,
+        isCombo ? BotType.combo : BotType.dca,
         'reduceDealFunds',
         false,
+        botId,
+        dealId,
+        userId,
+        paperContext,
+        settings,
+        fromWebhook,
+        actor,
+        isCombo,
+      )
+    }
+    if (isCombo) {
+      return this.dispatchComboDealFunds(
+        'reduceDealFunds',
         botId,
         dealId,
         userId,

@@ -1,4 +1,4 @@
-import { ExchangeEnum } from '../../types'
+import { ExchangeEnum, TypeOrderEnum } from '../../types'
 import type { RemainderOrder } from './reduceOnlyRemainder'
 
 /**
@@ -41,4 +41,58 @@ export function isVenueCanceledRemainderFill(
     return true
   }
   return exchange === ExchangeEnum.bybit && originalOrderType === 'MARKET'
+}
+
+/**
+ * Whether a short `FILLED` row is a safety order that was CANCELLED, not one the
+ * venue under-filled — so its remainder must not be bought at market.
+ *
+ * Only **kucoin** spot. Its stream reports a cancelled order that had fills
+ * (`type: 'canceled'`, `status: 'done'`, non-zero `filledSize`) as `FILLED`, and
+ * a resting LIMIT order cannot end short any other way: whoever cancelled it —
+ * the owner on the exchange, `cancelTerminalDealOrder`, an order-count
+ * reduction — the rest was never wanted. Every other venue reports the same
+ * cancel as `CANCELED`, which `buyRemainder` does not act on. MARKET orders keep
+ * their top-up, and so do the base entry and the take-profit. Spec `156`.
+ */
+export function isCancelledLimitSafetyOrder(order: {
+  exchange?: string | null
+  type?: string | null
+  typeOrder?: string | null
+}): boolean {
+  return (
+    order.exchange === ExchangeEnum.kucoin &&
+    order.type === 'LIMIT' &&
+    order.typeOrder === TypeOrderEnum.dealRegular
+  )
+}
+
+/**
+ * Whether a remainder top-up of `qty` at `price` is worth less than the venue's
+ * minimum order value, on a venue that is known to refuse it for that reason.
+ *
+ * Only **bybit** spot BUY. A market buy there is sized in quote, and Bybit
+ * refuses one below the pair's `minOrderAmt` (`quoteAsset.minAmount`) with
+ * `Order value exceeded lower limit.`, or with `An unknown parameter was sent.`
+ * once the amount rounds to zero. Other venues are not judged: a kucoinLinear
+ * top-up worth 0.05 USDT against a stored minimum of 1 filled. Spec `153` §1.1.
+ */
+export function isBelowVenueMinOrderValue(
+  exchange: string | undefined,
+  side: string | undefined,
+  qty: number,
+  price: number,
+  quoteMinAmount: number | undefined | null,
+): boolean {
+  if (exchange !== ExchangeEnum.bybit || side !== 'BUY') {
+    return false
+  }
+  if (
+    typeof quoteMinAmount !== 'number' ||
+    !Number.isFinite(quoteMinAmount) ||
+    quoteMinAmount <= 0
+  ) {
+    return false
+  }
+  return qty * price < quoteMinAmount
 }

@@ -35,10 +35,12 @@ import swaggerDoc from './swagger.json'
 import { startAdminConfigSync } from '../utils/adminConfig'
 import { startEncryptKeyBackfill } from '../utils/encryptKeyBackfill'
 import { getClientIp, parseTrustProxy } from './clientIp'
+import { brokerCodesHandler } from './brokerCodes'
 
 swaggerDoc.servers = [{ url: `${SERVER_HOST}` }]
 
-const cors_origin = CORS_ORIGIN?.split(' ')
+// Origins separated by commas and/or whitespace (same format as admin-sh)
+const cors_origin = CORS_ORIGIN?.split(/[\s,]+/).filter(Boolean)
 
 const Bot = BotInstance.getInstance()
 
@@ -413,6 +415,7 @@ async function start() {
     app.get(r, apiLimiter, bodyMiddleware, ...fn.middlewares, fn.handler),
   )
 
+  app.get('/broker-codes', apiLimiter, brokerCodesHandler)
   app.get('/datafeed_ws', async (_req, res) => {
     const result = await methods.getWSKucoin()
     res.send(result)

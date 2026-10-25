@@ -104,6 +104,14 @@ export const baseGridBelowMinimumBudget = 'baseGridBelowMinimumBudget'
 export const orderBelowExchangeMin = 'orderBelowExchangeMin'
 
 /**
+ * An automatic new deal refused because the pair is a dated futures contract
+ * that delivers within the cutoff (`deliveryCutoff.ts`). Standing by nature:
+ * every start cycle asks again and only the calendar (or the contract leaving
+ * the pair list) changes the answer. Keyed by PAIR.
+ */
+export const newDealNearDelivery = 'newDealNearDelivery'
+
+/**
  * A deal's resting take-profit no longer covers the position it tracks
  * (issue #696, spec `013.tp-coverage-drift-after-partial-tp`).
  *
@@ -128,6 +136,27 @@ export const tpCoverageDrift = 'tpCoverageDrift'
  * substituted independently.
  */
 export const limitOnlyEntryFallback = 'limitOnlyEntryFallback'
+
+/**
+ * `openNewDeal` refused because the bot is at its max open deals (or its
+ * over/under split of it). Reported to the user as a notification, not as a
+ * bot event: hitting the limit is the bot working as configured, and the check
+ * runs on every start attempt — per candle per pair for indicator starts — so
+ * only the first refusal in a re-arm window is news. Bot-level: no symbol.
+ */
+export const maxDealsReached = 'maxDealsReached'
+
+/**
+ * As {@link maxDealsReached}, for the per-pair limit of a multi-pair bot.
+ * Keyed by PAIR: one pair can sit at its limit while the others still open.
+ */
+export const maxDealsPerPairReached = 'maxDealsPerPairReached'
+
+/**
+ * As {@link maxDealsReached}, for a single-position deal that holds its
+ * `maxPositionEntries` (spec 139 §3.2.2). Keyed by PAIR.
+ */
+export const positionEntriesReached = 'positionEntriesReached'
 
 /**
  * How long a standing condition may hold before it is reported again. Matches

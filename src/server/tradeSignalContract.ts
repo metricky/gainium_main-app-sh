@@ -124,10 +124,158 @@ export function missingWebhookFields(data: unknown): string[] {
   ) as string[]
 }
 
+/**
+ * Why a signal for a uuid that no running bot holds was not executed, from the
+ * stored bot's status (`undefined` when no bot has that uuid). An active status
+ * with no running bot means the bot service is re-loading its bots.
+ */
+export function webhookBotNotRunningReason(
+  status: string | undefined,
+  action: string,
+): string {
+  if (!status) return 'Bot not found'
+  if (status === 'closed') {
+    return `Bot is stopped, so "${action}" was not executed. Start the bot first.`
+  }
+  if (status === 'archive') {
+    return `Bot is archived, so "${action}" was not executed.`
+  }
+  return `Bot is restarting on our side, so "${action}" was not executed.`
+}
+
 export function missingWebhookFieldsReason(missing: string[]): string {
   return (
     `Webhook payload is missing required field(s): ${missing.join(', ')}. ` +
     `Expected a JSON object such as ` +
     `{"action":"startDeal","uuid":"<bot uuid>"}.`
+  )
+}
+
+/**
+ * The latest a signal may still run, measured from when the API received it.
+ * A TradingView alert is a decision about the market at the moment it fired;
+ * executed minutes later it may be the wrong one. So a signal runs if it can
+ * run within this window — straight away, after waiting for a bot that is
+ * still re-loading, or when its bot service comes back and takes it from the
+ * queue or the replay queue — and is otherwise dropped with the reason logged.
+ */
+export const WEBHOOK_SIGNAL_MAX_AGE_MS = 60_000
+
+/**
+ * The cap for a close signal (`closeDeal`, `closeDealSl`). A late close takes
+ * risk off rather than adding it — on a leveraged position, closing two
+ * minutes late is usually far better than not closing — so it may run for
+ * longer. It still has a cap: a close replayed an hour later, after the user
+ * may have dealt with the position themselves, must not run blind. And a late
+ * close only closes deals that were already open when the signal arrived (see
+ * `webhookCloseOpenedBefore`), never one a newer signal opened in between.
+ */
+export const WEBHOOK_CLOSE_SIGNAL_MAX_AGE_MS = 15 * 60_000
+
+const lateTolerantActions = new Set(['closeDeal', 'closeDealSl'])
+
+/** The cap that applies to this action. */
+export function webhookSignalMaxAgeMs(action?: string): number {
+  return action && lateTolerantActions.has(action)
+    ? WEBHOOK_CLOSE_SIGNAL_MAX_AGE_MS
+    : WEBHOOK_SIGNAL_MAX_AGE_MS
+}
+
+/**
+ * For a close that runs later than the ordinary cap: only deals created before
+ * this instant may be closed. undefined = no restriction (the close is on
+ * time, or the signal is unstamped).
+ */
+export function webhookCloseOpenedBefore(
+  receivedAt: number | undefined,
+  now: number,
+): number | undefined {
+  if (typeof receivedAt !== 'number' || !Number.isFinite(receivedAt)) {
+    return undefined
+  }
+  return now - receivedAt > WEBHOOK_SIGNAL_MAX_AGE_MS ? receivedAt : undefined
+}
+
+/** Age of a signal stamped `receivedAt` at the API; 0 when unstamped or from the future. */
+export function webhookSignalAgeMs(
+  receivedAt: number | undefined,
+  now: number,
+): number {
+  if (typeof receivedAt !== 'number' || !Number.isFinite(receivedAt)) return 0
+  return Math.max(0, now - receivedAt)
+}
+
+/**
+ * True when a stamped signal is already older than the cap. An unstamped
+ * signal (from an API that predates the stamp) is never expired here, so a
+ * mixed-version rollout keeps the old behaviour for it.
+ */
+export function webhookSignalExpired(
+  receivedAt: number | undefined,
+  now: number,
+  maxAgeMs = WEBHOOK_SIGNAL_MAX_AGE_MS,
+): boolean {
+  return webhookSignalAgeMs(receivedAt, now) > maxAgeMs
+}
+
+/**
+ * The instant past which a signal must not start: the cap from when the API
+ * received it, or from `intakeAt` (this process took it) when unstamped. A
+ * stamp from a clock ahead of ours cannot extend it.
+ */
+export function webhookSignalDeadline(
+  receivedAt: number | undefined,
+  intakeAt: number,
+  maxAgeMs = WEBHOOK_SIGNAL_MAX_AGE_MS,
+): number {
+  const start =
+    typeof receivedAt === 'number' && Number.isFinite(receivedAt)
+      ? Math.min(receivedAt, intakeAt)
+      : intakeAt
+  return start + maxAgeMs
+}
+
+/** "60s" / "15 min" — how a cap is written to the user. */
+export function formatSignalCap(ms: number): string {
+  return ms % 60_000 === 0 && ms > 60_000
+    ? `${ms / 60_000} min`
+    : `${ms / 1000}s`
+}
+
+export function webhookSignalExpiredReason(
+  action: string,
+  ageMs: number,
+): string {
+  return (
+    `Bot is restarting on our side, so "${action}" was not executed. ` +
+    `The signal arrived ${Math.round(ageMs / 1000)}s ago; signals that cannot ` +
+    `run within ${formatSignalCap(webhookSignalMaxAgeMs(action))} are dropped, not executed late.`
+  )
+}
+
+/** What a user is told about a signal that did not run, or ran late. */
+export type WebhookSignalNotice = {
+  uuid: string
+  action: string
+  /**
+   * `refused`: the bot was stopped/archived/restarting and the signal was not
+   * executed. `expired`: it could not run within its cap and was dropped.
+   * `lateClose`: a close ran after the ordinary cap.
+   */
+  kind: 'refused' | 'expired' | 'lateClose'
+  reason: string
+  receivedAt?: number
+}
+
+/** The bot-log line for a late close. */
+export function lateCloseNoticeReason(
+  action: string,
+  receivedAt: number,
+  now: number,
+): string {
+  const at = new Date(receivedAt).toISOString().slice(11, 19)
+  return (
+    `"${action}" received at ${at} UTC ran ${Math.round((now - receivedAt) / 1000)}s later, because the bot was not ready when it arrived. ` +
+    `It acted only on deals that were already open at ${at} UTC.`
   )
 }

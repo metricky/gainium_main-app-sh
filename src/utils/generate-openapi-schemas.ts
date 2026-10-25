@@ -16,6 +16,8 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as yaml from 'js-yaml'
 import { findEnumExampleMismatches } from './openapiEnumExamples'
+import { IndicatorEnum } from '../../types'
+import { CONDITION_INDICATOR_TYPES } from '../indicators/conditions/catalog'
 
 interface EnumInfo {
   name: string
@@ -168,6 +170,11 @@ const fieldMetadata: Record<
       'Smallest base order a reduced deal may open with, in the base order size unit. Below it the deal is skipped. Empty or 0: no floor beyond the exchange minimum',
     example: '20',
   },
+  baseFunding: {
+    description:
+      'Short spot DCA / combo bots: what to do when the free base does not cover the deal. require (default): skip the deal. auto: use the free base and buy only the shortfall for the safety orders at market; the base order is recorded at the current price without a trade, and its quote stays reserved until the deal closes. botOnly: never use the free base; the bot buys what the safety orders need',
+    example: 'require',
+  },
 
   // Start conditions
   startCondition: {
@@ -190,6 +197,16 @@ const fieldMetadata: Record<
   minOpenDeal: { description: 'Minimum price to open deals', example: '1' },
   useMulti: { description: 'Enable multiple pairs trading', example: false },
   maxDealsPerPair: { description: 'Max deals per trading pair', example: '2' },
+  singlePosition: {
+    description:
+      'Single position per pair (DCA bots only): at most one open deal per pair. A start signal on a pair that already holds an open deal adds an entry to it (sized like the base order) instead of opening a second deal. Safety orders are off while it is on. With start condition ASAP it needs a dynamic price filter or a cooldown after deal start. Switching it on while a pair has more than one open deal requires adoptOpenDeals: true on the update',
+    example: false,
+  },
+  maxPositionEntries: {
+    description:
+      'Single position: the most entries a position may hold, counting its base order. Empty or 0: no limit',
+    example: '5',
+  },
   ignoreStartDeals: {
     description: 'Ignore deals in start condition check',
     example: false,
@@ -272,6 +289,11 @@ const fieldMetadata: Record<
     description: 'Apply stop cooldown per symbol or bot',
     example: 'bot',
   },
+  cooldownAfterDealStopTrigger: {
+    description:
+      'Which closed deals start the stop cooldown: any (every close), sl (stop loss or liquidation only) or loss (deals closed at a net loss only)',
+    example: 'any',
+  },
   useCooldown: { description: 'Enable cooldown feature', example: false },
 
   // Trailing
@@ -352,6 +374,11 @@ const fieldMetadata: Record<
   hodlDay: { description: 'Days between opening new deal', example: '7' },
   hodlAt: { description: 'Time to open new deal', example: '23:59' },
   hodlHourly: { description: 'Hold on hourly basis', example: false },
+  hodlWeekdays: {
+    description:
+      'Weekdays the timer may open deals on, 0 = Sunday to 6 = Saturday, in the user timezone. Empty means every day; a run on another day moves to the next selected one.',
+    example: [1, 2, 3, 4, 5],
+  },
   hodlNextBuy: { description: 'Next buy time in hours', example: 24 },
 
   // Indicators
@@ -695,10 +722,10 @@ const fieldMetadata: Record<
   // Stochastic
   stochSmoothK: { description: 'Stochastic K smoothing', example: 3 },
   stochSmoothD: { description: 'Stochastic D smoothing', example: 3 },
-  stochUpper: { description: 'Stochastic overbought level', example: '80' },
-  stochLower: { description: 'Stochastic oversold level', example: '20' },
+  stochUpper: { description: 'Stochastic band. With stochRange both, the upper band (the condition is met above it). With stochRange lower, the lower band (met below it). Not read with upper or none.', example: '80' },
+  stochLower: { description: 'Stochastic band. With stochRange both, the lower band (the condition is met below it). With stochRange upper, the upper band (met above it). Not read with lower or none.', example: '20' },
   stochRSI: { description: 'Stochastic RSI period', example: 14 },
-  stochRange: { description: 'Stochastic range to check', example: 'upper' },
+  stochRange: { description: 'Zone the condition must be met in: lower (below the band in stochUpper), upper (above the band in stochLower), both (above stochUpper or below stochLower), none (anywhere).', example: 'upper' },
   rsiValue: { description: 'RSI value (K or D line)', example: 'k' },
   rsiValue2: { description: 'Second RSI value', example: 'd' },
 
@@ -842,6 +869,21 @@ const fieldMetadata: Record<
   factor: { description: 'Supertrend multiplier factor', example: 3 },
   atrLength: { description: 'ATR period length', example: 10 },
   stCondition: { description: 'Supertrend condition', example: 'up' },
+  smoothing: {
+    description:
+      "Oscillators RSI, CCI, MFI, WR, UO, MOM, AO, ADX, BBPB, KCPB, BBW, VO and MAR only. Moving average laid over the indicator's line: none, sma, ema, wma, dema, tema, hma or rma (case-insensitive). Unset or 'none' keeps the unsmoothed line; any other value on another indicator is rejected.",
+    example: 'ema',
+  },
+  smoothingLength: {
+    description:
+      'Period of the smoothing average, a whole number from 1 to 1000. Smoothing applies only when both smoothing and this are set.',
+    example: 14,
+  },
+  smoothingCompare: {
+    description:
+      "With smoothing on. 'value' (default): the condition compares the smoothed line with indicatorValue (or its percentile). 'line': the indicator's line is compared with its smoothed line — gt / lt / cu / cd only, indicatorValue is ignored (the API still requires the field; any value), bw is rejected. Percentile mode always compares by value.",
+    example: 'value',
+  },
 
   // Price change
   pcUp: { description: 'Price change up threshold', example: '5' },
@@ -903,10 +945,19 @@ const fieldMetadata: Record<
 // things on different schemas (the flat map above is keyed by field name only).
 const schemaFieldMetadata: Record<
   string,
-  Record<string, Partial<{ description: string; example: any }>>
+  Record<
+    string,
+    Partial<{ description: string; example: any; excludeEnum: string[] }>
+  >
 > = {
   SettingsIndicators: {
-    type: { example: 'RSI' },
+    // The validator accepts only the types a bot can run as a condition.
+    type: {
+      example: 'RSI',
+      excludeEnum: Object.values(IndicatorEnum).filter(
+        (t) => !CONDITION_INDICATOR_TYPES.includes(t),
+      ),
+    },
   },
 }
 

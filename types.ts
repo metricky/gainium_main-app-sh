@@ -14,6 +14,8 @@ import {
   PercentileResult,
   OBFVGResult,
   LongWickResult,
+  OTEResult,
+  SessionLevelsResult,
 } from '@gainium/indicators'
 import {
   DCABacktestingInput,
@@ -170,6 +172,80 @@ export enum TypeOrderEnum {
   br = 'br',
   rebalance = 'rebalance',
   hedge = 'hedge',
+  /**
+   * A market order the bot places to acquire an asset its committed orders
+   * consume (main-app spec 044). Carries the deal id for the funding lot, but
+   * is not one of the deal's orders: it starts nothing and stays out of the
+   * deal's ledger and fee ledger.
+   */
+  funding = 'funding',
+}
+
+/**
+ * What a short spot DCA / combo deal does when the free base does not cover
+ * its orders (main-app spec 044 §3.4). Missing means `require`.
+ */
+export enum BaseFundingEnum {
+  /** Refuse (or reduce, with reduceToAvailableBalance) — as before. */
+  require = 'require',
+  /** Use the free base, buy only the shortfall. */
+  auto = 'auto',
+  /** Never use the free base; the bot buys all it needs. */
+  botOnly = 'botOnly',
+}
+
+/**
+ * Account funds a deal's own orders need that are not on the book yet (spec
+ * 044 §8.4): free balance the reservation must hold for the deal until each
+ * order is placed. `committed` is the need of every order counted (in
+ * `asset`); `remaining` is what is not placed yet. Released as orders are
+ * placed, and with the deal (only open / start / error deals are counted).
+ */
+export type DealFundingHold = {
+  asset: 'base' | 'quote'
+  committed: number
+  remaining: number
+}
+
+/**
+ * How a deal was funded by the bot (main-app spec 044). Absent on a deal that
+ * ran on the account's own balance.
+ */
+export type DealFunding = {
+  mode: BaseFundingEnum
+  /**
+   * The base order recorded filled at this price with no trade.
+   *
+   * Short: its quote is the account's own and stays reserved
+   * (`quoteReserved`) until the deal closes, because the take profit spends
+   * it to buy the base back.
+   *
+   * Long (hedge leg, spec 044 phase 3): the entry is backed by base the
+   * account already holds, which the take profit sells — `baseReserved`
+   * keeps it from other deals until the deal closes; `quoteReserved` is 0.
+   */
+  virtualEntry?: {
+    qty: number
+    price: number
+    quoteReserved: number
+    baseReserved?: number
+  }
+  /**
+   * A funding trade about to be (or being) sent (phase 3, restart safety):
+   * written before the order goes out, cleared when the funding is recorded.
+   * A deal in `start` that carries it must never get a real base order — a
+   * restore looks the order up and resumes or retires the deal.
+   */
+  pendingTrade?: {
+    clientOrderId: string
+    side: OrderSideEnum
+    qty: number
+    at: number
+  }
+  /** `fundinglots` rows this deal's funding trades wrote. */
+  lotIds: string[]
+  /** Every base unit the deal sells came from a lot or the virtual entry. */
+  sourcedByBot: boolean
 }
 
 export enum BalancesAction {
@@ -207,6 +283,7 @@ export type TypeOrder =
   | typeof TypeOrderEnum.br
   | typeof TypeOrderEnum.rebalance
   | typeof TypeOrderEnum.hedge
+  | typeof TypeOrderEnum.funding
 export const BUY = 'BUY'
 export const SELL = 'SELL'
 export const OK = 'OK'
@@ -287,6 +364,13 @@ export type ExchangeInfo = {
   // market as a wrapper (Bitget v3 `isReality`). Absent => base name is the
   // ticker. Danger List #1.
   underlying?: string
+  // Leverage limits from the instrument info, where the venue publishes them
+  // (raw: strings on Bybit / Bitget / Hyperliquid / OKX). Danger List #1.
+  minLeverage?: number | string
+  maxLeverage?: number | string
+  // Delivery time (ms epoch) of a dated futures contract, from the venue's
+  // instrument info; absent for perpetuals and spot. Danger List #1.
+  deliveryTime?: number
 }
 
 export type TpSlCondition = 'valueChanged' | 'priceReached'
@@ -409,6 +493,30 @@ export enum IndicatorStartConditionEnum {
   /** value-type indicators only: indicatorValue < value < indicatorValue2 */
   bw = 'bw',
 }
+
+/**
+ * What a smoothed oscillator condition compares (only when `smoothing` is on):
+ * - `value` (default): the condition reads the smoothed line S = MA(R) instead
+ *   of the indicator's line R, against indicatorValue / percentile as usual.
+ * - `line`: R against S (gt / lt / cu / cd; the value fields are ignored,
+ *   `bw` never fires). Percentile mode overrides it.
+ */
+export enum SmoothingCompareEnum {
+  value = 'value',
+  line = 'line',
+}
+
+/** Moving averages allowed as oscillator smoothing (`none` = off). */
+export const SMOOTHING_VALUES = [
+  'none',
+  'sma',
+  'ema',
+  'wma',
+  'dema',
+  'tema',
+  'hma',
+  'rma',
+] as const
 
 export enum BBCrossingEnum {
   middle = 'middle',
@@ -533,6 +641,17 @@ export type SettingsIndicators = {
   factor?: number
   atrLength?: number
   stCondition?: STConditionEnum
+  /**
+   * Smoothable oscillators only (SMOOTHABLE_INDICATORS). Moving average over
+   * the indicator's main line: 'sma' | 'ema' | 'wma' | 'dema' | 'tema' |
+   * 'hma' | 'rma' (case-insensitive). Missing, null, 'none' or unknown = off
+   * (unchanged behaviour).
+   */
+  smoothing?: string | null
+  /** Smoothing length (1..1000); missing, null or 0 = off. */
+  smoothingLength?: number | null
+  /** Missing / null = 'value'. See SmoothingCompareEnum. */
+  smoothingCompare?: SmoothingCompareEnum | null
   pcUp?: string
   pcDown?: string
   pcCondition?: PCConditionEnum
@@ -557,10 +676,26 @@ export type SettingsIndicators = {
   obfvgRef?: OBFVGRefEnum
   sessionDays?: number[]
   sessionRule?: SessionRuleEnum
+  /** Local HH:MM in sessionTimezone; with sessionEnd, limits the session to those hours. */
+  sessionStart?: string
+  sessionEnd?: string
+  /** IANA time zone the session hours and days are read in (default UTC). */
+  sessionTimezone?: string
+  /** Session rule `levels`: left operand of indicatorCondition (default price). */
+  sessionLevelA?: SessionLevelEnum
+  /** Session rule `levels`: right operand of indicatorCondition (default prevHigh). */
+  sessionLevelB?: SessionLevelEnum
   lwThreshold?: string
   lwMaxDuration?: string
   lwValue?: LWValueEnum
   lwCondition?: LWConditionEnum
+  /** OTE Levels: bars to the left a swing must dominate. */
+  oteLeftBars?: string
+  /** OTE Levels: minimum leg size, % of the leg's low. */
+  oteMinLegSize?: string
+  /** OTE Levels: retracement level price is compared with (0 = leg end, 1 = origin). */
+  oteLevel?: string
+  oteLeg?: OTELegEnum
 } & Percentile &
   TrendFilter
 
@@ -572,11 +707,32 @@ export enum LWConditionEnum {
 export enum SessionRuleEnum {
   in = 'in',
   out = 'out',
+  /** Price levels: compare two session levels, evaluated from candles */
+  levels = 'levels',
+}
+
+/** A value a Session "Price levels" condition compares (same values as `@gainium/indicators`). */
+export enum SessionLevelEnum {
+  prevOpen = 'prevOpen',
+  prevHigh = 'prevHigh',
+  prevMid = 'prevMid',
+  prevLow = 'prevLow',
+  prevClose = 'prevClose',
+  curOpen = 'curOpen',
+  curMid = 'curMid',
+  price = 'price',
 }
 
 export enum LWValueEnum {
   top = 'top',
   bottom = 'bottom',
+  any = 'any',
+}
+
+/** Which leg direction an OTE Levels condition reads. */
+export enum OTELegEnum {
+  bullish = 'bullish',
+  bearish = 'bearish',
   any = 'any',
 }
 
@@ -741,6 +897,16 @@ export enum CooldownOptionsEnum {
   bot = 'bot',
 }
 
+/** Which closed deals start the cooldown after deal stop. */
+export enum CooldownStopTriggerEnum {
+  /** Every closed deal (default; also when missing). */
+  any = 'any',
+  /** Deals closed by a stop loss or a liquidation. */
+  sl = 'sl',
+  /** Deals closed with a negative net profit. */
+  loss = 'loss',
+}
+
 export enum DCAVolumeType {
   scale = 'scale',
   change = 'change',
@@ -756,6 +922,12 @@ export type SettingsIndicatorGroup = {
   logic: IndicatorsLogicEnum
   action: IndicatorAction
   section?: IndicatorSection
+  /**
+   * How this group attaches to the previous group of the same action and
+   * section (ignored on the first). AND binds tighter than OR. Unset means
+   * the bot-level logic (startDealLogic, stopDealLogic, ...).
+   */
+  join?: IndicatorsLogicEnum
 }
 
 export enum RRSlTypeEnum {
@@ -796,6 +968,8 @@ export interface DCABotSettings extends BaseSettings {
   hodlDay: string
   hodlAt: string
   hodlHourly?: boolean
+  /** Timer weekdays, 0 = Sunday … 6 = Saturday in the user's timezone; empty = every day */
+  hodlWeekdays?: number[]
   hodlNextBuy: number
   maxNumberOfOpenDeals?: string
   indicators: SettingsIndicators[]
@@ -813,6 +987,7 @@ export interface DCABotSettings extends BaseSettings {
   cooldownAfterDealStopUnits?: CooldownUnits
   cooldownAfterDealStopInterval?: number
   cooldownAfterDealStopOption?: CooldownOptionsEnum
+  cooldownAfterDealStopTrigger?: CooldownStopTriggerEnum
   moveSL?: boolean
   moveSLTrigger?: string
   moveSLValue?: string
@@ -953,7 +1128,24 @@ export interface DCABotSettings extends BaseSettings {
    * exchange minimum.
    */
   reduceToAvailableMinSize?: string
+  /**
+   * Short spot DCA / combo: what to do when the free base does not cover the
+   * deal (main-app spec 044). Missing means `require`.
+   */
+  baseFunding?: BaseFundingEnum
   dcaByMarket?: boolean
+  /**
+   * At most one open deal per pair (spec 139). A start signal on a pair that
+   * already holds an open deal adds an entry to it instead of opening a
+   * second deal; safety orders are off while it is on. DCA bots only.
+   * Missing means off.
+   */
+  singlePosition?: boolean
+  /**
+   * The most entries a single-position deal may hold, counting its base
+   * order. '' / '0' / missing: no limit. A string, like `maxDealsPerPair`.
+   */
+  maxPositionEntries?: string
 }
 
 export enum IndicatorsLogicEnum {
@@ -1296,6 +1488,20 @@ export type Sizes = {
   multiplier?: number
   /** what `multiplier` scaled: the base order only, or the whole deal */
   multiplierScope?: 'base' | 'whole'
+  /**
+   * Combo add / reduce funds (main-app spec 047): base added to (or, negative,
+   * taken from) each DCA level, indexed like `dca`. Kept apart from `dca` so
+   * it applies to every order-size type, including percent sizing, which
+   * never read `dca`.
+   */
+  fundsDca?: number[]
+  /**
+   * Combo add / reduce funds: the same offsets for levels that had already
+   * filled when the deal was scaled. They resize the level only when it is
+   * placed again; the funds order already moved their share, so they are not
+   * counted in the deal's balances or usage.
+   */
+  fundsDcaHeld?: number[]
 }
 
 export enum DCADealFlags {
@@ -1342,6 +1548,23 @@ export interface Funding {
   lastTime: number
   /** Last 25 applied settlements (debug). */
   history?: FundingHistoryEntry[]
+}
+
+/**
+ * Per-deal settings a `startDeal` webhook may carry, replacing the bot's own
+ * value for that one deal. See `src/bot/signalDealOverrides.ts`.
+ */
+export type SignalDealOverrides = {
+  /** Base order size, in the bot's own base-order unit. */
+  baseOrderSize?: string
+  /** Take profit, % from the deal's average price. */
+  tpPerc?: string
+  /** Stop loss distance, % from the deal's reference price (stored negative). */
+  slPerc?: string
+  /** Take profit at this price. DCA bots only. */
+  tpPrice?: string
+  /** Stop loss at this price. DCA bots only. */
+  slPrice?: string
 }
 
 export interface DCADealsSchema extends SchemaI {
@@ -1416,10 +1639,21 @@ export interface DCADealsSchema extends SchemaI {
   allowBaseProcess?: boolean
   pendingAddFunds?: (AddFundsSettings & { id: string })[]
   pendingReduceFunds?: (AddFundsSettings & { id: string })[]
+  /**
+   * Single position (spec 139): entries the deal holds, counting the base
+   * order and one per adopted deal. Missing means 1.
+   */
+  positionEntries?: number
+  /** Single position (spec 139 §4.3): ids of the deals adopted into this one. */
+  adoptedIds?: string[]
   blockOrders?: BlockOrder[]
   funds?: {
     price: number
     qty: number
+    /** Spec 165: the add-funds entry id of a base-order remainder fill. */
+    id?: string
+    /** Spec 165: this fill is the rest of a part-filled base order. */
+    baseRemainder?: boolean
   }[]
   reduceFunds?: {
     price: number
@@ -1439,8 +1673,42 @@ export interface DCADealsSchema extends SchemaI {
   moveSlArmed?: boolean
   newBalance?: boolean
   sizes?: Sizes
+  /** main-app spec 044 — absent unless the bot funded the deal itself. */
+  botFunding?: DealFunding
+  fundingHold?: DealFundingHold
+  /**
+   * Spec 044 beta gate: base funding (phases 2–3) was available to the user
+   * when this deal was created. Everything the engine does for the deal
+   * follows this stamp, never a later role read.
+   */
+  baseFundingBeta?: boolean
   fullFee?: number
+  /**
+   * Slippage of the deal's executed MARKET trades, written once when the deal
+   * closes (`bot/orderSlippage.ts` `dealSlippage`). Absent on deals closed
+   * before it was recorded and on deals where no MARKET trade counted; the
+   * API computes those at read time.
+   */
+  slippage?: {
+    quote: number
+    bps: number | null
+    orders: number
+    reconstructed: boolean
+    notional: number
+  }
+  /**
+   * Written with `slippage` at close (present = the close-time cost facts are
+   * recorded): true when at least one executed trade had no venue-reported
+   * fee, so the books' fee figure includes the stored-rate estimate.
+   */
+  feesEstimated?: boolean
   fixSize?: number
+  /**
+   * What the `startDeal` webhook that opened this deal overrode (already
+   * written into `settings`). Kept as the record of it, and because it is what
+   * lets a non-terminal DCA deal use the fixed TP / SL prices in `settings`.
+   */
+  signalOverrides?: SignalDealOverrides
   orderSizeType?: OrderSizeTypeEnum
   tags?: string[]
   ac?: {
@@ -1597,6 +1865,13 @@ export type AddFundsSettings = {
   baseRemainder?: boolean
   /** That base order's requested quantity, for "filled of total". */
   baseTotal?: string
+  /** A single-position entry (spec 139 §3.3), not a user's add-funds. */
+  positionEntry?: boolean
+  /**
+   * Combo: the deal's position in base when the add/reduce order was sent. The
+   * fill scales the deal by `1 ± executed / positionBase`.
+   */
+  positionBase?: number
 }
 
 export interface ComboDealsSchema extends DCADealsSchema {
@@ -1654,7 +1929,31 @@ export interface ComboDealsSchema extends DCADealsSchema {
   funds?: {
     price: number
     qty: number
+    /** Combo add funds: the funds id of the fill (main-app spec 047). */
+    id?: string
   }[]
+  /** Combo add / reduce funds: the scale factor of each executed change. */
+  fundsScale?: { id: string; k: number; time: number }[]
+  /**
+   * Combo add / reduce funds: the id of a change that is booked but whose
+   * book rebuild has not finished. Written with the booking, cleared once the
+   * rebuilt book is in the restart snapshots; a restart that finds it loads
+   * the deal from the database and rebuilds the book (main-app spec 047).
+   */
+  comboFundsRebuild?: string | null
+  /**
+   * Combo add / reduce funds: the change's order as sent — its client id and
+   * the position it was sized on — written before the send and cleared with
+   * `comboFundsRebuild`. The fill is booked against this position whichever
+   * path reports it first, a restart included (main-app spec 047).
+   */
+  comboFundsRequest?: {
+    id: string
+    clientOrderId: string
+    direction: 'add' | 'reduce'
+    positionBase: number
+    k: number
+  } | null
   transactions?: {
     buy: number
     sell: number
@@ -1734,6 +2033,17 @@ export interface ComboMinigridSchema extends SchemaI {
     sell: number
   }
   lockClose: boolean
+  /**
+   * Combo add / reduce funds (main-app spec 047): the deal's `fundsScale` ids
+   * this minigrid's budget has been scaled by.
+   */
+  appliedFundsScale?: string[]
+  /**
+   * Why the engine closed it when that is not a trade: `duplicate` — a
+   * second open minigrid of the same rung, closed on load (main-app spec 047
+   * §2.3.9). Such a minigrid never stands for its rung being closed.
+   */
+  closeReason?: string
 }
 
 export type CleanComboMinigridSchema = ExcludeDoc<ComboMinigridSchema>
@@ -1921,9 +2231,16 @@ export interface FavoritePairsSchema extends SchemaI {
   pairs: string[]
 }
 
+export interface FavoriteIndicatorPreset {
+  indicator: IndicatorEnum
+  /** JSON object of the indicator's own settings, as the user saved them */
+  params: string
+}
+
 export interface FavoriteIndicatorsSchema extends SchemaI {
   userId: string
   indicators: IndicatorEnum[]
+  presets?: FavoriteIndicatorPreset[]
 }
 
 export enum APIPermission {
@@ -1955,6 +2272,8 @@ export interface UserSchema extends SchemaI {
   timezone: string
   weekStart?: string
   theme?: ThemeModeEnum
+  /** Dashboard reporting fiat; USD when unset. */
+  reportingCurrency?: string
   picture?: string
   name?: string
   lastName?: string
@@ -2082,6 +2401,35 @@ export interface ReconcileSweepSchema extends SchemaI {
   pair?: string
   /** Number of fills the sweep recovered in this catch (the log's "caught N"). */
   missedFills: number
+}
+
+/**
+ * One funding trade the bot placed itself to acquire an asset its orders
+ * consume (main-app spec 044 §3.2): the cost basis of base the bot bought, so
+ * a deal whose base is all bot-sourced can report an honest account result.
+ * `consumed` records each order that later sold out of the lot.
+ */
+export interface FundingLotSchema extends SchemaI {
+  userId: string
+  exchange: ExchangeEnum
+  exchangeUUID: string
+  botId: string
+  botType: BotType
+  dealId?: string
+  symbol: string
+  /** The asset acquired. */
+  asset: string
+  side: OrderSideEnum
+  qty: number
+  price: number
+  fee?: number
+  feeAsset?: string
+  orderId: string
+  clientOrderId: string
+  /** `qty` not yet consumed by a later sell. */
+  remaining: number
+  consumed: { orderId: string; qty: number; price: number; time: number }[]
+  paperContext: boolean
 }
 
 // One Binance Futures Quantitative Rules (-4400) cooldown event. Written by the
@@ -2350,6 +2698,10 @@ export type Usage = {
 
 type LastEventPerSymbols = { symbol: string; time: number }
 
+export type LastClosesByTrigger = Partial<
+  Record<Exclude<CooldownStopTriggerEnum, CooldownStopTriggerEnum.any>, number>
+>
+
 export type LastPricesPerSymbols = {
   symbol: string
   avg: number
@@ -2546,6 +2898,11 @@ export interface DCABotSchema<
   lastClosedDeal?: number
   lastOpenedDealPerSymbol?: LastEventPerSymbols[]
   lastClosedDealPerSymbol?: LastEventPerSymbols[]
+  /** Last close that matched each conditional cooldown-after-stop trigger. */
+  lastClosedDealByTrigger?: LastClosesByTrigger
+  lastClosedDealByTriggerPerSymbol?: (LastClosesByTrigger & {
+    symbol: string
+  })[]
   lastPricesPerSymbol?: LastPricesPerSymbols[]
   symbol: Map<string, Symbols>
   initialBalances: MultiAssets
@@ -2738,6 +3095,10 @@ export interface BotMessageSchema extends SchemaI {
    * which are thereby outside `botMessageCoalesceKey`.
    */
   bucket?: number
+  /** Acknowledged by the user; kept in the history views (spec 137). */
+  isRead?: boolean
+  /** When it was read — the clock for `botMessageReadHistoryTtl`. */
+  readAt?: Date
 }
 
 export type ClearBotErrorSchema = ExcludeDoc<BotMessageSchema>
@@ -2751,8 +3112,21 @@ export interface RateSchema extends SchemaI {
    * absent from every exchange's `getAllPrices` table, so without this the
    * holding values at $0. See `priceBalancesUsd` / `userSnapshots`.
    */
-  fiatRates?: { asset: string; usdRate: number }[]
+  fiatRates?: {
+    asset: string
+    usdRate: number
+    /** Where the rate came from on its last successful fetch. */
+    source?: FiatRateSource
+    /** When the rate was last fetched; carried-forward entries keep the old one. */
+    updated?: Date
+  }[]
 }
+
+/**
+ * kraken = live spot ticker; ecb = Frankfurter (ECB reference, daily);
+ * erApi = open.er-api.com (daily).
+ */
+export type FiatRateSource = 'kraken' | 'ecb' | 'erApi'
 
 export type ClearRateSchema = ExcludeDoc<RateSchema>
 
@@ -2828,6 +3202,21 @@ export interface PairsSchema extends SchemaI {
    * `resolveUnderlying` in the pairs cron. Absent => the base name is the ticker.
    */
   underlying?: string
+  /**
+   * Leverage limits from the instrument info, normalised by
+   * `normalizePairLeverage` (positive numbers or absent). Paper pairs mirror
+   * their real exchange's. Display/filter data — the bot engine doesn't read it.
+   */
+  minLeverage?: number
+  maxLeverage?: number
+  /**
+   * Delivery (expiry) time, ms epoch, of a dated futures contract, from the
+   * connector (the exchange's own instrument field). Absent = perpetual / spot
+   * / not published. Paper pairs mirror their real exchange's. The bot engine
+   * stops opening new deals on the pair near it (`deliveryCutoff.ts`); the
+   * dashboard keeps such pairs out of bulk selection.
+   */
+  deliveryTime?: number
 }
 
 export interface StoreFilesSchema extends SchemaI {
@@ -3616,11 +4005,37 @@ export type Order = CommonOrder & {
   baseAsset: string
   quoteAsset: string
   origPrice: string
+  /**
+   * The market price the engine held when it sent this MARKET order — the
+   * reference its slippage is measured against (`bot/orderSlippage.ts`).
+   * Never the protective, slippage-shifted `price`/`origPrice` a base order
+   * may be sent at. NO default: absent means "not observed" (orders sent
+   * before this was recorded, LIMIT orders, no fresh price held), and readers
+   * fall back to reconstruction rather than to a zero.
+   */
+  refPrice?: string
+  /** ms epoch of the price observation behind `refPrice` (its stream tick's own time). */
+  refPriceAt?: number
+  /** ms epoch on our clock immediately before the placement request left this process. */
+  sentAt?: number
+  /** ms epoch on our clock when the placement answer came back to this process. */
+  ackAt?: number
   tpSlTarget?: string
   dcaLevel?: number
   minigridId?: string
   addFundsId?: string
   reduceFundsId?: string
+  /**
+   * A single-position entry (spec 139 §3.3): placed for a start signal, or a
+   * fill of a deal adopted into the position (§4.2.3).
+   */
+  positionEntry?: boolean
+  /**
+   * `virtual`: recorded FILLED without a venue trade — a funded deal's base
+   * order (main-app spec 044 §3.3). Anything comparing a deal with the venue
+   * must read this row as "no venue trade". Absent on every real order.
+   */
+  fundingSource?: 'virtual'
   minigridBudget?: number
   liquidation?: boolean
   sl?: boolean
@@ -4039,7 +4454,28 @@ export enum IndicatorEnum {
   obfvg = 'OBFVG',
   session = 'SESSION',
   lw = 'LW',
+  ote = 'OTE',
 }
+
+/**
+ * Indicators whose single main line can be smoothed: the value oscillators
+ * that the value / percentile conditions read as `value`.
+ */
+export const SMOOTHABLE_INDICATORS = [
+  IndicatorEnum.rsi,
+  IndicatorEnum.cci,
+  IndicatorEnum.mfi,
+  IndicatorEnum.wr,
+  IndicatorEnum.uo,
+  IndicatorEnum.mom,
+  IndicatorEnum.ao,
+  IndicatorEnum.adx,
+  IndicatorEnum.bbpb,
+  IndicatorEnum.kcpb,
+  IndicatorEnum.bbw,
+  IndicatorEnum.vo,
+  IndicatorEnum.mar,
+] as const
 
 export enum MAEnum {
   ema = 'ema',
@@ -4126,7 +4562,9 @@ export type IndicatorHistory = { time: number } & (
   | { type: IndicatorEnum.qfl; value: QFLResult }
   | { type: IndicatorEnum.psar; value: { psar: number; price: number } }
   | { type: IndicatorEnum.lw; value: LongWickResult }
+  | { type: IndicatorEnum.ote; value: OTEResult }
   | { type: IndicatorEnum.session; value: boolean }
+  | { type: IndicatorEnum.session; value: SessionLevelsResult }
 )
 
 type Percentile = {
@@ -4163,8 +4601,24 @@ export type DivergenceOscillators =
   | IndicatorEnum.bbpb
   | IndicatorEnum.stoch
 
+/** Smoothing of a smoothable oscillator's config; absent = off. */
+type Smoothing = {
+  /** normalised MA type */
+  smoothing?: string
+  smoothingLength?: number
+}
+
 export type IndicatorConfig =
   | { type: IndicatorEnum.lw; lwThreshold: number; lwMaxDuration: number }
+  | { type: IndicatorEnum.ote; oteLeftBars: number; oteMinLegSize: number }
+  | {
+      type: IndicatorEnum.session
+      sessionRule: SessionRuleEnum.levels
+      sessionDays: number[]
+      sessionStart?: string
+      sessionEnd?: string
+      sessionTimezone?: string
+    }
   | { type: IndicatorEnum.obfvg }
   | { type: IndicatorEnum.dc; length: number }
   | {
@@ -4205,12 +4659,14 @@ export type IndicatorConfig =
       mar2type: MAEnum
       mar2length: number
     } & Percentile &
-      TrendFilter)
+      TrendFilter &
+      Smoothing)
   | ({
       type: IndicatorEnum.mom
       interval: number
       source: string
-    } & Percentile)
+    } & Percentile &
+      Smoothing)
   | {
       type: IndicatorEnum.bbwp
       interval: number
@@ -4228,14 +4684,16 @@ export type IndicatorConfig =
         | IndicatorEnum.atr
         | IndicatorEnum.adr
       interval: number
-    } & Percentile)
+    } & Percentile &
+      Smoothing)
   | ({
       type: IndicatorEnum.bbw | IndicatorEnum.bb | IndicatorEnum.bbpb
       interval: number
       bbwMult?: number
       bbwMa?: MAEnum
       bbwMaLength?: number
-    } & Percentile)
+    } & Percentile &
+      Smoothing)
   | ({
       type: IndicatorEnum.kc | IndicatorEnum.kcpb
       interval: number
@@ -4243,7 +4701,8 @@ export type IndicatorConfig =
       ma?: MAEnum
       range?: RangeType
       rangeLength?: number
-    } & Percentile)
+    } & Percentile &
+      Smoothing)
   | ({
       type: IndicatorEnum.macd
       longInterval: number
@@ -4260,7 +4719,8 @@ export type IndicatorConfig =
     }
   | ({
       type: IndicatorEnum.ao
-    } & Percentile)
+    } & Percentile &
+      Smoothing)
   | {
       type: IndicatorEnum.stochRSI
       interval: number
@@ -4273,7 +4733,8 @@ export type IndicatorConfig =
       fast: number
       middle: number
       slow: number
-    } & Percentile)
+    } & Percentile &
+      Smoothing)
   | {
       type: IndicatorEnum.ic
       conversionPeriods: number
@@ -4304,12 +4765,18 @@ export type IndicatorConfig =
       inc: number
       max: number
     }
-  | ({ type: IndicatorEnum.vo; voShort: number; voLong: number } & Percentile)
+  | ({ type: IndicatorEnum.vo; voShort: number; voLong: number } & Percentile &
+      Smoothing)
   | { type: IndicatorEnum.ecd }
   | {
       type: IndicatorEnum.lw
       lwThreshold: number
       lwMaxDuration: number
+    }
+  | {
+      type: IndicatorEnum.ote
+      oteLeftBars: number
+      oteMinLegSize: number
     }
 
 export type Prices = {
@@ -5205,6 +5672,12 @@ export type BotParentIndicatorEventDto = {
     symbol: string
   }
   type: BotType
+  /**
+   * Restart beacon of the sending process (`botService${BotServiceType}`), so
+   * the indicator service can drop exactly that process's subscriptions when
+   * it restarts. Absent from older senders.
+   */
+  service?: string
 }
 
 export type BotParentUnsubscribeIndicatorEventDto = {
@@ -5447,6 +5920,24 @@ export type ExchangeRequestTimeProfile = Partial<BalancerTimeProfile> & {
    * be equivalent.
    */
   server?: string
+  /**
+   * Who the request was made for and from which code path — what turns "the
+   * venue budget is full" into "this account, from this caller, is filling
+   * it". Each is optional: a client is not always built with a user or bot in
+   * hand, and `accountRef` alone (a fingerprint of the stored key) still
+   * groups requests per exchange account.
+   */
+  userId?: string
+  botId?: string
+  exchangeUUID?: string
+  accountRef?: string
+  caller?: string
+  /**
+   * Balance reads only: what the per-account balance limiter would have done
+   * with this read (`merge` / `reuse` / `budget` / `live`). Recorded, not
+   * enforced — see `core/src/exchange/balanceLimiter.ts`.
+   */
+  limiter?: string
 }
 
 export interface ExchangeRequestTimeProfileSchema
@@ -5481,6 +5972,8 @@ export interface UserProfitByHour extends SchemaI {
   botType: BotType
   terminal?: boolean
   paperContext: boolean
+  /** Exchange connection the profit was made on. Missing on rows written before 1.101.0. */
+  exchangeUUID?: string
 }
 
 export const rabbitIndicatorsKey = 'indicatorsActions'
@@ -5579,7 +6072,8 @@ export type IndicatorServiceChildMessageRemoveCallback = {
 
 export type IndicatorServiceParentMessageRemoveCallback = {
   event: 'removeCallback'
-  payload: [string]
+  /** [room] drops every subscriber; [room, subscriberId] drops only that one */
+  payload: [string] | [string, string]
   id: string
   response: string
 }

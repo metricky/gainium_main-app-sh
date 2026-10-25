@@ -1,4 +1,5 @@
 import { v4 } from 'uuid'
+import { withExchangeCaller } from '../exchange/requestContext'
 import DB from '../db'
 import type { PipelineStage, ProjectionFields } from 'mongoose'
 import { Types } from 'mongoose'
@@ -38,6 +39,7 @@ import {
   OrderSchema,
   ExcludeDoc,
   IndicatorEnum,
+  type FavoriteIndicatorPreset,
   ServerSideBacktestPayload,
   BacktestRequestStatus,
   rabbitUsersStreamKey,
@@ -56,12 +58,28 @@ import {
   HedgeDCABacktestingResult,
 } from '../../types'
 import BotInstance from '../bot'
+import {
+  checkBotSmoothing,
+  checkHedgeBotSmoothing,
+} from './handlers/indicatorSmoothing'
 import utils, { isFutures } from '../utils'
 import { isExchangeEnabled } from '../utils/adminConfig'
 import { describeUserAgent } from '../utils/userAgent'
 import userUtils, { checkLicenseKey, updateUserSteps } from '../utils/user'
 import { getBalances } from './handlers/balance.handler'
-import { deleteBotMessage, getBotMessage } from './handlers/botMessage.handler'
+import {
+  previewFunding,
+  PreviewFundingInput,
+  previewHedgeFunding,
+  PreviewHedgeFundingInput,
+  baseFundingAccess,
+} from './handlers/funding.handler'
+import { isReportingCurrency, usableFiatRates } from '../utils/fiatRates'
+import {
+  deleteBotMessage,
+  getBotMessage,
+  markBotMessageRead,
+} from './handlers/botMessage.handler'
 import { getQuantRulesStatus } from './handlers/quantRules.handler'
 import verify, { bybitAccountType } from '../exchange/verify'
 import {
@@ -181,6 +199,7 @@ import { JWT_SECRET } from '../config'
 import { DataResponse, ErrorResponse } from '../db/crud'
 import { LargeAccountService } from '../bot/largeAccount/largeAccountService'
 import { getInPositions } from './handlers/inPositions.handler'
+import { TradingCostsService } from './handlers/tradingCosts.handler'
 import { DEAL_TOTALS_ARGS } from '../bot/dealListFilter'
 
 /**
@@ -189,6 +208,24 @@ import { DEAL_TOTALS_ARGS } from '../bot/dealListFilter'
  * oracle (GHSA-whmj-5f67-9f3w).
  */
 const GENERIC_LOGIN_REASON = 'Invalid email or password'
+
+const MAX_FAVORITE_PRESET_LENGTH = 4000
+
+/** Saved favorite settings must be a small JSON object. */
+const isFavoritePresetParams = (params: string): boolean => {
+  if (
+    typeof params !== 'string' ||
+    params.length > MAX_FAVORITE_PRESET_LENGTH
+  ) {
+    return false
+  }
+  try {
+    const parsed = JSON.parse(params)
+    return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+  } catch {
+    return false
+  }
+}
 
 const math = new MathHelper()
 
@@ -275,11 +312,48 @@ const dealTotalsOf = (parent: DealTotalsParent) => {
   return BotInstance.getInstance().getDealListTotals(args.combo, args.search)
 }
 
+const tradingCosts = () => TradingCostsService.getInstance()
+
+/** Fees + slippage on a deal type (main-app spec 050 §4). */
+const dealCostFields = {
+  slippage: (deal: object) => tradingCosts().dealSlippage(deal),
+  costBreakdown: (deal: object) => tradingCosts().dealCostBreakdown(deal),
+}
+
+/** Closed-deal cost aggregate on a bot type (main-app spec 050 §5.1). */
+const botCostFields = {
+  tradingCosts: (bot: { _id?: unknown; bots?: unknown[] }) =>
+    tradingCosts().botTradingCosts(bot),
+}
+
 /**
  * Field resolvers on object types. Exported so a host that assembles its own
  * resolver map (main-app) can spread them next to `Query`/`Mutation`.
  */
 export const typeResolvers = {
+  // MARKET-order slippage, computed from the order row (main-app spec 050 §4).
+  botOrder: {
+    refPrice: async (o: object) => {
+      const s = await tradingCosts().orderSlippage(o)
+      return s ? `${s.refPrice}` : null
+    },
+    slippageBps: async (o: object) =>
+      (await tradingCosts().orderSlippage(o))?.bps ?? null,
+    slippageQuote: async (o: object) =>
+      (await tradingCosts().orderSlippage(o))?.quote ?? null,
+    slippageSource: async (o: object) =>
+      (await tradingCosts().orderSlippage(o))?.source ?? null,
+    feeQuote: async (o: object) => (await tradingCosts().orderFee(o)).feeQuote,
+    feeEstimated: async (o: object) =>
+      (await tradingCosts().orderFee(o)).feeEstimated,
+    feeConverted: async (o: object) => {
+      const f = await tradingCosts().orderFee(o)
+      return f.feeQuote === null ? null : !!f.feeConverted
+    },
+  },
+  fullDCABot: botCostFields,
+  fullComboBot: botCostFields,
+  fullHedgeComboBot: botCostFields,
   botDashboardStats: {
     inPositionsUsd: async (parent: InPositionsParent) =>
       (await inPositionsOf(parent))?.inPositionsUsd ?? null,
@@ -290,6 +364,7 @@ export const typeResolvers = {
   },
   dcaDeal: {
     updatedAt: (deal: { updated?: Date | null }) => deal?.updated ?? null,
+    ...dealCostFields,
   },
   getDCADealsResponse: {
     totals: (parent: DealTotalsParent) => dealTotalsOf(parent),
@@ -299,6 +374,7 @@ export const typeResolvers = {
   },
   comboDeal: {
     updatedAt: (deal: { updated?: Date | null }) => deal?.updated ?? null,
+    ...dealCostFields,
   },
 }
 
@@ -740,13 +816,15 @@ const resolvers = <
         // fall through and return the last STORED snapshot; the refresh keeps
         // running and lands for the next read. See `awaitSnapshotRefresh`.
         await userUtils.awaitSnapshotRefresh(
-          userUtils.userSnapshots(
-            user.data._id.toString(),
-            paperContext,
-            true,
-            undefined,
-            undefined,
-            input?.uuid,
+          withExchangeCaller('api.updateBalance', () =>
+            userUtils.userSnapshots(
+              user.data._id.toString(),
+              paperContext,
+              true,
+              undefined,
+              undefined,
+              input?.uuid,
+            ),
           ),
           user.data._id.toString(),
         )
@@ -1665,6 +1743,33 @@ const resolvers = <
         input.all,
       )
     },
+    tradingCostsSummary: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input?: {
+          from?: number | null
+          to?: number | null
+          botType?: string | null
+        }
+      },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      const data = await tradingCosts().accountTradingCosts(
+        `${user.data._id}`,
+        !!paperContext,
+        input ?? {},
+      )
+      return { status: StatusEnum.ok, reason: null, data }
+    },
     getComboDealOrders: async (
       _parent: any,
       {
@@ -1953,6 +2058,31 @@ const resolvers = <
         return user
       }
       return await Bot.getComboBotDealsById(
+        user.data._id.toString(),
+        input.botId,
+        input.id,
+        paperContext,
+      )
+    },
+    // DCA twin of getComboBotDealsById. Both return only the caller's own
+    // deals of their own bot (see Bot.get*BotDealsById).
+    getDCABotDealsById: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: { botId: string; id: string[] }
+      },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return await Bot.getDCABotDealsById(
         user.data._id.toString(),
         input.botId,
         input.id,
@@ -2470,6 +2600,52 @@ const resolvers = <
         includeUsdValues,
       )
     },
+    previewFunding: async (
+      _parent: any,
+      { input }: { input: PreviewFundingInput },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return previewFunding(user.data, input, paperContext)
+    },
+    previewHedgeFunding: async (
+      _parent: any,
+      { input }: { input: PreviewHedgeFundingInput },
+      { token, req, paperContext }: InputRequest,
+    ) => {
+      if (token !== 'demo' && !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return previewHedgeFunding(user.data, input, paperContext)
+    },
+    baseFundingAccess: async (
+      _parent: any,
+      _args: unknown,
+      { token, req }: InputRequest,
+    ) => {
+      try {
+        if (token === 'demo' || !req.user?.authorized) {
+          return { available: false }
+        }
+        const user = await findUser(token)
+        if (user.status === StatusEnum.notok) {
+          return { available: false }
+        }
+        return await baseFundingAccess(`${user.data._id}`)
+      } catch {
+        return { available: false }
+      }
+    },
     getProfitByBot: async (
       _parent: any,
       {
@@ -2898,6 +3074,7 @@ const resolvers = <
           timeframe?: number
           botType?: BotType
           terminal?: boolean
+          exchangeUUIDs?: string[]
         }
       },
       { token, paperContext }: InputRequest,
@@ -2910,6 +3087,11 @@ const resolvers = <
 
       const timeframe = input?.timeframe || 0
       const botType = input?.botType
+      // Rows written before exchangeUUID was recorded have none, so they only
+      // count toward the unfiltered total.
+      const exchangeMatch = input?.exchangeUUIDs?.length
+        ? { exchangeUUID: { $in: input.exchangeUUIDs } }
+        : {}
       if (timeframe === 3) {
         if (botType === BotType.grid) {
           const transactionsAggr: PipelineStage[] = [
@@ -2918,6 +3100,7 @@ const resolvers = <
                 userId: `${user.data._id}`,
                 // @ts-ignore
                 paperContext: paperContext ? { $eq: true } : { $ne: true },
+                ...exchangeMatch,
                 botType: BotType.grid,
               },
             },
@@ -2946,6 +3129,7 @@ const resolvers = <
             userId: `${user.data._id}`,
             // @ts-ignore
             paperContext: paperContext ? { $eq: true } : { $ne: true },
+            ...exchangeMatch,
             botType: BotType.dca,
           }
           if (typeof input?.terminal !== 'undefined') {
@@ -2984,6 +3168,7 @@ const resolvers = <
                 userId: user.data._id.toString(),
                 // @ts-ignore
                 paperContext: paperContext ? { $eq: true } : { $ne: true },
+                ...exchangeMatch,
                 botType: BotType.combo,
               },
             },
@@ -3014,6 +3199,7 @@ const resolvers = <
                 userId: user.data._id.toString(),
                 // @ts-ignore
                 paperContext: paperContext ? { $eq: true } : { $ne: true },
+                ...exchangeMatch,
                 botType: BotType.hedgeCombo,
               },
             },
@@ -3044,6 +3230,7 @@ const resolvers = <
                 userId: user.data._id.toString(),
                 // @ts-ignore
                 paperContext: paperContext ? { $eq: true } : { $ne: true },
+                ...exchangeMatch,
                 botType: BotType.hedgeDca,
               },
             },
@@ -3074,6 +3261,7 @@ const resolvers = <
                 userId: `${user.data._id}`,
                 // @ts-ignore
                 paperContext: paperContext ? { $eq: true } : { $ne: true },
+                ...exchangeMatch,
               },
             },
             {
@@ -3244,6 +3432,7 @@ const resolvers = <
               userId: `${user.data._id}`,
               // @ts-ignore
               paperContext: paperContext ? { $eq: true } : { $ne: true },
+              ...exchangeMatch,
               time: { $gte: startTime },
             },
           },
@@ -3673,6 +3862,25 @@ const resolvers = <
         return { ...rate, data: rate.data.result?.usdRate ?? 1 }
       }
     },
+    getFiatRates: async (_parent: any, {}, {}: InputRequest) => {
+      const rate = await rateDb.readData(
+        {},
+        undefined,
+        {
+          limit: 1,
+          sort: { created: -1 },
+        },
+        false,
+        false,
+      )
+      if (rate.status === StatusEnum.notok) {
+        return rate
+      }
+      return {
+        ...rate,
+        data: usableFiatRates(rate.data.result?.fiatRates),
+      }
+    },
     getPairInfo: async (
       _parent: any,
       { input }: { input: { pair: string; exchange: ExchangeEnum } },
@@ -3762,6 +3970,9 @@ const resolvers = <
         input,
       }: {
         input?: {
+          view?: string
+          type?: string
+          botId?: string
           unreadOnly?: boolean
           page?: number
           pageSize?: number
@@ -3777,14 +3988,15 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      return getBotMessage(
-        user.data._id,
-        paperContext,
-        input?.unreadOnly,
-        input?.page,
-        input?.pageSize,
-        input?.search,
-      )
+      return getBotMessage(user.data._id, paperContext, {
+        view: input?.view ?? undefined,
+        unreadOnly: input?.unreadOnly,
+        page: input?.page,
+        pageSize: input?.pageSize,
+        search: input?.search,
+        type: input?.type ?? undefined,
+        botId: input?.botId ?? undefined,
+      })
     },
     getQuantRulesStatus: async (
       _parent: any,
@@ -4398,7 +4610,10 @@ const resolvers = <
           }
           return {
             ...res,
-            data: { indicators: res?.data?.result?.indicators || [] },
+            data: {
+              indicators: res?.data?.result?.indicators || [],
+              presets: res?.data?.result?.presets || [],
+            },
           }
         })
     },
@@ -5201,7 +5416,6 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-
       try {
         let requestId = ''
         if (input.payload.type === BotType.dca) {
@@ -5291,6 +5505,7 @@ const resolvers = <
           asset: OrderSizeTypeEnum
           dealId: string
           botId: string
+          combo?: boolean
         }
       },
       { token, req, paperContext }: InputRequest,
@@ -5302,13 +5517,16 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { botId, dealId, ...rest } = input
+      const { botId, dealId, combo, ...rest } = input
       return await Bot.addDealFunds(
         botId,
         dealId,
         user.data._id.toString(),
         paperContext,
         rest,
+        false,
+        undefined,
+        combo === true ? true : undefined,
       )
     },
     restartDeal: async (
@@ -5380,6 +5598,7 @@ const resolvers = <
           asset: OrderSizeTypeEnum
           dealId: string
           botId: string
+          combo?: boolean
         }
       },
       { token, req, paperContext }: InputRequest,
@@ -5391,13 +5610,16 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { botId, dealId, ...rest } = input
+      const { botId, dealId, combo, ...rest } = input
       return await Bot.reduceDealFunds(
         botId,
         dealId,
         user.data._id.toString(),
         paperContext,
         rest,
+        false,
+        undefined,
+        combo === true ? true : undefined,
       )
     },
     cancelTerminalDealOrder: async (
@@ -5906,6 +6128,7 @@ const resolvers = <
         input: {
           timezone?: string
           theme?: string
+          reportingCurrency?: string
           paperContext?: boolean
           shouldOnBoard?: boolean
           shouldOnBoardExchange?: boolean
@@ -5922,6 +6145,7 @@ const resolvers = <
       const {
         timezone,
         theme,
+        reportingCurrency,
         paperContext,
         shouldOnBoardExchange,
         shouldOnBoard,
@@ -5938,6 +6162,12 @@ const resolvers = <
           reason: 'Invalid timezone',
         }
       }
+      if (reportingCurrency && !isReportingCurrency(reportingCurrency)) {
+        return {
+          status: StatusEnum.notok,
+          reason: 'Unsupported reporting currency',
+        }
+      }
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
@@ -5945,6 +6175,7 @@ const resolvers = <
       const $set: {
         timezone?: string
         theme?: string
+        reportingCurrency?: string
         paperContext?: boolean
         shouldOnBoard?: boolean
         shouldOnBoardExchange?: boolean
@@ -5974,6 +6205,9 @@ const resolvers = <
       }
       if (theme) {
         $set.theme = theme
+      }
+      if (reportingCurrency) {
+        $set.reportingCurrency = reportingCurrency
       }
       if (paperContext !== undefined) {
         $set.paperContext = paperContext
@@ -7403,9 +7637,11 @@ const resolvers = <
         return user
       }
 
+      const smoothing = checkBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.createDCABot(
         user.data._id.toString(),
-        input,
+        smoothing.input,
         paperContext,
       )
     },
@@ -7425,9 +7661,11 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const smoothing = checkBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.createComboBot(
         user.data._id.toString(),
-        input,
+        smoothing.input,
         paperContext,
       )
     },
@@ -7451,9 +7689,11 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const smoothing = checkHedgeBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.createHedgeComboBot(
         user.data._id.toString(),
-        input,
+        smoothing.input,
         paperContext,
       )
     },
@@ -7477,9 +7717,11 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const smoothing = checkHedgeBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.createHedgeDcaBot(
         user.data._id.toString(),
-        input,
+        smoothing.input,
         paperContext,
       )
     },
@@ -7662,8 +7904,10 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const smoothing = checkBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.changeDCABot(
-        input,
+        smoothing.input,
         user.data._id.toString(),
         paperContext,
       )
@@ -7689,8 +7933,10 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const smoothing = checkHedgeBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.changeHedgeComboBot(
-        input,
+        smoothing.input,
         user.data._id.toString(),
         paperContext,
       )
@@ -7716,8 +7962,10 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const smoothing = checkHedgeBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.changeHedgeDcaBot(
-        input,
+        smoothing.input,
         user.data._id.toString(),
         paperContext,
       )
@@ -7734,8 +7982,10 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const smoothing = checkBotSmoothing(input)
+      if ('error' in smoothing) return smoothing.error
       return await Bot.changeComboBot(
-        input,
+        smoothing.input,
         user.data._id.toString(),
         paperContext,
       )
@@ -7894,6 +8144,20 @@ const resolvers = <
         return user
       }
       return deleteBotMessage(user.data._id, input.id)
+    },
+    markBotMessageRead: async (
+      _parent: any,
+      { input }: { input: { id?: string } },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return markBotMessageRead(user.data._id, input.id ?? undefined)
     },
     updateProfilePicture: async (
       _parent: any,
@@ -8285,6 +8549,10 @@ const resolvers = <
         input: {
           botId: string
           dealIds: string[]
+          useTp?: boolean | null
+          useSl?: boolean | null
+          useDca?: boolean | null
+          dcaOrders?: number | null
         }
       },
       { token, req }: InputRequest,
@@ -8299,6 +8567,44 @@ const resolvers = <
       return Bot.mergeDeals(
         user.data._id.toString(),
         input.botId,
+        input.dealIds,
+        !!user.data.paperContext,
+        {
+          ...(typeof input.useTp === 'boolean' ? { useTp: input.useTp } : {}),
+          ...(typeof input.useSl === 'boolean' ? { useSl: input.useSl } : {}),
+          ...(typeof input.useDca === 'boolean'
+            ? { useDca: input.useDca }
+            : {}),
+          ...(typeof input.dcaOrders === 'number'
+            ? { dcaOrders: input.dcaOrders }
+            : {}),
+        },
+      )
+    },
+    adoptDeals: async (
+      _parent: any,
+      {
+        input,
+      }: {
+        input: {
+          botId: string
+          targetDealId: string
+          dealIds: string[]
+        }
+      },
+      { token, req }: InputRequest,
+    ) => {
+      if (token === 'demo' || !req.user?.authorized) {
+        return errorAccess()
+      }
+      const user = await findUser(token)
+      if (user.status === StatusEnum.notok) {
+        return user
+      }
+      return Bot.adoptDeals(
+        user.data._id.toString(),
+        input.botId,
+        input.targetDealId,
         input.dealIds,
         !!user.data.paperContext,
       )
@@ -9602,21 +9908,42 @@ const resolvers = <
     },
     addUserFavoriteIndicator: async (
       _parent: any,
-      { input }: { input: { indicator: IndicatorEnum } },
+      {
+        input,
+      }: { input: { indicator: IndicatorEnum; params?: string | null } },
       { token, req }: InputRequest,
     ) => {
       if (token === 'demo' || !req.user?.authorized) {
         return errorAccess()
       }
-      const { indicator } = input
+      const { indicator, params } = input
       const user = await findUser(token)
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const userId = user.data._id.toString()
+      // Optional saved settings: one preset per indicator, replaced on re-save.
+      let presets: FavoriteIndicatorPreset[] | undefined
+      if (params !== undefined && params !== null) {
+        if (!isFavoritePresetParams(params)) {
+          return {
+            status: StatusEnum.notok,
+            reason: 'Invalid indicator settings',
+            data: null,
+          }
+        }
+        const current = await favoriteIndicatorsDb.readData({ userId })
+        presets = [
+          ...(current.data?.result?.presets ?? []).filter(
+            (preset) => preset.indicator !== indicator,
+          ),
+          { indicator, params },
+        ]
+      }
       const result = await favoriteIndicatorsDb.updateData(
-        { userId: user.data._id.toString() },
+        { userId },
         {
-          $set: { userId: user.data._id.toString() },
+          $set: { userId, ...(presets ? { presets } : {}) },
           $addToSet: { indicators: indicator },
         },
         true,
@@ -9628,7 +9955,10 @@ const resolvers = <
       }
       return {
         status: StatusEnum.ok,
-        data: { indicators: result.data.indicators },
+        data: {
+          indicators: result.data.indicators,
+          presets: result.data.presets ?? [],
+        },
         reason: null,
       }
     },
@@ -9650,7 +9980,7 @@ const resolvers = <
         {
           userId: user.data._id,
         },
-        { $pull: { indicators: indicator } },
+        { $pull: { indicators: indicator, presets: { indicator } } },
         true,
       )
       if (updateResult.status === StatusEnum.notok) {
@@ -9658,7 +9988,10 @@ const resolvers = <
       }
       return {
         status: StatusEnum.ok,
-        data: { indicators: updateResult.data.indicators },
+        data: {
+          indicators: updateResult.data.indicators,
+          presets: updateResult.data.presets ?? [],
+        },
         reason: null,
       }
     },

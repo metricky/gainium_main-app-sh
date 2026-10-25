@@ -13,6 +13,7 @@
 import type { Request, Response } from 'express'
 import type { ChangeTrailActor } from '../../../types'
 import { openSyncStream, syncStreamMode } from './syncStream'
+import { parseSignalFundsPrice } from '../../bot/signalFundsPrice'
 import { Types, isValidObjectId } from 'mongoose'
 import {
   StatusEnum,
@@ -1954,7 +1955,10 @@ const v2API = <R extends UserSchema = UserSchema>(
       "The group's 'action' must match the indicator's 'indicatorAction', and the group's 'section' " +
       "must match the indicator's 'section'. " +
       "The group's 'logic' ('and'/'or') controls how triggers are combined within that group. " +
-      'Multiple groups that share the same action+section are always ANDed together.',
+      "Groups that share the same action+section are combined in array order: each group's optional " +
+      "'join' ('and'/'or') attaches it to the previous group, AND binding tighter than OR " +
+      "(groups A, B join 'and', C join 'or' = (A and B) or C). Groups without 'join' use the " +
+      "bot-level logic for that action (startDealLogic, stopDealLogic, stopDealSlLogic, startBotLogic, stopBotLogic; default 'and').",
     rules: [
       'Every indicator must have a non-empty groupId that equals the id of an entry in settings.indicatorGroups.',
       'Never generate a groupId without first creating the corresponding group object.',
@@ -1962,7 +1966,8 @@ const v2API = <R extends UserSchema = UserSchema>(
       "A group's section must exactly equal the indicator's section (or both must be absent/undefined).",
       'Never mix indicators with different indicatorAction or section values in the same group.',
       "Indicators within a group are combined using the group's logic field ('and' = all must trigger, 'or' = any must trigger).",
-      'Multiple groups for the same action+section are ANDed: every group must trigger before the condition fires.',
+      "Groups for the same action+section combine in array order using each group's 'join' (ignored on the first group); AND binds tighter than OR.",
+      "Leave 'join' unset on every group to combine them all with the bot-level logic field instead.",
     ],
     fields: indicatorGroupFieldDefinitions,
   }
@@ -2705,8 +2710,9 @@ const v2API = <R extends UserSchema = UserSchema>(
     handler: async (req, res) => {
       const user = req.userData
       const { dealId } = req.params
-      const { qty, asset, symbol, type } = req.body as {
+      const { qty, asset, symbol, type, price } = req.body as {
         qty?: string
+        price?: string | number
         asset?: OrderSizeTypeEnum
         symbol?: string
         type?: AddFundsTypeEnum
@@ -2742,6 +2748,14 @@ const v2API = <R extends UserSchema = UserSchema>(
         return res.status(400).json({
           status: StatusEnum.notok,
           reason: 'Invalid parameters',
+        })
+      }
+
+      const funds = parseSignalFundsPrice({ price })
+      if (funds.error) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: funds.error,
         })
       }
 
@@ -2782,6 +2796,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           fundsType,
           dealId,
           apiActor,
+          funds.price,
         )
 
         return res.status(200).json(result)
@@ -2815,8 +2830,9 @@ const v2API = <R extends UserSchema = UserSchema>(
     handler: async (req, res) => {
       const user = req.userData
       const { dealId } = req.params
-      const { qty, asset, symbol, type } = req.body as {
+      const { qty, asset, symbol, type, price } = req.body as {
         qty?: string
+        price?: string | number
         asset?: OrderSizeTypeEnum
         symbol?: string
         type?: AddFundsTypeEnum
@@ -2852,6 +2868,14 @@ const v2API = <R extends UserSchema = UserSchema>(
         return res.status(400).json({
           status: StatusEnum.notok,
           reason: 'Invalid parameters',
+        })
+      }
+
+      const funds = parseSignalFundsPrice({ price })
+      if (funds.error) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: funds.error,
         })
       }
 
@@ -2892,6 +2916,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           fundsType,
           dealId,
           apiActor,
+          funds.price,
         )
 
         return res.status(200).json(result)
@@ -3009,6 +3034,7 @@ const v2API = <R extends UserSchema = UserSchema>(
             pair,
             PairsToSetMode.replace,
             true,
+            botType === 'combo' ? BotType.combo : BotType.dca,
           )
           if (updatePairs.status === StatusEnum.notok) {
             if (updatePairs.reason === 'Nothing changed') {
@@ -3516,6 +3542,8 @@ const v2API = <R extends UserSchema = UserSchema>(
           pairsToChange,
           pairsToSet,
           pairsToSetMode,
+          false,
+          botType === 'combo' ? BotType.combo : BotType.dca,
         )
 
         if (result.status === StatusEnum.notok) {
@@ -4073,8 +4101,9 @@ const v2API = <R extends UserSchema = UserSchema>(
     middlewares: [],
     handler: async (req, res) => {
       const user = req.userData
-      const { qty, asset, symbol, type } = req.body as {
+      const { qty, asset, symbol, type, price } = req.body as {
         qty?: string
+        price?: string | number
         asset?: OrderSizeTypeEnum
         symbol?: string
         type?: AddFundsTypeEnum
@@ -4117,6 +4146,14 @@ const v2API = <R extends UserSchema = UserSchema>(
         })
       }
 
+      const funds = parseSignalFundsPrice({ price })
+      if (funds.error) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: funds.error,
+        })
+      }
+
       try {
         const result = await Bot.addDealFundsFromPublicApi(
           user.id,
@@ -4127,6 +4164,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           fundsType,
           dealId,
           apiActor,
+          funds.price,
         )
 
         return res.status(200).json(result)
@@ -4223,8 +4261,9 @@ const v2API = <R extends UserSchema = UserSchema>(
     middlewares: [],
     handler: async (req, res) => {
       const user = req.userData
-      const { qty, asset, symbol, type } = req.body as {
+      const { qty, asset, symbol, type, price } = req.body as {
         qty?: string
+        price?: string | number
         asset?: OrderSizeTypeEnum
         symbol?: string
         type?: AddFundsTypeEnum
@@ -4267,6 +4306,14 @@ const v2API = <R extends UserSchema = UserSchema>(
         })
       }
 
+      const funds = parseSignalFundsPrice({ price })
+      if (funds.error) {
+        return res.status(400).json({
+          status: StatusEnum.notok,
+          reason: funds.error,
+        })
+      }
+
       try {
         const result = await Bot.reduceDealFundsFromPublicApi(
           user.id,
@@ -4277,6 +4324,7 @@ const v2API = <R extends UserSchema = UserSchema>(
           fundsType,
           dealId,
           apiActor,
+          funds.price,
         )
 
         return res.status(200).json(result)
@@ -4353,7 +4401,6 @@ const v2API = <R extends UserSchema = UserSchema>(
         reason: 'Payload is required',
       }
     }
-
     // Validate pairs in settings
     if (
       !payload.data?.settings?.pair ||

@@ -1813,7 +1813,7 @@ SettingsIndicators configuration
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | enum: `RSI|ADX|BBW|BB|MACD|Stoch|CCI|AO|StochRSI|WR|BullBear|UO|IC|TV|MA|SR|QFL|MFI|PSAR|VO|MOM|BBWP|ECD|XO|MAR|BBPB|DIV|ST|PC|ATR|PP|ADR|ATH|KC|KCPB|UNPNL|DC|OBFVG|SESSION|LW` | No | Bot or indicator type |
+| `type` | enum: `RSI|ADX|BBW|BB|MACD|Stoch|CCI|AO|StochRSI|WR|UO|TV|MA|SR|QFL|MFI|PSAR|VO|MOM|BBWP|ECD|XO|MAR|BBPB|DIV|ST|PC|ATR|PP|ADR|ATH|KC|KCPB|UNPNL|DC|OBFVG|SESSION|LW|OTE` | No | Bot or indicator type |
 | `indicatorLength` | number | No | Indicator period length |
 | `indicatorValue` | string | No | Indicator value threshold |
 | `indicatorValue2` | string | No | Upper bound for indicatorCondition "bw" (between); indicatorValue is the lower bound. Value-type indicators only (RSI, CCI, MFI, WR, ADX, AO, UO, MOM, VO, BBW, BBWP, BBPB, KCPB, MAR, ATR, ADR, ATH), not with percentile. |
@@ -1832,8 +1832,8 @@ SettingsIndicators configuration
 | `bbCrossingValue` | enum: `middle|upper|lower` | No | Bollinger Band line to cross |
 | `stochSmoothK` | number | No | Stochastic K smoothing |
 | `stochSmoothD` | number | No | Stochastic D smoothing |
-| `stochUpper` | string | No | Stochastic overbought level |
-| `stochLower` | string | No | Stochastic oversold level |
+| `stochUpper` | string | No | Stochastic band. With stochRange both, the upper band (the condition is met above it). With stochRange lower, the lower band (met below it). Not read with upper or none. |
+| `stochLower` | string | No | Stochastic band. With stochRange both, the lower band (the condition is met below it). With stochRange upper, the upper band (met above it). Not read with lower or none. |
 | `stochRSI` | number | No | Stochastic RSI period |
 | `rsiValue` | enum: `k|d` | No | RSI value (K or D line) |
 | `rsiValue2` | enum: `k|d|custom` | No | Second RSI value |
@@ -1851,7 +1851,7 @@ SettingsIndicators configuration
 | `psarStart` | number | No | Parabolic SAR start value |
 | `psarInc` | number | No | Parabolic SAR increment |
 | `psarMax` | number | No | Parabolic SAR maximum |
-| `stochRange` | enum: `upper|lower|both|none` | No | Stochastic range to check |
+| `stochRange` | enum: `upper|lower|both|none` | No | Zone the condition must be met in: lower (below the band in stochUpper), upper (above the band in stochLower), both (above stochUpper or below stochLower), none (anywhere). |
 | `minPercFromLast` | string | No | Minimum % from last signal |
 | `orderSize` | string | No | Size of each order |
 | `keepConditionBars` | string | No | Bars to keep condition |
@@ -1885,6 +1885,9 @@ SettingsIndicators configuration
 | `factor` | number | No | Supertrend multiplier factor |
 | `atrLength` | number | No | ATR period length |
 | `stCondition` | enum: `up|down|upToDown|downToUp` | No | Supertrend condition |
+| `smoothing` | enum: `none|sma|ema|wma|dema|tema|hma|rma` | No | Oscillators RSI, CCI, MFI, WR, UO, MOM, AO, ADX, BBPB, KCPB, BBW, VO and MAR only. Moving average laid over the indicator's line (case-insensitive). Unset or 'none' keeps the unsmoothed line; any other value on another indicator is rejected. |
+| `smoothingLength` | number | No | Period of the smoothing average, a whole number from 1 to 1000. Smoothing applies only when both smoothing and this are set. |
+| `smoothingCompare` | enum: `value|line` | No | With smoothing on. 'value' (default): the condition compares the smoothed line with indicatorValue (or its percentile). 'line': the indicator's line is compared with its smoothed line — gt / lt / cu / cd only, indicatorValue is ignored (the API still requires the field; any value), bw is rejected. Percentile mode always compares by value. |
 | `pcUp` | string | No | Price change up threshold |
 | `pcDown` | string | No | Price change down threshold |
 | `pcCondition` | enum: `UP|DOWN` | No | Price change direction |
@@ -1908,11 +1911,20 @@ SettingsIndicators configuration
 | `obfvgValue` | enum: `bullish|bearish|any` | No | Order block/FVG type |
 | `obfvgRef` | enum: `high|low|middle` | No | Order block/FVG reference |
 | `sessionDays` | Array<number> | No |  |
-| `sessionRule` | enum: `in|out` | No |  |
+| `sessionRule` | enum: `in|out|levels` | No | in = trade inside the session, out = outside it (both a time filter); levels = Price levels, compare sessionLevelA with sessionLevelB by indicatorCondition on indicatorInterval candles, only during the session. |
+| `sessionStart` | string | No | Session open, local HH:MM in sessionTimezone. With sessionEnd, limits the session to those hours; omit both for the whole day. |
+| `sessionEnd` | string | No | Session close (exclusive), local HH:MM. Before sessionStart means an overnight session that belongs to the day it opens. |
+| `sessionTimezone` | string | No | IANA time zone the session days and hours are read in. Defaults to UTC; follows daylight saving. |
+| `sessionLevelA` | enum: `prevOpen|prevHigh|prevMid|prevLow|prevClose|curOpen|curMid|price` | No | Session Price levels rule — left operand of indicatorCondition (cd/cu/gt/lt). prev* = the last completed session (open, high, midpoint, low, close), curOpen = open of the session in progress, curMid = (highest high + lowest low) / 2 of the session in progress so far (both none outside a session), price = latest close. Default price. |
+| `sessionLevelB` | enum: `prevOpen|prevHigh|prevMid|prevLow|prevClose|curOpen|curMid|price` | No | Session Price levels rule — right operand of indicatorCondition (cd/cu/gt/lt). prev* = the last completed session (open, high, midpoint, low, close), curOpen = open of the session in progress, curMid = (highest high + lowest low) / 2 of the session in progress so far (both none outside a session), price = latest close. Default prevHigh. Must differ from sessionLevelA. |
 | `lwThreshold` | string | No |  |
 | `lwMaxDuration` | string | No |  |
 | `lwValue` | enum: `top|bottom|any` | No |  |
 | `lwCondition` | enum: `onStart|during` | No |  |
+| `oteLeftBars` | string | No | OTE Levels — bars to the left a swing high/low must dominate (pivots confirm one bar later). Default 10. |
+| `oteMinLegSize` | string | No | OTE Levels — minimum leg size, in percent of the leg's low. Default 1. |
+| `oteLevel` | string | No | OTE Levels — retracement level of the latest leg the close is compared with (indicatorCondition cd/cu/gt/lt). 0 = the leg's end, 1 = its origin, 0.5 = equilibrium, 0.618–0.79 = OTE zone. Default 0.705. |
+| `oteLeg` | enum: `bullish|bearish|any` | No | OTE Levels — which leg direction is read. Bullish = swing low up to swing high. |
 
 ### Example
 
@@ -2017,10 +2029,19 @@ SettingsIndicators configuration
     0
   ],
   "sessionRule": "in",
+  "sessionStart": "09:30",
+  "sessionEnd": "16:00",
+  "sessionTimezone": "America/New_York",
+  "sessionLevelA": "price",
+  "sessionLevelB": "prevHigh",
   "lwThreshold": "example-string",
   "lwMaxDuration": "example-string",
   "lwValue": "top",
-  "lwCondition": "onStart"
+  "lwCondition": "onStart",
+  "oteLeftBars": "10",
+  "oteMinLegSize": "1",
+  "oteLevel": "0.705",
+  "oteLeg": "bullish"
 }
 ```
 

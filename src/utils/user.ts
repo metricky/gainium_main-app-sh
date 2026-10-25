@@ -1,5 +1,6 @@
 import ExchangeChooser from '../exchange/exchangeChooser'
 import { paperExchanges } from '../exchange/paper/utils'
+import { usableFiatRates } from './fiatRates'
 import {
   Prices,
   RateSchema,
@@ -93,6 +94,8 @@ import {
   streamedFree,
 } from './balanceWrite'
 import { createHoldRefresh } from './holdRefresh'
+import { pegRateEntries } from './pegRates'
+import { withExchangeCaller } from '../exchange/requestContext'
 import {
   groupSharedKeyLegs,
   isSharedWalletProvider,
@@ -485,7 +488,10 @@ const updateUserBalance = async (
         e.okxSource,
         e.bybitHost,
       )
-      const balances = await provider.getBalance()
+      provider.setRequestContext({ userId, exchangeUUID: e.uuid })
+      const balances = await withExchangeCaller('user.updateUserBalance', () =>
+        provider.getBalance(),
+      )
       if (balances.status !== 'OK') {
         // The connector reports a refusal as a NOTOK result, not a throw, so
         // the catch below never sees it. Without this line the connection
@@ -871,8 +877,8 @@ const connectUserBalance = async (
             (await reconcileSharedWalletLinks(u._id.toString(), ec, true)) ?? u,
         ),
       )
-      await Promise.all(
-        list.map((u) => updateUserBalance(u, uuid, undefined, ec)),
+      await withExchangeCaller('user.connect', () =>
+        Promise.all(list.map((u) => updateUserBalance(u, uuid, undefined, ec))),
       )
     }
     for (const u of list) {
@@ -948,7 +954,9 @@ const connectUserBalance = async (
             // venue whose stream carries no hold they are the only prompt
             // signal that `locked` moved (spec 070).
             holdRefresh.schedule(e.provider, e.uuid, parsed?.eventType, () =>
-              refreshBalanceForHold(userId, e.uuid, ec),
+              withExchangeCaller('user.holdRefresh', () =>
+                refreshBalanceForHold(userId, e.uuid, ec),
+              ),
             )
             balanceMsg.push({ ...parsed, userId, e })
             await processBalanceUpdate()
@@ -1202,13 +1210,11 @@ const usablePrice = (p: { price: number }) =>
  * rate already rides on. Rates are stored pre-normalized to "1 unit = X USD".
  */
 const fiatRateEntries = (fiatRates: RateSchema['fiatRates']): Prices =>
-  (fiatRates ?? [])
-    .filter((f) => f?.asset && f.usdRate > 0)
-    .map((f) => ({
-      pair: `${f.asset}USD`,
-      price: f.usdRate,
-      exchange: 'all',
-    }))
+  usableFiatRates(fiatRates).map((f) => ({
+    pair: `${f.asset}USD`,
+    price: f.usdRate,
+    exchange: 'all',
+  }))
 
 /**
  * Value a set of balances in USD using the SAME authoritative path the portfolio
@@ -1266,6 +1272,7 @@ export const priceBalancesUsd = async (
       ...rates,
       { pair: 'USDTZUSD', price, exchange: 'all' },
       ...fiatRateEntries(usdRequest.data.result?.fiatRates),
+      ...pegRateEntries,
     ]
   }
 
@@ -1414,6 +1421,7 @@ const userSnapshots = async (
         ...rates,
         { pair: 'USDTZUSD', price, exchange: 'all' },
         ...fiatRateEntries(usdRequest.data.result?.fiatRates),
+        ...pegRateEntries,
       ]
     } else {
       logger.error(`Snapshot | Cannot get user rates ${usdRequest.reason}`)
@@ -1423,9 +1431,11 @@ const userSnapshots = async (
       // portfolio refresh); keep the all-users cron sweep sequential per user,
       // since it already runs every user concurrently.
       const perUserConcurrency = id ? balanceFetchConcurrency() : 1
-      await Promise.all(
-        users.data.result.map((u) =>
-          updateUserBalance(u, uuid, !!paperContext, ec, perUserConcurrency),
+      await withExchangeCaller(id ? 'user.snapshotOne' : 'cron.snapshot', () =>
+        Promise.all(
+          users.data.result.map((u) =>
+            updateUserBalance(u, uuid, !!paperContext, ec, perUserConcurrency),
+          ),
         ),
       )
     }

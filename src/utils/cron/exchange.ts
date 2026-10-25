@@ -16,7 +16,10 @@ import {
   OKXSource,
 } from '../../../types'
 import { classifyAssetClass, resolveUnderlying } from '../assetClass'
+import { normalizePairLeverage } from '../pairLeverage'
+import { normalizeDeliveryTime } from '../../bot/deliveryCutoff'
 import { Kraken } from 'node-kraken-api'
+import { fetchReferenceRates, mergeFiatRates } from '../fiatRates'
 import axios from 'axios'
 
 const providers = [
@@ -99,6 +102,9 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
                 assetCategory?: AssetClass
                 isCanonical?: boolean
                 underlying?: string
+                minLeverage?: number
+                maxLeverage?: number
+                deliveryTime?: number
               }
             >
           | undefined
@@ -108,7 +114,15 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
             realName.slice(1)) as ExchangeEnum
           const realPairs = await pairDb.readData<ClearPairsSchema>(
             { exchange: realExchange },
-            { pair: 1, assetCategory: 1, isCanonical: 1, underlying: 1 },
+            {
+              pair: 1,
+              assetCategory: 1,
+              isCanonical: 1,
+              underlying: 1,
+              minLeverage: 1,
+              maxLeverage: 1,
+              deliveryTime: 1,
+            },
             {},
             true,
             true,
@@ -121,6 +135,9 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
                   assetCategory: p.assetCategory,
                   isCanonical: p.isCanonical,
                   underlying: p.underlying,
+                  minLeverage: p.minLeverage,
+                  maxLeverage: p.maxLeverage,
+                  deliveryTime: p.deliveryTime,
                 },
               ]),
             )
@@ -158,9 +175,24 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
                   baseAsset: info.baseAsset.name,
                   connectorUnderlying: info.underlying,
                 })
+            // Leverage limits from the instrument info (absent = unknown);
+            // paper twins carry none of their own and mirror the real pair.
+            const { minLeverage, maxLeverage } = normalizePairLeverage(
+              paperRealMap ? (paperRealMap.get(info.pair) ?? {}) : info,
+            )
+            // Delivery time of a dated futures contract (absent = perpetual /
+            // spot); paper twins mirror the real pair, like leverage.
+            const deliveryTime = normalizeDeliveryTime(
+              paperRealMap
+                ? paperRealMap.get(info.pair)?.deliveryTime
+                : info.deliveryTime,
+            )
             if (getPair) {
               if (
                 getPair.wsCode !== info.wsCode ||
+                getPair.minLeverage !== minLeverage ||
+                getPair.maxLeverage !== maxLeverage ||
+                getPair.deliveryTime !== deliveryTime ||
                 // Treat an assetCategory change as an update so existing pairs
                 // get backfilled on the next cron run.
                 getPair.assetCategory !== assetCategory ||
@@ -207,6 +239,9 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
                   assetCategory,
                   isCanonical,
                   underlying,
+                  minLeverage,
+                  maxLeverage,
+                  deliveryTime,
                   _id,
                 })
               }
@@ -218,6 +253,9 @@ export const updateExchangeInfo = async (ec = ExchangeChooser) => {
                 assetCategory,
                 isCanonical,
                 underlying,
+                minLeverage,
+                maxLeverage,
+                deliveryTime,
               })
             }
           }
@@ -371,12 +409,15 @@ async function reconcileEuPairs(
       quoteAsset: item.quoteAsset.name,
       connectorAssetClass: item.assetClass,
     })
+    const leverage = normalizePairLeverage(item)
     const doc = {
       ...item,
       exchange,
       source: OKXSource.my,
       assetCategory,
       approx,
+      minLeverage: leverage.minLeverage,
+      maxLeverage: leverage.maxLeverage,
     }
     const found = dbByPair.get(item.pair)
     if (!found) {
@@ -389,6 +430,8 @@ async function reconcileEuPairs(
     // size); it's undefined for spot so this stays a no-op there.
     const changed =
       found.wsCode !== item.wsCode ||
+      found.minLeverage !== leverage.minLeverage ||
+      found.maxLeverage !== leverage.maxLeverage ||
       found.code !== item.code ||
       found.assetCategory !== assetCategory ||
       Boolean(found.approx) !== approx ||
@@ -596,17 +639,17 @@ const FIAT_USD_PAIRS = [
 /**
  * One ticker call per pair: Kraken answers with its own canonical key
  * (`EURUSD` → `ZEURZUSD`), so asking for a single pair lets us take the only
- * entry instead of guessing how to normalize the key. A pair that fails keeps
- * its previous rate — a transient Kraken hiccup must not zero out everyone's
- * fiat balances until the next run twelve hours later.
+ * entry instead of guessing how to normalize the key. A pair that fails is
+ * simply left out — `mergeFiatRates` then falls back to the reference sources
+ * and finally to the previous rate, so a Kraken hiccup never zeroes anyone's
+ * fiat balances.
  */
-const getFiatRates = async (
-  previous: RateSchema['fiatRates'] = [],
-): Promise<RateSchema['fiatRates']> => {
+const getKrakenFiatRates = async (): Promise<
+  { asset: string; usdRate: number }[]
+> => {
   const exchangeKraken = new Kraken()
-  const rates: NonNullable<RateSchema['fiatRates']> = []
+  const rates: { asset: string; usdRate: number }[] = []
   for (const { asset, pair, invert } of FIAT_USD_PAIRS) {
-    const prev = previous?.find((p) => p.asset === asset)
     try {
       const ticker = await exchangeKraken.ticker({ pair })
       const price = parseFloat(Object.values(ticker ?? {})[0]?.c?.[0] ?? '0')
@@ -616,10 +659,28 @@ const getFiatRates = async (
       rates.push({ asset, usdRate: invert ? 1 / price : price })
     } catch (e) {
       logger.error(`Get fiat rate ${pair} failed: ${e}`)
-      if (prev) rates.push(prev)
     }
   }
   return rates
+}
+
+/**
+ * Live Kraken rates for the fiat it lists, daily reference rates (ECB, then
+ * open.er-api) for every other reporting currency. Source failures are logged
+ * here; they are *alerted* by main-app's `fxRatesHealth`, which reads the
+ * `source`/`updated` stamps this writes.
+ */
+const getFiatRates = async (
+  previous: RateSchema['fiatRates'] = [],
+): Promise<RateSchema['fiatRates']> => {
+  const [kraken, reference] = await Promise.all([
+    getKrakenFiatRates(),
+    fetchReferenceRates(),
+  ])
+  for (const err of reference.errors) {
+    logger.error(`Get reference fiat rates failed: ${err}`)
+  }
+  return mergeFiatRates(kraken, reference, previous)
 }
 
 export const saveRate = async () => {

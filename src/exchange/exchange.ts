@@ -29,6 +29,8 @@ import http from 'http'
 import logger from '../utils/logger'
 import utils from '../utils'
 import TimeProfiler from './timeProfiler'
+import BalanceLimiter from './balanceLimiter'
+import { currentExchangeCaller } from './requestContext'
 import RedisClient from '../db/redis'
 import { EXCHANGE_SERVICE_API_URL } from '../config'
 import { brokerCodesDb } from '../db/dbInit'
@@ -119,6 +121,9 @@ const fetchAllPricesOnce = (
   return pending
 }
 
+/** Balance-read profiles already classified by the limiter (retries reuse them). */
+const balanceLimiterClassified = new WeakSet<ExchangeRequestTimeProfile>()
+
 class Exchange extends AbstractExchange {
   /**
    * How many times a placement may be re-sent after the venue has CONFIRMED
@@ -171,7 +176,12 @@ class Exchange extends AbstractExchange {
   protected getEmptyTimeProfile(
     requestName: string,
   ): ExchangeRequestTimeProfile {
-    return this.timeProfiler.getEmptyTimeProfile(requestName, this.exchange)
+    return {
+      ...this.timeProfiler.getEmptyTimeProfile(requestName, this.exchange),
+      ...this.requestContext,
+      accountRef: this.accountRef,
+      caller: currentExchangeCaller(),
+    }
   }
 
   protected startProfilerTime(
@@ -366,16 +376,41 @@ class Exchange extends AbstractExchange {
   async getBalance(
     timeProfile = this.getEmptyTimeProfile('getBalance'),
   ): Promise<BaseReturn<FreeAsset>> {
-    const result = await this.apiCall<FreeAsset>(
-      {
-        endpoint: 'balance',
-        method: 'get',
-        isPrivate: true,
-      },
-      timeProfile,
-    ).catch(this.handleError(this.getBalance, timeProfile))
-    this.saveTimeProfile(result.timeProfile)
-    return result.data
+    const live = () =>
+      this.apiCall<FreeAsset>(
+        {
+          endpoint: 'balance',
+          method: 'get',
+          isPrivate: true,
+        },
+        timeProfile,
+      ).catch(this.handleError(this.getBalance, timeProfile))
+    // A retry re-enters with the same profile object; it goes straight to the
+    // venue rather than through the limiter a second time.
+    if (balanceLimiterClassified.has(timeProfile)) {
+      const result = await live()
+      this.saveTimeProfile(result.timeProfile)
+      return result.data
+    }
+    balanceLimiterClassified.add(timeProfile)
+    const outcome = await BalanceLimiter.getInstance().read(
+      this.accountRef,
+      timeProfile.caller ?? '',
+      live,
+    )
+    if (outcome.served) {
+      // Answered without a venue call. Recorded under its own request name so
+      // `getBalance` keeps counting only real venue calls.
+      this.saveTimeProfile({
+        ...timeProfile,
+        requestName: 'getBalanceCached',
+        limiter: outcome.verdict,
+      })
+      return outcome.data
+    }
+    outcome.result.timeProfile.limiter = outcome.verdict
+    this.saveTimeProfile(outcome.result.timeProfile)
+    return outcome.result.data
   }
 
   /**
@@ -1529,6 +1564,15 @@ class Exchange extends AbstractExchange {
       timeProfile.credentialResolveMs = Date.now() - credentialStart
     }
     const { endpoint, params, body, method } = request
+    if (
+      count === 0 &&
+      method !== 'get' &&
+      ['order', 'orders/openBatch', 'orders/cancelBatch'].includes(endpoint)
+    ) {
+      // Placing or cancelling moves the account's balance: a balance answer
+      // from before this request must not count as reusable afterwards.
+      BalanceLimiter.getInstance().invalidate(this.accountRef)
+    }
     const authHeaders: Record<string, string> = {
       'Content-type': 'application/json',
     }

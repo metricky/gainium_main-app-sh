@@ -50,6 +50,8 @@ import type {
   DonchianChannels,
   OBFVG,
   LongWick,
+  OTELevels,
+  SessionLevels,
 } from '@gainium/indicators'
 import { v4 } from 'uuid'
 import {
@@ -75,9 +77,9 @@ import { IdMute, IdMutex } from '../utils/mutex'
 import { isKucoin, isOkx, isUsdmKucoin } from '../utils/exchange'
 import RedisClient, { RedisWrapper } from '../db/redis'
 import { removePaperFormExchangeName } from '../exchange/helpers'
-import RabbitClient from '../db/rabbit'
 import { getId } from '.'
 import { CandlesProvider } from './candleProvider'
+import { CandlesRequestBatcher } from './candlesRequests'
 
 const { sleep } = utils
 
@@ -318,6 +320,8 @@ class InternalIndicator {
     | DonchianChannels
     | OBFVG
     | LongWick
+    | OTELevels
+    | SessionLevels
   private data: IndicatorHistory[]
   private lastPrice = 0
   private subscribers: IndicatorSubscribers[]
@@ -362,7 +366,6 @@ class InternalIndicator {
   private limitMultiplier = 0
   private is1d?: boolean = false
   private lastSentUpdateAt = 0
-  private rabbitClient = new RabbitClient()
   constructor({
     indicatorConfig,
     test,
@@ -511,11 +514,21 @@ class InternalIndicator {
     }
     return { id: externalId }
   }
-  public removeCallback(id: string) {
-    this.subscribers = []
+  /**
+   * Forget subscribers without closing the room, for subscribers whose process
+   * died and will never unsubscribe. With `subscriberId` only that one is
+   * dropped; without it every subscriber is (legacy — also forgets live
+   * subscribers of other processes sharing the room).
+   */
+  public removeCallback(id: string, subscriberId?: string) {
+    this.subscribers =
+      subscriberId === undefined
+        ? []
+        : this.subscribers.filter((s) => s.id !== subscriberId)
     this.handleDebug(
-      `Remove subscriber ${id}. Left - ${this.subscribers.length}`,
+      `Remove subscriber ${subscriberId ?? id}. Left - ${this.subscribers.length}`,
     )
+    return this.subscribers.length
   }
   public unsubscribe(id: string) {
     this.subscribers = this.subscribers.filter((s) => s.id !== id)
@@ -794,12 +807,15 @@ class InternalIndicator {
     }
     // Per-class instanceof dispatch lives in @gainium/indicators' feedCandle —
     // one source of truth for "which input shape goes to which indicator."
+    // `t` is the candle's open time (every caller passes it as `time`):
+    // Session Price levels groups candles into sessions by it.
     feedCandle(this.indicator, {
       o: +value.o,
       h: +value.h,
       l: +value.l,
       c: +value.c,
       v: +value.v,
+      t: time,
     })
     try {
       const result = this.indicator ? this.indicator.result : undefined
@@ -1178,7 +1194,7 @@ class InternalIndicator {
     }
     // Display pair, not symbolCode — must match getRedisChannelName() above
     // and the connector's display-pair keyed subscription maps.
-    this.rabbitClient.send('candlesRequests', {
+    CandlesRequestBatcher.getInstance().request({
       symbol: this.symbol,
       exchange,
       interval,

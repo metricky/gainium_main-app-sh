@@ -64,8 +64,22 @@ export type NewDealApprovalContext = {
    * DCA order, `base` the base order only (DCA orders keep their size).
    */
   sizeScope?: 'base' | 'whole'
+  /**
+   * Who asked for `sizeMultiplier`: an approving hook (default), or the
+   * `baseOrderSize` of the webhook that triggered the deal. A webhook's size
+   * is the sender's explicit choice, so it is not held to the hook bounds —
+   * only to the balance and exchange-minimum checks.
+   */
+  sizeSource?: 'extension' | 'webhook'
   /** An extension's own reference for this approval (e.g. its decision id). */
   extensionRef?: string
+  /**
+   * Spec 139 §3.2.7: the request adds an entry to the open position `dealId`
+   * of a single-position bot instead of opening a deal. A size multiplier is
+   * not applied to an entry.
+   */
+  entry?: boolean
+  dealId?: string
 }
 
 /** Bounds of a new deal's size multiplier, enforced by the engine. */
@@ -91,6 +105,7 @@ export type NewDealSizeOutcome = {
   /** what it scaled */
   scope?: 'base' | 'whole'
   reason?: NewDealSizeReason
+  source?: 'extension' | 'webhook'
 }
 
 const SIZE_REASON_TEXT: Record<NewDealSizeReason, string> = {
@@ -111,7 +126,7 @@ export const newDealSizeDescription = (o: NewDealSizeOutcome): string =>
   o.applied !== 1
     ? `Deal opened at ${fmtMultiplier(o.applied)} the configured ${
         o.scope === 'base' ? 'base order' : 'size'
-      } (requested by extension)`
+      } (requested by ${o.source === 'webhook' ? 'webhook' : 'extension'})`
     : `Requested size ${fmtMultiplier(o.requested)} not applied (${
         SIZE_REASON_TEXT[o.reason ?? 'unsizeable']
       }) — opened at the configured size`

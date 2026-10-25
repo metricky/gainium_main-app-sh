@@ -1,5 +1,898 @@
 # Changelog
 
+## [1.115.8] - 2026-10-25
+
+### Fixed
+
+- Exchange-token fees on accounts with long trading histories could show as unknown in trading costs, and the unknown share could change between page loads: the minute-price cache emptied itself completely when full, sometimes while a valuation was still reading back prices it had just fetched. A valuation now keeps the prices it fetched until it is done, and a full cache drops its oldest prices first. Fees that already showed a value are unchanged.
+
+## [1.115.7] - 2026-10-25
+
+### Fixed
+
+- The trading-costs summary of an account with thousands of bots read each bot's orders one bot at a time, and waited on the candle days that value its exchange-token fees one bot after another, so it could run past the dashboard's request timeout. It now reads the orders for up to 500 bots per query and reads those bots' candle days ahead, several at a time; the figures are unchanged.
+
+## [1.115.5] - 2026-10-25
+
+### Fixed
+
+- Support & Resistance conditions saved without left/right bars ran with 5 and 5 while the form, the API defaults and the backtester use 15 and 15. They now run with 15 and 15.
+- ATH Drawdown with no Value falls back to 10, the form's default, instead of 70.
+- Public API Keltner Channel range length defaults to 20, the value the engine and the backtester use when it is unset.
+
+## [1.115.4] - 2026-10-25
+
+### Fixed
+
+- ATH Drawdown "between" compared the drawdown with minus the Value but with the upper value as entered, so "between 3 and 8" held for any drawdown under 3%. Both bounds are now read as drawdowns, as the backtester does from 1.21.1.
+- Public API Stochastic and Stochastic RSI conditions sent without bands got defaults for the wrong zone: with Zone `lower` (the default) the band is read from `stochUpper`, which defaulted to 80, so the condition held below 80. An omitted band now defaults to the zone it is read in: 20 for `lower` (in `stochUpper`), 80 for `upper` (in `stochLower`).
+- Public API Momentum conditions defaulted to a level of 70. Momentum is a price difference in the pair's price units, so the default is now the zero line.
+
+### Changed
+
+- The OpenAPI document and `SCHEMAS.md` describe which Stochastic band key each `stochRange` reads.
+
+## [1.115.3] - 2026-10-24
+
+### Changed
+
+- The public API (v1 and v2 bot create, update and clone) rejects indicator types bots cannot evaluate as a condition — Ichimoku Cloud (`IC`) and Bull Bear Power (`BullBear`) — instead of storing a condition that never signals. They are also gone from the OpenAPI document, the v1 Swagger document and `SCHEMAS.md`. The accepted list is `CONDITION_INDICATOR_TYPES`, derived from the condition catalog, and drives validation, discovery and the OpenAPI generator. A bot that already has one of them still reads, and updates that do not resend its indicators still apply.
+
+## [1.115.2] - 2026-10-24
+
+### Fixed
+
+- `/api/v2/discovery/indicators` (and `/:type`) listed Ichimoku Cloud (`IC`) and Bull Bear Power (`BullBear`), which bots cannot evaluate as a condition. Discovery now lists only types the condition catalog can run; the generator reads that catalog, so a type without an engine condition is never advertised.
+
+## [1.115.1] - 2026-10-24
+
+### Fixed
+
+- Valuing fees paid in another token read candles one window per gap between fills, so a long bot or account history hit the per-call cap and stayed partial. Prices are now read once per pair and trading day, so a history costs one read per day per pair.
+
+## [1.115.0] - 2026-10-24
+
+### Added
+
+- Session indicator Price levels: new level `curMid` (current session midpoint) — (highest high + lowest low) / 2 of the session in progress so far, none outside a session. Accepted as `sessionLevelA` / `sessionLevelB` by GraphQL, the v2 API (validators, OpenAPI, indicator definitions) and the bot schema; decided by `@gainium/indicators` 1.9.0.
+
+## [1.114.0] - 2026-10-24
+
+### Added
+
+- Session indicator "Price levels" rule (`sessionRule: levels`): compares `sessionLevelA` with `sessionLevelB` (previous session open / high / midpoint / low / close, current session open, price) by `indicatorCondition` (cd / cu / gt / lt) on `indicatorInterval` candles, only during the session. It is subscribed and evaluated from candles like any other indicator, decided by `@gainium/indicators`' `sessionLevelsCondition` (the same decision backtests use); the in / out rules stay the bot's clock filter, and a bot can combine both. Accepted by GraphQL, the v2 API (validators, defaults with a 15m interval, OpenAPI, indicator definitions) and stored on the bot.
+
+### Changed
+
+- The indicator service passes each candle's open time to the indicators it feeds.
+
+## [1.113.2] - 2026-10-24
+
+### Fixed
+
+- When a hedge-mode futures account has its long and short positions liquidated in the same instant, both bots now close their deals. The second liquidation report was removed from the order queue unprocessed when it sorted ahead of the one being handled, and two equal-size liquidations on one symbol were taken for duplicates. The "closed due to position liquidation" message now appears only on the bot that actually closed deals.
+
+## [1.113.1] - 2026-10-24
+
+### Fixed
+
+- Binance: an order whose fee came from the fills in the placement answer could have the same trades' fees added again when the user stream reported them, so the order and its deal counted those fees twice. When the answer's fills carry the exchange's trade ids, they now settle the fee and mark those trades as counted, so the stream adds only trades the answer did not include, in either arrival order. Fills without trade ids behave as before.
+
+## [1.113.0] - 2026-10-24
+
+### Added
+
+- Fees an exchange charges in a token that is neither side of the pair (for example BNB, BGB or KCS) are valued in the pair's quote currency at the market price of the fill's minute. Orders expose the converted amount (`feeQuote`, `feeConverted`); deals, bots and the account summary report these fees separately (`unbookedFeesQuote`, `unbookedFeesPartial`, `unbookedFeeAssets`), since the deal's own profit in quote does not deduct them.
+- Deals whose USD profit already deducts those fees say so (`unbookedFeesInUsdProfit`, `unbookedFeesUsd`), so the cost breakdown converts with a plain quote-to-USD rate and adds up to the USD profit shown.
+
+## [1.112.0] - 2026-10-24
+
+### Added
+
+- Discount / Premium OTE Levels indicator (`OTE`): tracks the latest valid leg between a swing low and a swing high (`oteLeftBars`, `oteMinLegSize` in % of the leg's low) and compares the close with one retracement level of it (`oteLevel`, default 0.705) for bullish, bearish or any legs (`oteLeg`), with `indicatorCondition` crossing down/up, greater or lower than. The decision is `@gainium/indicators`' `oteCondition`, the same one backtests use. Accepted by GraphQL, the v2 API (validators, defaults, OpenAPI, indicator definitions) and stored on the bot.
+
+## [1.111.1] - 2026-10-24
+
+### Fixed
+
+- Changing the number of DCA levels on an open deal cancels and places only the safety orders that the new count adds or removes. The take profit and the safety orders that stay are no longer cancelled and placed again.
+
+## [1.111.0] - 2026-10-23
+
+### Added
+
+- Session indicator hours: `sessionStart` / `sessionEnd` (local `HH:MM`) and `sessionTimezone` (IANA, default UTC) limit a session to its trading hours on the session's local clock, through daylight saving. Without them a session still covers whole days. Accepted by GraphQL, the v2 API and stored on the bot.
+
+## [1.110.0] - 2026-10-23
+
+### Added
+
+- Market orders now record the market price the bot acted on (`refPrice`, with the time that price was observed), when the order left for the exchange (`sentAt`) and when the exchange answered (`ackAt`). Slippage is measured from that recorded price.
+- Per-order slippage and fee in the order's quote currency (`slippageBps`, `slippageQuote`, `slippageSource`, `feeQuote`, `feeEstimated`). For older orders without a recorded price, slippage is estimated from the order's own data and marked as reconstructed; estimates that cannot be trusted are left empty rather than shown.
+- A cost breakdown on closed DCA and combo deals (`costBreakdown`: gross, fees, slippage, net), where net is the deal's existing profit, plus bot-level `tradingCosts` and an account-level `tradingCostsSummary` over closed deals.
+- `getDCABotDealsById` returns the requested deals of the caller's bot.
+
+## [1.109.9] - 2026-10-22
+
+### Fixed
+
+- A limit order that filled part of itself the moment it reached the book, and the rest a moment later, could be recorded as filled for only the first part: the exchange's answer to the placement arrived after the live updates and its smaller executed amount overwrote them. The deal then counted less than it held, and its size, average price and used funds were understated. A placement answer can no longer lower the executed amount the live updates already reported.
+
+## [1.109.8] - 2026-10-22
+
+### Fixed
+
+- An order cancelled while its placement was still running its pre-send checks (for example a balance re-check) was written off as cancelled, and then went out to the exchange and could fill with no deal tracking it. A cancel now waits for the placement's answer for the whole time the order has no exchange id yet, not only during the exchange call.
+
+## [1.109.7] - 2026-10-22
+
+### Fixed
+
+- Changing an open DCA deal's take profit to a fixed price cancelled and re-placed every resting safety order before placing the new take profit, so each level lost its place in the book. A take-profit-only edit set as a fixed price now replaces only the take-profit order, as a percentage edit already did; edits that change anything else still rebuild the ladder.
+
+## [1.109.6] - 2026-10-22
+
+### Fixed
+
+- A deal that closed in the seconds before the bot's worker restarted could come back after the restart: the restart restored it from the bot's saved state, which had not yet recorded the close, and the bot went on trading it as open. A restart now checks the restored deals against their stored status and drops the ones already closed or canceled; their remaining orders are cancelled and a combo deal's grids are closed. Open deals restore as before.
+
+## [1.109.5] - 2026-10-22
+
+### Fixed
+
+- A futures grid level sent reduce-only that the exchange refused because there was no position left for it to reduce was sent again on every grid rebuild, so the bot kept asking the exchange the same refused order after every fill. The level is now held back for a widening interval (one minute, doubling up to 15 minutes) after a refusal and re-tried after it; the refusal is still reported to the user each time the exchange is asked. The rest of the grid is unaffected.
+
+## [1.109.4] - 2026-10-21
+
+### Fixed
+
+- A grid bot whose take profit or stop loss closes it with "stop and sell" could place the closing sale again and again while it was stopping: price ticks that queued behind the first close re-checked the trigger against balances the close had not yet updated in memory, and each one sold the grid's full amount again. A close now runs once; later ticks, and any re-entry after the closing order filled, place nothing.
+
+## [1.109.3] - 2026-10-21
+
+### Fixed
+
+- A deal close that found the deal's take-profit already filled on the exchange (its fill event never arrived) still sent a new full-size take-profit while that fill closed the deal in the background. The new order was left resting with no deal behind it, and when it filled it sold coins outside any deal. The close now re-checks the deal right before sending and sends nothing when the filled take-profit already closed it.
+
+## [1.109.2] - 2026-10-21
+
+### Fixed
+
+- A futures deal whose exchange position was gone is closed after two readings that agree, but the bot forgot the first reading after ten minutes. Where those readings only come when the bot re-places its orders, hours apart, a flat combo deal could stay open for days and hold its pair's only deal slot. Readings are now remembered for a day, and a check the exchange did not answer no longer counts as one.
+
+## [1.109.1] - 2026-10-21
+
+### Fixed
+
+- A Combo deal whose base order could not be built (for example a percentage-of-balance spot short on an account without the coin it sells, or a balance read the exchange refused) stayed in start with no order, holding one of the bot's deal slots. It is now cancelled, as a DCA deal already is, and the reason is still shown. A deal already stuck this way is cancelled the next time the bot starts.
+
+## [1.109.0] - 2026-10-21
+
+### Added
+
+- Reporting currency: a per-account `reportingCurrency` setting (USD when unset) on the `user` type and `userSettings` input, accepted for USD plus 33 fiat currencies.
+- Fiat rates now cover every reporting currency. Kraken prices the fiat it lists live; the rest come from daily ECB reference rates (Frankfurter), with open.er-api.com as fallback. Each rate records its `source` and the time it was last `updated`, both exposed on `getFiatRates`.
+
+### Changed
+
+- A fiat rate Kraken cannot price falls back to the reference rates before reusing the previous value.
+## [1.108.23] - 2026-10-21
+
+### Fixed
+
+- A Kraken order the exchange accepted could be saved under the exchange's order id instead of the bot's own, which left the bot's copy without its exchange id. After a restart the bot then wrote it off as never placed without asking the exchange, and its fills were not added to the deal. An accepted order is now always saved under the bot's own id. Before writing off an order that has no exchange id, the bot now looks it up on Kraken, Coinbase and KuCoin futures by its own id.
+
+## [1.108.22] - 2026-10-21
+
+### Added
+
+- When a webhook signal is not executed (the bot is stopped, archived or restarting, or the signal could not run in time), or a close signal runs late, the bot's owner is told why. The cloud edition writes it to the bot's log and sends a bot alert; self-hosted keeps the reason in the webhook reply and the server log.
+
+### Changed
+
+- A close signal (`closeDeal`, `closeDealSl`) may still run up to 15 minutes after it reached us, instead of 60 seconds: closing late takes risk off a position rather than adding it. Past 60 seconds it closes only deals that were already open when the signal arrived, never one opened after it. Every other action keeps the 60-second limit.
+
+## [1.108.21] - 2026-10-20
+
+### Fixed
+
+- A bot service restart moments after a deal closed and the next one opened could restore the bot's open/total deal counter from an older saved copy and keep it wrong. The counter is now re-checked against the bot's actual deals on every start and corrected when it differs.
+
+## [1.108.20] - 2026-10-20
+
+### Fixed
+
+- When a deal closed, its remaining orders were cancelled one at a time, and if the bot service restarted during that sweep, the orders not yet reached stayed open on the exchange with nothing managing them. The bot now records the sweep before it starts and, on its next start, cancels whatever orders of that deal are still open and closes the deal's combo ladders.
+- A take profit or stop loss that fired while a deal's grid was still being placed let the whole grid be placed first and only then cancelled it. Placement now stops as soon as the close is requested.
+
+## [1.108.19] - 2026-10-20
+
+### Fixed
+
+- An order lookup that the exchange refused for its rate limit was treated as answered, and the order was skipped until the next check. It is now asked again after a short, jittered backoff.
+- A single rate-limited batch order lookup turned batch lookups off until the bot service restarted. Only an answer saying the exchange cannot batch does that now.
+- Order checks after a restart and on reconnect now share a per-exchange-account budget of lookups per second, across all bots on the account. An account with many bots no longer hits the exchange's per-account rate limit after a restart, and an account with a few bots is not slowed down. Orders that a restart check could not reach in time are checked by a reconcile pass straight afterwards.
+
+## [1.108.18] - 2026-10-20
+
+### Fixed
+
+- After a rollback to an older bot service, signals sent while it restarted could be queued where it never reads them, and were lost. Signals are now queued on the webhook queue during a restart only while a current-version service of that type has reported itself alive in the last five minutes; otherwise they go to the command queue as before.
+- A signal waiting on the webhook queue now expires there when its 60 seconds run out, instead of staying queued.
+
+## [1.108.17] - 2026-10-20
+
+### Fixed
+
+- A webhook signal runs if it can run within 60 seconds of reaching the API, on every path: straight away, after waiting for a bot that is still re-loading, or when its bot service comes back and takes it from a queue or the replay queue. Otherwise it is dropped and the reason is logged and returned. (1.108.16 had replays uncapped and a 10-second wait.)
+- While a bot service is down, signals are queued on its webhook queue, which it reads as soon as it starts, instead of its command queue, which it reads only once every bot is back.
+- Combo, hedge combo and hedge DCA bots are now indexed by webhook uuid, like DCA bots.
+
+## [1.108.16] - 2026-10-20
+
+### Fixed
+
+- A webhook signal that the API could not hand to its bot service is replayed once the service is back, as before, with no age limit. The 10-second limit now applies only to waiting for a bot that is still re-loading after a restart.
+- A replayed signal is delivered to its own bot type's queue. The shared replay queue could hand it to another bot type, which then answered that the bot was not running.
+- A signal runs at most once. The copy the API replays and the original still waiting in the bot service's queue carry the same signal id, so only the first one runs.
+- Webhook signals have their own queue on each bot service, separate from its command queue, so commands that wait for the restart to finish can no longer hold signals back.
+- A restarting bot service spreads its bots over all the worker threads it needs from the start, instead of filling one thread before opening the next.
+- Two copies of the same signal for a re-loading bot share one waiting period instead of each getting its own.
+
+## [1.108.15] - 2026-10-20
+
+### Fixed
+
+- Webhook signals around a bot-service restart are executed within 10 seconds of reaching the API or refused with the reason, never queued and executed later. A signal for a bot that is still re-loading waits for it for at most that long; the API stamps each signal on arrival and the bot service drops one that is older, including a replayed one.
+- The bot service now takes webhook signals while its bots are still being re-loaded; other commands still wait until every bot is back.
+- The restart could start taking commands before every bot had been handed to a worker, when a worker that failed during start-up had its bots counted twice. Bots are now counted once each.
+- Bots that webhook signals drive, and bots with an open deal, are resumed first after a restart.
+
+## [1.108.13] - 2026-10-20
+
+### Fixed
+
+Merges the 1.107.3 take-profit-only edit fix:
+
+- A take-profit-only deal edit cancelled every resting take-profit-type order of the deal, including a resting limit reduce-funds order. A reduce-funds order is now left resting (also when its row has no funds id yet).
+- A take profit rebuilt next to a resting percentage reduce-funds order was sized as if the reduce were almost nothing: the pending entry's percentage was read as a quote amount. The resting reduce order's own quantity is now what the take profit and the deal's balances leave out, so the take profit and the reduce together never sell more than the deal holds.
+
+## [1.108.12] - 2026-10-20
+
+### Fixed
+
+- Combo: when several grid orders of a deal filled on the same price move, the first fill's rebuild could trim exit lines whose orders had already filled but were still waiting to be processed. The rebuild cancelled them too late and placed the trimmed copies, so their base was sold (or bought back) twice; on a short the same timing trimmed buy-backs the deal still needed. The exit cap now waits until no grid fill of the deal is still queued, and a grid line whose cancel finds it already filled is never placed again at a new size.
+- Combo: a grid exit that filled after its deal had closed was traded again at market as a "remainder". Only an entry filled after the close leaves base to sell; an exit already took its base out of the position.
+- Combo shorts: a new minigrid could open with only one buy-back and further entry sells above it, when a lower level's displaced sell price rounded onto the price the level filled at. A new minigrid is now always anchored at its top level for a short (bottom level for a long), so all of its exit lines are placed.
+
+## [1.108.11] - 2026-10-20
+
+### Fixed
+
+- A take-profit-only deal edit now also leaves a reduce-funds order resting when its row has no funds id yet (recognised by its client id), and on a Combo deal it places the take profit from the rebuilt deal orders without regenerating the minigrid ladders.
+
+## [1.108.10] - 2026-10-20
+
+### Changed
+
+- Editing only a DCA deal's take profit (target, trailing, minimum or multiple take profits, or switching it on or off) now replaces just the take-profit order. The deal's safety orders stay on the exchange as they are, at their original prices and with their place in the order book. Any other deal edit still rebuilds the deal's orders. A resting reduce-funds order is not the take profit and is left in place.
+
+## [1.108.9] - 2026-10-20
+
+### Fixed
+
+- Combo: a minigrid's resting exits (the sells of a long, the buy-backs of a short) could sum to more base than the deal held. After a grid fill the ladder is regenerated and each line is rounded on its own, so the exit handed back over a refilled level could be one lot larger than the fill that refilled it (a buy of 0.027 answered by a sell of 0.028); every refill cycle rested one more lot. On one-way futures the last exit would have reversed the position, on spot it was refused for insufficient balance, and a deal could close with a negative base. The regenerated exits are now held to what the minigrid holds after each fill, and the deal's exits together to its position, trimming the newly placed lines first and never below the exchange minimum; a new minigrid's exits are held to the level that opened it, and a book rebuild holds every deal's exits to its position (before, only after an add / reduce funds change). Spot shorts are unchanged: they buy back with quote, and buying back more base than they sold is their profit.
+
+## [1.108.8] - 2026-10-20
+
+### Fixed
+
+- A limit order the exchange reports as resting with a price of 0 is recorded as a limit order. It was recorded as a market order, so the bot's resting-order checks and missed-fill recovery did not see it.
+
+## [1.108.7] - 2026-10-20
+
+### Fixed
+
+- Combo add / reduce funds: a grid fill that rebuilt the deal's book while the funds order was still being placed could stop the bot processing that deal until a restart. The rebuild tried to cancel the funds order, the cancel found it filled and waited to book it, while the user-stream report of the same fill waited for the rebuild — each held what the other needed. A funds order is never treated as a grid or ladder order by a rebuild, now also when its row reached the bot without its funds id.
+
+## [1.108.6] - 2026-10-19
+
+### Fixed
+
+- Combo add / reduce funds: a funds order whose fill reached the bot before the venue's reply to the send could go unbooked — the deal kept its old scale and size, the change stayed marked unfinished, and a restart later booked it against a position that had moved since. The fill is now booked by whichever report reaches the bot first (stream, send reply or venue lookup) and the others change nothing; a funds order that arrives without its funds id is booked as the deal's change in flight and never as a safety order; the request is stored before the send with the position it was sized on, and the fill is always booked against that position; a grid level never cancels a funds order. A new request first books a previous change whose order has already ended, and a request while a change is unfinished is refused with a message.
+- Combo: the duplicate-minigrid cleanup decides on orders, not on the minigrid's own counters (a copy carries its source's): a copy is closed only with no resting and no filled grid order of its own, and it is marked as a duplicate. A closed duplicate, or a base rung that still has another open minigrid, no longer makes the restart close the deal as if its base minigrid had closed.
+
+## [1.108.5] - 2026-10-19
+
+### Fixed
+
+- Combo: a restart within seconds of a safety order fill could open a second minigrid for the same level. The minigrid snapshot a cold restart loads is written on a delay, so it lacked the minigrid the fill had just opened; the restarted worker processed the fill again and opened another, leaving the first open with no orders (and later scaled by add / reduce funds). The minigrid snapshot is now written as soon as a minigrid opens or closes, a cold restart also loads the open minigrids the database holds that the snapshot lacks, a level that already has an open minigrid never gets a second one, and a duplicate left by an earlier restart with no resting order and no grid trade is closed on load.
+- Combo add / reduce funds: the resting-exit cap never empties a minigrid. It used to take a minigrid's last line to zero when the deal's exits were over the position (for example with a duplicate minigrid), leaving that minigrid without a ladder until the next restart.
+
+## [1.108.4] - 2026-10-19
+
+### Fixed
+
+- Combo add / reduce funds after a restart: a funds order still open in the restored book was left to the restart check, whose fill booking then ran alongside the check — the check re-sent the safety orders the booking had just cancelled, at their old size, and placed missing orders from a book read before the change. The restart now asks the venue about the change's order first and books (or drops) it before the check runs, and the check places nothing for a deal whose book is being rebuilt.
+- The restart check no longer re-sends an order this process cancelled itself.
+- A change interrupted by a restart with no order executed (for example a reduce stopped after the book was taken down and before its sell was sent) puts the book back and now tells the user that nothing was bought or sold and the request should be sent again.
+- Combo deal size and usage follow grid fills, and are recomputed before a funds change is reported done; they used to stay at the last rebuild until the next restart.
+- The resting-exit cap (exits never above the position) also applies to a rebuild resuming a change that was never scaled.
+
+## [1.108.3] - 2026-10-19
+
+### Fixed
+
+- Combo add / reduce funds: the resting grid exits (sells of a long, buy-backs of a short) could exceed the deal's position by a lot step after a change. The market order rounds down, but every regenerated grid line rounded on its own, so the lines no longer summed to the scaled holding (on a 0.1 lot, a 30 % reduce left 200.0 held against 200.1 resting). Scaled lines are now fitted to the lot step so each minigrid's exits sum to no more than what it holds after the change, and the book rebuilt for a deal with funds changes never rests more exit base than the deal's position (lots come off the largest lines). Coin-margined lines (contracts) are unchanged.
+
+## [1.108.2] - 2026-10-19
+
+### Fixed
+
+- Combo add / reduce funds: a worker stopped while a change was being booked or its book rebuilt restarted on Redis snapshots written before the change and placed the old book again next to the half placed new one — grid exits for more base than the deal held, safety orders at the old size, and the deal size left at the old position. A change now writes a durable marker on the deal (`comboFundsRebuild`) before its order is sent and clears it once the rebuilt book is in the snapshots. A cold restart loads a marked deal, a deal with an order in flight, or a deal holding a change its snapshot lacks from the database together with its orders and minigrids, books a funds order that executed before the stop (drops one that executed nothing), and rebuilds the book from the stored deal before the restart check runs.
+- Redis snapshot writes are awaited by callers that await them.
+
+## [1.108.1] - 2026-10-19
+
+### Fixed
+
+- Combo add / reduce funds: the unfilled DCA levels were re-placed at their previous size. The book was rebuilt on a copy of the deal read before its save had landed, and the save then put the old ladder back; the booking now waits for the save, so the levels go out at the new size under new order ids.
+- Combo add / reduce funds: a second request could be sized on the position before the previous fill was booked and scale the minigrids twice. A request now waits for, or is refused during, the whole booking of the previous one, book rebuild included.
+- Combo reduce funds: a part fill was also recorded as a partial take profit, which the deal's close then counted again. It is no longer recorded, and an entry left from before is dropped when the reduce is booked.
+- Combo deal average: a reduce funds fill now takes its quantity out of the position at the deal average (futures and spot), so a later add or reduce works from the right position.
+- Combo minigrids record which add / reduce changes they were scaled by; one loaded after a restart from a snapshot older than the change is scaled on load, and the snapshots are written right after the change.
+- Combo add / reduce funds now also resizes the DCA levels that had filled, for when their minigrid closes and the level is placed again. Those offsets are kept apart (`sizes.fundsDcaHeld`) and left out of the deal's balances and usage, which the funds order already covers.
+- Coin-margined Combo add / reduce funds orders are sized in whole contracts (a reduce rounds down) and one contract is the minimum for a grid line or level.
+- A funds order reported done before its send returned no longer leaves a pending entry; an add fill that arrives after the deal closed is sold as its own quantity and reported; a reduce covering the whole deal is reported as an info event, not a refused action.
+
+## [1.108.0] - 2026-10-19
+
+### Added
+
+- Add funds and reduce funds work on Combo deals. The change scales every rung of the deal by one factor instead of adding a new one: the filled position is grown or reduced with one market order, every live minigrid's budget (and so each of its grid lines) is scaled by the same factor, and every DCA level not filled yet is resized through a per-level offset (`sizes.fundsDca`) that its resting order and the minigrid it opens later both follow. A percentage scales by that percentage; a fixed amount is the total across the position (at market) and the unfilled levels. The fill is not counted as a safety order and opens no minigrid; a reduce books its realized profit at the deal average and does not close the deal. A reduce that would leave any grid line or unfilled level below the exchange minimum is refused with the largest percentage that would pass, and one that covers the whole deal closes it. A limit price is not supported for Combo deals and is refused.
+- Combo deals persist and expose `funds`, `reduceFunds`, `pendingAddFunds` and `pendingReduceFunds`; GraphQL `addDealFundsInput` takes an optional `combo` flag (the deal type is resolved when it is omitted), and the public add/reduce funds endpoints accept a Combo deal or bot.
+
+## [1.107.0] - 2026-10-19
+### Changed
+- Bot base funding is available to every user: short spot DCA / combo `baseFunding` (Auto / Bot only) and hedge DCA / hedge combo legs on spot that fund themselves with the start actions. Deals opened from now on are stamped `baseFundingBeta` and follow the funded path; deals opened before keep the behaviour they started with. `baseFundingAccess.available` is true for every signed-in user, and `baseFunding` settings are stored as sent. The role check is kept in code (`BASE_FUNDING_RELEASED`) to narrow it again if needed.
+
+## [1.106.18] - 2026-10-19
+
+### Fixed
+
+- A user action the bot engine refuses, drops or fails is now answered with a bot message instead of only a log line: a crash during start or stop, a bot stopped because the exchange returned no trading rules for its pair, a manual new deal refused for balance, the deal limit or an unreadable balance (answered on every click, not once per day), a close request on a deal in error, a manual entry into a single position while another is in flight, and an action sent while the bot is not loaded on its worker.
+- Webhook signals the bot's settings ignore (a close signal when the close condition is not Webhook, a start signal on a bot that does not start by webhook or is in error) are still ignored, but the user is now told why.
+
+### Changed
+
+- Stopping a bot that closes its deals first posts a notice saying how many deals are being closed, since the bot only shows as closed once they are done.
+
+## [1.106.17] - 2026-10-19
+
+### Changed
+
+- Starting a stopped Combo bot that still has open deals no longer cancels and re-places those deals' orders. As for DCA bots, the bot checks its resting safety and grid orders with the exchange, books any fills that arrived while it was stopped, cancels the orders of grids that have already closed, and places only what each deal is missing. Restart still cancels and re-places the whole order book.
+
+## [1.106.16] - 2026-10-19
+
+### Changed
+
+- Starting a stopped DCA bot that still has open deals no longer cancels and re-places those deals' orders. The bot checks the orders it already has with the exchange, books any fills that arrived while it was stopped, and places only what is missing. Existing safety orders keep their original prices and their place in the order book, and a bot with many open deals starts in seconds instead of minutes.
+
+## [1.106.15] - 2026-10-19
+
+### Fixed
+
+- Starting a DCA bot with many open deals now shows it as running right away. Before, the bot kept showing as closed until it had re-placed the orders of every open deal, which could take minutes, so it looked like the start had failed.
+
+## [1.106.14] - 2026-10-19
+
+### Fixed
+
+- A deal close or bot stop whose cancel the exchange refused for a reason other than a rate limit, a lockout or "unknown order" no longer leaves the order resting on the exchange with nothing tracking it. Two examples are Coinbase `COMMANDER_REJECTED_CANCEL_ORDER`, and `RFQ_ORDERS_CANNOT_BE_CANCELLED` for an order the exchange is filling as an RFQ. Before, the refusal was only reported, and the close then dropped the order from the bot, so a later fill sat outside any deal. Now the bot:
+  - sends the cancel once more after a short back-off (except for RFQ orders, which can never be cancelled);
+  - asks the exchange for the order's real status;
+  - keeps tracking the order until the exchange reports it cancelled or filled, asking again on the deferred schedule;
+  - sells a late fill like any other fill that arrives after its deal closed.
+
+  Cancels on running deals are unchanged.
+
+## [1.106.13] - 2026-10-19
+
+### Fixed
+
+- A combo grid order that had been resting on the exchange and was then cancelled there (the exchange cancelling all open orders, or a cancel made on the exchange by hand) now stays on its minigrid's ladder, and the bot places it again. Before, the bot dropped the level. After a cancel-all, a minigrid was left active with no orders at all: it held what its levels had bought and nothing would sell it back. A minigrid already left with no orders this way gets its ladder back on the next restart, rebuilt from its own last price as a full reload already did. An order the exchange refuses the moment it is placed is still dropped and not retried.
+
+## [1.106.12] - 2026-10-19
+
+### Fixed
+
+- A DCA or Combo deal that closes while the exchange is temporarily refusing requests (a rate limit, or a temporary lockout of the API key) no longer leaves its safety and take-profit orders open on the exchange. Before, a cancel refused for that reason was reported and never asked again, so the order stayed live with no deal managing it. The bot now asks again after the stated hold (or a back-off of up to 30 minutes, four times), and only while the order is still open and its deal has closed. The close itself is not delayed.
+
+## [1.106.11] - 2026-10-18
+
+### Fixed
+
+- A DCA deal whose opening order filled just before a bot worker restart now opens after the restart. The fill had reached the bot's in-memory order book but not its saved order record, and the restart checked the saved record, then handed the order to a check that found it already filled and did nothing, so the deal stayed waiting with the position unbooked. The restart now confirms such an order with the exchange, saves it and opens the deal; if the exchange reports a different status, that status is used instead.
+- An order that never received an exchange id and that the exchange confirms does not exist is now written off after 5 minutes (`BOT_NEVER_PLACED_ORDER_MIN_AGE_MS`) instead of 24 hours, and the restart check places its take-profit or safety order again. Before, a take-profit lost this way left the deal with no exit for a day. Orders with an exchange id, and the not-found answers some exchanges give about an order placed moments ago, keep the 24-hour floor.
+
+## [1.106.10] - 2026-10-18
+
+### Fixed
+
+- A combo minigrid whose price range is narrower than its number of grid levels in price ticks no longer puts two levels on the same price. Before, after a level filled, its twin at the same price stayed on the ladder and filled again on the next trade there, so the minigrid bought back more than it had sold. The minigrid now uses the most levels whose prices stay apart, and the bot log says when it reduced them. Ladders whose levels are already on different prices are built exactly as before.
+
+## [1.106.9] - 2026-10-18
+
+### Fixed
+
+- A futures combo deal whose grid levels bought back its whole position now closes. Before, the exchange refused every remaining closing-side grid order because nothing was left to reduce, the deal re-sent those orders on every grid event, and it stayed open. After such a refusal the bot now asks the exchange for the position. When two readings a few minutes apart agree that it is flat, the deal closes the same way a completed base grid closes it. A deal whose position is still on the exchange keeps trading as before.
+
+## [1.106.8] - 2026-10-18
+
+### Fixed
+
+- A DCA deal whose opening order was restored after a worker restart but had never been sent now places that order. If the order has no exchange id and no saved record, and the exchange confirms it does not exist, the restart drops it and places the entry again. Before, the restart treated the order as already active and the deal waited with nothing bought. An order the exchange knows about, or one with a saved record, is never re-sent.
+
+## [1.106.7] - 2026-10-18
+
+### Fixed
+
+- A combo deal that closes while its bot is reloading now closes its grid ladders too. The reload cleared the in-memory ladder list mid-close, so the close found none and the ladders stayed active on the closed deal.
+
+## [1.106.6] - 2026-10-18
+
+### Fixed
+
+- A DCA deal whose base order filled just before a worker restart is finished on restart: if the restart snapshot shows it open while the database still has it unstarted, it is loaded from the database and started on its filled base order, which places its take-profit. A restored take-profit that was never sent (no exchange id, no saved record, and the exchange confirms it does not exist) is dropped and placed again right away, instead of being polled for a day while the position has no exit.
+
+## [1.106.5] - 2026-10-18
+
+### Fixed
+
+- A KuCoin order reported FILLED with nothing executed and no fills is no longer booked at its requested size. KuCoin always reports the executed size, so that answer means the venue closed the order unexecuted; booking the requested size made the deal count coins it never bought.
+
+## [1.106.4] - 2026-10-19
+### Fixed
+- The deals index backing the funding-reservation reads is the partial `{ userId, status }` index of `baseFundingBeta` deals (the one 1.106.3's first build created), declared again so the next start keeps it instead of rebuilding a different one. The resting-order and grid reads behind the reservation are bounded with `maxTimeMS` too.
+
+## [1.106.3] - 2026-10-19
+### Fixed
+- Spot balance checks no longer read the deals collections for funds held by bot-funded deals unless the account has a deal that can hold them (stamped `baseFundingBeta`; the check reads only that account's open deals and is cached briefly). Every other account answers 0 without the full read. DCA and combo deals get an `{ exchangeUUID, status }` index that serves both reads, which are limited to stamped deals and bounded with `maxTimeMS`; a read that fails or times out counts nothing and is logged.
+
+## [1.106.2] - 2026-10-18
+### Fixed
+- The new-deal balance check on spot bots no longer stalls for minutes. The read of funds held by bot-funded deals is now scoped to the account owner, so the deals collections' user indexes serve it instead of a full scan. A bot whose deal closes opens the next one on the first check that sees the freed funds, rather than minutes later after a "not enough balance" warning. The figures are unchanged.
+
+## [1.106.0] - 2026-10-18
+### Changed
+- Bot base funding (short spot DCA / combo `baseFunding`, and hedge legs funding themselves on spot) is now a beta, available only to users holding the user role `BaseFundingBeta`. The role is read when a deal is created (cached up to 60 s per process, a failed read keeps the last answer) and stamped on the deal (`baseFundingBeta`); everything the engine later does for that deal follows the stamp, so removing the role never strands a funded deal. Every other user, self-hosted included, gets the behaviour from before base funding: `baseFunding` is ignored (and stored as `require` when set), hedge legs start as they did (the previous funding order, a DCA leg records no start action), and no funding lock, reservation or restart resume applies to their deals.
+### Added
+- GraphQL `baseFundingAccess { available }`: whether base funding is on for the session user. `previewFunding` and `previewHedgeFunding` answer "Base funding is not available for your account yet." for users without it.
+
+## [1.105.1] - 2026-10-18
+### Fixed
+- An order re-sent under a sibling client order id after the exchange refused its id as a duplicate is stored as its own order row, so a re-sent safety order or take profit that fills shows as filled instead of leaving only the cancelled original. It is also sent as a fresh placement: it no longer inherits the original's cancelled status, so a re-sent order that rests on the book is no longer cancelled on the exchange right after it was placed, and one that fills is no longer reported as filled outside its deal.
+
+## [1.105.0] - 2026-10-18
+### Added
+- Hedge DCA and hedge combo legs on spot started with "buy difference" / "buy for all" (short leg) or "sell difference" / "sell for all" (long leg), with DCA on, fund themselves the way a bot-funded short does. The leg's base order is recorded filled at the latest price without a trade. Short leg: the quote that entry stands for is reserved for the take profit, and the safety orders' base is bought upfront (difference: free base first). Long leg, the mirror: the entry is backed by base the account holds, which is reserved for the take profit (`botFunding.virtualEntry.baseReserved`), and the safety orders' quote is raised by selling base upfront (difference: free quote first). A "difference" leg whose own free funds already cover its base order and safety orders trades nothing and starts with a real base order. A leg the account cannot cover is refused, its deal cancelled, and the user gets a bot warning.
+- The funding trade is a `funding` order without a deal id, so it is never mistaken for the deal's base order or counted in the deal's balances, fees or profit. A sale is recorded in `fundinglots` with the quote it raised.
+- Per-account funding lock: planning, trading and recording a deal's funding run one at a time per exchange account across worker processes (Redis `SET NX PX` with a token, renewed by a token-checked heartbeat while it is held, released by its holder only, bounded wait). Ownership is checked again right before the trade and before the record is saved, and the funds other deals reserve are read fresh inside it. `useBalance` hedge legs and funding actions without DCA are checked under the same lock. Adding DCA levels takes it only when a trade is needed.
+- `deal.fundingHold`: the free funds a deal's own orders still need while they are not on the venue — released as each order is placed (levels placed later included) and with the deal.
+- The funding record and the intended trade (`botFunding.pendingTrade`) are saved before the trade is sent. After a restart, a deal in `start` with a funding record never sends a real base order: the funding order is looked up by its client id and the deal resumes when it filled, or is cancelled otherwise.
+- A funded deal's reservation is reduced by what its own resting take profit and base-level grid orders already lock on the venue; orders paid by a safety level's own proceeds are not counted.
+- Adding DCA levels to a funded hedge leg funds the new levels first, both sides (short: buy base; long: sell base for quote).
+- GraphQL `previewHedgeFunding`: both legs of a hedge planned in both start orders, each reported with its worse outcome, so a leg it does not refuse opens whichever leg starts first. Optional combo inputs (`comboGridLevel`, `safetyLevels`, `feeOrder`) add the per-level padding and the fee order the engine plans.
+### Changed
+- Combo fee orders on deals the bot funds are planned into the funding at deal open (an upper bound of their size) instead of trading out of the funds held for the deal.
+- Funding refusals and failures (bot-funded shorts too) are shown to the user as bot warnings instead of only being logged.
+- The funding lock cannot be held forever: the funding trade times out after 180 s and the lock stops being renewed after a maximum hold.
+- A funding order the exchange acknowledges before it has filled is queried again until it is final, within the same 180 s. A final fill within 1% (plus one quantity step) of the plan funds the deal with what executed; a larger shortfall is recorded as executed and the deal cancelled. On exchanges that size market buys in quote, funding buys carry 0.5% headroom for the spread.
+- After a restart, a deal waiting to start with a hedge action and no funding record is funded under the lock like a new one; a funding lot written before the restart is linked to its deal; a funded deal is resumed before any stale-start cancel.
+- Hedge DCA legs started with "use opposite balance" now take the virtual path hedge combo legs take (virtual base order, levels and take profit checked by price), now that the deal keeps its start action.
+### Fixed
+- Hedge DCA deals keep their start action: the DCA deal schema had no `action` field, so the action was dropped on save and a hedge DCA leg always started with a plain base order, whatever action was chosen.
+
+## [1.104.1] - 2026-10-18
+### Fixed
+- Short spot base funding now applies to bots created in the dashboard: a regular bot's stored `terminalDealType` no longer reads as a terminal deal, and combo bots are funded whatever `startOrderType` they carry, since combo always enters at market.
+- Adding DCA levels to a bot-funded deal no longer leaves it without its safety orders and take profit: the deal is read again after the funding trade has filled, so the ladder is rebuilt from the deal's current state instead of re-sending the orders it had before.
+
+## [1.104.0] - 2026-10-18
+### Added
+- DCA timer start on selected weekdays: new bot setting `hodlWeekdays` (0 = Sunday … 6 = Saturday, in the user's profile timezone). A timer run on an unselected day opens no deal and the next run moves to the next selected day — a daily timer keeps its set time, an hourly one restarts at the first hour of that day. Empty, missing or all seven keeps every day, as before. Exposed on GraphQL (`DCABotSettings`, create/change inputs) and on the v2 API bot settings; matches `@gainium/backtester` 1.16.0.
+
+## [1.103.0] - 2026-10-18
+### Added
+- Short spot DCA and combo bots can fund a deal themselves when the free base does not cover it: new bot setting `baseFunding` (`require` — default, the deal is skipped as before; `auto` — use the free base and buy only what is missing; `botOnly` — never use the free base). The base order is recorded filled at the current price without a trade, and its quote stays reserved until the deal closes, because the take profit spends it to buy the base back; only the safety orders' base is bought, once, at market when the deal opens. Market base orders sized in base, quote or USD only; hedge legs and terminal deals are unchanged. The purchase is recorded in `fundinglots`, and the deal carries `botFunding`.
+- Adding DCA levels to such a deal buys the base the new levels need beyond its resting sell orders (and the free base, in `auto`) before the change is applied; if the quote cannot cover it the change is refused and the deal is left as it was.
+- Quote reserved by bot-funded deals is no longer counted as available by long spot DCA / combo balance checks on the same account.
+- GraphQL `previewFunding` returns what a bot-funded deal (or an add-DCA edit) would buy, reserve or refuse, for the dashboard.
+- Order type `funding` for these purchases: placed without a deal id and kept out of every deal ledger.
+
+## [1.102.8] - 2026-10-18
+### Added
+- Base-funding planner (`bot/baseFunding.ts`): one pure calculation of how much of an asset a bot must buy or sell before placing the orders it commits to, covering use-held, buy-the-difference and buy-for-all, with fee gross-up, the exchange minimum and rounding. A `fundinglots` collection for the purchase price of assets a bot buys itself, and an `Order.fundingSource: 'virtual'` marker for order rows recorded filled without an exchange trade. No writer or reader of either yet.
+### Fixed
+- Hedge DCA and hedge combo legs started with "buy difference" / "sell difference" now size the funding order from the shortfall of the asset the leg's safety orders consume (base for a short leg, quote for a long leg). Before, they compared the requirement with the balance of the asset being spent, so an account holding plenty of quote bought nothing. "Buy for all" / "sell for all" now cover the safety orders only, since the leg's base order is recorded without a trade; the DCA leg also counted its take-profit order. The funding order is now raised to the exchange minimum and grossed up for the fee. The base order filled without a trade is marked `fundingSource: 'virtual'`.
+- A grid bot's "buy difference" / "sell difference" choice is accepted when stored with a start price.
+
+## [1.102.7] - 2026-10-18
+### Fixed
+- Hedge take profit / stop loss is judged per pair. On a multi-pair hedge bot the combined TP/SL summed every open deal of every pair and closed them all at once, so a pair past its target stayed open while the rest lagged. Each pair's long and short deals are now one hedge: when that pair's combined P&L reaches the TP or SL, only its deals close. A pair with one leg open is judged on that leg alone. Single-pair hedges are unchanged.
+
+## [1.102.6] - 2026-10-17
+### Added
+- GraphQL `getFiatRates` returns the latest cached fiat rates (EUR, GBP, AUD, CHF, JPY, CAD) as `{ asset, usdRate }`, so the dashboard can convert USD values into a chosen display currency at live rates instead of a fixed table.
+
+## [1.102.5] - 2026-10-16
+### Fixed
+- Deals opened while a bot closed by indicator keep closing by their own close indicator and minimum profit after the bot is switched to a percentage take profit without applying it to open deals. Before, the bot stopped following its close-deal indicators as soon as its own close condition changed, so those deals, which rest no take-profit order, were left open with nothing able to close them. Deals opened under the percentage take profit are unchanged.
+
+## [1.102.4] - 2026-10-16
+### Fixed
+- The resting remainder of a part-filled LIMIT base order is placed again when it is moved to a new price even if the exchange's cancel answer still reads the order as open and only the user stream reports it cancelled. Before, the remainder was left as a pending entry with no order behind it and the deal kept running on the part of the base order that filled first. The reposition tick now also recovers a remainder whose order ended without it (including after a restart): it books what that order filled and places the rest again.
+
+## [1.102.3] - 2026-10-15
+### Fixed
+- The fill of a part-filled base order's resting remainder is now recorded on the deal's `funds` entry with its add-funds id and `baseRemainder: true` (exposed on the GraphQL `dealFunds` type), so a dashboard can show it as the rest of the base order instead of funds the user added. Placement, sizing and accounting of the remainder are unchanged.
+
+## [1.102.2] - 2026-10-15
+### Fixed
+- A manual "New deal" on a bot that was stopped with its deals left open is now refused with a message ("Bot is stopped, a new deal cannot be opened") instead of being reported as scheduled and then silently ignored. The bot keeps running for the deals it left open, so the request reached it, but a stopped bot does not open new deals.
+
+## [1.102.1] - 2026-10-15
+### Fixed
+- DCA and hedge DCA bots again open at most one deal at a time per pair: two start triggers for the same pair arriving together (for example a price update and a timer, or an indicator and a webhook) could both pass the max-deals and balance checks and open two deals. The per-pair lock had moved onto the exchange-minimum check placed next to it in 1.61.0; it is back on the deal opening, and a spec pins it there. Single-position bots still skip a second start signal while the first is handled.
+
+## [1.102.0] - 2026-10-15
+### Added
+- Trading pairs carry the delivery time of dated futures contracts (Bybit, Binance and KuCoin quarterly / weekly contracts), from the exchange's own instrument info; paper pairs carry their exchange's. Exposed on the pair list (`deliveryTime`). Needs exchange connector core 1.27.16; filled on the next hourly pairs sync.
+### Changed
+- DCA, combo and hedge bots no longer open a new deal automatically (start condition, indicator, webhook, timer) on a dated futures contract within 3 days of its delivery, since the exchange settles any position still open at delivery. The bot logs a warning once per pair. Deals already open are not touched; a manual "New deal" and terminal deals still open.
+
+## [1.101.1] - 2026-10-15
+### Fixed
+- A futures safety order refused because the contract's risk tier is full is no longer re-sent on every ladder rebuild (on combo bots, every minigrid fill). The refused level backs off from 1 to 15 minutes, a new deal or a leverage change retries it at once, and suppressed attempts no longer raise a bot error each time. Other orders on the contract, including the minigrid and reduce-only orders, are not held back.
+
+## [1.101.0] - 2026-10-15
+### Added
+- Profit-over-time data records which exchange connection each profit was made on, and the user profit query accepts an exchange filter (`exchangeUUIDs`). Profit recorded before this release has no exchange and counts only toward the unfiltered total.
+
+## [1.100.0] - 2026-10-15
+### Added
+- Trading pairs carry their minimum and maximum leverage where the exchange publishes them (Bybit, Bitget, Hyperliquid, OKX and KuCoin futures), and paper pairs carry their exchange's. Exposed on the pair list for the dashboard's pair picker.
+
+## [1.99.3] - 2026-10-15
+### Fixed
+- A DCA deal whose safety orders filled during a sharp, momentary price spike no longer keeps safety orders parked at the spike price. A level that had just filled could be sent again and treated as one the market had skipped, and a market price beyond the deal's deepest level was used as a new level price. Every later rebuild of the ladder then moved later levels next to it, so the ladder ended there and raising the level count placed orders near zero. Neither is recorded any more, and a level price beyond the ladder's deepest level is ignored when the ladder is built, so deals already affected get their real levels back on the next settings change, fill or restart. A gap inside the ladder still moves the next level to the market price, as before.
+
+## [1.99.2] - 2026-10-14
+### Fixed
+- On Hyperliquid, a deal's close (stop loss, take profit or manual close) worth less than $10 is no longer retried when it is only part of the position on the pair. Hyperliquid accepts a closing order under $10 only when it closes the whole position, so when another deal or bot on the same account holds part of it, no retry can succeed. The bot now stops after the first refusal with a message naming the deal, the close, the position on Hyperliquid and what to do, instead of retrying five times and reporting the exchange's raw text. A close that is the whole position is sent as before.
+
+## [1.99.1] - 2026-10-14
+### Fixed
+- The part of a futures deal's position left over after a take-profit is now closed even when it is worth less than the exchange's minimum order value, on exchanges that accept a reduce-only close below that minimum: Bybit USDT/USDC perpetuals, Binance USDⓈ-M, and Bitget USDT-M in hedge mode. The bot held these closes to the minimum meant for opening orders, so a small remainder stayed open on the exchange after the deal closed. The minimum quantity still applies. Hyperliquid, Bitget USDT-M in one-way mode, coin-margined futures and spot keep the minimum value, as they apply it to closing orders too.
+
+## [1.99.0] - 2026-10-14
+### Changed
+- Combo bots, both sides of hedge DCA and hedge combo bots, and terminal deals now refuse a deal whose Base or DCA/Safety order the exchange minimum would raise more than 10% past its configured size, as DCA bots already did, and notify once per pair. `allowRaiseToExchangeMin` turns the raise back on; a missing value refuses.
+
+## [1.98.1] - 2026-10-14
+### Added
+- Combo bots and both sides of hedge DCA and hedge combo bots store `allowRaiseToExchangeMin`, and the combo create/change inputs and combo bot settings expose it. Nothing reads it for them yet.
+
+## [1.98.0] - 2026-10-14
+### Added
+- `mergeDeals` takes optional `useDca` and `dcaOrders`. With `useDca`, the merged DCA deal restarts the bot's safety-order ladder from the merged average: the bot's step, step scale, order size, volume scale and active orders, with `dcaOrders` levels (at most the bot's). Only percentage ladders sized in base or quote are carried; indicator, custom, ATR/ADR, volume-change and balance-share ladders are sized from what their deal opened with and are left off.
+
+## [1.97.0] - 2026-10-14
+### Added
+- `mergeDeals` takes optional `useTp` and `useSl`. When set, the merged DCA deal takes the bot's take profit and/or stop loss (including multiple targets and trailing), priced from the merged average; when false it gets none. Risk-reward and dynamic exits are never carried over, since they are sized from what their deal opened with. Omitting both keeps the previous rule, where only an indicator or webhook close carried over.
+
+## [1.96.16] - 2026-10-14
+### Fixed
+- A DCA or combo safety order that the exchange cancels is no longer sent again under the same client order id. The bot re-placed such a level under its old id, which exchanges like Bybit refuse as a duplicate. The bot then re-sent it under a regenerated id but the level kept the old one, so a later update sent the old id again and the regenerated id a second time: the user saw a "Duplicate clientOrderId" error, and on an exchange that had accepted it the level could have filled twice. A re-placed level now gets a new id and keeps it, a level whose replacement is still open or already filled is not placed again, and a refused duplicate is never re-sent under an id the bot has already used for that order.
+
+## [1.96.15] - 2026-10-14
+### Fixed
+- A DCA deal that has closed no longer places orders that were queued for it before the close. On exchanges where cancelling the closed deal's safety orders takes minutes, an order update queued earlier, for example by a safety order fill, could still run after the close and place its take-profit for the old position. On spot that take-profit sold the coins of the next deal on the same pair, and that deal's own take-profit was then refused for insufficient balance. Order placement now stops as soon as the deal is no longer active or its take-profit has filled in full, including part-way through placing a set of orders, and the dropped orders are logged. A take-profit that fills only partly still keeps the deal open, as before.
+
+## [1.96.14] - 2026-10-13
+### Fixed
+- A DCA deal's limit "reduce funds" order that the exchange cancels is now settled. Until it was, the deal kept counting it as pending. The take-profit was sized as if the whole reduction were still going to be sold, and any part already sold was subtracted a second time. The unsold rest of the position had no take-profit. Now the part that filled is booked as a reduction, the pending reduction is removed, and the take-profit is re-placed for everything the deal still holds. Cancelling a resting reduce funds order from the deal also removes its pending reduction now. Reduce orders the bot itself cancels and re-places, on a restart or a settings update, are unchanged.
+
+## [1.96.13] - 2026-10-13
+### Fixed
+- On Binance USDⓈ-M accounts in Multi-Assets mode, the account balance now counts the BNFCR balance. Binance books settled losses, fees and funding as BNFCR, usually negative, and Gainium valued it at zero, so the account balance, the futures Wallet balance and Equity left it out and came out higher than on Binance. BNFCR is now valued at 1 USD, so these figures match Binance's Wallet Balance and Margin Balance. Portfolio totals for such accounts change by the BNFCR balance from the next balance update on.
+
+## [1.96.12] - 2026-10-13
+### Fixed
+- A DCA deal whose take-profit closes only part of the position is no longer marked closed when the exchange refuses to sell the rest at market because the order book is in limit-only mode. The bot used to write the deal closed, with a profit that counted the unsold coins as sold, and only then try to sell them with a market order. When the exchange refused that order, the coins stayed in the account with no deal tracking them. The bot now tries that sale before it closes the deal. If the exchange answers that it only accepts limit orders, the deal stays open, the part already sold is kept as a partial take profit, and the rest is placed as a limit take-profit at the current price. It replaces any other take-profit resting on the deal. The deal closes, and its profit is booked, when that order fills. Sales the exchange accepts, and refusals for any other reason, are unchanged.
+
+## [1.96.11] - 2026-10-13
+### Fixed
+- A KuCoin spot safety order that is cancelled after part of it filled is no longer completed at market. KuCoin reports such a cancel as a filled order carrying only the part that traded, and the bot treated the rest as an under-fill: it bought or sold it at once with a market order and booked the safety order as filled in full. Whether the order is cancelled on the exchange, from the deal, or by lowering the number of safety orders, the deal now keeps only the part that filled and no market order is sent. KuCoin market orders that the exchange fills short are still completed as before, as are base orders, take-profits and every other exchange.
+
+## [1.96.10] - 2026-10-13
+### Fixed
+- A DCA or combo bot order that was still being placed when its deal closed is no longer written off while it goes live on the exchange. This happened on exchanges where orders are cancelled by the exchange's own order id (Coinbase, Kraken, KuCoin futures). Until the exchange answered the placement, the order had no such id, and a cancel at that moment treated it as never placed. It was marked cancelled without contacting the exchange. The exchange then accepted it, and it could fill as coins that belonged to no deal. Such a cancel now waits for the placement's answer and cancels the order on the exchange by the id it returned. If a placement answer arrives for an order the bot has already marked cancelled, the bot cancels it on the exchange if it is still open, and logs an error if it has already filled. The unknown-order log line now states how many lookups were actually made.
+
+## [1.96.9] - 2026-10-13
+### Fixed
+- A Coinbase take-profit (or other order) that reached the exchange while the bot worker was restarting is no longer written off while still live on Coinbase. Such an order kept a placeholder in place of its Coinbase order id. The restart check read the real id back but did not keep it when the order's status had not changed. When the bot later replaced the take-profit, it treated the placeholder as "never placed" and marked the order cancelled without contacting Coinbase. The order stayed open and kept its coins locked, so every new take-profit was refused for balance and the deal could not close. The restart and reconnect checks now record the order id Coinbase reports. Before cancelling or writing off a Coinbase order that has no id, the bot now looks for it among the open orders by its client order id. If it finds the order, it adopts the real id and cancels it on Coinbase. If that lookup fails, the bot reports a cancel error and keeps the order instead of writing it off. Orders that are not open on Coinbase, and other exchanges, are unchanged.
+
+## [1.96.8] - 2026-10-13
+### Fixed
+- A DCA bot with "Remainder full amount" no longer sends Bybit spot a top-up order that can never fill. When a base order filled slightly short, the bot topped it up with the pair's minimum quantity, whatever that was worth. On Bybit spot a market buy is sized in quote, so such a top-up was either below the pair's minimum order value or rounded to an amount of zero, and Bybit refused it every time. The bot now skips a Bybit spot top-up worth less than the minimum order value and logs why. A Bybit, Coinbase or Bitget spot market buy whose quote amount rounds to zero is now refused locally instead of being sent. Top-ups worth at least the minimum, and every other exchange, are unchanged.
+
+## [1.96.7] - 2026-10-13
+### Fixed
+- A DCA or Combo bot with the ASAP start condition no longer sits idle after its next deal is refused for balance. A refusal right after a deal closes usually reads a stored balance that does not yet include the funds the close freed: the take-profit proceeds and the cancelled safety orders. Nothing tried the pair again, so the bot waited until it was restarted. The bot now re-checks after 10 s, 30 s, 1 min, 2 min and 5 min, reading the balance from the exchange, and opens the deal as soon as it can be funded. A bot that genuinely lacks the funds still opens nothing and stops re-checking after the last attempt. The "Not enough balance" warning is still reported once. Manual opens, terminal deals and other start conditions are unchanged.
+
+## [1.96.6] - 2026-10-13
+### Added
+- GraphQL `botOrder.addFundsId`: lets the dashboard tell an add-funds order from a ladder (safety) order, the same distinction the engine draws, instead of guessing from the client order id.
+
+## [1.96.5] - 2026-10-13
+### Fixed
+- A DCA or Combo deal created in the seconds before a bot-worker restart is no longer lost by the restart. On a service restart the bot restores its deals from the Redis deal snapshot, which is written on a short delay, and it did not read the database when the snapshot was not empty. A deal that was in the database but not yet in the snapshot was never loaded again: a base order that filled meanwhile never got its safety orders or take profit, and the bot opened another deal on the same pair. A service restart now also loads the bot's live deals that the snapshot lacks, with their orders, so they are restored like any other deal. If that read fails, the restart continues from the snapshot as before.
+
+## [1.96.4] - 2026-10-12
+### Fixed
+- Restart deal now re-sends safety orders that were refused for insufficient funds, once the account can fund them. Earlier refusals had armed the not-enough-balance cooldown for the deal's pair. The cooldown then answered the restart itself for up to an hour, without asking the exchange, and reported "Not enough balance" next to a free balance well above the order size. A restart now clears the cooldown and the refusal counters for the deal's symbol before it re-places orders. If the exchange refuses again, the guard re-arms as it would on a first shortfall. Automatic retries keep their existing back-off. Separately, a refusal served from the cooldown no longer triggers the Coinbase / KuCoin / Bybit "not enough balance" retry loop. That loop waits out exchange balance lag, and a cached refusal cannot change between retries.
+
+## [1.96.3] - 2026-10-12
+### Fixed
+- The first settings save of a futures DCA or Combo bot after a bot-worker restart no longer re-applies leverage and margin to every pair. A service restart does not call the venue for them, so the bot had no record of what was already set, and that first save still made two venue round trips per pair while holding the bot's method lock. A service restart now records each pair's leverage, margin type and position side from the bot's stored settings. Changed values, new pairs and symbols the venue reports at other values are still applied on that save, and a user start still re-applies every pair.
+
+## [1.96.2] - 2026-10-12
+### Fixed
+- Saving a futures DCA or Combo bot's settings no longer re-applies leverage and margin to every pair, one venue round trip each, while holding the bot's method lock. On bots with large pair lists this held up every other action on the bot for minutes, manual deal closes included. A keep-orders reload now skips symbols this bot already set to the same leverage, margin type and position side. New pairs, changed values and symbols whose last attempt failed are still applied. A start or restart re-applies every pair as before.
+
+## [1.96.1] - 2026-10-12
+### Fixed
+- The GraphQL bot mutations (`createDCABot`, `createComboBot`, `createHedgeComboBot`, `createHedgeDCABot`, `changeDCABot`, `changeComboBot`, `changeHedgeComboBot`, `changeHedgeDCABot`) now apply the same oscillator smoothing rules as the v2 bot settings API: an unknown smoothing type (including `vwma` and `price`), a length that is not a whole number from 1 to 1000, a compare mode other than `value` / `line`, `line` together with the between condition, and smoothing on an indicator that cannot be smoothed are refused with a reason naming the indicator. Previously these were stored, and a `line` + between condition could never trigger. Accepted settings are stored normalised: a lower-case type and the effective compare mode, and no smoothing fields at all when smoothing is off. Indicators sent without the fields are stored exactly as before.
+
+## [1.96.0] - 2026-10-12
+### Added
+- Per-group AND/OR between indicator groups: an indicator group entry accepts `join` (`and` or `or`), how it attaches to the previous group of the same action and section (ignored on the first). AND binds tighter than OR, so groups A, B (`join: and`), C (`join: or`) trigger as `(A and B) or C`. Groups without `join` use the bot-level logic (`startDealLogic`, `stopDealLogic`, `stopDealSlLogic`, `startBotLogic`, `stopBotLogic`), so existing bots behave exactly as before. Applies to deal start, take profit, stop loss and bot start / stop indicators, the wait for lower-timeframe indicators and the unrealized-P&L close check. Available in GraphQL, the v2 bot settings API (validation, OpenAPI, definitions) and its AI guide.
+- Favorite indicators can keep their settings: `addUserFavoriteIndicator` accepts an optional `params` (a JSON object of the indicator's settings, up to 4000 characters), stored once per indicator and returned as `presets { indicator params }` with the favorites; removing a favorite drops its preset.
+
+## [1.95.0] - 2026-10-12
+### Added
+- Optional smoothing of the value oscillators RSI, CCI, MFI, Williams %R, Ultimate Oscillator, Momentum, Awesome Oscillator, ADX, BB %B, KC %B, BB Width, Volume Oscillator and MA Ratio: their indicator entries accept `smoothing` (`none`, `sma`, `ema`, `wma`, `dema`, `tema`, `hma` or `rma`, case-insensitive), `smoothingLength` (a whole number from 1 to 1000) and `smoothingCompare` (`value`, the default, or `line`). With `value`, every condition of the indicator (crossings, greater / lower than, between and percentile) reads the smoothed line instead of the indicator's own. With `line`, the indicator's line is compared with its smoothed line (greater / lower than, crossing up / down; the value fields are not used and between is not available). Percentile mode always compares by value. Without smoothing an indicator behaves exactly as before and keeps its indicator subscription; smoothing on any other indicator is refused. Available for every bot type with indicators, in the bot settings API (v2 validation, OpenAPI, definitions), GraphQL and automation indicator conditions.
+
+## [1.94.2] - 2026-10-12
+### Fixed
+- Self-hosted: the API server now answers `GET /broker-codes`. The dashboard's Hyperliquid Web3 wallet setup reads the builder address from this route before asking the wallet to approve the builder fee; without it the request fell through to GraphQL, the wallet was never asked, and the connection timed out.
+
+## [1.94.1] - 2026-10-12
+### Security
+- Updated dependencies to patched versions.
+
+## [1.94.0] - 2026-10-12
+### Added
+- Cooldown after deal stop can be limited to the closes that should cause it: new DCA / Combo setting `cooldownAfterDealStopTrigger` — `any` (every closed deal; the default and the behaviour when missing), `sl` (deals closed by a stop loss, including a moved or trailing stop loss, or a liquidation) or `loss` (deals closed with a negative net profit). A conditional cooldown runs from the last close that matched it, so a winning close inside the window does not shorten it. Available in the bot settings API (v1 settings change and v2), GraphQL and the API defaults.
+
+## [1.93.0] - 2026-10-12
+### Added
+- Public API add / reduce funds (`POST /api/v2/deals/dca/add-funds`, `/reduce-funds`, the terminal-deal equivalents, and v1 `/api/addFunds`, `/api/reduceFunds`) accept an optional `price`: the order is placed as a resting limit order at that price instead of a market order, with the same rules as the webhook `price` — rounded to the pair's price step, a value that is not a positive number is rejected with 400, and a bot-wide call on a bot with more than one pair needs a `symbol`.
+
+## [1.92.0] - 2026-10-12
+### Added
+- `addFunds` / `reduceFunds` webhooks accept an optional `price`: the order is placed as a resting limit order at that price (rounded to the pair's price step) instead of a market order. Without `price` the behaviour is unchanged. A `price` that is not a positive number is rejected instead of falling back to market, and on a bot with more than one pair a `price` must come with a `symbol`.
+### Fixed
+- A resting limit reduce-funds order was cancelled the next time the deal's take profit was re-sized (for example after a safety order or an add-funds order filled): the re-size counted it as an undersized take profit. The take profit is already sized net of pending reduce-funds orders, so they are now left in place.
+
+## [1.91.0] - 2026-10-12
+### Changed
+- DCA by indicators counts as one indicator, however many DCA levels it has: for the bot's credit cost and for the 20-indicator limit per bot (create and API v2 validation). Each DCA indicator is one ladder level and a deal only subscribes the one of its next level, so the ladder no longer counts once per level. Every other indicator still counts once.
+
+## [1.90.3] - 2026-10-12
+### Fixed
+- Binance USDⓈ-M in Multi-Assets mode: USDT-quoted deals now count the account's pooled available margin when the USDT balance falls short. In that mode every collateral coin margins every contract, so an account holding USDC and no USDT was refused with "Not enough balance". On accounts that also carry a BNFCR row (EEA Credits mode), that row is the account's settled PnL and can be negative, and it was being read as the balance. Other venues keep the per-asset USDT balance.
+- Terminal: importing an existing futures position no longer runs a free-balance check. The position is already open and its margin already committed, so the check could only refuse a valid import. Spot imports still check that the imported coins are held.
+
+## [1.90.2] - 2026-10-11
+
+### Fixed
+
+- Combo and grid bots: a grid level whose size was already an exact number of exchange lots could be rounded up by one extra lot, because the lot-step check used a floating-point remainder that reads some exact multiples (for example 0.118 at a 0.001 step) as almost a whole step. A combo base order could then come out one lot short and the minigrid sell above it one lot larger than the buy it closes. Exact multiples now keep their size; sizes that are genuinely between lots and the exchange-minimum raise round up as before. The Bitget futures price-tick alignment used the same check and is corrected the same way.
+
+## [1.90.1] - 2026-10-11
+
+### Fixed
+
+- RabbitMQ: a publish that met a full channel write buffer was reported as a failed send, although the message was already buffered and delivered. Publishers now wait for the buffer to drain, and the condition is logged at most once a minute per queue. Request/reply calls no longer give up on a request that was in fact sent.
+- Indicators: when the price connector restarts, every indicator re-requests its candle stream at once. Identical requests made within a short window are now sent once, so the burst no longer overruns the channel.
+
+## [1.90.0] - 2026-10-10
+
+### Changed
+
+- Indicator conditions: the decision a DCA bot makes for an indicator condition (every indicator type and option, how long a signal holds, and the indicator configuration it subscribes) now lives in one shared module, `src/indicators/conditions`, with no I/O, so other parts of the platform can evaluate conditions exactly as bots do. Bot behaviour is unchanged: a characterization suite recorded from the previous code pins every decision, status and subscription.
+
+## [1.89.3] - 2026-10-10
+
+### Fixed
+
+- DCA bots: when the indicator service did not confirm an indicator unsubscribe in time, the bot kept routing that indicator's updates to a condition it had already removed. The bot now always forgets the condition locally, and releases its listener for the indicator when no other condition uses it.
+
+## [1.89.2] - 2026-10-10
+
+### Fixed
+
+- Indicators: when a bot service or another service that consumes indicators (such as the metrics service) restarted, the indicator service forgot every subscriber of the indicator rooms that service used, including bots in other services sharing the same room. The room could later be closed while those bots were still listening, and they stopped receiving indicator updates until they were restarted. A restart now forgets only the restarted service's own subscriptions. Bot subscriptions now name the service they come from.
+- DCA bots: when two of a bot's indicator conditions used the same indicator, settings and interval on a pair (for example two deals on the same pair at different DCA levels, or a DCA level and a start condition), removing the one subscribed first stopped the other from receiving updates. The bot's listener for that indicator now stays until its last condition is removed.
+
+## [1.89.1] - 2026-10-10
+
+### Fixed
+
+- When the exchange refuses an order as a duplicate and confirms it has no such order, the bot re-sends it under a new client order id. That id was made by replacing the last character with `2`, so an id that already ended in `2` was re-sent unchanged, refused again, and the order was dropped, leaving that level empty on the exchange. The re-sent id now always differs from the refused one, with the same prefix and length. The check that first asks the exchange and keeps a live original is unchanged.
+
+## [1.89.0] - 2026-10-10
+
+### Changed
+
+- DCA by indicators: the bot now subscribes only the indicator of each open deal's next DCA level, instead of every DCA indicator on every pair. Only that level could act on a signal anyway, so which orders are placed is unchanged, with one difference in timing: when a deal reaches a level, that level's indicator is evaluated from the next candle close on. The candle that had already closed before the deal got there is not counted as its signal. Bots that use DCA indicators for scale adaptive orders keep every indicator subscribed as before.
+
+## [1.88.8] - 2026-10-10
+
+### Fixed
+
+- Manual "open deal": when a deal cannot open because the account balance is too low, or because a combo pair's budget cannot fund every base grid level at the exchange minimum, every manual request now shows the reason. Previously only the first request in a while did, and later clicks were refused silently. Automatic retries still report the condition once. Whether a deal opens is unchanged.
+
+## [1.88.7] - 2026-10-09
+
+### Fixed
+
+- Futures DCA: when the exchange refuses a deal's take-profit because there is nothing to reduce, the bot now checks the exchange position. If the exchange holds no position for the deal, the deal gets a warning asking the user to check the exchange and close the deal by hand, and the take-profit is retried with growing pauses (15 minutes up to 6 hours) instead of being re-sent on every pass. The deal is never closed automatically for this. Other refusals are reported as before.
+
+## [1.88.6] - 2026-10-09
+
+### Changed
+
+- The bot log no longer reports "No live price stream" for a pair that is merely quiet. A thin pair can go minutes without a trade, and the venues' tickers only push on a change, so such a pair fell back to the REST price poll and was reported as having no stream, although the stream was fine and the price had not moved. The report is now made only once the REST price differs from the last price the bot held — the market moved without a tick reaching the bot — or when that cannot be told (no price held yet, or the REST read failed). The fallback poll itself is unchanged.
+
+## [1.88.5] - 2026-10-09
+
+### Fixed
+
+- Adaptive close: an order re-sized to the free balance read directly from the exchange is no longer refused by the bot's own not-enough-balance cooldown, which could stop adaptive close from placing anything.
+
+## [1.88.4] - 2026-10-09
+
+### Fixed
+
+- Adaptive close now also covers the resting take-profit on spot DCA bots. A take-profit refused for not enough balance is placed at the free balance (never more than the deal holds) instead of leaving the deal with no take-profit and the bot in error, and it is kept rather than cancelled back to full size on the next pass.
+
+## [1.88.3] - 2026-10-09
+
+### Fixed
+
+- A new order whose placement comes back as "order does not exist" / "order not found" (the connector failing to read back an order the exchange just accepted) is now checked with the exchange before being written off, like other ambiguous outcomes. Before, it was dropped while it could be resting on the exchange, untracked.
+
+## [1.88.2] - 2026-10-09
+
+### Fixed
+
+- DCA and Combo trailing take profit: a price tick the exchange stamped before the deal's latest fill no longer arms or moves the trail. When the price feed lagged in a fast move, a safety-order fill could lower the take-profit line below a price the market had already left, and the trail armed on that old price and closed the deal by market below its average. Ticks from after the latest fill are handled as before.
+
+## [1.88.1] - 2026-10-09
+
+### Fixed
+
+- Kraken: a cancel answered with `WOrder:Cancel pending` (accepted, still being finalised) is now treated as a cancellation in progress — the bot re-reads the order instead of showing an error and switching to error status.
+
+## [1.88.0] - 2026-10-08
+
+### Added
+
+- Webhooks: a `startDeal` signal can carry the deal's own `baseOrderSize`, `tpPerc` / `tpPrice` and `slPerc` / `slPrice`. Each replaces the bot's setting for that one deal; the bot's settings are unchanged. Prices are available on DCA bots; Combo and hedge bots take percentages. A value that is not a positive number, both a percentage and a price for the same exit, or a price on a non-DCA bot is answered with HTTP 400 and nothing opens. A price already passed by the market, TP/SL on a risk/reward bot, or a price without `symbol` on a multi-pair bot leaves the deal unopened with a bot error.
+
+## [1.87.3] - 2026-10-08
+
+### Fixed
+
+- Combo: on a multi-coin combo bot, each deal's take profit and stop loss now trigger on that deal's own coin price. They used to be checked against the price of the first coin in the bot's pair list, so a deal on a coin priced far from it could be closed seconds after opening. The price gate that decides when take profit, stop loss and DCA-level checks run is also kept per coin now. Single-coin combo bots behave as before.
+
+## [1.87.2] - 2026-10-08
+
+### Changed
+
+- Single position: backtests run. The backtester (1.12.0) simulates single position, so a backtest of a single-position bot is no longer refused (GraphQL and v2 API). The server-side worker hands `singlePosition` and `maxPositionEntries` to the backtester with the rest of the bot settings.
+
+### Fixed
+
+- Single position: a bot in monitoring (bot controller or a stop condition) no longer adds entries to an open position on a start signal. An entry is now refused wherever a new deal would be; a manual "+ New deal" still adds one, as it still opens a deal there.
+
+## [1.87.1] - 2026-10-08
+
+### Fixed
+
+- Single position: after an adoption the take profit is placed for the whole position at its new average. It used to re-place the take profit the position held before the adoption, because the rebuild read the order plan from a deal copy that a pending save had not replaced yet.
+- Single position with an ASAP start now needs the dynamic price filter's deviation (`dynamicPriceFilterDeviation`) set: over / under values alone do not arm the filter that spaces entries.
+
+## [1.87.0] - 2026-10-08
+
+### Added
+
+- DCA: "single position per pair" (`singlePosition`). The bot holds at most one open deal per pair: a start signal on a pair that already holds an open deal adds an entry to it, sized like the base order, instead of opening a second deal. Safety orders are off while it is on. `maxPositionEntries` limits the entries a position may hold.
+- Entries are spaced by the dynamic price filter, measured from the last entry's fill, and by the cooldown after deal start, counted from the last entry. Only one entry is in flight per position.
+- `adoptDeals` folds open deals into an open deal, which keeps its id and history; merging a deal into a single-position bot that already holds the pair adopts it.
+- Switching the setting on adopts the open deals of a pair into its oldest one when asked to (`adoptOpenDeals`), and is refused otherwise or while the bot is stopped with open deals.
+- Single position with an ASAP start needs a dynamic price filter or a cooldown after deal start, and cannot be combined with "close after X deals opened". Backtests of single-position bots are refused for now. Combo and hedge bots do not take the setting.
+## [1.86.2] - 2026-10-07
+
+### Fixed
+
+- DCA: when a safety order fills while the take-profit is partly sold, the take-profit is now re-placed for the remainder instead of the partial being treated as a full take-profit fill, which closed the deal and sold the rest at market. A take-profit that fills in full still closes the deal.
+
+## [1.86.1] - 2026-10-07
+
+### Fixed
+
+- Merged deals: the deals merged into a new deal are no longer counted as closed deals in the bot's statistics, per-pair statistics, deal durations, "close after X deals opened" or the DCA-usage chart, and the merge moment is no longer counted twice in peak capital.
+- Merged deals: the realtime order update sent when a merge moves an order to the new deal now carries the new deal and bot.
+- Merged deals: futures funding is recorded on the merged deal.
+
+### Changed
+
+- Combo deals cannot be merged; `mergeComboDeals` answers with a reason. A combo position is spread over its minigrids, which a single merged deal cannot take over.
+
+## [1.86.0] - 2026-10-07
+
+### Added
+
+- The bot notifications feed can be narrowed to one severity (`type`) and one bot (`botId`), in any view.
+
+## [1.85.0] - 2026-10-07
+
+### Added
+
+- Bot messages can be marked read without being deleted (`markBotMessageRead`). The notifications feed takes a `view` (`unread`, `read`, `all`) and returns each message's `isRead` / `readAt`; read messages are kept for 90 days after they were read. A new occurrence of the same error still arrives as a new unread message.
+- Notification when a bot skips a new deal because it is at its max open deals or a pair is at its max deals per pair (once per day; once for ASAP bots).
+
+## [1.84.1] - 2026-10-07
+
+### Fixed
+
+- When an exchange answers "client order ID already exists", the bot now asks the exchange for that order and keeps tracking it. It sends a copy under a new ID only when the exchange confirms it has no such order. Before, the bot marked the order canceled and placed a second one, which left the original live on the exchange with its fills not reaching the deal.
+
+## [1.84.0] - 2026-10-07
+
+### Added
+
+- Multi-coin combo bots. A combo bot can trade several pairs, each in its own deal with its own grid, like a multi-pair DCA bot. The v2 API accepts `useMulti` and `maxDealsPerPair` when creating a combo bot, and a multi-coin combo's pairs can be changed through `PUT /api/v2/bots/combo/:botId` (`pair`) and `PUT /api/v2/bots/combo/:botId/pairs`. On the cloud edition the feature is in beta for selected accounts; self-hosted is not restricted.
+
+### Fixed
+
+- Changing a combo bot's pairs through the v2 API no longer fails with "Bot not found": the pair change looked the bot up among DCA bots only.
+
+## [1.83.0] - 2026-10-07
+
+### Changed
+
+- A bot that cannot fund its next deal no longer asks the exchange for the whole account balance on every retry. The open-new-deal balance check now decides from the stored, stream-maintained balances first: a shortfall they already show is answered without an exchange call, and a pass is confirmed with a live read before the deal opens, so a stored figure can delay a deal but never open one the account cannot fund. Bots that open a reduced deal from the available balance, and venues whose streamed balances do not carry order holds, still read live.
+- Stored balances answer for a pair's coin the account has never held (counted as zero) instead of falling through to a full exchange read, once the connection has stored balances at all.
+
+## [1.82.0] - 2026-10-07
+
+### Changed
+
+- Bots on the same exchange account share balance reads. The per-tick balance checks the bot engine makes before placing orders are now answered from a read of that account made within the last few seconds, or by joining one already in flight, instead of each bot asking the exchange separately. An account running many bots no longer spends a large share of the exchange's rate budget on identical balance reads, which delayed order placement for everyone on the same connector. The shared answer is dropped as soon as the account places or cancels an order, and reads that size a deal from the balance always go to the exchange. `BALANCE_LIMITER_MODE=log` restores the previous behaviour while still recording what would have been shared; `off` disables it entirely.
+
+## [1.81.0] - 2026-10-07
+
+### Added
+
+- Exchange request telemetry records who each request was made for (user, bot, exchange connection, and a fingerprint of the stored API key — never the key) and which code path made it, so the share of a venue's rate budget spent by one account or one caller can be measured.
+- Per-account balance-read limiter in shadow mode: every balance read still goes to the exchange, and the limiter only records whether it would have merged the read with one already in flight, reused a recent answer, or held it back over a per-minute budget. Reads that size a deal from the balance are exempt from reuse and the budget. `BALANCE_LIMITER_MODE=off` disables the bookkeeping; `BALANCE_LIMITER_WINDOW_MS` and `BALANCE_LIMITER_PER_MINUTE` tune it.
+
 ## [1.80.1] - 2026-10-06
 
 ### Fixed

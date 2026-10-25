@@ -1,4 +1,34 @@
+import {
+  FundingTrade,
+  HEDGE_FUNDING_ACTIONS,
+  planFunding,
+  planHedgeLegDealFunding,
+  planHedgeLegFunding,
+  planShortSpotDealFunding,
+  ShortSpotFundingDecision,
+} from './baseFunding'
+import { FundingReservation } from './fundingReservation'
+import { BaseFundingGate } from './baseFundingGate'
+import {
+  FUNDING_FILL_TOLERANCE,
+  FUNDING_QUOTE_SIZED_BUY_HEADROOM,
+  FUNDING_TRADE_TIMEOUT_MS,
+  FundingLease,
+  FundingLock,
+  FundingLockResult,
+} from './fundingLock'
+import {
+  combineIndicatorGroups,
+  groupStandsAlone,
+  groupsJoinedByAnd,
+} from '../utils/indicatorGroupLogic'
 import Big from 'big.js'
+import { withExchangeCaller } from '../exchange/requestContext'
+import { holdFromRestOnly } from '../utils/holdRefresh'
+import {
+  isStoppedForNewDeals,
+  stoppedBotNewDealMessage,
+} from './stoppedBotNewDeal'
 import { v4 } from 'uuid'
 import type DB from '../db'
 import {
@@ -15,11 +45,7 @@ import {
   CloseDCATypeEnum,
   ExchangeEnum,
   IndicatorEnum,
-  rsiValueEnum,
-  rsiValue2Enum,
   IndicatorStartConditionEnum,
-  TradingviewAnalysisConditionEnum,
-  TradingviewAnalysisSignalEnum,
   DCATypeEnum,
   MAEnum,
   OrderSizeTypeEnum,
@@ -34,19 +60,14 @@ import {
   BotMarginTypeEnum,
   PositionSide,
   ExcludeDoc,
-  StochRangeEnum,
   DCAConditionEnum,
   BotStartTypeEnum,
-  ECDTriggerEnum,
-  DivTypeEnum,
-  TrendFilterOperatorEnum,
   STConditionEnum,
   timeIntervalMap,
   SettingsIndicators,
   CooldownOptionsEnum,
   BotParentIndicatorEventDto,
   BotParentUnsubscribeIndicatorEventDto,
-  PCConditionEnum,
   IndicatorsData,
   DynamicPriceFilterPriceTypeEnum,
   LastPricesPerSymbols,
@@ -55,14 +76,12 @@ import {
   BotSymbolsStats,
   ComboTpBase,
   ppValueEnum,
-  ppValueTypeEnum,
   Symbols,
   RiskSlTypeEnum,
   DynamicArPrices,
   ScaleDcaTypeEnum,
   BotFlags,
   BaseSlOnEnum,
-  RangeType,
   IndicatorsLogicEnum,
   Sizes,
   BotParentProcessStatsEventDtoDcaCombo,
@@ -74,22 +93,24 @@ import {
   OrderStatusType,
   DcaVolumeRequiredChangeRef,
   DynamicPriceFilterDirectionEnum,
-  DCValueEnum,
   ActionsEnum,
+  BaseFundingEnum,
   DCACustom,
   DCAIndicatorLevel,
   MultiTP,
   DCADealsSchema,
-  OBFVGRefEnum,
-  OBFVGValueEnum,
   RRSlTypeEnum,
   ComboBotSchema,
-  LWConditionEnum,
   DealStartBlock,
   ClearPairsSchema,
   OrderAdditionalParams,
 } from '../../types'
 import { observedFeeSplit } from './orderFee'
+import {
+  dealSlippage,
+  feesEstimatedOf,
+  slippageContextFromBot,
+} from './orderSlippage'
 import { ORDER_ID_MARKER, markOrderId } from './orderIdMarker'
 import { hasConsecutiveStreak } from './consecutiveStreak'
 import {
@@ -104,6 +125,12 @@ import {
   type NewDealTrigger,
 } from './newDealApproval'
 import {
+  applySignalDealOverrides,
+  hasSignalTpSl,
+  signalPriceError,
+  type SignalDealOverrides,
+} from './signalDealOverrides'
+import {
   buildDealCloseSignal,
   dealCloseHeldDescription,
   resolveDealCloseTrigger,
@@ -114,29 +141,33 @@ import { MathHelper } from '../utils/math'
 import MainBot, {
   notEnoughErrors,
   isDefinitiveOrderNotFound,
+  isReconcileDeferred,
   isNotFoundUnreliableJustAfterPlacement,
   reconcileUnresolvedWarn,
   QUANT_RULES_RETRY_BUDGET_ASAP,
 } from './main'
 import { underfilledTpQty } from './dca/partialTp'
+import { isPositionAlreadyClosedReason } from './positionAlreadyClosed'
 import { isAmbiguousOrderFailure } from '../utils/exchange'
 import {
+  isLimitOnlyReason,
   limitOnlyEntryReplacedMessage,
-  normalizeReason,
   shouldFallBackToLimitEntry,
 } from './limitOnlyEntry'
 import utils from '../utils'
-import {
-  gt,
-  lt,
-  lte,
-  gte,
-  eq,
-  OBFVGResult,
-  LongWickResult,
-  isInSession,
-} from '@gainium/indicators'
+import { isInSession } from '@gainium/indicators'
 import { IdMute, IdMutex } from '../utils/mutex'
+import {
+  applyConditionStatus,
+  buildIndicatorConfig,
+  buildMaCrossReferenceConfig,
+  buildXoReferenceConfig,
+  evaluateIndicatorCondition,
+  indicatorSubscribeInterval,
+  isClockCondition,
+  isConditionActive,
+  keepConditionBarsMultiplier,
+} from '../indicators/conditions'
 import {
   DCABotSchema,
   PriceMessage,
@@ -145,7 +176,6 @@ import {
   Grid,
   ExecutionReport,
   IndicatorHistory,
-  IndicatorConfig,
   MAResult,
   UnPromise,
   AddFundsSettings,
@@ -156,19 +186,39 @@ import {
   CleanComboDealsSchema,
   DCACloseTriggerEnum,
   TrailingCloseRetry,
+  DealFunding,
 } from '../../types'
 import { ExchangeIntervals } from '../../types'
 import {
   closeNotActioned,
   convertDCABot,
   convertComboBot,
+  futuresPosition,
   limitOnlyEntryReplaced,
   orderBelowExchangeMinSubType,
   positionLeftOpen,
   trailingCloseFailed,
 } from './utils'
+import {
+  closeRefusedForStatusMessage,
+  exchangeInfoMissingPairRemovedMessage,
+  exchangeInfoMissingStopMessage,
+  manualEntryNotAddedMessage,
+  manualNewDealMaxDealsMessage,
+  manualNewDealNotOpenedMessage,
+  startFailedMessage,
+  stopFailedMessage,
+  stoppingNoticeMessage,
+} from './userNotice'
+import { isTimerRunAllowed, shiftToAllowedWeekday } from './timerWeekdays'
 import { dealRefPrice, withoutUnusableAvgPrice } from './dealRefPrice'
 import DCAUtils from './dca/utils'
+import {
+  cooldownTriggersForClose,
+  lastCloseForCooldown,
+  recordCooldownTriggers,
+  type ConditionalCooldownTrigger,
+} from './dca/cooldownStopTrigger'
 import { emptyBotStats } from './dca/botStatsReset'
 import { profitFactorOf } from './profitFactor'
 import {
@@ -179,6 +229,7 @@ import {
 import { grossEntryVolume, resolveBaseOrderQty } from './dca/baseOrderQty'
 import { bookReduceFundsFill } from './dca/reduceFundsFill'
 import { executedFillQty } from './dca/executedFill'
+import { closeOrderQuoteMinimum } from './closeOrderMinValue'
 import {
   baseEntryCancelSettleAttempts,
   baseEntryCancelSettleDelayMs,
@@ -197,6 +248,7 @@ import {
   defaultLimitFallbackMs,
 } from './dca/limitTimeouts'
 import { shouldDiscardUnbuiltBaseEntry } from './dca/unbuiltBaseEntry'
+import { BotServiceType } from '../config'
 import {
   repositionKeepsRestingBaseEntry,
   terminalLimitEntryPrice,
@@ -224,7 +276,18 @@ import {
   nextLadderLevel,
   remainingLadderLevels,
 } from './dca/ladderLevels'
+import {
+  isDisplacementInLadder,
+  isLevelFilled,
+  percentageLadderEnd,
+} from './dca/gridBreakpoints'
+import { resolveLevelClientOrderId } from './clientOrderIdReissue'
 import { splitPendingFunds } from './dca/pendingFundsResend'
+import { isComboFundsOrderRow } from './combo/comboDealFunds'
+import {
+  pendingReduceQty,
+  type PendingReduceEntry,
+} from './dca/pendingReduceQty'
 import { backedFeeDust } from './dca/comboFeeDust'
 import {
   tpPriceDisplacement,
@@ -253,6 +316,7 @@ import {
   trailingRetryStateAfterRefusal,
   trailingTpArmingPermitted,
 } from './dca/trailingCloseRetry'
+import { isTickBeforeLatestFill } from './dca/tickBeforeFill'
 import {
   levelAt,
   parseTrailingGuardMode,
@@ -271,9 +335,22 @@ import {
   dealPositionGoneMessage,
   reconcileDealAgainstVenue,
   reconcileSpotDealAgainstVenue,
+  restingTpPositionGoneMessage,
   type PositionReconcileVerdict,
 } from './dca/positionReconcile'
 import { shouldRearmTpTargets } from './dca/multiTpCompletion'
+import {
+  closesWholePositionOnlyBelowMinimum,
+  isPartialCloseOfSharedPosition,
+} from './dca/sharedPositionClose'
+import {
+  maxPositionEntriesOf,
+  planPositionsByPair,
+  positionEntriesOf,
+  positionIsFull,
+  SINGLE_POSITION_ADOPT_COMBO_REASON,
+  SINGLE_POSITION_ADOPT_HEDGE_REASON,
+} from './dca/singlePosition'
 import {
   describeTpRepairScope,
   parseTpRepairScope,
@@ -285,18 +362,27 @@ import {
   type TpCoverageProbe,
 } from './dca/tpCoverageReconcile'
 import RetryBackoff from './retryBackoff'
+import AuthFailureGuard from './authGuard'
 import Bot from './index'
 import { getIntersection } from '../utils/set'
 import { removePaperFormExchangeName } from '../exchange/helpers'
 import logger from '../utils/logger'
-import { botProfitChartDb, dcaBotDb, dcaDealsDb } from '../db/dbInit'
+import {
+  botProfitChartDb,
+  dcaBotDb,
+  dcaDealsDb,
+  fundingLotDb,
+} from '../db/dbInit'
 import { RunWithDelay } from '../utils/delay'
 import { DealStats } from './worker/statsService'
 import RedisClient from '../db/redis'
 import {
+  closeSweepsToResume,
+  parseCloseSweeps,
+  serializeCloseSweeps,
+} from './closeSweeps'
+import {
   BandsResult,
-  DIVResult,
-  PCResult,
   PivotResult,
   PriorPivotResult,
   QFLResult,
@@ -305,13 +391,23 @@ import {
 import { botMonitor, CalculateDCALiveStatsParams } from './botMonitor'
 import { getSubTypeBehavior } from './errorRulesCache'
 import { capLadderPlacements } from './ladderPlacementCap'
+import { priceMovedSince } from './priceStreamGap'
 import {
+  ConditionLatch,
   limitOnlyEntryFallback,
+  maxDealsPerPairReached,
+  positionEntriesReached,
+  maxDealsReached,
   notEnoughBalanceNewDeal,
   orderBelowExchangeMin,
+  newDealNearDelivery,
   standingConditionKey,
   tpCoverageDrift,
 } from './conditionLatch'
+import {
+  deliveryRefusalMessage,
+  deliveryRefusingNewDeal,
+} from './deliveryCutoff'
 import {
   MinOrderFloor,
   MinOrderViolation,
@@ -361,6 +457,69 @@ if ((process.env.BOT_TP_COVERAGE_REPAIR ?? '').trim()) {
   }
 }
 
+/** What the merged deal takes from its bot (`mergeDeals`). */
+export type MergeDealsOptions = {
+  useTp?: boolean
+  useSl?: boolean
+  /** Restart the bot's DCA ladder from the merged average. */
+  useDca?: boolean
+  /** Levels of that ladder; capped at the bot's. Omitted: the bot's. */
+  dcaOrders?: number
+}
+
+/**
+ * Whether a bot's DCA ladder can be carried to a merged deal: a plain
+ * percentage ladder sized in quote or base. Every other kind is sized from
+ * what its deal opened with (indicators, custom rows, ATR/ADR, volume
+ * change, a share of the balance) and has no meaning for a merged deal.
+ */
+/**
+ * Deal settings that only shape the take profit. A deal edit that changes
+ * nothing else replaces the take profit and leaves the safety orders resting.
+ */
+const tpOnlyDealKeys = new Set([
+  'tpPerc',
+  'useTp',
+  'trailingTp',
+  'trailingTpPerc',
+  'useMinTP',
+  'minTp',
+  'useMultiTp',
+  'multiTp',
+  // A take profit set as a fixed price (spec 191).
+  'useFixedTPPrices',
+  'fixedTpPrice',
+])
+
+/**
+ * Deal settings that only count ladder levels: how many rest on the book
+ * (spec 195) and how many the ladder has (spec 196). A deal edit that changes
+ * nothing else cancels and places only the levels the new count drops or adds.
+ */
+const ladderCountDealKeys = new Set([
+  'activeOrdersCount',
+  'ordersCount',
+  'dcaLevelsCap',
+])
+
+export const mergeDcaSupported = (settings: {
+  useDca?: boolean
+  dcaCondition?: DCAConditionEnum
+  scaleDcaType?: ScaleDcaTypeEnum
+  dcaVolumeBaseOn?: DCAVolumeType
+  orderSizeType?: OrderSizeTypeEnum
+  useRiskReward?: boolean
+}) =>
+  !!settings.useDca &&
+  !settings.useRiskReward &&
+  (!settings.dcaCondition ||
+    settings.dcaCondition === DCAConditionEnum.percentage) &&
+  (!settings.scaleDcaType ||
+    settings.scaleDcaType === ScaleDcaTypeEnum.percentage) &&
+  settings.dcaVolumeBaseOn !== DCAVolumeType.change &&
+  (settings.orderSizeType === OrderSizeTypeEnum.quote ||
+    settings.orderSizeType === OrderSizeTypeEnum.base)
+
 export type FullDeal<Deal extends CleanDCADealsSchema> = {
   deal: Deal
   initialOrders: Grid[]
@@ -382,6 +541,23 @@ const mutexDCAOrdersByIndicator = new IdMutex(100)
 const mutexPriceConcurrently = new IdMutex(30)
 
 const mutexOpenDealBySignal = new IdMutex(15)
+
+/**
+ * Deal settings that resize or add to a deal's safety-order ladder — the edits
+ * a bot-funded short has to fund before applying (main-app spec 044).
+ */
+const LADDER_SETTINGS = new Set<string>([
+  'ordersCount',
+  'orderSize',
+  'volumeScale',
+  'step',
+  'stepScale',
+  'useDca',
+  'dcaCustom',
+  'minimumDeviation',
+  'dcaLevelsCap',
+  'gridLevel',
+])
 
 /**
  * How long a deal waits before re-attempting a market take-profit close the
@@ -420,6 +596,26 @@ const positionProbeBackoff = new RetryBackoff({
 })
 
 /**
+ * How many answered probes in a row found the deal's position gone (spec
+ * `185`). `reconcileDealPosition` books a deal closed on the second.
+ *
+ * Kept apart from `positionProbeBackoff` for two reasons. That throttle counts
+ * every probe, including ones the venue did not answer, so one timeout plus
+ * one empty answer passed as two readings. And its key lives only twice its
+ * window (10 min), while spec `175`'s grid-refusal probes come only when the
+ * bot re-places its ladders — reloads and reconnects, hours apart — so every
+ * reading found the last one forgotten and a flat deal waited for days. A day,
+ * as for `tpg`, because those passes come hours apart. Only `record` and
+ * `clear` are used; `check` never gates anything here.
+ */
+const positionGoneReadings = new RetryBackoff({
+  namespace: 'dpg',
+  minMs: 5 * 60 * 1000,
+  maxMs: 60 * 60 * 1000,
+  memoryMs: 24 * 60 * 60 * 1000,
+})
+
+/**
  * How often one deal may re-arm its own close after the venue refused it
  * (spec `074` §4.2).
  *
@@ -443,6 +639,29 @@ const uncoveredCloseBackoff = new RetryBackoff({
 })
 
 /**
+ * How long a futures deal stops re-sending its RESTING take-profit after the
+ * venue refused it as un-reducible (`Futures position`) AND reported no
+ * position for the deal (spec `143`).
+ *
+ * `placeOrders` re-sends a missing take-profit on every pass over the deal —
+ * each worker start, user-stream reconnect and orders check — and the venue
+ * gives the same answer every time while the position is gone. Only a refusal
+ * whose position probe found nothing opens or widens the window, so a deal
+ * whose position is there keeps today's cadence.
+ *
+ * `memoryMs` is a day because those passes come hours apart: with the default
+ * (twice the window) every refusal would find the last one forgotten, restart
+ * at `minMs` with `attempt: 1`, and re-announce the deal each time. `attempt`
+ * is what keeps the user's warning to one per episode.
+ */
+const restingTpPositionGoneBackoff = new RetryBackoff({
+  namespace: 'tpg',
+  minMs: 15 * 60 * 1000,
+  maxMs: 6 * 60 * 60 * 1000,
+  memoryMs: 24 * 60 * 60 * 1000,
+})
+
+/**
  * Exchange rejections that mean "this order's notional is under the venue
  * minimum". They route the order into the slippage-retry ladder, which on a
  * combo bot terminates in the `count === slippageRetry` branch of
@@ -458,36 +677,6 @@ export const notionalReasons = [
   'NOTIONAL',
   // Hyperliquid — "order must have minimum value of $10. asset=122"
   'must have minimum value of',
-]
-
-/**
- * Exchange rejections that mean "there is nothing left to close" — the position
- * is already flat (or on the other side), so a reduce-only closing order can
- * never be accepted. Retrying is pointless; the deal must be booked closed.
- */
-const positionAlreadyClosedReasons = [
-  // Hyperliquid
-  'reduce only order would increase position',
-  // Binance -2022
-  'ReduceOnly Order is rejected',
-  // Bybit
-  'current position is zero, cannot fix reduce-only order qty',
-  'reduce-only order has same side with current position',
-  // OKX 51169 / 51023
-  "You don't have any positions in this contract",
-  'Position does not exist',
-  // OKX again, and a DIFFERENT message from the one above — not a spelling of
-  // it: "Order failed because you don't have any positions in this direction
-  // for this contract to reduce or close." Stored as the clause rather than
-  // the sentence, because the words around it are decoration the venue has
-  // reworded before while the clause is the condition. Missing this one left
-  // futures deals `open` forever, re-refusing the same close on every attempt
-  // against a position the venue says is not there.
-  'positions in this direction for this contract',
-  // dYdX — camelCase; matched via the normalisation in
-  // isPositionAlreadyClosedReason, not literally
-  'wouldNotReducePosition',
-  'no position to close',
 ]
 
 const maxTimeout = 2 ** 31 - 1
@@ -509,6 +698,18 @@ const MAX_CLOSE_PRICE_DEVIATION = 10
  * deal worth telling the user about.
  */
 const ZERO_HELD_SETTLE_MS = 5 * 60 * 1000
+
+/**
+ * Spec 152. After an ASAP bot's new deal is refused for balance, re-check
+ * after each of these delays, reading the exchange. Nothing else re-attempts
+ * an ASAP deal after a refusal. A refusal right after a close usually reads a
+ * stored balance that does not yet include the funds the close freed, so
+ * without this the bot idled until a restart. Bounded, so a bot that really
+ * lacks the funds stops checking after about nine minutes.
+ */
+export const NEW_DEAL_BALANCE_RETRY_MS = [
+  10_000, 30_000, 60_000, 120_000, 300_000,
+]
 
 /**
  * Spec `037` §4.3 (#731). The `035` deviation test, extracted so the single
@@ -611,6 +812,12 @@ function createDCABotHelper<
     indicatorRoomConfigMap: Map<string, Set<string>> = new Map()
     indicatorConfigIdMap: Map<string, string> = new Map()
     indicatorSubscribedRooms: Set<string> = new Set()
+    /**
+     * The one Redis listener per indicator room. It serves every config of
+     * this bot in the room (it walks `indicatorRoomConfigMap`), so it must be
+     * the same function for all of them and leave only with the last one.
+     */
+    indicatorRoomCb: Map<string, (_msg: string) => void> = new Map()
     indicatorGroupsToUse: SettingsIndicatorGroup[] = []
     botProfitDb = botProfitChartDb
     /** Bot deals */
@@ -621,6 +828,14 @@ function createDCABotHelper<
     dealSymbolMap: Map<string, Set<string>> = new Map()
     /** DB instance to work with deals */
     dealsDb: DB<Deal>
+    /**
+     * Spec `182`. Deal closes whose cancel sweep has started and not finished
+     * (dealId → start ms), mirrored to this bot's Redis hash so a start after a
+     * process stop can resume them. Never reset on reload.
+     */
+    closeSweeps: Map<string, number> = new Map()
+    /** Spec `182`. The sweeps running in THIS process. */
+    closeSweepsInFlight: Set<string> = new Set()
     /** Close after TP filled */
     closeAfterTpFilled: boolean
     /** Timer for time base trigger */
@@ -660,12 +875,20 @@ function createDCABotHelper<
     pendingDealsPerPair: Map<string, number> = new Map()
     /** Last indicators data map */
     lastIndicatorsDataMap: Map<string, number> = new Map()
+    /**
+     * `uuid@symbol` → when a DCA-level indicator was subscribed because a deal
+     * reached its level. Candles that had already closed by then are not
+     * signals for that level; see `syncDcaIndicatorLevels`.
+     */
+    dcaIndicatorArmedAt: Map<string, number> = new Map()
     /** Initial all deals value */
     allDeals = 0
     /** Allow to place orders by deal*/
     allowToPlaceOrders: Map<string, boolean> = new Map()
     /** Open new deal timer */
     openNewDealTimer: Map<string, NodeJS.Timeout> = new Map()
+    /** Spec 152: pair → balance re-checks already scheduled since its refusal */
+    newDealBalanceRetries: Map<string, number> = new Map()
     /** Close deal timers */
     closeDealTimer: Map<string, NodeJS.Timeout | null> = new Map()
 
@@ -771,6 +994,8 @@ function createDCABotHelper<
     trailingGuardReported: Map<string, number> = new Map()
     dealsForMoveSl: Map<string, number> = new Map()
     dealsForTrailing: Map<string, TrailingDeal> = new Map()
+    /** Venue time of each deal's latest processed fill (spec 142). */
+    latestDealFillTime: Map<string, number> = new Map()
     dealsForStopLoss: Map<string, number> = new Map()
     dealsForIndicatorUnpnl: Map<string, DealIndicatorUnpnlVal> = new Map()
     dealsForStopLossCombo: Map<string, DealStopLossCombo> = new Map()
@@ -905,6 +1130,7 @@ function createDCABotHelper<
       this.deals.set(key, deal)
       this.setDealByStatus(deal.deal.status, key)
       this.setDealBySymbol(deal.deal.symbol.symbol, key)
+      this.scheduleDcaIndicatorSync(this.botId)
       if (save) {
         this.setDealToRedis(
           this.botId,
@@ -920,6 +1146,20 @@ function createDCABotHelper<
       return this.deals.get(key)
     }
 
+    /**
+     * A deferred cancel re-send (spec `178`) goes out only once the order's
+     * deal is no longer open: that is the order a close meant to cancel and
+     * nothing else will ask for again. An open deal's passes own its orders.
+     */
+    protected override cancelRetryWanted(order: Order) {
+      return !!order.dealId && !this.getDeal(`${order.dealId}`)
+    }
+
+    /** A deferred cancel re-send found the order filled: a late fill. Spec `180`. */
+    protected override async settleLateCancelFill(order: Order) {
+      await this.handleUnknownOrder(order)
+    }
+
     deleteDeal(id: string) {
       const key = `${id}`
       const get = this.deals.get(key)
@@ -927,6 +1167,7 @@ function createDCABotHelper<
       this.removeDealByStatus(key)
       if (get) {
         this.removeDealBySymbol(get.deal.symbol.symbol, key)
+        this.scheduleDcaIndicatorSync(this.botId)
       }
     }
 
@@ -1155,6 +1396,61 @@ function createDCABotHelper<
      * what a deal owns. Base-denominated only: the one caller is gated on
      * `!this.futures`, so there is no contract conversion to do here.
      */
+    protected async sendTpAtFreeBalance(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      tpOrder: Grid,
+      sendOptions: OrderAdditionalParams,
+      ed: ClearPairsSchema,
+    ): Promise<Order | string | void | undefined> {
+      const balances = await this.checkAssets(true)
+      const asset = ed.baseAsset.name
+      const find = balances?.get(asset)
+      if (!find) {
+        this.handleDebug(`Asset ${asset} not found in user balances`)
+        return
+      }
+      // Same three-way minimum as the market close: the wallet's free base
+      // (shared with every other bot on this account), the TP itself, and
+      // what this deal still holds — so it can only ever sell LESS.
+      const toPlace = Math.min(
+        this.math.round(
+          find.free,
+          await this.baseAssetPrecision(ed.pair),
+          true,
+        ),
+        tpOrder.qty,
+        this.dealOwnBasePosition(findDeal),
+      )
+      if (toPlace >= tpOrder.qty) {
+        return
+      }
+      if (
+        toPlace < ed.baseAsset.minAmount ||
+        toPlace * tpOrder.price < ed.quoteAsset.minAmount
+      ) {
+        this.handleDebug(
+          `Asset ${asset} free amount ${toPlace} is lower than exchange requirements, TP stays unplaced`,
+        )
+        return
+      }
+      this.handleLog(
+        `TP ${tpOrder.newClientOrderId} refused for balance; adaptive close places it at ${toPlace} ${asset} (was ${tpOrder.qty})`,
+      )
+      return this.sendGridToExchange(
+        {
+          ...tpOrder,
+          qty: toPlace,
+          newClientOrderId: markOrderId(
+            tpOrder.newClientOrderId,
+            ORDER_ID_MARKER.adaptiveClose,
+          ),
+        },
+        { ...sendOptions, acBefore: tpOrder.qty, acAfter: toPlace },
+        ed,
+        true,
+      )
+    }
+
     protected dealOwnBasePosition(
       findDeal: FullDeal<ExcludeDoc<Deal>>,
     ): number {
@@ -1593,6 +1889,11 @@ function createDCABotHelper<
       const settings = {
         ...botSettings,
         ...(deal?.settings ?? {}),
+        // Spec 139 §2.3.1: a single-position bot sizes and funds a new
+        // position without safety orders. A deal carries its own `useDca`
+        // (written false when it became a position), so only the bot-level
+        // view is overridden here; the bot's DCA settings are kept.
+        ...(!deal && this.singlePositionActive ? { useDca: false } : {}),
       }
       return {
         ...settings,
@@ -1603,7 +1904,14 @@ function createDCABotHelper<
             settings.useFixedTPPrices) ||
           (this.botType === BotType.dca &&
             settings.useRiskReward &&
-            settings.riskUseTpRatio),
+            settings.riskUseTpRatio) ||
+          // A deal opened with a `tpPrice` from its webhook. Keyed on the
+          // record of the signal, not on `useFixedTPPrices` alone, which a
+          // regular deal can carry over from settings without ever using it.
+          (this.botType === BotType.dca &&
+            !!deal?.signalOverrides?.tpPrice &&
+            settings.useTp &&
+            settings.useFixedTPPrices),
         useFixedSLPrices:
           (this.botType === BotType.dca &&
             settings.type === DCATypeEnum.terminal &&
@@ -1611,13 +1919,26 @@ function createDCABotHelper<
             !settings.trailingSl &&
             !settings.moveSL &&
             settings.useFixedSLPrices) ||
-          (this.botType === BotType.dca && settings.useRiskReward),
+          (this.botType === BotType.dca && settings.useRiskReward) ||
+          (this.botType === BotType.dca &&
+            !!deal?.signalOverrides?.slPrice &&
+            settings.useSl &&
+            !settings.trailingSl &&
+            !settings.moveSL &&
+            settings.useFixedSLPrices),
       }
     }
 
     getInitalDealSettings(): Deal['settings'] | undefined {
       if (this.data) {
-        return this.utils.getInitalDealSettings(BotType.dca, this.data.settings)
+        const settings = this.utils.getInitalDealSettings(
+          BotType.dca,
+          this.data.settings,
+        )
+        // Spec 139 §2.3.1: a new position is created without safety orders.
+        return this.singlePositionActive
+          ? { ...settings, useDca: false }
+          : settings
       }
     }
 
@@ -1700,6 +2021,7 @@ function createDCABotHelper<
       type: 'opened' | 'closed',
       time: number,
       symbol: string,
+      cooldownTriggers: ConditionalCooldownTrigger[] = [],
     ) {
       if (this.data) {
         if (type === 'opened') {
@@ -1723,9 +2045,14 @@ function createDCABotHelper<
             ),
             { symbol, time },
           ]
+          const byTrigger = cooldownTriggers.length
+            ? recordCooldownTriggers(this.data, cooldownTriggers, time, symbol)
+            : {}
+          Object.assign(this.data, byTrigger)
           this.updateData({
             lastClosedDeal: time,
             lastClosedDealPerSymbol: this.data.lastClosedDealPerSymbol,
+            ...byTrigger,
           })
         }
       }
@@ -1753,12 +2080,13 @@ function createDCABotHelper<
         settings?.cooldownAfterDealStopOption && settings?.useMulti
           ? settings?.cooldownAfterDealStopOption
           : CooldownOptionsEnum.bot
-      const lastTime =
-        cooldownAfterDealStartOption === CooldownOptionsEnum.bot
-          ? this.data?.lastClosedDeal
-          : this.data?.lastClosedDealPerSymbol?.find((d) => d.symbol === symbol)
-              ?.time
-      return this.utils.checkCooldownStop(settings, lastTime ?? 0)
+      const lastTime = lastCloseForCooldown(
+        this.data,
+        settings?.cooldownAfterDealStopTrigger,
+        cooldownAfterDealStartOption,
+        symbol,
+      )
+      return this.utils.checkCooldownStop(settings, lastTime)
     }
 
     async comboBasedOn(deal?: ExcludeDoc<Deal>) {
@@ -1777,6 +2105,7 @@ function createDCABotHelper<
 
     async loadOrders(): Promise<void> {
       const _id = this.startMethod('loadOrders')
+      await this.loadCloseSweeps()
       // Deals restored from Redis are SEEDED here and their orders generated
       // further down, AFTER `_loadOrders` has filled the order book. Generating
       // them here — which is what this used to do — sized every restored deal's
@@ -1791,6 +2120,7 @@ function createDCABotHelper<
       // whose orders it was generating, so `findBaseOrderByDeal` — which returns
       // nothing without it — could never find that deal's own base order either.
       let restoredFromRedis: FullDeal<ExcludeDoc<Deal>>[] = []
+      this.snapshotStaleDeals = new Set()
       if (this.serviceRestart && !this.secondRestart) {
         const fromRedis =
           await this.getFromRedis<FullDeal<ExcludeDoc<Deal>>[]>('deals')
@@ -1838,6 +2168,47 @@ function createDCABotHelper<
             }
           }
         }
+        // The snapshot's own status is not the last word: a deal closed in the
+        // seconds before a stop is `closed` in Mongo, but the debounced write
+        // that would have dropped it from the snapshot died with the process.
+        // Restoring it revived the deal for good — the bot traded it and kept
+        // re-saving it `open`. Drop the ones Mongo holds closed, and hand them
+        // to the spec `182` sweep resume, which cancels what they still rest
+        // and closes a combo deal's minigrids. Spec 190.
+        if (restoredFromRedis.length) {
+          const closed = await this.dealsDb.readData(
+            {
+              botId: this.botId,
+              _id: { $in: restoredFromRedis.map((d) => `${d.deal._id}`) },
+              status: {
+                $in: [DCADealStatusEnum.closed, DCADealStatusEnum.canceled],
+              },
+            } as any,
+            { status: 1 },
+            {},
+            true,
+          )
+          if (closed.status === StatusEnum.notok) {
+            this.handleWarn(
+              `Cannot check DB status of deals restored from redis: ${closed.reason}`,
+            )
+          } else if (closed.data.result.length) {
+            const drop = new Set(closed.data.result.map((d) => `${d._id}`))
+            this.handleLog(
+              `Deals restored from redis are closed in DB, dropping them: ${[
+                ...drop,
+              ].join(', ')}`,
+            )
+            for (const id of drop) {
+              this.deleteDeal(id)
+              this.closeSweeps.set(id, Date.now())
+            }
+            restoredFromRedis = restoredFromRedis.filter(
+              (d) => !drop.has(`${d.deal._id}`),
+            )
+            await this.persistCloseSweeps()
+          }
+        }
       }
       const loadFromDb =
         !(this.serviceRestart && !this.secondRestart) || !this.deals.size
@@ -1870,10 +2241,84 @@ function createDCABotHelper<
           )
         }
         deals = dealData.data.result
+      } else {
+        // The snapshot is written through `@RunWithDelay`, and the pending
+        // write dies with the process, so a deal created in the last seconds
+        // before a stop is in Mongo but not in Redis. Trusting the snapshot
+        // alone lost such a deal for good: never restored, never started on
+        // its filled base order, and the bot opened another deal on the pair.
+        // Load the live deals the snapshot lacks the way a Mongo load does.
+        // Spec 151.
+        //
+        // The same read returns the restored deals whose stored copy may be
+        // newer than the snapshot (`snapshotStaleDealFilter`, none for DCA);
+        // `snapshotStaleReason` decides which of them load from Mongo instead.
+        const restoredIds = [...this.deals.keys()]
+        const staleFilter = this.snapshotStaleDealFilter()
+        const missing = await this.dealsDb.readData(
+          {
+            botId: this.botId,
+            status: {
+              $in: [
+                DCADealStatusEnum.error,
+                DCADealStatusEnum.open,
+                DCADealStatusEnum.start,
+              ],
+            },
+            ...(staleFilter.length
+              ? {
+                  $or: [{ _id: { $nin: restoredIds } }, ...staleFilter],
+                }
+              : { _id: { $nin: restoredIds } }),
+          } as any,
+          {},
+          {},
+          true,
+        )
+        if (missing.status === StatusEnum.notok) {
+          this.handleWarn(
+            `Cannot check DB for deals missing from redis: ${missing.reason}`,
+          )
+        } else if (missing.data.result.length) {
+          const restoredSet = new Set(restoredIds)
+          const absent = missing.data.result.filter(
+            (d) => !restoredSet.has(`${d._id}`),
+          )
+          const stale = missing.data.result.filter((d) => {
+            const snapshot = this.deals.get(`${d._id}`)
+            if (!snapshot) {
+              return false
+            }
+            const reason = this.snapshotStaleReason(snapshot.deal, d)
+            if (reason) {
+              this.handleLog(
+                `Deal ${d._id} restored from redis is older than DB (${reason}), loading it from DB`,
+              )
+            }
+            return !!reason
+          })
+          for (const d of stale) {
+            this.snapshotStaleDeals.add(`${d._id}`)
+            this.deleteDeal(`${d._id}`)
+          }
+          if (stale.length) {
+            restoredFromRedis = restoredFromRedis.filter(
+              (r) => !this.snapshotStaleDeals.has(`${r.deal._id}`),
+            )
+          }
+          deals = [...absent, ...stale]
+          if (absent.length) {
+            this.handleLog(
+              `Found in DB ${absent.length} deals missing from redis: ${absent
+                .map((d) => `${d._id}`)
+                .join(', ')}`,
+            )
+          }
+        }
       }
       const keys = loadFromDb
         ? deals.map((d) => `${d._id}`)
-        : [...this.deals.keys()]
+        : [...this.deals.keys(), ...deals.map((d) => `${d._id}`)]
       const orders = await this._loadOrders(
         {
           $or: [
@@ -1929,6 +2374,9 @@ function createDCABotHelper<
         // A cold restart that restores orders from Redis merges in these
         // deals' open orders from Mongo (Spec 109).
         keys,
+        // ...and reads every row of the deals loaded from Mongo above because
+        // the snapshot was older (main-app spec 047 §2.3.7).
+        [...this.snapshotStaleDeals],
       )
       orders
         .filter(
@@ -1941,6 +2389,59 @@ function createDCABotHelper<
         this.botId,
         this.serviceRestart && !this.secondRestart,
       )
+      // `startDeal` marks a deal `open` in memory, and so in the snapshot,
+      // before its own Mongo update and before its take-profit is sent. A stop
+      // in between restored the deal `open` with a take-profit no venue ever
+      // saw, and the filled-base branch of `restoreWork`, which only walks
+      // `start` deals, never got to finish it. Where Mongo still says `start`
+      // and nothing of the deal beyond its entry ever reached the venue, load
+      // Mongo's copy instead, so the restart starts the deal again. Spec 172
+      // §1.1.1.
+      const unfinishedStarts = restoredFromRedis.filter((d) => {
+        if (d.deal.status !== DCADealStatusEnum.open) return false
+        const own = this.allOrders.filter(
+          (o) => `${o.dealId}` === `${d.deal._id}`,
+        )
+        return (
+          own.some(
+            (o) =>
+              o.typeOrder === TypeOrderEnum.dealStart && o.status === 'FILLED',
+          ) &&
+          !own.some(
+            (o) =>
+              o.typeOrder !== TypeOrderEnum.dealStart &&
+              `${o.orderId ?? ''}` !== '-1',
+          )
+        )
+      })
+      if (unfinishedStarts.length) {
+        const inDb = await this.dealsDb.readData(
+          {
+            botId: this.botId,
+            _id: { $in: unfinishedStarts.map((d) => `${d.deal._id}`) },
+            status: DCADealStatusEnum.start,
+          } as any,
+          {},
+          {},
+          true,
+        )
+        if (inDb.status === StatusEnum.notok) {
+          this.handleWarn(
+            `Cannot check DB status of deals restored from redis: ${inDb.reason}`,
+          )
+        } else if (inDb.data.result.length) {
+          const reload = new Set(inDb.data.result.map((d) => `${d._id}`))
+          this.handleLog(
+            `Deals restored from redis as open are still start in DB, loading them from DB: ${[
+              ...reload,
+            ].join(', ')}`,
+          )
+          restoredFromRedis = restoredFromRedis.filter(
+            (d) => !reload.has(`${d.deal._id}`),
+          )
+          deals = [...deals, ...inDb.data.result]
+        }
+      }
       // Now that the order book is populated, generate the orders for the deals
       // restored from Redis above. `getTPOrder` reads this deal's filled orders
       // and its base order out of that map; before, it ran against an empty one.
@@ -1983,7 +2484,7 @@ function createDCABotHelper<
           false,
         )
       }
-      if (loadFromDb) {
+      if (loadFromDb || deals.length) {
         deals.map((d) =>
           this.setDeal(
             {
@@ -2058,6 +2559,13 @@ function createDCABotHelper<
       } as any)
       this.handleLog(`Get deals count ${count?.data?.result ?? 0}`)
       this.allDeals = count?.data?.result ?? this.deals.size
+      // A cold restart restores `deals` from the debounced `botData` snapshot,
+      // which can predate the last counter write, and `restoreWork` skips
+      // `calculateBotDeals` on that path. Re-derive it here. Spec 183.
+      await this.reconcileBotDeals(
+        this.botId,
+        count?.status === StatusEnum.ok ? count.data.result : undefined,
+      )
 
       this.handleLog(`Check exchange info and user fee to be in the bot`)
       if (this.deals.size) {
@@ -2237,6 +2745,7 @@ function createDCABotHelper<
       dynamicAr: DynamicArPrices[] = [],
       sizes?: Sizes | null,
       orderSizeType?: OrderSizeTypeEnum,
+      signalOverrides?: SignalDealOverrides | null,
     ): Promise<string | undefined> {
       if (!this.shouldProceed()) {
         this.handleLog(this.notProceedMessage('create deal'))
@@ -2244,6 +2753,15 @@ function createDCABotHelper<
       }
       const _id = this.startMethod('createDeal')
       const time = new Date().getTime()
+      // Spec 044 beta gate: asked once, stamped on the deal — only when base
+      // funding could apply to it (a spot deal with a hedge start action or
+      // a base-funding mode), so no other deal ever reads the user's roles.
+      const baseFundingBeta =
+        !this.data?.settings.futures &&
+        (!!this.data?.action ||
+          this.shortSpotFundingMode(await this.getAggregatedSettings(), true) !==
+            null) &&
+        (await this.baseFundingAllowed())
       let symbolData: Symbols | undefined
       try {
         const ed = await this.getExchangeInfo(symbol)
@@ -2316,7 +2834,7 @@ function createDCABotHelper<
           createTime: time,
           updateTime: time,
           levels: {
-            all: this.data.settings.useDca
+            all: dealSettings.useDca
               ? this.data.settings.dcaCondition === DCAConditionEnum.indicators
                 ? this.data.settings.indicators.filter(
                     (si) => si.indicatorAction === IndicatorAction.startDca,
@@ -2347,40 +2865,44 @@ function createDCABotHelper<
               quote: 0,
             },
           },
-          settings: {
-            ...dealSettings,
-            fixedSlPrice: this.data.settings.useRiskReward
-              ? fixSl
+          settings: applySignalDealOverrides(
+            {
+              ...dealSettings,
+              fixedSlPrice: this.data.settings.useRiskReward
                 ? fixSl
-                : undefined
-              : this.data.settings.fixedSlPrice,
-            fixedTpPrice:
-              this.data.settings.useRiskReward &&
-              this.data.settings.riskUseTpRatio
-                ? fixTp
-                  ? fixTp
+                  ? fixSl
                   : undefined
-                : this.data.settings.fixedTpPrice,
-            useTp:
-              this.data.settings.useRiskReward &&
-              fixTp &&
-              this.data.settings.riskUseTpRatio
+                : this.data.settings.fixedSlPrice,
+              fixedTpPrice:
+                this.data.settings.useRiskReward &&
+                this.data.settings.riskUseTpRatio
+                  ? fixTp
+                    ? fixTp
+                    : undefined
+                  : this.data.settings.fixedTpPrice,
+              useTp:
+                this.data.settings.useRiskReward &&
+                fixTp &&
+                this.data.settings.riskUseTpRatio
+                  ? true
+                  : this.data.settings.useTp,
+              useSl: this.data.settings.useRiskReward
                 ? true
-                : this.data.settings.useTp,
-            useSl: this.data.settings.useRiskReward
-              ? true
-              : this.data.settings.useSl,
-            dealCloseCondition:
-              this.data.settings.useRiskReward &&
-              fixTp &&
-              this.data.settings.riskUseTpRatio
-                ? CloseConditionEnum.tp
-                : this.data.settings.dealCloseCondition,
-            dealCloseConditionSL:
-              this.data.settings.useRiskReward && fixSl
-                ? CloseConditionEnum.tp
-                : this.data.settings.dealCloseConditionSL,
-          },
+                : this.data.settings.useSl,
+              dealCloseCondition:
+                this.data.settings.useRiskReward &&
+                fixTp &&
+                this.data.settings.riskUseTpRatio
+                  ? CloseConditionEnum.tp
+                  : this.data.settings.dealCloseCondition,
+              dealCloseConditionSL:
+                this.data.settings.useRiskReward && fixSl
+                  ? CloseConditionEnum.tp
+                  : this.data.settings.dealCloseConditionSL,
+            },
+            signalOverrides,
+          ),
+          ...(signalOverrides ? { signalOverrides } : {}),
           parentId: null,
           childIds: [],
           parent: false,
@@ -2405,11 +2927,14 @@ function createDCABotHelper<
           fixSize,
           orderSizeType,
           parentBotId: this.data.parentBotId,
-          action: this.data.settings.futures ? undefined : this.data.action,
+          action: this.dealStartAction(baseFundingBeta),
+          ...(baseFundingBeta ? { baseFundingBeta: true } : {}),
           // Funding cursor starts at deal creation so we never backfill funding
           // from before the deal existed.
           funding: { total: 0, totalUsd: 0, offset: time, lastTime: 0 },
           tags: ['TPrev150925'],
+          // Spec 139 §3.4.1: the base order is the position's first entry.
+          ...(this.singlePositionActive ? { positionEntries: 1 } : {}),
         } as any)
         if (record.status === StatusEnum.notok) {
           this.handleErrors(
@@ -2439,7 +2964,7 @@ function createDCABotHelper<
           }
         }
         this.emit('bot deal update', record.data)
-        this.updateBotDeals(this.botId, true)
+        await this.updateBotDeals(this.botId, true)
         this.endMethod(_id)
         return dealId
       }
@@ -2869,7 +3394,11 @@ function createDCABotHelper<
       }).filter(
         (o) =>
           +o.executedQty > 0 &&
-          ![TypeOrderEnum.br, TypeOrderEnum.rebalance].includes(o.typeOrder),
+          ![
+            TypeOrderEnum.br,
+            TypeOrderEnum.rebalance,
+            TypeOrderEnum.funding,
+          ].includes(o.typeOrder),
       )
       let feeByAsset: FeeLedgerEntry[] = []
       let feeBaseFull = 0
@@ -3009,6 +3538,82 @@ function createDCABotHelper<
               filledTp.reduce((acc, d) => acc + d.qty * d.price, 0)) /
             qty
 
+          // Spec `157`. A take-profit that closed only part of the position
+          // leaves the rest to the market sweep below, and that sweep used to
+          // be sent only AFTER this method had written the deal closed and
+          // booked its profit — valuing the unsold coins as if sold. A
+          // limit-only book refuses every market order, so there the deal was
+          // closed with the coins still in the account and nothing working to
+          // sell them. Send the sweep first; on that refusal keep the deal
+          // open and close the rest by LIMIT through the normal close path.
+          let sweep: { result: Order | string | void; qty: number } | void =
+            undefined
+          const preLedger = findDeal.deal.currentBalances
+          const preBase =
+            (preLedger?.base ?? NaN) +
+            qty * (tpOrder.side === OrderSideEnum.buy ? 1 : -1)
+          const preRemainder = this.isLong
+            ? preBase
+            : findDeal.deal.initialBalances.base - preBase
+          const sweepEd = await this.getExchangeInfo(
+            findDeal.deal.symbol.symbol,
+          )
+          if (
+            !profitBase &&
+            // A lost ledger is rebuilt below before the remainder is measured;
+            // leave that case to the path that rebuilds it.
+            Number.isFinite(preLedger?.quote) &&
+            Number.isFinite(preRemainder) &&
+            !(preLedger.base === 0 && preLedger.quote === 0) &&
+            sweepEd &&
+            preRemainder > sweepEd.baseAsset.minAmount &&
+            // Spec `162`: a reduce-only close, held to the value minimum only
+            // where the venue applies it to closes.
+            preRemainder * findDeal.deal.avgPrice >
+              closeOrderQuoteMinimum(
+                this.data?.exchange,
+                this.hedge,
+                sweepEd.quoteAsset.minAmount,
+              )
+          ) {
+            sweep = await this.sellRemainder(
+              dealId,
+              preRemainder,
+              findDeal.deal.avgPrice,
+              true,
+              findDeal,
+              undefined,
+              true,
+              false,
+              'send',
+            )
+            if (
+              sweep &&
+              typeof sweep.result === 'string' &&
+              isLimitOnlyReason(sweep.result)
+            ) {
+              this.handleLog(
+                `${tpOrder.symbol} book is in limit only mode, cannot sell the remaining ${sweep.qty} of deal ${dealId} at market. Deal stays open, closing the rest by limit`,
+              )
+              // This fill is a partial take profit like any other; the next
+              // close counts it from here, once.
+              findDeal.deal.tpHistory = [
+                ...(findDeal.deal.tpHistory ?? []).filter(
+                  (h) => h.id !== tpOrder.clientOrderId,
+                ),
+                { qty: orderQty, price: orderPrice, id: tpOrder.clientOrderId },
+              ]
+              this.saveDeal(findDeal, { tpHistory: findDeal.deal.tpHistory })
+              this.pendingClose.delete(dealId)
+              this.endMethod(_id)
+              // Not awaited: it shares the per-deal mutex with a close request
+              // that may still be running (the one whose cancel promoted this
+              // take-profit), so it queues behind it.
+              this.closeRemainderByLimit(this.botId, dealId, sweep.qty)
+              return
+            }
+          }
+
           findDeal.deal.status = DCADealStatusEnum.closed
           findDeal.deal.lastPrice = parseFloat(tpOrder.price)
           const dealOrders = this.getOrdersByStatusAndDealId({
@@ -3017,9 +3622,11 @@ function createDCABotHelper<
           }).filter(
             (o) =>
               +o.executedQty > 0 &&
-              ![TypeOrderEnum.br, TypeOrderEnum.rebalance].includes(
-                o.typeOrder,
-              ),
+              ![
+                TypeOrderEnum.br,
+                TypeOrderEnum.rebalance,
+                TypeOrderEnum.funding,
+              ].includes(o.typeOrder),
           )
           // Spec `024` (#716). `currentBalances` is the deal's running ledger,
           // and the profit booked below is measured against
@@ -3398,9 +4005,16 @@ function createDCABotHelper<
             (profitBase ? findDeal.deal.profit.total : 0)
           const ed = await this.getExchangeInfo(findDeal.deal.symbol.symbol)
           if (
-            ed &&
-            remainder > ed.baseAsset.minAmount &&
-            remainder * findDeal.deal.avgPrice > ed.quoteAsset.minAmount
+            // A sweep already sent above is booked whatever this re-reads.
+            sweep ||
+            (ed &&
+              remainder > ed.baseAsset.minAmount &&
+              remainder * findDeal.deal.avgPrice >
+                closeOrderQuoteMinimum(
+                  this.data?.exchange,
+                  this.hedge,
+                  ed.quoteAsset.minAmount,
+                ))
           ) {
             await this.sellRemainder(
               dealId,
@@ -3410,6 +4024,8 @@ function createDCABotHelper<
               findDeal,
               undefined,
               true,
+              false,
+              sweep ? { result: sweep.result } : undefined,
             )
           }
           stop = await this.processDealClose(
@@ -3553,6 +4169,138 @@ function createDCABotHelper<
         if (stop) {
           this.stop()
         }
+      }
+      this.endMethod(_id)
+    }
+
+    /**
+     * Spec `157` §1.3. Close what a take-profit left behind with a LIMIT order,
+     * after the venue refused the market sweep because the book only takes
+     * limit orders.
+     *
+     * Sized from what the refused sweep carried — the deal's ledger remainder,
+     * net of fees and on the venue's step — not re-derived by `getTPOrder`: a
+     * remainder exists precisely because the take-profit sizing and the ledger
+     * disagreed, and asking the sizing again can answer "nothing to close" and
+     * close the deal with no order.
+     *
+     * Same mutex key as `closeDealById`, so a close request still in flight
+     * finishes first; any take-profit it rested is then cancelled as a re-size
+     * (its fills are a partial take profit, kept in `tpHistory`) so the deal
+     * never carries two closes. The order is an ordinary `dealTP`: its fill
+     * closes the deal through `closeDeal` like any other.
+     */
+    @IdMute(
+      mutex,
+      (botId: string, dealId: string) => `${botId}${dealId ?? 'closeById'}`,
+    )
+    async closeRemainderByLimit(_botId: string, dealId: string, qty: number) {
+      const _id = this.startMethod('closeRemainderByLimit')
+      const findDeal = this.getDeal(dealId)
+      const symbol = findDeal?.deal.symbol?.symbol
+      const ed = symbol ? await this.getExchangeInfo(symbol) : undefined
+      if (
+        !findDeal ||
+        findDeal.deal.status !== DCADealStatusEnum.open ||
+        !symbol ||
+        !ed ||
+        !this.data
+      ) {
+        this.endMethod(_id)
+        return
+      }
+      let toSell = qty
+      let historyChanged = false
+      const resting = this.getOrdersByStatusAndDealId({
+        status: ['NEW', 'PARTIALLY_FILLED'],
+        dealId,
+      }).filter((o) => o.typeOrder === TypeOrderEnum.dealTP)
+      for (const o of resting) {
+        // Already netted out of `qty` by the close that measured it.
+        const known =
+          (findDeal.deal.tpHistory ?? []).find((h) => h.id === o.clientOrderId)
+            ?.qty ?? 0
+        const cancelled = await this.cancelOrderOnExchange(o, true, true, false)
+        if (cancelled?.status === 'FILLED') {
+          // It filled out from under the cancel, which is a close in its own
+          // right; that fill re-measures whatever is left.
+          this.handleUnknownOrder(cancelled)
+          this.endMethod(_id)
+          return
+        }
+        const executed = +(cancelled?.executedQty ?? 0) || 0
+        if (executed > known) {
+          toSell -= executed - known
+          findDeal.deal.tpHistory = [
+            ...(findDeal.deal.tpHistory ?? []).filter(
+              (h) => h.id !== o.clientOrderId,
+            ),
+            { qty: executed, price: +o.price, id: o.clientOrderId },
+          ]
+          historyChanged = true
+        }
+      }
+      if (historyChanged) {
+        this.saveDeal(findDeal, { tpHistory: findDeal.deal.tpHistory })
+      }
+      toSell = this.math.round(
+        toSell,
+        await this.baseAssetPrecision(symbol),
+        true,
+      )
+      const price = this.math.round(
+        await this.getLatestPrice(symbol),
+        ed.priceAssetPrecision,
+      )
+      if (
+        !(toSell > 0) ||
+        toSell < ed.baseAsset.minAmount ||
+        // Spec `162` — see `closeDeal`.
+        toSell * price <
+          closeOrderQuoteMinimum(
+            this.data.exchange,
+            this.hedge,
+            ed.quoteAsset.minAmount,
+          )
+      ) {
+        this.handleLog(
+          `Deal ${dealId} remainder ${toSell} is below the exchange minimums, no limit close placed`,
+        )
+        this.endMethod(_id)
+        return
+      }
+      const grid: Grid = {
+        price,
+        number: 0,
+        side: this.isLong ? OrderSideEnum.sell : OrderSideEnum.buy,
+        qty: toSell,
+        type: TypeOrderEnum.dealTP,
+        newClientOrderId: this.getOrderId(`D-TP`),
+        dealId,
+      }
+      const additional: OrderAdditionalParams = {
+        dealId,
+        type: OrderTypeEnum.limit,
+        reduceOnly: !!this.futures,
+        positionSide: this.hedge
+          ? this.isLong
+            ? PositionSide.LONG
+            : PositionSide.SHORT
+          : PositionSide.BOTH,
+      }
+      const result = await this.sendGridToExchange(grid, additional, ed, true)
+      if (typeof result === 'string') {
+        const order = this.convertGridToOrder(grid, additional, ed)
+        if (order) {
+          await this.handleOrderErrors(
+            result,
+            order,
+            'limitOrders()',
+            `Send new order request ${order.clientOrderId}, qty ${order.origQty}, price ${order.price}, side ${order.side}`,
+          )
+        }
+        // Same recovery a refused close gets in `closeDealById`.
+        await this.restoreOrReportRefusedClose(dealId, ed.pair, result)
       }
       this.endMethod(_id)
     }
@@ -3784,11 +4532,149 @@ function createDCABotHelper<
       return
     }
 
+    /**
+     * Drop a closed deal's orders from memory — except any still resting on
+     * the venue. Once `cancelAllOrder` has swept the deal, a `NEW` or
+     * `PARTIALLY_FILLED` order is one whose cancel the venue did not confirm.
+     * Dropping it would also unregister it from the user stream, so its later
+     * fill would reach nothing and the coin would sit outside every deal. Kept,
+     * its fill still arrives and is sold as a late fill (spec `112`), and the
+     * deferred re-send keeps asking for its cancel. Spec `180`.
+     */
     removeOrdersByDeal(dealId: string) {
       const get = this.getOrdersByStatusAndDealId({ dealId })
       for (const o of get) {
+        if (this.orderStatuses.includes(o.status)) {
+          this.handleLog(
+            `Order ${o.clientOrderId} is still ${o.status} after its deal closed. Keep tracking it`,
+          )
+          continue
+        }
         this.deleteOrder(o.clientOrderId)
       }
+    }
+
+    /**
+     * Spec `182` §4.2. Merge the sweeps a previous process recorded into this
+     * one's, so the next write cannot drop them.
+     */
+    protected async loadCloseSweeps() {
+      const stored = parseCloseSweeps(await this.getFromRedis('closeSweeps'))
+      for (const [dealId, at] of stored) {
+        if (!this.closeSweeps.has(dealId)) {
+          this.closeSweeps.set(dealId, at)
+        }
+      }
+    }
+
+    /**
+     * Written straight away and awaited, NOT through `@RunWithDelay` like the
+     * order snapshot: that debounce restarts on every order change, so during a
+     * long sweep — exactly when this matters — it would never fire.
+     */
+    protected async persistCloseSweeps() {
+      await this.setToRedis('closeSweeps', serializeCloseSweeps(this.closeSweeps))
+    }
+
+    /** Spec `182` §4.1. Recorded before the deal's first cancel is sent. */
+    protected async noteCloseSweep(dealId: string) {
+      this.closeSweepsInFlight.add(dealId)
+      this.closeSweeps.set(dealId, Date.now())
+      await this.persistCloseSweeps()
+    }
+
+    /**
+     * Spec `182` §4.1. The sweep is over. Its record stays while an order of the
+     * deal is still live (a refused cancel, spec `180`), for the next start.
+     */
+    protected async finishCloseSweep(dealId: string) {
+      this.closeSweepsInFlight.delete(dealId)
+      const live = this.getOrdersByStatusAndDealId({
+        status: this.orderStatuses,
+        dealId,
+      })
+      if (live.length) {
+        return
+      }
+      this.closeSweeps.delete(dealId)
+      await this.persistCloseSweeps()
+    }
+
+    /**
+     * Spec `182` §4.3. Finish the close sweeps a previous process recorded and
+     * never completed: the deal is closed, but its orders the sweep had not
+     * reached yet are still live on the venue, and the order snapshot this
+     * start restored may predate the whole deal. Read them from Mongo by deal
+     * and cancel them.
+     */
+    protected async resumeCloseSweeps() {
+      if (!this.closeSweeps?.size) {
+        return
+      }
+      const { resume, expired } = closeSweepsToResume(
+        this.closeSweeps,
+        Date.now(),
+        (dealId) =>
+          this.closeSweepsInFlight.has(dealId)
+            ? 'inFlight'
+            : this.getDeal(dealId)
+              ? 'held'
+              : null,
+      )
+      for (const dealId of expired) {
+        this.closeSweeps.delete(dealId)
+      }
+      for (const dealId of resume) {
+        const read = await this.ordersDb.readData(
+          {
+            botId: this.botId,
+            dealId,
+            status: { $in: ['NEW', 'PARTIALLY_FILLED'] },
+            typeOrder: {
+              $nin: [TypeOrderEnum.liquidation, TypeOrderEnum.br],
+            },
+          },
+          undefined,
+          {},
+          true,
+        )
+        if (read.status === StatusEnum.notok) {
+          this.handleWarn(
+            `Cannot read the open orders of closed deal ${dealId}: ${read.reason}`,
+          )
+          continue
+        }
+        const rows = read.data.result
+        if (rows.length) {
+          this.handleLog(
+            `Deal ${dealId} closed while its orders were being cancelled. Cancel the ${rows.length} still open`,
+          )
+        }
+        for (const row of rows) {
+          const order = this.getOrderFromMap(row.clientOrderId) ?? row
+          if (!this.getOrderFromMap(order.clientOrderId)) {
+            this.setOrder(order, false)
+          }
+          const result = await this.cancelOrderOnExchange(order)
+          if (result?.status === 'FILLED') {
+            this.handleUnknownOrder(result)
+          }
+        }
+        await this.afterCloseSweepResumed(dealId)
+        const live = this.getOrdersByStatusAndDealId({
+          status: this.orderStatuses,
+          dealId,
+        })
+        if (!live.length) {
+          this.closeSweeps.delete(dealId)
+        }
+      }
+      await this.persistCloseSweeps()
+    }
+
+    /** Spec `182` §4.3. What else a resumed sweep finishes, per bot type. */
+    protected async afterCloseSweepResumed(_dealId: string) {
+      return
     }
 
     /**
@@ -4030,6 +4916,39 @@ function createDCABotHelper<
     }
 
     /**
+     * Write the deal's close-time cost facts (main-app spec 050 §4.1): the
+     * slippage of its executed MARKET trades and whether its fee figure
+     * includes an estimate. From the orders this process already holds, once,
+     * so the API never has to rescan a closed deal's orders. Forward-only:
+     * nothing rewrites deals closed before this existed; the API computes
+     * those at read time.
+     */
+    recordDealCostFacts(fullDeal: FullDeal<ExcludeDoc<Deal>>) {
+      try {
+        const orders = this.getOrdersByStatusAndDealId({
+          dealId: `${fullDeal.deal._id}`,
+          status: ['FILLED', 'CANCELED'],
+        })
+        const ctx = slippageContextFromBot(
+          this.combo ? 'combo' : 'dca',
+          this.data?.settings as Record<string, unknown> | undefined,
+        )
+        const slippage = dealSlippage(orders, () => ctx)
+        const facts: Record<string, unknown> = {
+          feesEstimated: feesEstimatedOf(orders),
+        }
+        if (slippage) {
+          facts.slippage = slippage
+        }
+        this.saveDeal(fullDeal, facts, false)
+      } catch (e) {
+        this.handleDebug(
+          `Deal ${fullDeal.deal._id} cost facts not recorded: ${(e as Error)?.message ?? e}`,
+        )
+      }
+    }
+
+    /**
      * Process deal close
      *
      * @param {string} dealId Id of the deal
@@ -4064,6 +4983,7 @@ function createDCABotHelper<
         this.handleWarn(`Deal ${dealId} not found in local deals`)
         return false
       }
+      this.recordDealCostFacts(deal)
       if (!this.combo) {
         const botUpdate = {
           dealsReduceForBot:
@@ -4137,6 +5057,7 @@ function createDCABotHelper<
           this.checkNotEnoughBalanceErrors(this.botId)
         }
         if (cancel) {
+          await this.noteCloseSweep(dealId)
           await this.cancelAllOrder(deal.deal.lastPrice, dealId, true)
           for (const o of this.getOrdersByStatusAndDealId({ dealId })) {
             this.partiallyFilledFilledSet.delete(o.clientOrderId)
@@ -4155,6 +5076,7 @@ function createDCABotHelper<
             'closed',
             +new Date(),
             deal.deal.symbol.symbol,
+            cooldownTriggersForClose(deal.deal),
           )
           deal.deal.closeTime = order ? order.updateTime : +new Date()
           const set = await this.getAggregatedSettings(deal.deal)
@@ -4242,6 +5164,9 @@ function createDCABotHelper<
         const openDeals = this.getOpenDeals()
         await this.checkClosedDeals()
         await this.afterDealClose(dealId, profit)
+        if (cancel) {
+          await this.finishCloseSweep(dealId)
+        }
         this.handleDebug(`Closed after TP is: ${this.closeAfterTpFilled}`)
         this.processedFilled.delete(dealId)
         this.feeProcessed.delete(dealId)
@@ -4388,16 +5313,22 @@ function createDCABotHelper<
         this.handleWarn(`Latest price not found for ${symbol}`)
         return false
       }
+      // Spec 139 §3.2.4: a position measures from its LAST ENTRY's fill,
+      // never from its average — the average moves toward the market after
+      // every entry and would bunch entries ever closer. The entry fill writes
+      // that price to `entry` (and `avg`) of the pair's row.
+      const singlePosition = this.singlePositionActive
       const referencePrice =
+        !singlePosition &&
         settings.dynamicPriceFilterPriceType ===
-        DynamicPriceFilterPriceTypeEnum.avg
+          DynamicPriceFilterPriceTypeEnum.avg
           ? lastData.avg
           : lastData.entry
       const calculatedOverValue =
         referencePrice + (referencePrice * overValue) / 100
       const calculatedUnderValue =
         referencePrice - (referencePrice * underValue) / 100
-      if (settings.useNoOverlapDeals) {
+      if (settings.useNoOverlapDeals && !singlePosition) {
         const openDeals = this.getDealsByStatusAndSymbol({
           symbol: symbol,
           status: DCADealStatusEnum.open,
@@ -4820,9 +5751,7 @@ function createDCABotHelper<
         action === IndicatorAction.startDeal
           ? allForSymbol.filter((i) => i.action === IndicatorAction.startDeal)
           : []
-      const all = allForSymbol.filter(
-        (i) => i.status && (i.statusTo ? i.statusTo >= +new Date() : true),
-      )
+      const all = allForSymbol.filter((i) => isConditionActive(i, +new Date()))
       const allCloseSl =
         action === IndicatorAction.closeDeal && section === IndicatorSection.sl
           ? all.filter(
@@ -4855,30 +5784,28 @@ function createDCABotHelper<
         action === IndicatorAction.startDca
           ? all.filter((i) => i.action === IndicatorAction.startDca)
           : []
+      const closeDealSlGroups = (this.indicatorGroupsToUse ?? []).filter(
+        (ig) =>
+          ig.action === IndicatorAction.closeDeal &&
+          ig.section === IndicatorSection.sl,
+      )
       const closeDealSlGroupsStatus = !allCloseSl.length
         ? []
-        : this.indicatorGroupsToUse
-            .filter(
-              (ig) =>
-                ig.action === IndicatorAction.closeDeal &&
-                ig.section === IndicatorSection.sl,
+        : closeDealSlGroups.map((ig) => {
+            const findAll = allForSymbolCloseSl.filter(
+              (i) => i.groupId === ig.id,
             )
-            .map((ig) => {
-              const findAll = allForSymbolCloseSl.filter(
-                (i) => i.groupId === ig.id,
-              )
-              const findAllStatus = allCloseSl.filter(
-                (i) => i.groupId === ig.id,
-              )
-              return !!(ig.logic === IndicatorsLogicEnum.or
-                ? findAllStatus.length > 0
-                : findAll.length && findAll.length === findAllStatus.length)
-            })
+            const findAllStatus = allCloseSl.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
       if (
-        (settings.stopDealSlLogic === IndicatorsLogicEnum.and ||
-        !settings.stopDealSlLogic
-          ? closeDealSlGroupsStatus.every((r) => !!r)
-          : closeDealSlGroupsStatus.some((r) => !!r)) &&
+        combineIndicatorGroups(
+          closeDealSlGroups,
+          closeDealSlGroupsStatus,
+          settings.stopDealSlLogic,
+        ) &&
         closeDealSlGroupsStatus.length !== 0
       ) {
         for (const ai of allForSymbolCloseSl) {
@@ -4904,30 +5831,28 @@ function createDCABotHelper<
           )
         }
       }
+      const closeDealTpGroups = (this.indicatorGroupsToUse ?? []).filter(
+        (ig) =>
+          ig.action === IndicatorAction.closeDeal &&
+          ig.section !== IndicatorSection.sl,
+      )
       const closeDealTpGroupsStatus = !allCloseTp.length
         ? []
-        : this.indicatorGroupsToUse
-            .filter(
-              (ig) =>
-                ig.action === IndicatorAction.closeDeal &&
-                ig.section !== IndicatorSection.sl,
+        : closeDealTpGroups.map((ig) => {
+            const findAll = allForSymbolCloseTp.filter(
+              (i) => i.groupId === ig.id,
             )
-            .map((ig) => {
-              const findAll = allForSymbolCloseTp.filter(
-                (i) => i.groupId === ig.id,
-              )
-              const findAllStatus = allCloseTp.filter(
-                (i) => i.groupId === ig.id,
-              )
-              return !!(ig.logic === IndicatorsLogicEnum.or
-                ? findAllStatus.length > 0
-                : findAll.length && findAll.length === findAllStatus.length)
-            })
+            const findAllStatus = allCloseTp.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
       if (
-        (settings.stopDealLogic === IndicatorsLogicEnum.and ||
-        !settings.stopDealLogic
-          ? closeDealTpGroupsStatus.every((r) => !!r)
-          : closeDealTpGroupsStatus.some((r) => !!r)) &&
+        combineIndicatorGroups(
+          closeDealTpGroups,
+          closeDealTpGroupsStatus,
+          settings.stopDealLogic,
+        ) &&
         closeDealTpGroupsStatus.length !== 0
       ) {
         for (const ai of allForSymbolCloseTp) {
@@ -4953,26 +5878,26 @@ function createDCABotHelper<
           )
         }
       }
+      const stopBotGroups = (this.indicatorGroupsToUse ?? []).filter(
+        (ig) => ig.action === IndicatorAction.stopBot,
+      )
       const stopBotGroupsStatus = !allStopBot.length
         ? []
-        : this.indicatorGroupsToUse
-            .filter((ig) => ig.action === IndicatorAction.stopBot)
-            .map((ig) => {
-              const findAll = allForSymbolStopBot.filter(
-                (i) => i.groupId === ig.id,
-              )
-              const findAllStatus = allStopBot.filter(
-                (i) => i.groupId === ig.id,
-              )
-              return !!(ig.logic === IndicatorsLogicEnum.or
-                ? findAllStatus.length > 0
-                : findAll.length && findAll.length === findAllStatus.length)
-            })
+        : stopBotGroups.map((ig) => {
+            const findAll = allForSymbolStopBot.filter(
+              (i) => i.groupId === ig.id,
+            )
+            const findAllStatus = allStopBot.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length && findAll.length === findAllStatus.length)
+          })
       if (
-        (settings.stopBotLogic === IndicatorsLogicEnum.and ||
-        !settings.stopBotLogic
-          ? stopBotGroupsStatus.every((r) => !!r)
-          : stopBotGroupsStatus.some((r) => !!r)) &&
+        combineIndicatorGroups(
+          stopBotGroups,
+          stopBotGroupsStatus,
+          settings.stopBotLogic,
+        ) &&
         stopBotGroupsStatus.length !== 0 &&
         this.data.status !== BotStatusEnum.monitoring
       ) {
@@ -5014,28 +5939,28 @@ function createDCABotHelper<
           }
         }
       }
+      const startBotGroups = (this.indicatorGroupsToUse ?? []).filter(
+        (ig) => ig.action === IndicatorAction.startBot,
+      )
       const startBotGroupsStatus = !allStartBot.length
         ? []
-        : this.indicatorGroupsToUse
-            .filter((ig) => ig.action === IndicatorAction.startBot)
-            .map((ig) => {
-              const findAll = allForSymbolStartBot.filter(
-                (i) => i.groupId === ig.id,
-              )
-              const findAllStatus = allStartBot.filter(
-                (i) => i.groupId === ig.id,
-              )
-              return !!(ig.logic === IndicatorsLogicEnum.or
-                ? findAllStatus.length > 0
-                : findAll.length &&
-                  findAll.length === findAllStatus.length &&
-                  !groupsWithMissingLeg.has(ig.id))
-            })
+        : startBotGroups.map((ig) => {
+            const findAll = allForSymbolStartBot.filter(
+              (i) => i.groupId === ig.id,
+            )
+            const findAllStatus = allStartBot.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length &&
+                findAll.length === findAllStatus.length &&
+                !groupsWithMissingLeg.has(ig.id))
+          })
       if (
-        (settings.startBotLogic === IndicatorsLogicEnum.and ||
-        !settings.startBotLogic
-          ? startBotGroupsStatus.every((r) => !!r)
-          : startBotGroupsStatus.some((r) => !!r)) &&
+        combineIndicatorGroups(
+          startBotGroups,
+          startBotGroupsStatus,
+          settings.startBotLogic,
+        ) &&
         startBotGroupsStatus.length !== 0 &&
         this.data.status === BotStatusEnum.monitoring
       ) {
@@ -5062,26 +5987,26 @@ function createDCABotHelper<
           )
         }
       }
+      const openDealGroups = (this.indicatorGroupsToUse ?? []).filter(
+        (ig) => ig.action === IndicatorAction.startDeal,
+      )
       const openDealGroupsStatus = !allOpen.length
         ? []
-        : this.indicatorGroupsToUse
-            .filter((ig) => ig.action === IndicatorAction.startDeal)
-            .map((ig) => {
-              const findAll = allForSymbolOpen.filter(
-                (i) => i.groupId === ig.id,
-              )
-              const findAllStatus = allOpen.filter((i) => i.groupId === ig.id)
-              return !!(ig.logic === IndicatorsLogicEnum.or
-                ? findAllStatus.length > 0
-                : findAll.length &&
-                  findAll.length === findAllStatus.length &&
-                  !groupsWithMissingLeg.has(ig.id))
-            })
+        : openDealGroups.map((ig) => {
+            const findAll = allForSymbolOpen.filter((i) => i.groupId === ig.id)
+            const findAllStatus = allOpen.filter((i) => i.groupId === ig.id)
+            return !!(ig.logic === IndicatorsLogicEnum.or
+              ? findAllStatus.length > 0
+              : findAll.length &&
+                findAll.length === findAllStatus.length &&
+                !groupsWithMissingLeg.has(ig.id))
+          })
       if (
-        (settings.startDealLogic === IndicatorsLogicEnum.and ||
-        !settings.startDealLogic
-          ? openDealGroupsStatus.every((r) => !!r)
-          : openDealGroupsStatus.some((r) => !!r)) &&
+        combineIndicatorGroups(
+          openDealGroups,
+          openDealGroupsStatus,
+          settings.startDealLogic,
+        ) &&
         openDealGroupsStatus.length !== 0 &&
         !(
           this.data?.status === BotStatusEnum.archive ||
@@ -5197,17 +6122,6 @@ function createDCABotHelper<
       this.saveIndicatorsData(this.botId)
     }
 
-    private convertNullToNan(obj: Record<string, unknown>) {
-      for (const key in obj) {
-        if (typeof obj[key] === 'object' && obj[key] !== null) {
-          this.convertNullToNan(obj[key] as Record<string, unknown>)
-        } else if (obj[key] === null) {
-          obj[key] = NaN
-        }
-      }
-      return obj
-    }
-
     /**
      * Check indicator condition
      */
@@ -5273,19 +6187,30 @@ function createDCABotHelper<
       let risk = false
       let dcaAr = false
       this.lastIndicatorsDataMap.set(key, lastTime)
+      const armedAt = this.dcaIndicatorArmedAt.get(key)
+      if (armedAt !== undefined) {
+        const step =
+          timeIntervalMap[
+            this.indicators.get(key)?.interval ?? ExchangeIntervals.oneM
+          ]
+        if (lastTime + step <= armedAt) {
+          this.handleDebug(
+            `DCA Signals | ${key} candle ${new Date(
+              lastTime,
+            ).toISOString()} closed before the level was armed, skip`,
+          )
+          return
+        }
+        this.dcaIndicatorArmedAt.delete(key)
+      }
       const settings = await this.getAggregatedSettings()
       if (this.data) {
-        const [lastData, prevData] = sortedByTime
+        const [lastData] = sortedByTime
         const i = this.indicators.get(key)
         if (!i?.is1d && is1d) {
           return
         }
         let action = false
-        let skipAction = false
-        let trendFilterAction = false
-        let lastDataString = ''
-        let prevDataString = ''
-        let trendValue: number | undefined
         let cont = false
         if (i) {
           i.data = true
@@ -5349,41 +6274,10 @@ function createDCABotHelper<
           const showLog = this.indicators.size < 100
           if (find) {
             const {
-              indicatorValue,
-              indicatorValue2,
-              indicatorCondition,
-              type,
-              checkLevel,
-              signal,
-              maUUID,
-              maCrossingValue,
-              maType,
               indicatorInterval,
-              bbCrossingValue,
-              stochUpper,
-              stochLower,
-              srCrossingValue,
               indicatorAction,
-              stochRange,
               keepConditionBars,
-              ecdTrigger,
-              xoUUID,
-              xOscillator1,
-              percentile,
-              divMinCount,
-              divType,
-              trendFilter,
-              trendFilterType,
-              stCondition,
-              pcValue,
-              ppValue,
-              ppType,
               section,
-              dcValue,
-              obfvgRef,
-              obfvgValue,
-              lwValue,
-              lwCondition,
             } = find
             if (indicatorAction === IndicatorAction.riskReward) {
               risk = true
@@ -5415,898 +6309,29 @@ function createDCABotHelper<
               cont = true
             }
             if (!cont) {
-              let { rsiValue, rsiValue2, valueInsteadof } = find
-              rsiValue = rsiValue ?? rsiValueEnum.k
-              rsiValue2 = rsiValue2 ?? rsiValue2Enum.d
-              valueInsteadof = valueInsteadof ?? 1
-              let value = indicatorValue !== undefined ? +indicatorValue : 0
-              let prevValue = value
-              if (type === IndicatorEnum.obfvg) {
-                const [l, p] = [...data].sort((a, b) => b.time - a.time)
-                const last = this.convertNullToNan(
-                  l.value as OBFVGResult,
-                ) as OBFVGResult
-                const prev = this.convertNullToNan(
-                  p.value as OBFVGResult,
-                ) as OBFVGResult
-                const lastBull =
-                  obfvgRef === OBFVGRefEnum.high
-                    ? last.bullishFVGHigh
-                    : obfvgRef === OBFVGRefEnum.low
-                      ? last.bullishFVGLow
-                      : last.bullishFVGMiddle
-                const lastBear =
-                  obfvgRef === OBFVGRefEnum.high
-                    ? last.bearishFVGHigh
-                    : obfvgRef === OBFVGRefEnum.low
-                      ? last.bearishFVGLow
-                      : last.bearishFVGMiddle
-                const prevBull =
-                  obfvgRef === OBFVGRefEnum.high
-                    ? prev.bullishFVGHigh
-                    : obfvgRef === OBFVGRefEnum.low
-                      ? prev.bullishFVGLow
-                      : prev.bullishFVGMiddle
-                const prevBear =
-                  obfvgRef === OBFVGRefEnum.high
-                    ? prev.bearishFVGHigh
-                    : obfvgRef === OBFVGRefEnum.low
-                      ? prev.bearishFVGLow
-                      : prev.bearishFVGMiddle
-                const lastPrice = last.price
-                const prevPrice = prev.price
-                const bullCd =
-                  !isNaN(lastBull) &&
-                  !isNaN(prevBull) &&
-                  !isNaN(lastPrice) &&
-                  !isNaN(prevPrice) &&
-                  ((gt(prevPrice, prevBull) && lt(lastPrice, lastBull)) ||
-                    (gt(prevPrice, prevBull) && lte(lastPrice, lastBull)))
-                const bearCd =
-                  !isNaN(lastBear) &&
-                  !isNaN(prevBear) &&
-                  !isNaN(lastPrice) &&
-                  !isNaN(prevPrice) &&
-                  ((gt(prevPrice, prevBear) && lt(lastPrice, lastBear)) ||
-                    (gt(prevPrice, prevBear) && lte(lastPrice, lastBear)))
-                const bullCu =
-                  !isNaN(lastBull) &&
-                  !isNaN(prevBull) &&
-                  !isNaN(lastPrice) &&
-                  !isNaN(prevPrice) &&
-                  ((lt(prevPrice, prevBull) && gt(lastPrice, lastBull)) ||
-                    (lt(prevPrice, prevBull) && gte(lastPrice, lastBull)))
-                const bearCu =
-                  !isNaN(lastBear) &&
-                  !isNaN(prevBear) &&
-                  !isNaN(lastPrice) &&
-                  !isNaN(prevPrice) &&
-                  ((lt(prevPrice, prevBear) && gt(lastPrice, lastBear)) ||
-                    (lt(prevPrice, prevBear) && gte(lastPrice, lastBear)))
-                const bullGt =
-                  !isNaN(lastBull) &&
-                  !isNaN(prevPrice) &&
-                  gt(lastPrice, lastBull)
-                const bearGt =
-                  !isNaN(lastBear) &&
-                  !isNaN(lastPrice) &&
-                  gt(lastPrice, lastBear)
-                const bullLt =
-                  !isNaN(lastBull) &&
-                  !isNaN(lastPrice) &&
-                  lt(lastPrice, lastBull)
-                const bearLt =
-                  !isNaN(lastBear) &&
-                  !isNaN(lastPrice) &&
-                  lt(lastPrice, lastBear)
-
-                action =
-                  indicatorCondition === IndicatorStartConditionEnum.cd
-                    ? obfvgValue === OBFVGValueEnum.bearish
-                      ? bearCd
-                      : obfvgValue === OBFVGValueEnum.any
-                        ? bullCd || bearCd
-                        : bullCd
-                    : indicatorCondition === IndicatorStartConditionEnum.cu
-                      ? obfvgValue === OBFVGValueEnum.bearish
-                        ? bearCu
-                        : obfvgValue === OBFVGValueEnum.any
-                          ? bullCu || bearCu
-                          : bullCu
-                      : indicatorCondition === IndicatorStartConditionEnum.gt
-                        ? obfvgValue === OBFVGValueEnum.bearish
-                          ? bearGt
-                          : obfvgValue === OBFVGValueEnum.any
-                            ? bullGt || bearGt
-                            : bullGt
-                        : indicatorCondition === IndicatorStartConditionEnum.lt
-                          ? obfvgValue === OBFVGValueEnum.bearish
-                            ? bearLt
-                            : obfvgValue === OBFVGValueEnum.any
-                              ? bullLt || bearLt
-                              : bullLt
-                          : false
-              } else if (type === IndicatorEnum.pc) {
-                const pcCondition =
-                  +(pcValue ?? '5') > 0
-                    ? PCConditionEnum.up
-                    : PCConditionEnum.down
-                const [last] = [...data].sort((a, b) => b.time - a.time)
-                action =
-                  (pcCondition === PCConditionEnum.down &&
-                    (last.value as PCResult).down) ||
-                  (pcCondition === PCConditionEnum.up &&
-                    (last.value as PCResult).up)
-                if (action && showLog) {
+              action = evaluateIndicatorCondition(find, data, {
+                interval: i.interval,
+                symbol,
+                exchange: this.data.exchange,
+                showLog,
+                debug: (message) => this.handleDebug(message),
+                reference: (refKey) => this.indicators.get(refKey),
+                setReference: (refKey, ref) =>
+                  this.indicators.set(refKey, ref as LocalIndicators),
+              }).action
+              applyConditionStatus(i, {
+                action,
+                barTime: lastData.time,
+                indicatorInterval,
+                keepConditionBars,
+                now: +new Date(),
+                onExtendedPastNow: (statusTo, step) =>
                   this.handleDebug(
-                    `${uuid}@${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger action: up: ${
-                      (last.value as PCResult).up
-                    }, down: ${
-                      (last.value as PCResult).down
-                    }, condition: ${pcCondition}, last time ${new Date(
-                      lastTime,
-                    )?.toISOString()}`,
-                  )
-                }
-              } else if (type === IndicatorEnum.lw) {
-                const [ld, pd] = sortedByTime
-                const last = this.convertNullToNan(
-                  ld?.value as LongWickResult,
-                ) as LongWickResult
-                const prev = this.convertNullToNan(
-                  pd?.value as LongWickResult,
-                ) as LongWickResult
-                if (last && prev) {
-                  const useTop =
-                    typeof lwValue === 'undefined' ||
-                    lwValue === 'top' ||
-                    lwValue === 'any'
-                  const useBottom =
-                    typeof lwValue === 'undefined' ||
-                    lwValue === 'bottom' ||
-                    lwValue === 'any'
-                  const cond =
-                    typeof lwCondition === 'undefined'
-                      ? LWConditionEnum.during
-                      : lwCondition
-                  action =
-                    (useTop &&
-                      (cond === LWConditionEnum.during
-                        ? !isNaN(last.bull)
-                        : isNaN(prev.bull) && !isNaN(last.bull))) ||
-                    (useBottom &&
-                      (cond === LWConditionEnum.during
-                        ? !isNaN(last.bear)
-                        : isNaN(prev.bear) && !isNaN(last.bear)))
-                }
-              } else if (type === IndicatorEnum.st) {
-                const [ld, pd] = sortedByTime
-                const lastData = ld?.value as SuperTrendResult
-                const prevData = pd?.value as SuperTrendResult
-                action =
-                  (stCondition === STConditionEnum.up &&
-                    lastData?.direction === -1) ||
-                  (stCondition === STConditionEnum.down &&
-                    lastData?.direction === 1) ||
-                  (stCondition === STConditionEnum.upToDown &&
-                    prevData?.direction === -1 &&
-                    lastData?.direction === 1) ||
-                  (stCondition === STConditionEnum.downToUp &&
-                    prevData?.direction === 1 &&
-                    lastData?.direction === -1)
-                if (action && showLog) {
-                  this.handleDebug(
-                    `${uuid}@${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger action: ${indicatorAction}. ${
-                      prevData.direction
-                    }, ${lastData.direction}, ${prevData.value}, ${
-                      lastData.value
-                    }, last time ${new Date(lastTime)?.toISOString()}`,
-                  )
-                }
-              } else if (type === IndicatorEnum.div) {
-                const [lastData] = sortedByTime
-                const result = lastData.value as DIVResult
-                const min = +(divMinCount ?? 2)
-                action = action =
-                  ((divType === DivTypeEnum.bear ||
-                    divType === DivTypeEnum.abear) &&
-                    result.negdivergence >= min) ||
-                  ((divType === DivTypeEnum.hbear ||
-                    divType === DivTypeEnum.abear) &&
-                    result.negdivergencehidden >= min) ||
-                  ((divType === DivTypeEnum.bull ||
-                    divType === DivTypeEnum.abull) &&
-                    result.posdivergence >= min) ||
-                  ((divType === DivTypeEnum.hbull ||
-                    divType === DivTypeEnum.abull) &&
-                    result.posdivergencehidden >= min)
-                if (action && showLog) {
-                  this.handleDebug(
-                    `${uuid}@${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger action: ${indicatorAction}. ${
-                      result.negdivergence
-                    }, ${result.negdivergencehidden}, ${result.posdivergence}, ${
-                      result.posdivergencehidden
-                    }, last time ${new Date(lastTime)?.toISOString()}`,
-                  )
-                }
-              } else if (type === IndicatorEnum.qfl) {
-                action = (lastData.value as QFLResult).action
-                if (action && showLog) {
-                  this.handleDebug(
-                    `${uuid}@${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger action: ${indicatorAction}, last time ${new Date(
-                      lastTime,
-                    )?.toISOString()}`,
-                  )
-                }
-              } else if (type === IndicatorEnum.tv && checkLevel && signal) {
-                /**
-                 * TradingViews Technical Analysis
-                 *
-                 * Result:
-                 *  - 0 - neutral
-                 *
-                 *  - 1 - Buy
-                 *
-                 *  - 2 - Strong buy
-                 *
-                 *  - 3 - Sell
-                 *
-                 *  - 4 - Strong sell
-                 *
-                 *  - 5 - No action (for useEntryExitPoints)
-                 */
-                const tvta = lastData.value as number
-                if (
-                  signal === TradingviewAnalysisSignalEnum.buy &&
-                  tvta === 1
-                ) {
-                  action = true
-                } else if (
-                  signal === TradingviewAnalysisSignalEnum.strongBuy &&
-                  tvta === 2
-                ) {
-                  action = true
-                } else if (
-                  signal === TradingviewAnalysisSignalEnum.bothBuy &&
-                  (tvta === 2 || tvta === 1)
-                ) {
-                  action = true
-                } else if (
-                  signal === TradingviewAnalysisSignalEnum.sell &&
-                  tvta === 3
-                ) {
-                  action = true
-                } else if (
-                  signal === TradingviewAnalysisSignalEnum.strongSell &&
-                  tvta === 4
-                ) {
-                  action = true
-                } else if (
-                  signal === TradingviewAnalysisSignalEnum.bothSell &&
-                  (tvta === 3 || tvta === 4)
-                ) {
-                  action = true
-                }
-                if (action && showLog) {
-                  this.handleDebug(
-                    `${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger. ${
-                      tvta === 0
-                        ? 'Neutral'
-                        : tvta === 1
-                          ? 'Buy'
-                          : tvta === 2
-                            ? 'Strong Buy'
-                            : tvta === 3
-                              ? 'Sell'
-                              : tvta === 4
-                                ? 'Strong Sell'
-                                : 'No action'
-                    } action: ${indicatorAction}, last time ${new Date(
-                      lastTime,
-                    )?.toISOString()}`,
-                  )
-                }
-              } else if (type === IndicatorEnum.ecd && ecdTrigger) {
-                /**
-                 * Engulfing candle detector
-                 *
-                 * Result:
-                 *  - 0 - na
-                 *
-                 *  - 1 - Bearish
-                 *
-                 *  - 2 - Bullish
-                 *
-                 */
-                const [lastData] = sortedByTime
-                const ecd = lastData.value as number
-                if (
-                  ecd === 1 &&
-                  [ECDTriggerEnum.bearish, ECDTriggerEnum.both].includes(
-                    ecdTrigger,
-                  )
-                ) {
-                  action = true
-                } else if (
-                  ecd === 2 &&
-                  [ECDTriggerEnum.bullish, ECDTriggerEnum.both].includes(
-                    ecdTrigger,
-                  )
-                ) {
-                  action = true
-                }
-                if (action && showLog) {
-                  this.handleDebug(
-                    `${uuid}@${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger. ${
-                      ecd === 1
-                        ? 'Bearish'
-                        : ecd === 2
-                          ? 'Bullish'
-                          : 'No action'
-                    } action: ${indicatorAction}, last time ${new Date(
-                      lastTime,
-                    )?.toISOString()}`,
-                  )
-                }
-              } else if (
-                (indicatorValue !== undefined || type === IndicatorEnum.ma) &&
-                indicatorCondition &&
-                prevData
-              ) {
-                let last = 0
-                let prev = 0
-                let checkValue = true
-                if (
-                  (lastData.type === IndicatorEnum.rsi ||
-                    lastData.type === IndicatorEnum.ao ||
-                    lastData.type === IndicatorEnum.cci ||
-                    lastData.type === IndicatorEnum.uo ||
-                    lastData.type === IndicatorEnum.mom ||
-                    lastData.type === IndicatorEnum.wr ||
-                    lastData.type === IndicatorEnum.mfi ||
-                    lastData.type === IndicatorEnum.adx ||
-                    lastData.type === IndicatorEnum.bbw ||
-                    lastData.type === IndicatorEnum.bbpb ||
-                    lastData.type === IndicatorEnum.kcpb ||
-                    lastData.type === IndicatorEnum.vo ||
-                    lastData.type === IndicatorEnum.mar) &&
-                  (prevData.type === IndicatorEnum.rsi ||
-                    prevData.type === IndicatorEnum.ao ||
-                    prevData.type === IndicatorEnum.cci ||
-                    prevData.type === IndicatorEnum.uo ||
-                    prevData.type === IndicatorEnum.mom ||
-                    prevData.type === IndicatorEnum.wr ||
-                    prevData.type === IndicatorEnum.mfi ||
-                    prevData.type === IndicatorEnum.adx ||
-                    prevData.type === IndicatorEnum.bbw ||
-                    prevData.type === IndicatorEnum.bbpb ||
-                    prevData.type === IndicatorEnum.kcpb ||
-                    prevData.type === IndicatorEnum.vo ||
-                    prevData.type === IndicatorEnum.mar)
-                ) {
-                  last = lastData.value.value
-                  prev = prevData.value.value
-                  if (percentile) {
-                    const tmpValue = lastData.value.percentile
-                    const tmpPrevValue = prevData.value.percentile
-                    if (
-                      typeof tmpValue === 'undefined' ||
-                      typeof tmpPrevValue === 'undefined'
-                    ) {
-                      last = 0
-                      prev = 0
-                      value = 0
-                      prevValue = 0
-                    } else {
-                      value = tmpValue
-                      prevValue = tmpPrevValue
-                    }
-                  }
-                  if (trendFilter) {
-                    trendFilterAction =
-                      (trendFilterType === TrendFilterOperatorEnum.lower &&
-                        lastData.value.trend === 1) ||
-                      (trendFilterType === TrendFilterOperatorEnum.higher &&
-                        lastData.value.trend === 2) ||
-                      (trendFilterType === TrendFilterOperatorEnum.between &&
-                        lastData.value.trend === 3)
-                    trendValue = lastData.value.trend
-                  }
-                }
-                if (
-                  lastData.type === IndicatorEnum.dc &&
-                  prevData.type === IndicatorEnum.dc
-                ) {
-                  last = lastData.value.price
-                  prev = prevData.value.price
-                  value =
-                    dcValue === DCValueEnum.lower
-                      ? lastData.value.low
-                      : dcValue === DCValueEnum.upper
-                        ? lastData.value.high
-                        : lastData.value.basis
-                  prevValue =
-                    dcValue === DCValueEnum.lower
-                      ? prevData.value.low
-                      : dcValue === DCValueEnum.upper
-                        ? prevData.value.high
-                        : prevData.value.basis
-                }
-                if (
-                  lastData.type === IndicatorEnum.bbwp &&
-                  prevData?.type === IndicatorEnum.bbwp
-                ) {
-                  last = lastData.value
-                  prev = prevData.value
-                }
-                if (
-                  lastData.type === IndicatorEnum.atr &&
-                  prevData?.type === IndicatorEnum.atr
-                ) {
-                  last = lastData.value
-                  prev = prevData.value
-                }
-                if (
-                  lastData.type === IndicatorEnum.adr &&
-                  prevData?.type === IndicatorEnum.adr
-                ) {
-                  last = lastData.value
-                  prev = prevData.value
-                }
-                if (
-                  lastData.type === IndicatorEnum.ath &&
-                  prevData.type === IndicatorEnum.ath
-                ) {
-                  last = lastData.value
-                  prev = prevData.value
-                  value = Math.abs(+(indicatorValue ?? '70')) * -1
-                  prevValue = value
-                }
-                if (
-                  lastData.type === IndicatorEnum.macd &&
-                  prevData?.type === IndicatorEnum.macd
-                ) {
-                  last = lastData.value.histogram
-                  prev = prevData.value.histogram
-                }
-                if (
-                  lastData.type === IndicatorEnum.ma &&
-                  prevData?.type === IndicatorEnum.ma
-                ) {
-                  last = lastData.value.ma
-                  prev = prevData.value.ma
-                  if (maCrossingValue === MAEnum.price) {
-                    value = lastData.value.price
-                    prevValue = prevData.value.price
-                  } else if (lastData.value.maType === maType) {
-                    const maKey = `${maUUID}@${symbol}`
-                    const findMA = this.indicators.get(maKey)
-                    if (findMA) {
-                      const data = [...findMA.history].sort(
-                        (a, b) => b.time - a.time,
-                      )
-                      const prevMAData =
-                        findMA.interval === i.interval
-                          ? data.find((d) => d.time === prevData.time) ||
-                            data[1] ||
-                            0
-                          : data[1]
-                      const dataMA =
-                        findMA.interval === i.interval
-                          ? data.find((d) => d.time === lastData.time) ||
-                            data[0] ||
-                            0
-                          : data[0]
-                      prevValue = prevMAData
-                        ? (prevMAData.value as MAResult).ma
-                        : 0
-                      findMA.data =
-                        findMA.interval === i.interval ||
-                        timeIntervalMap[findMA.interval] <
-                          timeIntervalMap[i.interval]
-                          ? false
-                          : findMA.data
-                      this.indicators.set(maKey, findMA)
-                      value = dataMA ? (dataMA.value as MAResult).ma : 0
-                      if (
-                        (eq(prevValue, 0) && !eq(value, 0)) ||
-                        (eq(value, 0) && !eq(prevValue, 0))
-                      ) {
-                        this.handleDebug(
-                          `Indicator ${maKey} some values are zero: ${value} value, ${prevValue} prevValue | ${new Date(
-                            lastData.time,
-                          )}`,
-                        )
-                        value = 0
-                        prevValue = 0
-                      }
-                    } else {
-                      this.handleDebug(
-                        `Indicator ${maKey} not found | ${new Date(
-                          lastData.time,
-                        )}`,
-                      )
-                      value = 0
-                      prevValue = 0
-                      last = 0
-                      prev = 0
-                    }
-                  } else {
-                    value = 0
-                    prevValue = 0
-                    last = 0
-                    prev = 0
-                  }
-                }
-                if (
-                  find.type === IndicatorEnum.xo &&
-                  lastData.type === xOscillator1 &&
-                  prevData?.type === xOscillator1
-                ) {
-                  last = lastData.value.value
-                  prev = prevData.value.value
-                  const xoKey = `${xoUUID}@${symbol}`
-                  const findXO = this.indicators.get(xoKey)
-                  if (findXO) {
-                    const [dataXO, prevXOData] = [...findXO.history].sort(
-                      (a, b) => b.time - a.time,
-                    )
-                    prevValue = prevXOData
-                      ? (prevXOData.value as PercentileResult).value
-                      : 0
-                    value = dataXO
-                      ? (dataXO.value as PercentileResult).value
-                      : 0
-                    findXO.data =
-                      findXO.interval === i.interval ||
-                      timeIntervalMap[findXO.interval] <
-                        timeIntervalMap[i.interval]
-                        ? false
-                        : findXO.data
-                    this.indicators.set(xoKey, findXO)
-                  } else {
-                    last = 0
-                    prev = 0
-                    value = 0
-                    prevValue = 0
-                  }
-                }
-                if (
-                  lastData.type === IndicatorEnum.psar &&
-                  prevData.type === IndicatorEnum.psar
-                ) {
-                  last = lastData.value.price
-                  prev = prevData.value.price
-                  value = lastData.value.psar
-                  prevValue = prevData.value.psar
-                }
-                if (
-                  (lastData.type === IndicatorEnum.bb ||
-                    lastData.type === IndicatorEnum.kc) &&
-                  (prevData.type === IndicatorEnum.bb ||
-                    prevData.type === IndicatorEnum.kc)
-                ) {
-                  last = lastData.value.price
-                  prev = prevData.value.price
-                  value =
-                    bbCrossingValue === BBCrossingEnum.lower
-                      ? lastData.value.result.lower
-                      : bbCrossingValue === BBCrossingEnum.middle
-                        ? lastData.value.result.middle
-                        : lastData.value.result.upper
-                  prevValue =
-                    bbCrossingValue === BBCrossingEnum.lower
-                      ? prevData.value.result.lower
-                      : bbCrossingValue === BBCrossingEnum.middle
-                        ? prevData.value.result.middle
-                        : prevData.value.result.upper
-                }
-                if (type === IndicatorEnum.pp) {
-                  const [ld, pd] = sortedByTime
-                  const lastData = this.convertNullToNan(
-                    ld.value as PriorPivotResult,
-                  ) as PriorPivotResult
-                  const prevData = this.convertNullToNan(
-                    pd.value as PriorPivotResult,
-                  ) as PriorPivotResult
-                  if (!ppType || ppType === ppValueTypeEnum.price) {
-                    last = lastData.price
-                    prev = prevData.price
-                    value =
-                      ppValue === ppValueEnum.anyH
-                        ? isNaN(lastData.hh)
-                          ? lastData.lh
-                          : lastData.hh
-                        : ppValue === ppValueEnum.anyL
-                          ? isNaN(lastData.ll)
-                            ? lastData.hl
-                            : lastData.ll
-                          : ppValue === ppValueEnum.hh
-                            ? lastData.hh
-                            : ppValue === ppValueEnum.hl
-                              ? lastData.hl
-                              : ppValue === ppValueEnum.ll
-                                ? lastData.ll
-                                : lastData.lh
-                    prevValue =
-                      ppValue === ppValueEnum.anyH
-                        ? isNaN(prevData.hh)
-                          ? prevData.lh
-                          : prevData.hh
-                        : ppValue === ppValueEnum.anyL
-                          ? isNaN(prevData.ll)
-                            ? prevData.hl
-                            : prevData.ll
-                          : ppValue === ppValueEnum.hh
-                            ? prevData.hh
-                            : ppValue === ppValueEnum.hl
-                              ? prevData.hl
-                              : ppValue === ppValueEnum.ll
-                                ? prevData.ll
-                                : prevData.lh
-                    if (isNaN(value) || isNaN(prevValue)) {
-                      last = 0
-                      prev = 0
-                      value = 0
-                      prevValue = 0
-                    }
-                  }
-                  if (ppType === ppValueTypeEnum.event) {
-                    skipAction = true
-                    action =
-                      ((ppValue === ppValueEnum.sBullCHoCH ||
-                        ppValue === ppValueEnum.SanyBull ||
-                        ppValue === ppValueEnum.bullAnyCHoCH) &&
-                        lastData.sBullCHoCH) ||
-                      ((ppValue === ppValueEnum.sBearCHoCH ||
-                        ppValue === ppValueEnum.SanyBear ||
-                        ppValue === ppValueEnum.bearAnyCHoCH) &&
-                        lastData.sBearCHoCH) ||
-                      ((ppValue === ppValueEnum.sBullBoS ||
-                        ppValue === ppValueEnum.SanyBull ||
-                        ppValue === ppValueEnum.bullAnyBoS) &&
-                        lastData.sBullBoS) ||
-                      ((ppValue === ppValueEnum.sBearBoS ||
-                        ppValue === ppValueEnum.SanyBear ||
-                        ppValue === ppValueEnum.bearAnyBoS) &&
-                        lastData.sBearBoS) ||
-                      ((ppValue === ppValueEnum.iBullCHoCH ||
-                        ppValue === ppValueEnum.IanyBull ||
-                        ppValue === ppValueEnum.bullAnyCHoCH) &&
-                        lastData.iBullCHoCH) ||
-                      ((ppValue === ppValueEnum.iBearCHoCH ||
-                        ppValue === ppValueEnum.IanyBear ||
-                        ppValue === ppValueEnum.bearAnyCHoCH) &&
-                        lastData.iBearCHoCH) ||
-                      ((ppValue === ppValueEnum.iBullBoS ||
-                        ppValue === ppValueEnum.IanyBull ||
-                        ppValue === ppValueEnum.bullAnyBoS) &&
-                        lastData.iBullBoS) ||
-                      ((ppValue === ppValueEnum.iBearBoS ||
-                        ppValue === ppValueEnum.IanyBear ||
-                        ppValue === ppValueEnum.bearAnyBoS) &&
-                        lastData.iBearBoS)
-                    if (action && showLog) {
-                      this.handleDebug(
-                        `${uuid}@${type}@${indicatorInterval}@${this.data.exchange}@${symbol} trigger. Action: ${ppValue}`,
-                      )
-                    }
-                  }
-                  if (ppType === ppValueTypeEnum.market) {
-                    skipAction = true
-                    action =
-                      (ppValue === ppValueEnum.bullMarket &&
-                        lastData.market === 'bull') ||
-                      (ppValue === ppValueEnum.bearMarket &&
-                        lastData.market === 'bear')
-                    if (action && showLog) {
-                      this.handleDebug(
-                        `${uuid}@${type}@${indicatorInterval}@${this.data.exchange}@${symbol} trigger. Action: ${ppValue}`,
-                      )
-                    }
-                  }
-                }
-                if (
-                  (lastData.type === IndicatorEnum.stoch &&
-                    prevData.type === IndicatorEnum.stoch) ||
-                  (lastData.type === IndicatorEnum.stochRSI &&
-                    prevData.type === IndicatorEnum.stochRSI)
-                ) {
-                  if (rsiValue === rsiValueEnum.k) {
-                    last = lastData.value.stochK
-                    prev = prevData.value.stochK
-                  } else if (rsiValue === rsiValueEnum.d) {
-                    last = lastData.value.stochD
-                    prev = prevData.value.stochD
-                  }
-                  if (rsiValue2 === rsiValue2Enum.d) {
-                    value = lastData.value.stochD
-                    prevValue = prevData.value.stochD
-                  } else if (rsiValue2 === rsiValue2Enum.k) {
-                    value = lastData.value.stochK
-                    prevValue = prevData.value.stochK
-                  } else if (rsiValue2 === rsiValue2Enum.custom) {
-                    value = valueInsteadof
-                    prevValue = valueInsteadof
-                    checkValue = false
-                  }
-                }
-                if (
-                  lastData.type === IndicatorEnum.sr &&
-                  prevData.type === IndicatorEnum.sr
-                ) {
-                  last = lastData.value.price
-                  prev = prevData.value.price
-                  value =
-                    srCrossingValue === SRCrossingEnum.resistance
-                      ? lastData.value.high
-                      : lastData.value.low
-                  prevValue =
-                    srCrossingValue === SRCrossingEnum.resistance
-                      ? lastData.value.high
-                      : lastData.value.low
-                }
-                lastDataString = `${last}`
-                prevDataString = `${prev}`
-                if (
-                  (indicatorCondition === IndicatorStartConditionEnum.cu ||
-                    indicatorCondition === IndicatorStartConditionEnum.cd) &&
-                  data.length < 2
-                ) {
-                  this.handleDebug(
-                    `Not enough data to count crossing down/up. Wait for next tick`,
-                  )
-                }
-
-                if (
-                  (indicatorCondition === IndicatorStartConditionEnum.cu ||
-                    indicatorCondition === IndicatorStartConditionEnum.cd) &&
-                  data.length >= 2 &&
-                  !skipAction
-                ) {
-                  if (indicatorCondition === IndicatorStartConditionEnum.cd) {
-                    action =
-                      (gt(value, last) && lt(prevValue, prev)) ||
-                      (gt(value, last) && lte(prevValue, prev))
-                  }
-                  if (indicatorCondition === IndicatorStartConditionEnum.cu) {
-                    action =
-                      (lt(value, last) && gt(prevValue, prev)) ||
-                      (lt(value, last) && gte(prevValue, prev))
-                  }
-                }
-                if (
-                  indicatorCondition === IndicatorStartConditionEnum.gt &&
-                  !skipAction
-                ) {
-                  action = gt(last, value)
-                }
-                if (
-                  indicatorCondition === IndicatorStartConditionEnum.lt &&
-                  !skipAction
-                ) {
-                  action = lt(last, value)
-                }
-                if (
-                  indicatorCondition === IndicatorStartConditionEnum.bw &&
-                  !skipAction
-                ) {
-                  const upper =
-                    indicatorValue2 !== undefined && indicatorValue2 !== ''
-                      ? +indicatorValue2
-                      : NaN
-                  action =
-                    !isNaN(upper) &&
-                    gt(last, Math.min(value, upper)) &&
-                    lt(last, Math.max(value, upper))
-                }
-
-                if (
-                  ((lastData.type === IndicatorEnum.stoch &&
-                    prevData.type === IndicatorEnum.stoch) ||
-                    (lastData.type === IndicatorEnum.stochRSI &&
-                      prevData.type === IndicatorEnum.stochRSI)) &&
-                  action &&
-                  checkValue &&
-                  stochRange !== StochRangeEnum.none
-                ) {
-                  const upper =
-                    stochRange === StochRangeEnum.lower
-                      ? 100
-                      : stochRange === StochRangeEnum.upper
-                        ? +(stochLower ?? '')
-                        : +(stochUpper ?? '')
-                  const lower =
-                    stochRange === StochRangeEnum.upper
-                      ? 0
-                      : stochRange === StochRangeEnum.lower
-                        ? +(stochUpper ?? '')
-                        : +(stochLower ?? '')
-                  action =
-                    !isNaN(upper) &&
-                    !isNaN(lower) &&
-                    ((last > upper &&
-                      value > upper &&
-                      prev > upper &&
-                      prevValue > upper) ||
-                      (last < lower &&
-                        value < lower &&
-                        prev < lower &&
-                        prevValue < lower))
-                }
-                if (trendFilter) {
-                  action = trendFilterAction && action
-                }
-                if (action && !trendFilter && !skipAction && showLog) {
-                  this.handleDebug(
-                    `${uuid}@${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger. ${type} prev: ${prevDataString}, value prev: ${prevValue}, ${type} last: ${lastDataString}, value last: ${value} action: ${indicatorAction}, last time ${new Date(
-                      lastTime,
-                    )?.toISOString()}`,
-                  )
-                }
-                if (action && trendFilter && !skipAction && showLog) {
-                  this.handleDebug(
-                    `${uuid}@${type}@${indicatorInterval}@${
-                      this.data.exchange
-                    }@${symbol} trigger. ${type} prev: ${prevDataString}, value prev: ${prevValue}, ${type} last: ${lastDataString}, value last: ${value} action: ${indicatorAction} ${type} trend value ${trendValue}, type: ${trendFilterType}, last time ${new Date(
-                      lastTime,
-                    )?.toISOString()}`,
-                  )
-                }
-              }
-              const toMultiplier = this.convertToMultiplier(keepConditionBars)
-              const step = timeIntervalMap[indicatorInterval]
-              if (i.statusTo && i.statusTo < lastData.time + step) {
-                i.statusTo = undefined
-                i.statusSince = undefined
-              }
-              if (toMultiplier !== 0) {
-                if (action) {
-                  i.statusSince = lastData.time + step
-                  i.statusTo = lastData.time + step * (2 + toMultiplier) - 1
-                  if (i.statusTo < +new Date()) {
-                    this.handleDebug(
-                      `Indicator ${uuid}@${symbol} statusTo (${new Date(
-                        i.statusTo,
-                      )}) < now (${new Date()}). Adding step (${step}) to statusTo`,
-                    )
-                    i.statusTo += step
-                  }
-                  i.status = true
-                } else {
-                  if (i.statusSince && i.statusTo) {
-                    i.statusSince += step
-                    if (i.statusSince > i.statusTo) {
-                      i.status = false
-                      i.statusSince = undefined
-                      i.statusTo = undefined
-                      i.statusTo = i.statusSince
-                    } else {
-                      i.status = true
-                    }
-                  } else {
-                    i.status = action
-                    i.statusTo = lastData.time + step * 2 - 1
-                  }
-                }
-              } else {
-                i.status = action
-                i.statusTo = lastData.time + step * 2 - 1
-              }
+                    `Indicator ${uuid}@${symbol} statusTo (${new Date(
+                      statusTo,
+                    )}) < now (${new Date()}). Adding step (${step}) to statusTo`,
+                  ),
+              })
               this.indicators.set(key, i)
             }
           }
@@ -6480,6 +6505,12 @@ function createDCABotHelper<
       if (!this.allowedMethods.has('checkMaxDealsPerPair')) {
         return true
       }
+      if (this.singlePositionActive) {
+        // Spec 139 §2.3.2: one deal per pair by definition. `openNewDeal`
+        // routes a pair that holds a deal to an entry and serialises the
+        // signals of a pair, so the per-pair limit has nothing to add.
+        return true
+      }
       const settings = await this.getAggregatedSettings()
       if (this.useMaxDealsPerSymbolOverAndUnder) {
         const deals = this.getOpenDeals(true, symbol)
@@ -6536,6 +6567,12 @@ function createDCABotHelper<
             this.pendingDealsPerPair.set(key, pendingDeals + 1)
             return true
           } else {
+            this.reportMaxDealsReached(
+              'pair',
+              symbol,
+              overDeals.length,
+              maxDealsOver,
+            )
             return false
           }
         } else {
@@ -6545,6 +6582,12 @@ function createDCABotHelper<
             this.pendingDealsPerPair.set(key, pendingDeals + 1)
             return true
           } else {
+            this.reportMaxDealsReached(
+              'pair',
+              symbol,
+              underDeals.length,
+              maxDealsUnder,
+            )
             return false
           }
         }
@@ -6566,10 +6609,25 @@ function createDCABotHelper<
           this.handleDebug(
             `Exceed max amount of active deals by max deals per pair ${symbol}`,
           )
+          this.reportMaxDealsReached('pair', symbol, symbolDealsLength, max)
           return false
         }
       }
       return true
+    }
+    /**
+     * Spec 139: this bot holds at most one open deal per pair. DCA bots only —
+     * combo (§2.4, spec 138), hedge legs (`parentBotId`) and terminal deals
+     * ignore the setting.
+     */
+    get singlePositionActive(): boolean {
+      return (
+        !this.combo &&
+        this.botType === BotType.dca &&
+        !this.data?.parentBotId &&
+        !!this.data?.settings?.singlePosition &&
+        this.data?.settings?.type !== DCATypeEnum.terminal
+      )
     }
     get useMaxDealsOverAndUnder() {
       return (
@@ -6651,6 +6709,12 @@ function createDCABotHelper<
             this.pendingDealsOver += 1
             return true
           } else {
+            this.reportMaxDealsReached(
+              'bot',
+              symbol,
+              overDeals.length,
+              maxDealsOver,
+            )
             return false
           }
         } else {
@@ -6658,6 +6722,12 @@ function createDCABotHelper<
             this.pendingDealsUnder += 1
             return true
           } else {
+            this.reportMaxDealsReached(
+              'bot',
+              symbol,
+              underDeals.length,
+              maxDealsUnder,
+            )
             return false
           }
         }
@@ -6682,6 +6752,7 @@ function createDCABotHelper<
           this.handleDebug(
             `Exceed max amount of active deals by max deals ${symbol}`,
           )
+          this.reportMaxDealsReached('bot', symbol, dealsLength, max)
           return false
         }
       }
@@ -6700,6 +6771,58 @@ function createDCABotHelper<
         }
       }
       return false
+    }
+
+    /**
+     * Spec `163`. When the venue refused a deal's close as under its minimum
+     * order value, on a venue that accepts such a close only for the whole
+     * position, ask the venue for its position once. If it holds more than
+     * this close on the deal's side, no order closing just this deal can be
+     * accepted: return the message to report instead of retrying. Otherwise,
+     * including when the venue does not answer, return nothing and the caller
+     * keeps its usual behaviour.
+     */
+    private async sharedPositionCloseRefusal(
+      deal: FullDeal<ExcludeDoc<Deal>>,
+      reason: string,
+      closeQty: number,
+      closePrice: number,
+      ed: ClearPairsSchema,
+    ): Promise<string | undefined> {
+      if (
+        !this.futures ||
+        !this.exchange ||
+        !closesWholePositionOnlyBelowMinimum(this.data?.exchange) ||
+        !this.isNotionalReason(reason)
+      ) {
+        return
+      }
+      const symbol = deal.deal.symbol.symbol
+      const positions = await this.exchange.futures_getPositions(symbol)
+      const verdict = isPartialCloseOfSharedPosition(
+        this.data?.exchange,
+        positions?.status === StatusEnum.ok && positions.data
+          ? { kind: 'positions', positions: positions.data }
+          : { kind: 'unavailable' },
+        symbol,
+        this.isLong ? 'LONG' : 'SHORT',
+        !!this.hedge,
+        closeQty,
+        ed.baseAsset.step ?? 0,
+      )
+      if (!verdict.shared) {
+        return
+      }
+      const base = deal.deal.symbol.baseAsset
+      const value = this.math.round(closeQty * closePrice, 2)
+      return (
+        `Deal ${deal.deal._id} close refused by Hyperliquid: the close of ${closeQty} ${base} ` +
+        `(about ${value} ${deal.deal.symbol.quoteAsset}) is under Hyperliquid's $10 order minimum ` +
+        `and is only part of the ${verdict.venueQty} ${base} position this account holds on ${symbol}. ` +
+        `Hyperliquid accepts a closing order under $10 only when it would close the whole position, ` +
+        `so this deal cannot be closed on its own while another deal or bot on this account holds the rest. ` +
+        `Close the position on Hyperliquid, or close the deals on ${symbol} together.`
+      )
     }
 
     /**
@@ -6754,7 +6877,11 @@ function createDCABotHelper<
       }).filter(
         (o) =>
           +o.executedQty > 0 &&
-          ![TypeOrderEnum.br, TypeOrderEnum.rebalance].includes(o.typeOrder),
+          ![
+            TypeOrderEnum.br,
+            TypeOrderEnum.rebalance,
+            TypeOrderEnum.funding,
+          ].includes(o.typeOrder),
       )
       return ordersFeeIsThirdAssetOnly(dealOrders, baseAsset, quoteAsset)
     }
@@ -6873,14 +7000,8 @@ function createDCABotHelper<
       return { result: resendResult ?? undefined }
     }
 
-    private isPositionAlreadyClosedReason(text: string): boolean {
-      const haystack = normalizeReason(text)
-      for (const r of positionAlreadyClosedReasons) {
-        if (haystack.indexOf(normalizeReason(r)) !== -1) {
-          return true
-        }
-      }
-      return false
+    protected isPositionAlreadyClosedReason(text: string): boolean {
+      return isPositionAlreadyClosedReason(text)
     }
 
     async prepareTpOrder(
@@ -7070,6 +7191,37 @@ function createDCABotHelper<
       )
     }
     /**
+     * Whether a close request must not send its close order after all, because
+     * the deal is already being closed by a fill. The request's own cancel
+     * sweep can find the take-profit FILLED on the venue (its fill event was
+     * missed); `handleUnknownOrder` closes the deal from that fill in the
+     * background, and the order this request was about to send would sell
+     * coins the deal no longer holds. Spec `188`.
+     *
+     * `sweptFilledTp` is that finding. Without it only the live deal is read,
+     * which a close of a deal that is still open passes unchanged.
+     */
+    protected async closeSupersededByFill(
+      dealId: string,
+      sweptFilledTp: boolean,
+    ): Promise<boolean> {
+      const live = this.getDeal(dealId)
+      if (
+        !live ||
+        live.deal.status !== DCADealStatusEnum.open ||
+        this.pendingClose.has(dealId)
+      ) {
+        return true
+      }
+      return (
+        sweptFilledTp &&
+        this.dealClosedByFilledTp(
+          dealId,
+          await this.getAggregatedSettings(live.deal),
+        )
+      )
+    }
+    /**
      * Manualy close deal by id
      *
      * @param {string} dealId Id of the deal
@@ -7244,12 +7396,22 @@ function createDCABotHelper<
             dealId,
             true,
           ).then(() => this.allowToPlaceOrders.delete(dealId))
+        let swept: Order[] | void
         if (fastClose) {
-          await closeSell()
+          swept = await closeSell()
         } else {
-          await this.cancelAllOrder(0, dealId, true)
+          swept = await this.cancelAllOrder(0, dealId, true)
           this.allowToPlaceOrders.delete(dealId)
         }
+        // Spec `188`: the sweep can find the deal's take-profit already FILLED
+        // on the venue. That fill closes the deal in the background, so it is
+        // re-checked right before the close order below is sent.
+        const sweptFilledTp = (swept ?? []).some(
+          (o) =>
+            o.dealId === dealId &&
+            o.typeOrder === TypeOrderEnum.dealTP &&
+            !o.reduceFundsId,
+        )
         findDeal = this.getDeal(dealId)
         if (findDeal && findDeal.deal.status === DCADealStatusEnum.open) {
           if (closeTrigger) {
@@ -7342,6 +7504,16 @@ function createDCABotHelper<
               // real-fee close is NOT live on the venue — see the restore at
               // the end of the terminal-refusal branch.
               let realFeeFateUnconfirmed = false
+              if (await this.closeSupersededByFill(dealId, sweptFilledTp)) {
+                if (fastClose) {
+                  await closeBuy()
+                }
+                this.handleLog(
+                  `Deal ${dealId} is already being closed by its filled take-profit, not sending ${tpOrder.newClientOrderId}`,
+                )
+                this.endMethod(_id)
+                return
+              }
               let result = await this.sendGridToExchange(
                 {
                   ...realFeeOrder,
@@ -7488,9 +7660,20 @@ function createDCABotHelper<
                 }
                 if (result) {
                   if (typeof result === 'string') {
+                    // Spec `163`: a refusal no retry can change. Only the
+                    // reported message differs; everything below still reads
+                    // the venue's own `result`.
+                    const sharedRefusal = await this.sharedPositionCloseRefusal(
+                      findDeal,
+                      result,
+                      tpOrder.qty,
+                      tpOrder.price,
+                      symbol,
+                    )
                     if (
                       this.isNotionalReason(result) &&
-                      count < this.slippageRetry
+                      count < this.slippageRetry &&
+                      !sharedRefusal
                     ) {
                       this.handleDebug(
                         `Cannot place take profit due to slippage ${
@@ -7528,7 +7711,7 @@ function createDCABotHelper<
                       return await this.closeDeal(this.botId, dealId)
                     } else {
                       this.handleOrderErrors(
-                        result,
+                        sharedRefusal ?? result,
                         {
                           symbol: symbol.pair,
                           orderId: '0',
@@ -7729,6 +7912,26 @@ function createDCABotHelper<
           )
         }
       }
+      // The API already answered "scheduled to be closed", but a deal in
+      // `error` (its base order failed) matches none of the branches above —
+      // only `start`/`open` deals and a Cancel are actioned — so the request
+      // ended here without a trace. Say so. Only for a caller who was
+      // answered (`manual` / `api`); a Cancel has already turned it `canceled`.
+      if (
+        findDeal &&
+        findDeal.deal.status === DCADealStatusEnum.error &&
+        verdictForMissingDealOnClose(findDeal.deal.status, closeTrigger) ===
+          'report'
+      ) {
+        await this.reportUserRefusal(
+          closeRefusedForStatusMessage(
+            dealId,
+            findDeal.deal.symbol.symbol,
+            findDeal.deal.status,
+          ),
+          findDeal.deal.symbol.symbol,
+        )
+      }
       this.endMethod(_id)
     }
 
@@ -7737,10 +7940,23 @@ function createDCABotHelper<
       symbol: string,
       section: 'sl' | 'tp',
     ) {
-      if (!this.data || !this.allowedMethods.has('checkMinTp')) {
+      if (!this.data) {
         return true
       }
       const settings = await this.getAggregatedSettings(d.deal)
+      // `allowedMethods` is derived from the bot's current settings; a deal
+      // that still closes by signal under its own settings keeps its own
+      // minimum profit after the bot moved to another close. Spec 167.
+      const dealClosesBySignal =
+        section === 'sl'
+          ? settings.dealCloseConditionSL === CloseConditionEnum.techInd
+          : !!settings.dealCloseCondition &&
+            [CloseConditionEnum.techInd, CloseConditionEnum.webhook].includes(
+              settings.dealCloseCondition,
+            )
+      if (!this.allowedMethods.has('checkMinTp') && !dealClosesBySignal) {
+        return true
+      }
       let value: number | undefined
       let isGt = true
       if (
@@ -7757,8 +7973,7 @@ function createDCABotHelper<
       }
       if (section === 'sl') {
         const foundUnpnl =
-          this.data?.settings.dealCloseConditionSL ===
-          CloseConditionEnum.techInd
+          settings.dealCloseConditionSL === CloseConditionEnum.techInd
             ? (this.data?.settings.indicators ?? []).find(
                 (i) =>
                   i.type === IndicatorEnum.unpnl &&
@@ -7772,20 +7987,29 @@ function createDCABotHelper<
           value = (foundUnpnl.unpnlValue ?? this.defaultUnpnl) / 100
         }
       }
-      if (
-        section === 'tp' &&
-        (this.data.settings.stopDealLogic === IndicatorsLogicEnum.and ||
-          !this.data.settings.stopDealLogic)
-      ) {
+      if (section === 'tp') {
         const foundUnpnl =
-          this.data?.settings.dealCloseCondition === CloseConditionEnum.techInd
+          settings.dealCloseCondition === CloseConditionEnum.techInd
             ? (this.data?.settings.indicators ?? []).find(
                 (i) =>
                   i.type === IndicatorEnum.unpnl &&
                   i.section !== IndicatorSection.sl,
               )
             : undefined
-        if (foundUnpnl) {
+        // Applies while the P&L indicator is ANDed with others; a P&L group
+        // standing alone between ORs closes by itself instead.
+        const unpnlAnded =
+          !!foundUnpnl &&
+          !groupStandsAlone(
+            (this.data.settings.indicatorGroups ?? []).filter(
+              (g) =>
+                g.action === IndicatorAction.closeDeal &&
+                g.section !== IndicatorSection.sl,
+            ),
+            foundUnpnl.groupId,
+            this.data.settings.stopDealLogic,
+          )
+        if (foundUnpnl && unpnlAnded) {
           isGt =
             (foundUnpnl.unpnlCondition ?? this.defaultUnpnlCondition) ===
             IndicatorStartConditionEnum.gt
@@ -7829,6 +8053,8 @@ function createDCABotHelper<
       slSource = false,
       liquidationPrice?: number,
       closeTrigger?: DCACloseTriggerEnum,
+      /** Only deals created before this instant (a late close signal). */
+      openedBefore?: number,
     ) {
       if (!this.loadingComplete) {
         this.runAfterLoadingQueue.push(() =>
@@ -7841,6 +8067,7 @@ function createDCABotHelper<
             slSource,
             liquidationPrice,
             closeTrigger,
+            openedBefore,
           ),
         )
         return this.handleLog('Loading not complete yet')
@@ -7854,6 +8081,12 @@ function createDCABotHelper<
         }
       }[] = []
       for (const d of this.getOpenDeals(ignoreStart, symbol)) {
+        if (openedBefore && !(d.deal.createTime < openedBefore)) {
+          this.handleLog(
+            `Deal ${d.deal._id} opened after the late close signal arrived; not closed by it`,
+          )
+          continue
+        }
         const settings = await this.getAggregatedSettings(d.deal)
         if (
           force ||
@@ -8040,6 +8273,67 @@ function createDCABotHelper<
     }
 
     /**
+     * Fired when `openNewDeal` is refused by a max-open-deals limit. `scope`
+     * says which limit: the bot's (`symbol` is the pair that wanted to start)
+     * or the pair's own. `open`/`max` are the count and the limit that refused
+     * it — for the over/under split, the side that was full. Already
+     * deduplicated by {@link reportMaxDealsReached}.
+     */
+    async sendMaxDealsReachedAlert(
+      _scope: 'bot' | 'pair' | 'entries',
+      _symbol: string,
+      _open: number,
+      _max: number,
+    ) {
+      return
+    }
+
+    /**
+     * Report a max-deals refusal at most once per re-arm window per limit (and
+     * per pair for the per-pair limit). The limit value is part of the key, so
+     * a user who raises it and fills the new one hears about it the same day.
+     */
+    /** No re-arm: see {@link reportMaxDealsReached}. */
+    asapMaxDealsLatch = new ConditionLatch(0)
+
+    reportMaxDealsReached(
+      /** `entries`: a single-position deal is full (spec 139 §3.2.2). */
+      scope: 'bot' | 'pair' | 'entries',
+      symbol: string,
+      open: number,
+      max: number,
+    ) {
+      if (!this.allowedMethods.has('sendMaxDealsReachedAlert') || max <= 0) {
+        return
+      }
+      const key = standingConditionKey(
+        `${
+          scope === 'bot'
+            ? maxDealsReached
+            : scope === 'entries'
+              ? positionEntriesReached
+              : maxDealsPerPairReached
+        }:${max}`,
+        scope === 'bot' ? undefined : symbol,
+      )
+      // An ASAP bot is full by design: it probes for a new deal after every
+      // close and is refused while at the limit, so a daily re-arm would just
+      // say "still full" every day. Report it once per limit value instead.
+      const latch =
+        this.data?.settings.startCondition === StartConditionEnum.asap
+          ? this.asapMaxDealsLatch
+          : this.standingConditionLatch
+      if (!latch.shouldReport(key, Date.now())) {
+        return
+      }
+      this.sendMaxDealsReachedAlert(scope, symbol, open, max).catch((e) =>
+        this.handleWarn(
+          `Max deals reached alert failed: ${(e as Error)?.message ?? e}`,
+        ),
+      )
+    }
+
+    /**
      * Start deal when BO is filled
      *
      * @param {Order} orderBo Base order
@@ -8171,6 +8465,10 @@ function createDCABotHelper<
           this.stop()
         }
         await this.updateDealLastPrices(this.botId)
+        // Spec 139: an ASAP position asks for its next entry once open.
+        if (findDeal.deal.status === DCADealStatusEnum.open) {
+          this.armNextPositionEntry(orderBo.symbol)
+        }
       }
       if (
         (!findDeal && dealId) ||
@@ -8211,7 +8509,18 @@ function createDCABotHelper<
       updateBalances = true,
       force = false,
       lateEntryFill = false,
-    ) {
+      /**
+       * Spec `157`. `closeDeal` sends the sweep BEFORE it commits the close, so
+       * that a refusal it cannot recover from after the fact (a limit-only
+       * book) can still keep the deal open:
+       * - `'send'`: send only, and return what the venue answered — nothing is
+       *   booked and the `sellRemainder` flag is not set. Returns nothing when
+       *   a guard below stopped it before a send.
+       * - `{ result }`: the sweep was already sent; book this answer instead
+       *   of sending a second one.
+       */
+      sweep?: 'send' | { result: Order | string | void },
+    ): Promise<{ result: Order | string | void; qty: number } | void> {
       if (
         this.data?.settings.type === DCATypeEnum.terminal &&
         this.data.settings.terminalDealType === TerminalDealTypeEnum.simple
@@ -8329,10 +8638,19 @@ function createDCABotHelper<
         if (
           sellQty > 0 &&
           sellQty >= ed.baseAsset.minAmount &&
-          sellQty * price >= ed.quoteAsset.minAmount
+          // Spec `162` — see `closeDeal`.
+          sellQty * price >=
+            closeOrderQuoteMinimum(
+              this.data?.exchange,
+              this.hedge,
+              ed.quoteAsset.minAmount,
+            )
         ) {
-          const result = await this.sendGridToExchange(
-            {
+          let result: Order | string | void
+          if (sweep && sweep !== 'send') {
+            result = sweep.result
+          } else {
+            const grid: Grid = {
               price: this.math.round(price, ed.priceAssetPrecision),
               number: 0,
               side: !long ? OrderSideEnum.buy : OrderSideEnum.sell,
@@ -8340,19 +8658,50 @@ function createDCABotHelper<
               type: TypeOrderEnum.dealTP,
               newClientOrderId: this.getOrderId(`D-SR`),
               dealId,
-            },
-            {
+            }
+            const additional: OrderAdditionalParams = {
               dealId,
-              type: 'MARKET',
+              type: OrderTypeEnum.market,
               reduceOnly: true,
               positionSide: this.hedge
                 ? this.isLong
                   ? PositionSide.LONG
                   : PositionSide.SHORT
                 : PositionSide.BOTH,
-            },
-            ed,
-          )
+            }
+            if (sweep !== 'send') {
+              result = await this.sendGridToExchange(grid, additional, ed)
+            } else {
+              // `returnError` so the caller can read the reason. That also
+              // skips the report the send makes for everyone else, so make it
+              // here — same call, `D-SR` never sets a bot error.
+              result = await this.sendGridToExchange(
+                grid,
+                additional,
+                ed,
+                true,
+              )
+              if (typeof result === 'string') {
+                const order = this.convertGridToOrder(grid, additional, ed)
+                if (order) {
+                  await this.handleOrderErrors(
+                    result,
+                    order,
+                    'limitOrders()',
+                    `Send new order request ${order.clientOrderId}, qty ${order.origQty}, price ${order.price}, side ${order.side}`,
+                    false,
+                    false,
+                  )
+                }
+              }
+              this.endMethod(_id)
+              return { result, qty: sellQty }
+            }
+          }
+          if (typeof result === 'string') {
+            // Already reported by the `'send'` call that produced it.
+            result = undefined
+          }
           if (result) {
             const srQty = +result.executedQty
             const srPrice = +result.price
@@ -8703,10 +9052,20 @@ function createDCABotHelper<
           })
         }
         if (roa) {
+          const baseRemainderFill = (findDeal.deal.pendingAddFunds ?? []).some(
+            (s) => s.id === order.addFundsId && s.baseRemainder,
+          )
           findDeal.deal.pendingAddFunds = (
             findDeal.deal.pendingAddFunds ?? []
           ).filter((s) => s.id !== order.addFundsId)
-          findDeal.deal.funds = [...(findDeal.deal.funds ?? []), { price, qty }]
+          // Spec 165: a base-remainder fill keeps its marker, so the deal can
+          // show it as the rest of the base order rather than added funds.
+          findDeal.deal.funds = [
+            ...(findDeal.deal.funds ?? []),
+            baseRemainderFill
+              ? { price, qty, id: order.addFundsId, baseRemainder: true }
+              : { price, qty },
+          ]
           const avgPrice = await this.getAvgPrice(dealId)
           findDeal.deal.avgPrice = avgPrice.avg
           findDeal.deal.displayAvg = avgPrice.display
@@ -8771,9 +9130,39 @@ function createDCABotHelper<
           // out. Fills not booked yet are left to their own `updateDeal`.
           await this.updateDealBalances(findDeal, true)
           findDeal.closeByTp = false
+          // Spec 139 §3.4: a single-position entry grows the position.
+          const positionEntry = !!order.positionEntry
+          if (positionEntry) {
+            findDeal.deal.positionEntries = positionEntriesOf(findDeal.deal) + 1
+            // §3.4.3: the target moved — the trail re-bases, as on a safety
+            // order fill.
+            findDeal.deal.bestPrice = 0
+            this.positionEntriesSent?.get(dealId)?.delete(clientOrderId)
+          }
           await this.checkDealSlMethods(findDeal)
           this.checkDealsPriceExtremum()
           this.carryStopLossLatches(findDeal)
+          if (positionEntry) {
+            const fillTime = +new Date()
+            // §3.4.2: the dynamic filter's reference and the start of the
+            // cooldown after deal start are this fill.
+            this.updateDealLastPrices(this.botId, {
+              symbol: order.symbol,
+              avg: price,
+              entry: price,
+              time: fillTime,
+            })
+            this.updateDealLastTime(
+              this.botId,
+              'opened',
+              fillTime,
+              order.symbol,
+            )
+            this.saveDeal(findDeal, {
+              positionEntries: findDeal.deal.positionEntries,
+              bestPrice: 0,
+            })
+          }
           this.saveDeal(findDeal, {
             funds: findDeal.deal.funds,
             pendingAddFunds: findDeal.deal.pendingAddFunds,
@@ -8797,6 +9186,9 @@ function createDCABotHelper<
             dealId,
             this.findDiff(findDeal.currentOrders, findDeal.previousOrders),
           )
+          if (positionEntry || baseRemainderFill) {
+            this.armNextPositionEntry(order.symbol)
+          }
         } else if (order.typeOrder === TypeOrderEnum.dealTP) {
           const isReduce = !!order.reduceFundsId
           if (isReduce) {
@@ -9510,12 +9902,7 @@ function createDCABotHelper<
       this.handleDebug(
         `${order.clientOrderId} not filled, price unchanged at ${order.price}. Keeping it`,
       )
-      this.armBaseRepositionTick(
-        dealTimer,
-        dealId,
-        symbol,
-        order.clientOrderId,
-      )
+      this.armBaseRepositionTick(dealTimer, dealId, symbol, order.clientOrderId)
       this.dealTimersMap.set(dealId, dealTimer)
       return true
     }
@@ -10211,6 +10598,72 @@ function createDCABotHelper<
     }
 
     /**
+     * A remainder entry's order, when it is recorded as ended (`CANCELED` or
+     * `EXPIRED`) — the order map first, then the stored row.
+     *
+     * The tick otherwise learns of the end only from its own cancel answer. A
+     * venue whose answer still reads the order as open (Coinbase answers with
+     * a read made right after the cancel) leaves the end on the user stream
+     * alone, and `cancelOrderOnExchange` has already dropped the unfilled row
+     * from the map; the stored row keeps the stream's `CANCELED`. Spec `166`.
+     *
+     * `minAgeMs`: an order this tick did not just cancel itself counts only
+     * once it ended that long ago. A deal close and a settings rebuild cancel
+     * the remainder with the deal still `open` and own what happens next (the
+     * close, or the spec `110` re-send); the tick must not re-place in their
+     * stead. An end that cannot be dated is left alone for the same reason.
+     */
+    async findEndedBaseRemainderOrder(
+      dealId: string,
+      addFundsId: string,
+      minAgeMs = 0,
+    ): Promise<Order | null> {
+      const ended: OrderStatusType[] = ['CANCELED', 'EXPIRED']
+      const oldEnough = (o: { updateTime?: number }) =>
+        !minAgeMs ||
+        (+(o.updateTime ?? 0) > 0 && Date.now() - +o.updateTime! >= minAgeMs)
+      const held = this.getOrdersByStatusAndDealId({
+        dealId,
+        status: ['CANCELED', 'EXPIRED'],
+      }).find((o) => o.addFundsId === addFundsId)
+      if (held) {
+        return oldEnough(held) ? held : null
+      }
+      const stored = await this.ordersDb.readData({
+        botId: this.botId,
+        dealId,
+        addFundsId,
+        status: { $in: ended },
+      })
+      const row = stored.status === StatusEnum.ok ? stored.data?.result : null
+      if (
+        !row ||
+        row.addFundsId !== addFundsId ||
+        !ended.includes(row.status) ||
+        !oldEnough(row)
+      ) {
+        return null
+      }
+      return { ...row, _id: `${row._id}` }
+    }
+
+    /**
+     * Book what an ended remainder order filled, through the add-funds fill
+     * path, and return that quantity. Same rule as a terminal cancel answer in
+     * `settleBaseEntryRemainderOrder`: only a fill that can be dated. Spec `166`.
+     */
+    async bookEndedBaseRemainderOrder(order: Order): Promise<number> {
+      const fill = settledBaseEntryFill(order, order)
+      if (fill && +fill.executedQty > 0) {
+        await this.handleUnknownOrder(
+          this.promoteEndedBaseEntry({ ...order, ...fill }),
+        )
+        return +fill.executedQty
+      }
+      return 0
+    }
+
+    /**
      * The reposition tick of a resting base-order remainder.
      *
      * The spec `103` rule, applied to the remainder: at an unchanged price it
@@ -10241,8 +10694,28 @@ function createDCABotHelper<
       }
       const order = this.findBaseRemainderOrder(dealId, entry.id)
       if (!order) {
-        // Not on the book yet, or gone; the reload re-send owns a missing
-        // entry (spec 110). §4.3.5.
+        // An order that ended without this tick hearing of it (spec 166 §4.2):
+        // book what it filled and place the rest again.
+        const ended = await this.findEndedBaseRemainderOrder(
+          dealId,
+          entry.id,
+          Math.max(60_000, this.orderLimitRepositionTimeout),
+        )
+        if (ended) {
+          this.handleLog(
+            `Deal ${dealId} base order remainder ${ended.clientOrderId} is ${ended.status} on the exchange. Placing the rest again`,
+          )
+          await this.replaceBaseEntryRemainder(
+            deal,
+            entry,
+            ended,
+            symbol,
+            await this.bookEndedBaseRemainderOrder(ended),
+          )
+          return
+        }
+        // Not on the book yet; the reload re-send owns a missing entry (spec
+        // 110). §4.3.5.
         this.armBaseRemainderTick(dealId, symbol)
         return
       }
@@ -10271,15 +10744,36 @@ function createDCABotHelper<
       this.handleLog(
         `Deal ${dealId} base order remainder ${order.clientOrderId} rests at ${restingPrice}, price is now ${repositionPrice}. Re-placing it`,
       )
-      const requested = this.baseRemainderRequestedQty(order, entry)
-      const executed = await this.settleBaseEntryRemainderOrder(order)
+      let executed = await this.settleBaseEntryRemainderOrder(order)
       if (executed === null) {
-        this.handleWarn(
-          `Deal ${dealId} base order remainder ${order.clientOrderId} could not be cancelled. Leaving it`,
-        )
-        this.armBaseRemainderTick(dealId, symbol)
-        return
+        // The answer did not say the order ended; the user stream may have.
+        // Spec 166 §4.1.
+        const ended = await this.findEndedBaseRemainderOrder(dealId, entry.id)
+        if (!ended) {
+          this.handleWarn(
+            `Deal ${dealId} base order remainder ${order.clientOrderId} could not be cancelled. Leaving it`,
+          )
+          this.armBaseRemainderTick(dealId, symbol)
+          return
+        }
+        executed = await this.bookEndedBaseRemainderOrder(ended)
       }
+      await this.replaceBaseEntryRemainder(deal, entry, order, symbol, executed)
+    }
+
+    /**
+     * Take an ended remainder's entry off the deal and place what it did not
+     * fill again at the current price. Spec `111` §4.3.3, spec `166`.
+     */
+    async replaceBaseEntryRemainder(
+      deal: FullDeal<ExcludeDoc<Deal>>,
+      entry: { id: string; qty: string; baseTotal?: string },
+      order: Order,
+      symbol: string,
+      executed: number,
+    ) {
+      const dealId = `${deal.deal._id}`
+      const requested = this.baseRemainderRequestedQty(order, entry)
       const live = this.getDeal(dealId) ?? deal
       this.dropBaseRemainderEntry(live, entry.id)
       if (requested > executed && live.deal.status === DCADealStatusEnum.open) {
@@ -10584,7 +11078,9 @@ function createDCABotHelper<
           orderSizeType === OrderSizeTypeEnum.percFree ||
           orderSizeType === OrderSizeTypeEnum.percTotal
         ) {
-          const balances = await this.getBalancesFromExchange()
+          const balances = await withExchangeCaller('bot.dealSizing', () =>
+            this.getBalancesFromExchange(),
+          )
           if (balances && balances.status === StatusEnum.ok) {
             const long = this.isLong
             const asset = this.futures
@@ -10857,6 +11353,7 @@ function createDCABotHelper<
       sizes?: Sizes | null,
       orderSizeType?: OrderSizeTypeEnum,
       forceLimit = false,
+      signalOverrides?: SignalDealOverrides | null,
     ) {
       if (!this.shouldProceed()) {
         this.handleLog(this.notProceedMessage('place base order'))
@@ -10874,6 +11371,7 @@ function createDCABotHelper<
           dynamicAr,
           sizes,
           orderSizeType,
+          signalOverrides,
         )
         if (!dealId) {
           this.resetPending(this.botId, symbol)
@@ -10999,6 +11497,53 @@ function createDCABotHelper<
             avg: +baseOrder.price,
             time: this.getDeal(dealId)?.deal.createTime,
           })
+          if (
+            !this.data.settings.futures &&
+            dealId &&
+            // Spec 044 beta gate: only a deal created with base funding.
+            this.isBaseFundingDeal(this.getDeal(dealId)?.deal)
+          ) {
+            // Spec 044 §8: a deal funded (or being funded) before a restart
+            // never gets a real base order.
+            const resumed = await this.resumeFundedEntry(
+              symbol,
+              dealId,
+              baseOrder,
+            )
+            if (resumed !== 'none') {
+              this.endMethod(_id)
+              return
+            }
+            // Fix round 2: a restored `start` deal whose hedge action spends
+            // the account's funds (a restart while it waited for the lock or
+            // planned, before any funding record) is decided under the lock
+            // like a new one — never an unplanned real base order.
+            const restored = oldDealId ? this.getDeal(dealId) : undefined
+            const restoredAction = restored?.deal.action
+            if (
+              restored &&
+              restored.deal.status === DCADealStatusEnum.start &&
+              restoredAction &&
+              restoredAction !== ActionsEnum.noAction &&
+              restoredAction !== ActionsEnum.useOppositeBalance
+            ) {
+              const started = await this.fundHedgeLegEntry(
+                symbol,
+                dealId,
+                baseOrder,
+                restoredAction,
+              )
+              if (started === 'refused') {
+                this.endMethod(_id)
+                return
+              }
+              if (started === 'virtual') {
+                this.endMethod(_id)
+                return this.startFundedDeal(baseOrder)
+              }
+              // `held`: the real base order below, checked and held.
+            }
+          }
           if (!this.data.settings.futures) {
             if (this.data?.action) {
               this.db?.updateData(
@@ -11021,10 +11566,53 @@ function createDCABotHelper<
                   false,
                 )
               }
-              if (
-                deal.deal.action &&
-                deal.deal.action !== ActionsEnum.useBalance
-              ) {
+              if (deal.deal.action && !this.isBaseFundingDeal(deal.deal)) {
+                // Spec 044 beta gate: a deal created without base funding
+                // starts exactly as before phases 2–3 (phase-1 hedge funding).
+                if (deal.deal.action !== ActionsEnum.useBalance) {
+                  if (deal.deal.action === ActionsEnum.noAction) {
+                    this.resetPending(this.botId, symbol)
+                    this.endMethod(_id)
+                    return this.handleErrors(
+                      `Cannot place base order. Action is noAction`,
+                      'placeBaseOrder',
+                    )
+                  }
+                  let proceedBaseOrder = false
+                  if (
+                    HEDGE_FUNDING_ACTIONS.includes(deal.deal.action) &&
+                    deal.deal.settings.useDca
+                  ) {
+                    this.handleDebug(`Action ${deal.deal.action} detected`)
+                    if (
+                      !(await this.placeHedgeFundingOrder(
+                        symbol,
+                        dealId,
+                        deal.deal,
+                        deal.deal.action,
+                      ))
+                    ) {
+                      this.endMethod(_id)
+                      return
+                    }
+                    proceedBaseOrder = true
+                  }
+                  if (deal.deal.action === ActionsEnum.useOppositeBalance) {
+                    this.handleDebug(`Action ${deal.deal.action} detected`)
+                    proceedBaseOrder = true
+                  }
+                  if (proceedBaseOrder) {
+                    baseOrder.status = 'FILLED'
+                    baseOrder.executedQty = baseOrder.origQty
+                    // main-app spec 044 §3.3: no venue trade behind this fill.
+                    baseOrder.fundingSource = 'virtual'
+                    this.setOrder(baseOrder)
+                    this.ordersDb.createData(baseOrder)
+                    this.endMethod(_id)
+                    return this.startDeal(baseOrder)
+                  }
+                }
+              } else if (deal.deal.action) {
                 if (deal.deal.action === ActionsEnum.noAction) {
                   this.resetPending(this.botId, symbol)
                   this.endMethod(_id)
@@ -11033,120 +11621,54 @@ function createDCABotHelper<
                     'placeBaseOrder',
                   )
                 }
-                let proceedBaseOrder = false
-                if (
-                  [
-                    ActionsEnum.buyDiff,
-                    ActionsEnum.buyForAll,
-                    ActionsEnum.sellDiff,
-                    ActionsEnum.sellForAll,
-                  ].includes(deal.deal.action) &&
-                  deal.deal.settings.useDca
-                ) {
-                  this.handleDebug(`Action ${deal.deal.action} detected`)
-                  const lp = await this.getLatestPrice(symbol)
-                  const orders = await this.createInitialDealOrders(
-                    symbol,
-                    lp,
-                    dealId,
-                    deal.deal,
-                  )
-                  const required = this.isLong
-                    ? orders.reduce((acc, v) => acc + v.qty * v.price, 0) / lp
-                    : orders.reduce((acc, v) => acc + v.qty, 0) * lp
-                  this.handleDebug(
-                    `Required amount for ${deal.deal.action} is ${required}, price is ${lp}`,
-                  )
-                  const ei = await this.getExchangeInfo(symbol)
-                  const balance =
-                    (await this.checkAssets(true, true))?.get(
-                      (this.isLong
-                        ? ei?.baseAsset.name
-                        : ei?.quoteAsset.name) ?? '',
-                    )?.free ?? 0
-                  this.handleDebug(`Available balance is ${balance}`)
-                  const orderSize = [
-                    ActionsEnum.buyDiff,
-                    ActionsEnum.sellDiff,
-                  ].includes(deal.deal.action)
-                    ? required - balance
-                    : required
-                  this.handleDebug(`Order size is ${orderSize}`)
-                  if (orderSize > 0) {
-                    const price = `${this.math.round(
-                      lp,
-                      ei?.priceAssetPrecision,
-                    )}`
-                    const qty = `${this.math.round(
-                      orderSize * (this.isLong ? 1 : 1 / lp),
-                      await this.baseAssetPrecision(symbol),
-                    )}`
-                    const r = await this.sendOrderToExchange(
-                      {
-                        clientOrderId: this.getOrderId('CMB-H'),
-                        status: 'NEW',
-                        executedQty: '0',
-                        price: price,
-                        origPrice: price,
-                        cummulativeQuoteQty: `${+price * +qty}`,
-                        orderId: '-1',
-                        origQty: `${qty}`,
-                        side: this.isLong
-                          ? OrderSideEnum.sell
-                          : OrderSideEnum.buy,
-                        symbol,
-                        type: OrderTypeEnum.market,
-                        updateTime: new Date().getTime(),
-                        transactTime: new Date().getTime(),
-                        exchange: this.data.exchange,
-                        exchangeUUID: this.data.exchangeUUID,
-                        typeOrder: TypeOrderEnum.dealStart,
-                        botId: this.botId,
-                        userId: this.userId,
-                        dealId,
-                        fills: [],
-                        baseAsset: ei?.baseAsset.name ?? '',
-                        quoteAsset: ei?.quoteAsset.name ?? '',
-                      },
-                      true,
-                    )
-                    if (typeof r === 'string') {
-                      this.endMethod(_id)
-                      return this.handleErrors(
-                        `Error placing order: ${r}`,
-                        'placeBaseOrder',
-                        '',
-                        false,
-                        false,
-                        false,
-                      )
-                    }
-                    if (!r) {
-                      this.endMethod(_id)
-                      return this.handleErrors(
-                        `Error placing order`,
-                        'placeBaseOrder',
-                        '',
-                        false,
-                        false,
-                        false,
-                      )
-                    }
-                    this.handleDebug(`Order ${r.clientOrderId} filled`)
-                  }
-                  proceedBaseOrder = true
-                }
+                this.handleDebug(`Action ${deal.deal.action} detected`)
                 if (deal.deal.action === ActionsEnum.useOppositeBalance) {
-                  this.handleDebug(`Action ${deal.deal.action} detected`)
-                  proceedBaseOrder = true
-                }
-                if (proceedBaseOrder) {
+                  // Unchanged: virtual base order, virtual levels — nothing
+                  // of the account's is spent at start.
                   baseOrder.status = 'FILLED'
                   baseOrder.executedQty = baseOrder.origQty
+                  // main-app spec 044 §3.3: no venue trade behind this fill.
+                  baseOrder.fundingSource = 'virtual'
                   this.setOrder(baseOrder)
                   this.ordersDb.createData(baseOrder)
                   this.endMethod(_id)
                   return this.startDeal(baseOrder)
+                }
+                // Main-app spec 044 §8: every other hedge start action uses
+                // the account's funds and is decided — and funded, or its need
+                // held — under the account's funding lock.
+                const started = await this.fundHedgeLegEntry(
+                  symbol,
+                  dealId,
+                  baseOrder,
+                  deal.deal.action,
+                )
+                if (started === 'refused') {
+                  this.endMethod(_id)
+                  return
+                }
+                if (started === 'virtual') {
+                  this.endMethod(_id)
+                  return this.startFundedDeal(baseOrder)
+                }
+                // `held`: `useBalance`, a funding action without DCA, or a
+                // `*Diff` leg its own funds cover — the real base order below.
+              }
+              if (!deal.deal.action) {
+                // Main-app spec 044: a short spot deal the bot funds itself.
+                const funded = await this.fundShortSpotEntry(
+                  symbol,
+                  dealId,
+                  baseOrder,
+                )
+                if (funded === 'refused') {
+                  // Reported and the deal retired, like an unbuilt entry.
+                  this.endMethod(_id)
+                  return
+                }
+                if (funded === 'virtual') {
+                  this.endMethod(_id)
+                  return this.startFundedDeal(baseOrder)
                 }
               }
             }
@@ -11165,6 +11687,10 @@ function createDCABotHelper<
             },
             true,
           )
+          if (dealId && this.getDeal(dealId)?.deal.fundingHold) {
+            // Spec 044 §8.4: the base order no longer needs holding.
+            await this.syncFundingHold(dealId)
+          }
           if (result) {
             if (
               typeof result !== 'string' &&
@@ -11584,6 +12110,33 @@ function createDCABotHelper<
       }
     }
     /**
+     * Set `deals` from what this load holds: `all` from the database count
+     * (the stored value when the count failed), `active` from the `open` and
+     * `start` deals in memory. Writes only when that differs from the stored
+     * counter, so a service restart does not write every bot. Shares the
+     * `updateBotDeals` mutex. Spec 183.
+     */
+    @IdMute(mutex, (botId) => `updateBotDeals${botId}`)
+    async reconcileBotDeals(_botId: string, all?: number) {
+      if (!this.data) {
+        return
+      }
+      const stored = this.data.deals ?? { all: 0, active: 0 }
+      const deals = {
+        all: all ?? stored.all,
+        active: this.getOpenDeals().length,
+      }
+      if (deals.all === stored.all && deals.active === stored.active) {
+        return
+      }
+      this.handleLog(
+        `Bot deals counter ${stored.active}/${stored.all} (active/all) does not match the loaded deals, set to ${deals.active}/${deals.all}`,
+      )
+      this.data.deals = deals
+      await this.updateData({ deals })
+      this.emit('bot settings update', { dealsInBot: deals })
+    }
+    /**
      * Update bot deals
      * @param {boolean} increase
      */
@@ -11633,30 +12186,15 @@ function createDCABotHelper<
     }
 
     getPendingReduceFunds(deal: FullDeal<ExcludeDoc<Deal>>) {
-      const pendingReduceFunds =
-        deal.deal.pendingReduceFunds ??
-        ([] as unknown as NonNullable<Deal['pendingReduceFunds']>)
-      const base = pendingReduceFunds.reduce(
-        (acc, v) =>
-          acc +
-          (v.useLimitPrice
-            ? v.asset === OrderSizeTypeEnum.base
-              ? +v.qty
-              : +v.qty / +(v.limitPrice ?? '0')
-            : 0),
-        0,
+      // The resting reduce order, when there is one, is the withdrawal; a
+      // percentage request is not an amount. See `./dca/pendingReduceQty`.
+      return pendingReduceQty(
+        (deal.deal.pendingReduceFunds ?? []) as PendingReduceEntry[],
+        this.getOrdersByStatusAndDealId({
+          status: ['NEW', 'PARTIALLY_FILLED'],
+          dealId: `${deal.deal._id}`,
+        }),
       )
-      const quote = pendingReduceFunds.reduce(
-        (acc, v) =>
-          acc +
-          (v.useLimitPrice
-            ? v.asset === OrderSizeTypeEnum.base
-              ? +v.qty * +(v.limitPrice ?? '0')
-              : +v.qty
-            : 0),
-        0,
-      )
-      return { base, quote }
     }
     sendEightyAlert(_findDeal: FullDeal<ExcludeDoc<Deal>>) {
       return
@@ -11953,6 +12491,9 @@ function createDCABotHelper<
           ],
         },
         botId: this.botId,
+        // A merge opens nothing: its sources were the opened deals, the
+        // merged deal only carries their position on (spec 138 §2.2.1).
+        parent: { $ne: true },
       } as any)
       if (deals.status === StatusEnum.notok) {
         return this.handleErrors(
@@ -12261,7 +12802,7 @@ function createDCABotHelper<
         const timeZone = (await this.getUser())?.timezone ?? 'UTC'
         const hour = 60 * 60 * 1000
         const day = 24 * hour
-        const { hodlDay, hodlAt, hodlNextBuy, hodlHourly } =
+        const { hodlDay, hodlAt, hodlNextBuy, hodlHourly, hodlWeekdays } =
           await this.getAggregatedSettings()
         if (hodlDay && hodlAt && hodlNextBuy) {
           let add = parseFloat(hodlDay) * (hodlHourly ? hour : day)
@@ -12297,6 +12838,13 @@ function createDCABotHelper<
 
             add = date - hodlNextBuy
           }
+          add =
+            shiftToAllowedWeekday(
+              hodlNextBuy + add,
+              !!hodlHourly,
+              timeZone,
+              hodlWeekdays,
+            ) - hodlNextBuy
           this.data.settings.hodlNextBuy += add
           this.updateData({ settings: { ...this.data.settings } })
         }
@@ -12308,13 +12856,28 @@ function createDCABotHelper<
 
     async openDealByTimer() {
       if (this.data) {
+        // the run firing now; one on a weekday that is not selected opens
+        // nothing (updateNextBuy moves its successor to a selected day)
+        const { hodlNextBuy, hodlHourly, hodlWeekdays } =
+          await this.getAggregatedSettings()
+        const runAllowed = isTimerRunAllowed(
+          hodlNextBuy,
+          !!hodlHourly,
+          (await this.getUser())?.timezone ?? 'UTC',
+          hodlWeekdays,
+        )
         await this.updateNextBuy()
         const diff = await this.findTimeDiff()
         if (diff && diff > 0) {
           if (this.timer) {
             clearTimeout(this.timer)
           }
-          for (const symbol of await this.getSymbolsToOpenAsapDeals()) {
+          if (!runAllowed) {
+            this.handleLog('Timer run skipped: not a selected weekday')
+          }
+          for (const symbol of runAllowed
+            ? await this.getSymbolsToOpenAsapDeals()
+            : []) {
             this.openNewDeal(
               this.botId,
               symbol,
@@ -12395,9 +12958,14 @@ function createDCABotHelper<
         this.processPartiallyFilledOrder(partially)
       }
     }
-    /** Check orders after socket reconnect */
-
-    async checkOrdersAfterReconnect(_botId: string) {
+    /**
+     * Check orders after socket reconnect — and on a user start, which follows
+     * a window in which the bot was not listening either.
+     *
+     * @param spread random start delay that keeps a fleet-wide reconnect from
+     * hitting the venue at once; a user start is one bot and skips it.
+     */
+    async checkOrdersAfterReconnect(_botId: string, spread = true) {
       if (!this.shouldProceed()) {
         this.handleLog(this.notProceedMessage('orders check after reconnect'))
         return
@@ -12414,7 +12982,9 @@ function createDCABotHelper<
       this.blockCheck = true
       try {
         this.handleLog('Check order after user stream reconnect')
-        await this.spreadReconcileStart()
+        if (spread) {
+          await this.spreadReconcileStart()
+        }
         const filledOrders: Order[] = []
         const partiallyFilledOrders: Order[] = []
         // Reported once at the end rather than per order: a bad window used to
@@ -12454,6 +13024,7 @@ function createDCABotHelper<
           let attemptsForOrder = 0
           const getOrder = await this.getOrderForReconcile(o, {
             onAttempts: (n) => (attemptsForOrder = n),
+            pace: true,
           })
           if (!getOrder || !getOrder.data) {
             unresolved.push(o.clientOrderId)
@@ -12500,6 +13071,8 @@ function createDCABotHelper<
             this.handleDebug(
               `${mergedOrder.typeOrder} order ${mergedOrder.clientOrderId} not changed.`,
             )
+            // Spec 154 §4.1: keep the exchange id the venue just named.
+            await this.adoptExchangeOrderId(o, mergedOrder.orderId)
           }
         }
         if (unresolved.length) {
@@ -12934,6 +13507,9 @@ function createDCABotHelper<
             continue main
           }
           const forTPCheck = deal && (await this.isDealForTPLevelCheck(deal))
+          // Take-profits dropped below as never sent. They are not resting, so
+          // the grid comparison further down must not count them. Spec 172.
+          const unsentTPs = new Set<string>()
           if (activeTPSLOrders.length && deal && !forTPCheck) {
             for (const activeTPSLOrder of activeTPSLOrders) {
               if (this.isOrderQuarantined(activeTPSLOrder)) continue
@@ -12945,7 +13521,7 @@ function createDCABotHelper<
               // way (see `isDefinitiveOrderNotFound`).
               const tpslOrderData = await this.getOrderForReconcile(
                 activeTPSLOrder,
-                { fromCache: true },
+                { fromCache: true, pace: true },
               )
               // `notok` is tested BEFORE `!data`: every failed lookup nulls
               // `data`, so testing `!data` first made this branch unreachable
@@ -12955,10 +13531,35 @@ function createDCABotHelper<
                 this.handleWarn(
                   `Order ${activeTPSLOrder.clientOrderId} not found on exchange: ${tpslOrderData?.reason}`,
                 )
-                this.noteOrderNotFound(
-                  activeTPSLOrder,
-                  `${tpslOrderData?.reason}`,
-                )
+                // A take-profit restored from the Redis snapshot that was
+                // never sent: the process stopped inside `startDeal` after the
+                // snapshot had it and before its write-ahead row. Waiting out
+                // the quarantine floor left the position without an exit for
+                // a day. Drop it so the grid comparison below places the
+                // take-profit. Spec 172 §1.1.3.
+                if (
+                  this.serviceRestart &&
+                  !partiallyFilled &&
+                  (await this.retireUnsentOrder(
+                    activeTPSLOrder,
+                    `${tpslOrderData?.reason}`,
+                  ))
+                ) {
+                  unsentTPs.add(activeTPSLOrder.clientOrderId)
+                  continue
+                }
+                // Retired as never placed: likewise not resting, so the grid
+                // comparison below places it again. Spec 177 §1.2.1.
+                if (
+                  this.noteOrderNotFound(
+                    activeTPSLOrder,
+                    `${tpslOrderData?.reason}`,
+                  )
+                ) {
+                  unsentTPs.add(activeTPSLOrder.clientOrderId)
+                }
+              } else if (isReconcileDeferred(tpslOrderData)) {
+                // Left for a later pass; counted in the probe summary.
               } else if (tpslOrderData?.status === StatusEnum.notok) {
                 this.handleWarn(`Cannot get order ${tpslOrderData.reason}`)
               } else if (!tpslOrderData || !tpslOrderData.data) {
@@ -13022,6 +13623,13 @@ function createDCABotHelper<
                   this.handleDebug(
                     `TP/SL order not changed ${updatedOrder.clientOrderId}`,
                   )
+                  // Unchanged status is still news when we hold no exchange id:
+                  // the venue (or the stream's cached report) just named it.
+                  // Dropping it left the order unaddressable. Spec 154 §4.1.
+                  await this.adoptExchangeOrderId(
+                    activeTPSLOrder,
+                    updatedOrder.orderId,
+                  )
                 }
               }
             }
@@ -13037,10 +13645,13 @@ function createDCABotHelper<
                   g.tpSlTarget ?? '',
                 ),
             )
-            if (activeTPSLOrders.length !== tpOrdersInCurrent.length) {
+            const restingTPs = unsentTPs.size
+              ? activeTPSLOrders.filter((o) => !unsentTPs.has(o.clientOrderId))
+              : activeTPSLOrders
+            if (restingTPs.length !== tpOrdersInCurrent.length) {
               for (const tpOrderInCurrent of tpOrdersInCurrent) {
                 if (
-                  activeTPSLOrders.find(
+                  restingTPs.find(
                     (o) =>
                       o.side === tpOrderInCurrent.side &&
                       +o.price === tpOrderInCurrent.price &&
@@ -13108,12 +13719,19 @@ function createDCABotHelper<
                 // read as the venue's answer.
                 const exchangeData = await this.getOrderForReconcile(o, {
                   fromCache: true,
+                  pace: true,
                 })
-                if (isDefinitiveOrderNotFound(exchangeData)) {
+                if (isReconcileDeferred(exchangeData)) {
+                  // Left for a later pass; counted in the probe summary.
+                } else if (isDefinitiveOrderNotFound(exchangeData)) {
                   this.handleWarn(
                     `Order ${o.clientOrderId} not found on exchange: ${exchangeData?.reason}`,
                   )
-                  this.noteOrderNotFound(o, `${exchangeData?.reason}`)
+                  // Retired as never placed: send it again below, as a
+                  // venue-side cancel is. Spec 177 §1.2.4.
+                  if (this.noteOrderNotFound(o, `${exchangeData?.reason}`)) {
+                    canceledOrders.push(o)
+                  }
                 } else if (!exchangeData || !exchangeData.data) {
                   this.handleWarn(
                     `Not enough data to get order ${o.clientOrderId}`,
@@ -13134,7 +13752,12 @@ function createDCABotHelper<
                         `Order ${updatedOrder.clientOrderId} is CANCELED.`,
                       )
                       this.updateOrderOnDb(updatedOrder)
-                      canceledOrders.push(o)
+                      // An order this process cancelled itself (a book
+                      // rebuild running alongside this check) is not sent
+                      // again: what replaces it is the rebuild's business.
+                      if (!this.isOwnCancel(o.clientOrderId)) {
+                        canceledOrders.push(o)
+                      }
                     } else if (updatedOrder.status === 'FILLED') {
                       this.emit('bot update', updatedOrder)
                       this.setOrder(updatedOrder)
@@ -13157,6 +13780,8 @@ function createDCABotHelper<
                       this.handleDebug(
                         `Regular order not changed ${updatedOrder.clientOrderId}`,
                       )
+                      // Spec 154 §4.1 — see the TP/SL branch above.
+                      await this.adoptExchangeOrderId(o, updatedOrder.orderId)
                     }
                   }
                 }
@@ -13173,6 +13798,15 @@ function createDCABotHelper<
                   }, quote: ${+o.executedQty * +o.price}, price: ${o.price}`,
                 )
                 this.processFilledOrder(o)
+              }
+              // A deal whose book is being rebuilt (a Combo funds change in
+              // flight) gets its whole book from that rebuild; the diff above
+              // was taken before it and would place the old book again.
+              if (this.dealBookRebuildInFlight(dealId)) {
+                this.handleLog(
+                  `Deal ${dealId}: book rebuild in flight, the restart check places nothing for it`,
+                )
+                continue main
               }
               for (const o of canceledOrders) {
                 this.handleDebug(
@@ -13356,17 +13990,40 @@ function createDCABotHelper<
     }
 
     private convertToMultiplier(keepConditionBars?: string) {
-      return keepConditionBars
-        ? isNaN(+keepConditionBars)
-          ? 0
-          : +keepConditionBars < 0
-            ? 0
-            : +keepConditionBars
-        : 0
+      return keepConditionBarsMultiplier(keepConditionBars)
+    }
+
+    /**
+     * Symbols of open deals whose OWN settings close by indicator. A deal keeps
+     * the close conditions it was opened with, so after the bot moves from
+     * indicator close to a percentage take profit (not applied to open deals)
+     * those deals still need the close-deal indicators the bot no longer does.
+     * Spec 167.
+     */
+    private async getDealCloseIndicatorSymbols() {
+      const tp = new Set<string>()
+      const sl = new Set<string>()
+      for (const d of this.getOpenDeals()) {
+        const settings = await this.getAggregatedSettings(d.deal)
+        if (
+          settings.useTp &&
+          settings.dealCloseCondition === CloseConditionEnum.techInd
+        ) {
+          tp.add(d.deal.symbol.symbol)
+        }
+        if (
+          settings.useSl &&
+          settings.dealCloseConditionSL === CloseConditionEnum.techInd
+        ) {
+          sl.add(d.deal.symbol.symbol)
+        }
+      }
+      return { tp, sl }
     }
 
     private async isIndicator(serviceRestart: boolean, activeDeals: number) {
       const settings = await this.getAggregatedSettings()
+      const dealClose = await this.getDealCloseIndicatorSymbols()
       return (
         this.data &&
         ((settings.startCondition === StartConditionEnum.ti &&
@@ -13383,14 +14040,16 @@ function createDCABotHelper<
               (i) => i.indicatorAction === IndicatorAction.startDca,
             ).length > 0) ||
           ((settings.dealCloseCondition === CloseConditionEnum.techInd ||
-            this.tpAr) &&
+            this.tpAr ||
+            dealClose.tp.size > 0) &&
             (settings.indicators ?? []).filter(
               (i) =>
                 i.indicatorAction === IndicatorAction.closeDeal &&
                 i.section !== IndicatorSection.sl,
             ).length > 0) ||
           ((settings.dealCloseConditionSL === CloseConditionEnum.techInd ||
-            this.slAr) &&
+            this.slAr ||
+            dealClose.sl.size > 0) &&
             (settings.indicators ?? []).filter(
               (i) =>
                 i.indicatorAction === IndicatorAction.closeDeal &&
@@ -13542,6 +14201,34 @@ function createDCABotHelper<
     }
 
     /**
+     * Confirm, on a cold restart, a deal entry the order map holds FILLED while
+     * its Mongo row does not: the FILLED write died with the process. Asks the
+     * venue by client order id. A venue answer that is not FILLED replaces the
+     * map copy and returns undefined, for `checkBaseOrder` to handle; no answer
+     * leaves the map's FILLED standing — it is the venue's own earlier report,
+     * and a filled order does not become unfilled. Saves what it returns, so
+     * the row stops looking unsent. Spec 177 §1.1.
+     */
+    async confirmRestoredFilledEntry(order: Order): Promise<Order | undefined> {
+      let filled = order
+      const venue = await this.getOrderForReconcile(order)
+      if (venue?.status === StatusEnum.ok && venue.data) {
+        const merged = await this.mergeCommonOrderWithOrder(venue.data, order)
+        if (merged.status !== 'FILLED') {
+          this.handleLog(
+            `Base order ${order.clientOrderId} restored as FILLED, but the exchange reports ${merged.status}`,
+          )
+          this.setOrder(merged)
+          return
+        }
+        filled = merged
+      }
+      this.setOrder(filled)
+      this.updateOrderOnDb(filled)
+      return filled
+    }
+
+    /**
      * Restore work
      */
 
@@ -13557,6 +14244,8 @@ function createDCABotHelper<
       const settings = await this.getAggregatedSettings()
       this.closeAfterTpFilled = settings.type === DCATypeEnum.terminal
       const asapSymbols = await this.getSymbolsToOpenAsapDeals()
+      // Spec `182`: before the order checks, which only see what was loaded.
+      await this.resumeCloseSweeps()
       if (serviceRestart || this.keepOrders) {
         // `keepOrders` is a settings save or a deal restore. It is not a cold
         // service restart, but it is emphatically not the user starting the bot
@@ -13577,9 +14266,32 @@ function createDCABotHelper<
         // is the manual escape hatch from order quarantine: whatever we decided
         // to stop polling, look again now.
         await this.clearAllOrderQuarantine('bot started by user')
-        await this.cancelAllOrder()
+        // Reconcile, don't tear down. This used to `cancelAllOrder()` and
+        // re-place every open deal's book from `currentOrders`, which is
+        // rebuilt at the CURRENT price: a start silently re-priced every
+        // ladder, gave up the resting orders' queue position, and on a bot
+        // with ~100 open deals took minutes of one-at-a-time venue calls.
+        // A running deal keeps the orders it started with (see the keep-orders
+        // guard in the active-deal loop below). The bot was not listening
+        // while closed, so ask the venue about every order we hold as open —
+        // fills are booked, cancels dropped — and let the loop below place
+        // only what is missing.
+        await this.checkOrdersAfterReconnect(this.botId, false)
+        // The teardown also used to clear orders that were never sent — a
+        // `'-1'` placeholder left by a process stop between the map and the
+        // write-ahead row. Kept, one would count as resting below and its
+        // deal would never get that order. Spec 172 §1.1.3 / 174.
+        for (const o of this.getOrdersByStatusAndDealId({
+          defaultStatuses: true,
+        }).filter((o) => `${o.orderId ?? ''}` === '-1')) {
+          const venue = await this.getOrderForReconcile(o)
+          if (isDefinitiveOrderNotFound(venue)) {
+            await this.retireUnsentOrder(o, `${venue?.reason}`)
+          }
+        }
         await this.checkOrders(this.botId, true)
       }
+      const keepStandingBook = !serviceRestart
       const openDeals = this.getOpenDeals()
       const activeDeals = openDeals.filter(
         (d) => d.deal.status === DCADealStatusEnum.open,
@@ -13642,7 +14354,25 @@ function createDCABotHelper<
                 this.setOrder(full.data.result, false)
               }
             }
-            if (baseRow.status !== 'FILLED') {
+            // The map can be ahead of Mongo: the venue's FILLED reached the
+            // order map, and so the Redis snapshot, but its write did not land
+            // before the process stopped. `checkBaseOrder` reads the map, finds
+            // FILLED and does nothing, so the deal stayed in `start` with the
+            // position unbooked. Spec 177 §1.1.
+            const known =
+              serviceRestart && baseRow.status !== 'FILLED'
+                ? this.getOrderFromMap(baseRow.clientOrderId)
+                : undefined
+            const restoredFill =
+              known?.status === 'FILLED'
+                ? await this.confirmRestoredFilledEntry(known)
+                : undefined
+            if (restoredFill) {
+              this.handleLog(
+                `Deal ${d.deal._id} in status start, but its base order ${restoredFill.clientOrderId} was filled before the restart`,
+              )
+              await this.startDeal(restoredFill)
+            } else if (baseRow.status !== 'FILLED') {
               await this.checkBaseOrder(
                 this.botId,
                 baseRow.symbol,
@@ -13675,6 +14405,33 @@ function createDCABotHelper<
             // deal into a long the strategy had since flipped short on. Only
             // ASAP carries no timing, so only ASAP replays.
             const dealSettings = await this.getAggregatedSettings(d.deal)
+            // Spec 044 §8 (fix round 2): funded — or being funded — before the
+            // restart. Resume or retire it (`resumeFundedEntry`, which links
+            // any funding lot); a stale-trigger cancel here would drop the lot.
+            if (
+              this.isBaseFundingDeal(d.deal) &&
+              (d.deal.botFunding?.pendingTrade ||
+                d.deal.botFunding?.virtualEntry)
+            ) {
+              this.handleLog(
+                `${d.deal._id} was funded before the restart: resuming it`,
+              )
+              await this.placeBaseOrder(
+                this.botId,
+                d.deal.symbol.symbol,
+                d.deal._id,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                d.deal.fixSize,
+                undefined,
+                d.deal.sizes,
+                d.deal.orderSizeType,
+              )
+              continue
+            }
             if (dealSettings.startCondition !== StartConditionEnum.asap) {
               this.handleLog(
                 `${d.deal._id} (${d.deal.symbol.symbol}) never started and its ${dealSettings.startCondition} trigger has passed. Cancelling the stale deal instead of replaying it`,
@@ -13686,6 +14443,27 @@ function createDCABotHelper<
                 false,
               )
               continue
+            }
+            // An entry restored from the Redis snapshot at `'-1'` with no row
+            // was never sent (the write-ahead row precedes the send), yet it
+            // made `placeBaseOrder` below refuse with "already have and active
+            // base order" at every restart. Drop it only on the venue's
+            // definitive not-found; anything else keeps today's refusal.
+            // Spec 174 §1.1.1–§1.1.4.
+            if (serviceRestart) {
+              for (const o of this.getOrdersByStatusAndDealId({
+                dealId: d.deal._id,
+                defaultStatuses: true,
+              }).filter(
+                (o) =>
+                  o.typeOrder === TypeOrderEnum.dealStart &&
+                  `${o.orderId ?? ''}` === '-1',
+              )) {
+                const venue = await this.getOrderForReconcile(o)
+                if (isDefinitiveOrderNotFound(venue)) {
+                  await this.retireUnsentOrder(o, `${venue?.reason}`)
+                }
+              }
             }
             this.handleLog(
               `${d.deal._id} not started yet. Place base order again`,
@@ -13849,7 +14627,7 @@ function createDCABotHelper<
             // standing ladder alone; it is replaced by the fill path as each
             // level is taken, which is the same promise the rest of this path
             // makes to a running deal.
-            const resting = this.keepOrders
+            const resting = keepStandingBook
               ? this.getOrdersByStatusAndDealId({
                   status: 'NEW',
                   dealId: `${d.deal._id}`,
@@ -13986,7 +14764,15 @@ function createDCABotHelper<
             data?: IndicatorHistory[]
             lastPrice?: number
           }
-        >(rabbitIndicatorsKey, data, this.indicatorTimeout)
+        >(
+          rabbitIndicatorsKey,
+          // Tag the subscription with this process's restart beacon so a
+          // restart of another process sharing the room leaves it counted.
+          BotServiceType
+            ? { ...data, service: `botService${BotServiceType}` }
+            : data,
+          this.indicatorTimeout,
+        )
         if (result && result?.response) {
           if (result.response.status) {
             const room = `${result.response.room}`
@@ -13995,7 +14781,9 @@ function createDCABotHelper<
             get.add(config)
             this.indicatorRoomConfigMap.set(room, get)
             this.indicatorConfigIdMap.set(result.response.id, config)
-            const cb = this.indicatorDataCbRedis(room)
+            const cb =
+              this.indicatorRoomCb.get(room) ?? this.indicatorDataCbRedis(room)
+            this.indicatorRoomCb.set(room, cb)
             if (!this.indicatorSubscribedRooms.has(room)) {
               this.indicatorSubscribedRooms.add(room)
               if (this.redisSubIndicators) {
@@ -14043,39 +14831,53 @@ function createDCABotHelper<
         type: this.botType,
       }
       const timeout = wait ? this.indicatorTimeout : 0
+      let unsubscribed = false
       if (this.rabbitClient) {
         const result = await this.rabbitClient.sendWithCallback<
           BotParentUnsubscribeIndicatorEventDto,
           boolean
         >(rabbitIndicatorsKey, payload, timeout)
-        if (result) {
-          if (result.response) {
-            const text = `Unsubscribed from indicator ${id}`
-            if (this.showIndicatorLogs()) {
-              this.handleLog(text)
-            } else {
-              this.handleDebug(text)
-            }
-            if (this.redisSubIndicators && cb) {
-              this.redisSubIndicators.unsubscribe(room, cb)
-            }
-            const get = this.indicatorConfigIdMap.get(id)
-            this.indicatorConfigIdMap.delete(id)
-            if (get) {
-              const getRoom = this.indicatorRoomConfigMap.get(room)
-              if (getRoom) {
-                getRoom.delete(get)
-                if (getRoom.size === 0) {
-                  this.indicatorRoomConfigMap.delete(room)
-                  this.indicatorSubscribedRooms.delete(room)
-                } else {
-                  this.indicatorRoomConfigMap.set(room, getRoom)
-                }
-              }
-            }
-            return true
+        unsubscribed = !!result?.response
+      }
+      const text = unsubscribed
+        ? `Unsubscribed from indicator ${id}`
+        : `Unsubscribe from indicator ${id} not confirmed by the indicator service`
+      if (this.showIndicatorLogs()) {
+        this.handleLog(text)
+      } else {
+        this.handleDebug(text)
+      }
+      // Local bookkeeping runs whatever the indicator service answered: the
+      // caller drops the indicator either way, and a config left in the room
+      // map would keep receiving the room's data.
+      const get = this.indicatorConfigIdMap.get(id)
+      this.indicatorConfigIdMap.delete(id)
+      if (get) {
+        const getRoom = this.indicatorRoomConfigMap.get(room)
+        if (getRoom) {
+          getRoom.delete(get)
+          if (getRoom.size === 0) {
+            this.indicatorRoomConfigMap.delete(room)
+            this.indicatorSubscribedRooms.delete(room)
+          } else {
+            this.indicatorRoomConfigMap.set(room, getRoom)
           }
         }
+      }
+      // The room listener serves every config of this bot in the room: drop
+      // it only with the last one, or the configs still in the room (another
+      // deal's level, a start condition with the same indicator) stop
+      // receiving data.
+      if (
+        this.redisSubIndicators &&
+        cb &&
+        !this.indicatorRoomConfigMap.has(room)
+      ) {
+        this.redisSubIndicators.unsubscribe(
+          room,
+          this.indicatorRoomCb.get(room) ?? cb,
+        )
+        this.indicatorRoomCb.delete(room)
       }
 
       return true
@@ -14140,6 +14942,8 @@ function createDCABotHelper<
           ...(settings.pair ?? []),
           ...this.getOpenDeals().map((d) => d.deal.symbol.symbol),
         ])
+        const dueDca = this.dueDcaIndicatorKeys(settings)
+        const dealCloseSymbols = await this.getDealCloseIndicatorSymbols()
         const copySymbols = new Set([...symbols])
         if (saveIndicators) {
           ;[...this.indicators.values()].forEach((i) => {
@@ -14186,11 +14990,7 @@ function createDCABotHelper<
         const indicatorTypeMap: Map<string, SettingsIndicators[]> = new Map()
         const groupsId = this.indicatorGroupsToUse.map((g) => g.id)
         const filteredIndicators = (settings.indicators ?? [])
-          .filter(
-            (i) =>
-              i.type !== IndicatorEnum.unpnl &&
-              i.type !== IndicatorEnum.session,
-          )
+          .filter((i) => i.type !== IndicatorEnum.unpnl && !isClockCondition(i))
           .filter(
             (i) => !i.groupId || (i.groupId && groupsId.includes(i.groupId)),
           )
@@ -14208,848 +15008,22 @@ function createDCABotHelper<
           const time = +new Date()
           this.handleDebug(`Open indicators | Symbol ${symbol} start`)
           await Promise.all(
-            filteredIndicators.map(async (i) => {
-              {
-                if (!this.data) {
-                  return
-                }
-                const {
-                  indicatorLength: _indicatorLength,
-                  type,
-                  uuid,
-                  indicatorInterval,
-                  checkLevel: _checkLevel,
-                  condition,
-                  maType,
-                  maCrossingValue,
-                  maCrossingInterval,
-                  maCrossingLength,
-                  maUUID,
-                  stochSmoothD: _stochSmoothD,
-                  stochSmoothK: _stochSmoothK,
-                  stochRSI: _stochRSI,
-                  leftBars: _leftBars,
-                  rightBars: _rightBars,
-                  basePeriods: _basePeriods,
-                  pumpPeriods: _pumpPeriods,
-                  pump: _pump,
-                  baseCrack: _baseCrack,
-                  indicatorAction,
-                  section,
-                  psarInc: _psarInc,
-                  psarMax: _psarMax,
-                  psarStart: _psarStart,
-                  keepConditionBars,
-                  voLong: _voLong,
-                  voShort: _voShort,
-                  uoFast: _uoFast,
-                  uoMiddle: _uoMiddle,
-                  uoSlow: _uoSlow,
-                  momSource,
-                  bbwpLookback,
-                  xOscillator1,
-                  xOscillator2,
-                  xOscillator2Interval,
-                  xOscillator2length: _xOscillator2length,
-                  xOscillator2voLong: _xOscillator2voLong,
-                  xOscillator2voShort: _xOscillator2voShort,
-                  xoUUID,
-                  percentile,
-                  mar1length: _mar1length,
-                  mar1type,
-                  mar2length,
-                  mar2type,
-                  bbwMa,
-                  bbwMaLength: _bbwMaLength,
-                  bbwMult: _bbwMult,
-                  macdFast: _macdFast,
-                  macdSlow: _macdSlow,
-                  macdMaSignal,
-                  macdMaSource,
-                  divOscillators,
-                  trendFilter,
-                  trendFilterLookback,
-                  trendFilterType,
-                  trendFilterValue,
-                  factor: _factor,
-                  atrLength: _atrLength,
-                  pcValue,
-                  ppHighLeft,
-                  ppHighRight,
-                  ppLowLeft,
-                  ppLowRight,
-                  ppMult,
-                  athLookback: _athLookback,
-                  kcMa,
-                  kcRange,
-                  kcRangeLength: _kcRangeLength,
-                  lwMaxDuration,
-                  lwThreshold,
-                } = i
-                let { percentileLookback, percentilePercentage } = i
-                percentileLookback = percentileLookback ?? 150
-                percentilePercentage = percentilePercentage ?? 80
-                const macdFast = +(_macdFast ?? 12)
-                const macdSlow = +(_macdSlow ?? 26)
-                const indicatorLength = +(_indicatorLength ?? 14)
-                const factor = +(_factor ?? 3)
-                const atrLength = +(_atrLength ?? 10)
-
-                const checkLevel = +(_checkLevel ?? 0)
-                const athLookback = +(_athLookback ?? 100)
-                const stochSmoothD = +(_stochSmoothD ?? 3)
-                const stochSmoothK = +(_stochSmoothK ?? 3)
-                const stochRSI = +(_stochRSI ?? 14)
-                const leftBars = +(_leftBars ?? 5)
-                const rightBars = +(_rightBars ?? 5)
-                const mar1length = +(_mar1length ?? 20)
-                const basePeriods = +(_basePeriods ?? 36)
-                const pumpPeriods = +(_pumpPeriods ?? 8)
-                const uoFast = +(_uoFast ?? 7)
-                const uoMiddle = +(_uoMiddle ?? 14)
-                const uoSlow = +(_uoSlow ?? 28)
-                const psarInc = +(_psarInc ?? 0.02)
-                const psarMax = +(_psarMax ?? 0.2)
-                const psarStart = +(_psarStart ?? 0.02)
-                const voLong = +(_voLong ?? 10)
-                const voShort = +(_voShort ?? 5)
-                const bbwMult = +(_bbwMult ?? 2)
-                const kcRangeLength = +(_kcRangeLength ?? 20)
-                const bbwMaLength = +(_bbwMaLength ?? 20)
-                const pump = +(_pump ?? 3)
-                const baseCrack = +(_baseCrack ?? 3)
-                const xOscillator2length = +(_xOscillator2length ?? 14)
-                if (
-                  (settings.startCondition !== StartConditionEnum.ti &&
-                    indicatorAction === IndicatorAction.startDeal) ||
-                  (!settings.useRiskReward &&
-                    indicatorAction === IndicatorAction.riskReward) ||
-                  (settings.useRiskReward &&
-                    indicatorAction === IndicatorAction.riskReward &&
-                    settings.type === DCATypeEnum.terminal) ||
-                  ((!settings.useTp ||
-                    (settings.dealCloseCondition !==
-                      CloseConditionEnum.techInd &&
-                      !this.tpAr)) &&
-                    indicatorAction === IndicatorAction.closeDeal &&
-                    section !== IndicatorSection.sl) ||
-                  ((!settings.useSl ||
-                    (settings.dealCloseConditionSL !==
-                      CloseConditionEnum.techInd &&
-                      !this.slAr)) &&
-                    indicatorAction === IndicatorAction.closeDeal &&
-                    section === IndicatorSection.sl) ||
-                  ((!settings.useDca ||
-                    !(
-                      settings.dcaCondition === DCAConditionEnum.indicators ||
-                      this.scaleAr
-                    )) &&
-                    indicatorAction === IndicatorAction.startDca) ||
-                  ((!settings.useBotController ||
-                    settings.botStart !== BotStartTypeEnum.indicators) &&
-                    indicatorAction === IndicatorAction.stopBot) ||
-                  ((!settings.useBotController ||
-                    settings.botActualStart !== BotStartTypeEnum.indicators) &&
-                    indicatorAction === IndicatorAction.startBot)
-                ) {
-                  return
-                }
-                if (indicatorLength && indicatorInterval) {
-                  const rrOrAr =
-                    indicatorAction === IndicatorAction.riskReward ||
-                    (indicatorAction === IndicatorAction.startDca &&
-                      this.scaleAr) ||
-                    (indicatorAction === IndicatorAction.closeDeal &&
-                      section !== IndicatorSection.sl &&
-                      this.tpAr) ||
-                    (indicatorAction === IndicatorAction.closeDeal &&
-                      section === IndicatorSection.sl &&
-                      this.slAr)
-                  const otherOnType = rrOrAr
-                    ? []
-                    : filteredIndicators.filter(
-                        (i) =>
-                          i.indicatorAction === indicatorAction &&
-                          ((!i.section && !section) || i.section === section),
-                      )
-                  const lowerIntervals = otherOnType.filter(
-                    (i) =>
-                      timeIntervalMap[i.indicatorInterval] <
-                      timeIntervalMap[indicatorInterval],
-                  ).length
-                  const useAnd =
-                    i.indicatorAction === IndicatorAction.closeDeal
-                      ? i.section === IndicatorSection.sl
-                        ? !settings.stopDealSlLogic ||
-                          settings.stopDealSlLogic === IndicatorsLogicEnum.and
-                        : !settings.stopDealLogic ||
-                          settings.stopDealLogic === IndicatorsLogicEnum.and
-                      : i.indicatorAction === IndicatorAction.startBot
-                        ? !settings.startBotLogic ||
-                          settings.startBotLogic === IndicatorsLogicEnum.and
-                        : i.indicatorAction === IndicatorAction.startDeal
-                          ? !settings.startDealLogic ||
-                            settings.startDealLogic === IndicatorsLogicEnum.and
-                          : i.indicatorAction === IndicatorAction.stopBot
-                            ? !settings.stopBotLogic ||
-                              settings.stopBotLogic === IndicatorsLogicEnum.and
-                            : false
-                  const hasLower = rrOrAr
-                    ? false
-                    : otherOnType.length > 1 && lowerIntervals > 0 && useAnd
-                  if (hasLower) {
-                    this.handleDebug(
-                      `Indicator ${uuid} ${symbol} ${indicatorAction} has indicators with lower interval: ${lowerIntervals}`,
-                    )
-                  }
-                  const indicatorData: BotParentIndicatorEventDto = {
-                    data: {
-                      indicatorConfig:
-                        type === IndicatorEnum.lw
-                          ? {
-                              type: IndicatorEnum.lw,
-                              lwThreshold: +(lwThreshold ?? 2),
-                              lwMaxDuration: +(lwMaxDuration ?? 1000),
-                            }
-                          : type === IndicatorEnum.obfvg
-                            ? { type }
-                            : type === IndicatorEnum.dc
-                              ? { type, length: indicatorLength }
-                              : type === IndicatorEnum.macd
-                                ? {
-                                    type,
-                                    shortInterval: macdFast ?? 12,
-                                    longInterval: macdSlow ?? 26,
-                                    signalInterval: indicatorLength,
-                                    percentile,
-                                    percentileLookback,
-                                    percentilePercentage,
-                                    maSignal: macdMaSignal ?? MAEnum.ema,
-                                    maSource: macdMaSource ?? MAEnum.ema,
-                                  }
-                                : type === IndicatorEnum.st
-                                  ? {
-                                      type,
-                                      factor: factor ?? 3,
-                                      atrLength: atrLength ?? 10,
-                                    }
-                                  : type === IndicatorEnum.pp
-                                    ? {
-                                        type,
-                                        ppHighLeft: +(ppHighLeft ?? 5),
-                                        ppHighRight: +(ppHighRight ?? 5),
-                                        ppLowLeft: +(ppLowLeft ?? 5),
-                                        ppLowRight: +(ppLowRight ?? 5),
-                                        ppMult: +(ppMult ?? 1),
-                                      }
-                                    : type === IndicatorEnum.tv
-                                      ? {
-                                          type,
-                                          checkLevel,
-                                          useAsEntryExitPoints:
-                                            condition ===
-                                            TradingviewAnalysisConditionEnum.entry,
-                                        }
-                                      : type === IndicatorEnum.pc
-                                        ? {
-                                            type,
-                                            pcUp: Math.abs(+(pcValue ?? '5')),
-                                            pcDown: Math.abs(+(pcValue ?? '5')),
-                                          }
-                                        : type === IndicatorEnum.div
-                                          ? {
-                                              type,
-                                              oscillators: divOscillators ?? [],
-                                            }
-                                          : type === IndicatorEnum.ma
-                                            ? {
-                                                type,
-                                                interval: indicatorLength,
-                                                maType: maType || MAEnum.ema,
-                                              }
-                                            : type === IndicatorEnum.ath
-                                              ? {
-                                                  type,
-                                                  lookback: athLookback ?? 100,
-                                                }
-                                              : type === IndicatorEnum.xo
-                                                ? xOscillator1 ===
-                                                  IndicatorEnum.vo
-                                                  ? {
-                                                      type: xOscillator1,
-                                                      voLong: voLong ?? 10,
-                                                      voShort: voShort ?? 5,
-                                                    }
-                                                  : {
-                                                      type:
-                                                        xOscillator1 ||
-                                                        IndicatorEnum.rsi,
-                                                      interval: indicatorLength,
-                                                    }
-                                                : type === IndicatorEnum.atr
-                                                  ? {
-                                                      type,
-                                                      interval: indicatorLength,
-                                                    }
-                                                  : type === IndicatorEnum.adr
-                                                    ? {
-                                                        type,
-                                                        interval:
-                                                          indicatorLength,
-                                                      }
-                                                    : type ===
-                                                        IndicatorEnum.stoch
-                                                      ? {
-                                                          type,
-                                                          k: indicatorLength,
-                                                          dsmooth:
-                                                            stochSmoothD ?? 1,
-                                                          ksmooth:
-                                                            stochSmoothK ?? 3,
-                                                        }
-                                                      : type ===
-                                                          IndicatorEnum.stochRSI
-                                                        ? {
-                                                            type,
-                                                            k: indicatorLength,
-                                                            dsmooth:
-                                                              stochSmoothD ?? 3,
-                                                            ksmooth:
-                                                              stochSmoothK ?? 3,
-                                                            interval:
-                                                              stochRSI ?? 14,
-                                                          }
-                                                        : type ===
-                                                            IndicatorEnum.sr
-                                                          ? {
-                                                              type,
-                                                              leftBars:
-                                                                leftBars ?? 15,
-                                                              rightBars:
-                                                                rightBars ?? 15,
-                                                            }
-                                                          : type ===
-                                                              IndicatorEnum.mar
-                                                            ? {
-                                                                type,
-                                                                mar1type:
-                                                                  mar1type ||
-                                                                  MAEnum.ema,
-                                                                mar1length:
-                                                                  mar1length ||
-                                                                  20,
-                                                                mar2type:
-                                                                  mar2type ||
-                                                                  MAEnum.price,
-                                                                mar2length:
-                                                                  mar2length ||
-                                                                  20,
-                                                                percentile,
-                                                                percentileLookback,
-                                                                percentilePercentage,
-                                                                trendFilter,
-                                                                trendFilterLookback,
-                                                                trendFilterType,
-                                                                trendFilterValue,
-                                                              }
-                                                            : type ===
-                                                                IndicatorEnum.mfi
-                                                              ? {
-                                                                  type,
-                                                                  interval:
-                                                                    indicatorLength ??
-                                                                    14,
-                                                                  percentile,
-                                                                  percentileLookback,
-                                                                  percentilePercentage,
-                                                                }
-                                                              : type ===
-                                                                  IndicatorEnum.qfl
-                                                                ? {
-                                                                    type,
-                                                                    basePeriods:
-                                                                      basePeriods ??
-                                                                      36,
-                                                                    pumpPeriods:
-                                                                      pumpPeriods ??
-                                                                      8,
-                                                                    pump:
-                                                                      (pump ??
-                                                                        3) /
-                                                                      100,
-                                                                    baseCrack:
-                                                                      (baseCrack ??
-                                                                        3) /
-                                                                      100,
-                                                                  }
-                                                                : type ===
-                                                                    IndicatorEnum.uo
-                                                                  ? {
-                                                                      type,
-                                                                      fast:
-                                                                        uoFast ??
-                                                                        7,
-                                                                      middle:
-                                                                        uoMiddle ??
-                                                                        14,
-                                                                      slow:
-                                                                        uoSlow ??
-                                                                        28,
-                                                                      percentile,
-                                                                      percentileLookback,
-                                                                      percentilePercentage,
-                                                                    }
-                                                                  : type ===
-                                                                      IndicatorEnum.mom
-                                                                    ? {
-                                                                        type,
-                                                                        interval:
-                                                                          indicatorLength,
-                                                                        source:
-                                                                          momSource ??
-                                                                          'close',
-                                                                        percentile,
-                                                                        percentileLookback,
-                                                                        percentilePercentage,
-                                                                      }
-                                                                    : type ===
-                                                                        IndicatorEnum.bbwp
-                                                                      ? {
-                                                                          type,
-                                                                          interval:
-                                                                            indicatorLength,
-                                                                          source:
-                                                                            momSource ??
-                                                                            'close',
-                                                                          lookback:
-                                                                            bbwpLookback ??
-                                                                            252,
-                                                                        }
-                                                                      : type ===
-                                                                          IndicatorEnum.psar
-                                                                        ? {
-                                                                            type,
-                                                                            start:
-                                                                              psarStart ??
-                                                                              0.02,
-                                                                            inc:
-                                                                              psarInc ??
-                                                                              0.02,
-                                                                            max:
-                                                                              psarMax ??
-                                                                              0.2,
-                                                                          }
-                                                                        : type ===
-                                                                            IndicatorEnum.vo
-                                                                          ? {
-                                                                              type,
-                                                                              voLong:
-                                                                                voLong ??
-                                                                                10,
-                                                                              voShort:
-                                                                                voShort ??
-                                                                                5,
-                                                                              percentile,
-                                                                              percentileLookback,
-                                                                              percentilePercentage,
-                                                                            }
-                                                                          : type ===
-                                                                              IndicatorEnum.kc
-                                                                            ? {
-                                                                                type,
-                                                                                interval:
-                                                                                  indicatorLength,
-                                                                                ma:
-                                                                                  kcMa ||
-                                                                                  MAEnum.ema,
-                                                                                multiplier:
-                                                                                  bbwMult ||
-                                                                                  2,
-                                                                                range:
-                                                                                  kcRange ||
-                                                                                  RangeType.atr,
-                                                                                rangeLength:
-                                                                                  kcRangeLength ||
-                                                                                  20,
-                                                                              }
-                                                                            : type ===
-                                                                                IndicatorEnum.kcpb
-                                                                              ? {
-                                                                                  type,
-                                                                                  interval:
-                                                                                    indicatorLength,
-                                                                                  ma:
-                                                                                    kcMa ||
-                                                                                    MAEnum.ema,
-                                                                                  multiplier:
-                                                                                    bbwMult ||
-                                                                                    2,
-                                                                                  range:
-                                                                                    kcRange ||
-                                                                                    RangeType.atr,
-                                                                                  rangeLength:
-                                                                                    kcRangeLength ||
-                                                                                    20,
-                                                                                  percentile,
-                                                                                  percentileLookback,
-                                                                                  percentilePercentage,
-                                                                                }
-                                                                              : type ===
-                                                                                  IndicatorEnum.bb
-                                                                                ? {
-                                                                                    type,
-                                                                                    interval:
-                                                                                      indicatorLength,
-                                                                                    bbwMa:
-                                                                                      bbwMa ||
-                                                                                      MAEnum.sma,
-                                                                                    bbwMaLength:
-                                                                                      bbwMaLength ||
-                                                                                      20,
-                                                                                    bbwMult:
-                                                                                      bbwMult ||
-                                                                                      2,
-                                                                                  }
-                                                                                : type ===
-                                                                                    IndicatorEnum.bbw
-                                                                                  ? {
-                                                                                      type,
-                                                                                      interval:
-                                                                                        indicatorLength,
-                                                                                      bbwMa:
-                                                                                        bbwMa ||
-                                                                                        MAEnum.sma,
-                                                                                      bbwMaLength:
-                                                                                        bbwMaLength ||
-                                                                                        20,
-                                                                                      bbwMult:
-                                                                                        bbwMult ||
-                                                                                        2,
-                                                                                      percentile,
-                                                                                      percentileLookback,
-                                                                                      percentilePercentage,
-                                                                                    }
-                                                                                  : type ===
-                                                                                      IndicatorEnum.bbpb
-                                                                                    ? {
-                                                                                        type,
-                                                                                        interval:
-                                                                                          indicatorLength,
-                                                                                        bbwMa:
-                                                                                          bbwMa ||
-                                                                                          MAEnum.sma,
-                                                                                        bbwMaLength:
-                                                                                          bbwMaLength ||
-                                                                                          20,
-                                                                                        bbwMult:
-                                                                                          bbwMult ||
-                                                                                          2,
-                                                                                        percentile,
-                                                                                        percentileLookback,
-                                                                                        percentilePercentage,
-                                                                                      }
-                                                                                    : type ===
-                                                                                        IndicatorEnum.ecd
-                                                                                      ? {
-                                                                                          type,
-                                                                                        }
-                                                                                      : ({
-                                                                                          type,
-                                                                                          interval:
-                                                                                            indicatorLength,
-                                                                                          percentile,
-                                                                                          percentileLookback,
-                                                                                          percentilePercentage,
-                                                                                        } as IndicatorConfig),
-                      interval:
-                        type === IndicatorEnum.adr
-                          ? ExchangeIntervals.oneD
-                          : indicatorInterval,
-                      symbol,
-                      exchange: this.data.exchange,
-                      test: false,
-                      limitMultiplier: serviceRestart
-                        ? this.convertToMultiplier(keepConditionBars)
-                        : undefined,
-                      load1d: rrOrAr || hasLower,
-                    },
-                    event: 'subscribeIndicator',
-                    botId: this.botId,
-                    responseId: v4(),
-                    responseParams: {
-                      uuid,
-                      symbol,
-                    },
-                    type: this.botType,
-                  }
-                  const { id, room, data, cb } =
-                    await this.sendIndicatorSubscribeEvent(indicatorData)
-                  if (!id) {
-                    this.handleDebug(
-                      `Indicator ${uuid} ${symbol} not connected`,
-                    )
-                    return
-                  }
-                  const maChild =
-                    type === IndicatorEnum.ma &&
-                    maCrossingValue !== MAEnum.price &&
-                    maCrossingInterval &&
-                    maCrossingLength &&
-                    maUUID &&
-                    maCrossingValue &&
-                    indicatorAction !== IndicatorAction.riskReward &&
-                    !(
-                      this.scaleAr &&
-                      indicatorAction === IndicatorAction.startDca
-                    ) &&
-                    !(
-                      indicatorAction === IndicatorAction.closeDeal &&
-                      section !== IndicatorSection.sl &&
-                      this.tpAr
-                    ) &&
-                    !(
-                      indicatorAction === IndicatorAction.closeDeal &&
-                      section === IndicatorSection.sl &&
-                      this.slAr
-                    )
-                  const xoChild =
-                    type === IndicatorEnum.xo &&
-                    xOscillator2 &&
-                    xOscillator2Interval &&
-                    xOscillator2length &&
-                    xoUUID &&
-                    indicatorAction !== IndicatorAction.riskReward &&
-                    !(
-                      this.scaleAr &&
-                      indicatorAction === IndicatorAction.startDca
-                    ) &&
-                    !(
-                      indicatorAction === IndicatorAction.closeDeal &&
-                      section !== IndicatorSection.sl &&
-                      this.tpAr
-                    ) &&
-                    !(
-                      indicatorAction === IndicatorAction.closeDeal &&
-                      section === IndicatorSection.sl &&
-                      this.slAr
-                    )
-                  const key = `${uuid}@${symbol}`
-                  const findInCurrent = serviceRestart
-                    ? this.data.indicatorsData?.find(
-                        (id) =>
-                          id.signature === this.getIndicatorSignature(i) &&
-                          id.symbol === symbol &&
-                          id.uuid === uuid,
-                      )
-                    : _indicators.get(key)
-
-                  const active = (findInCurrent?.statusTo ?? 0) > +new Date()
-                  const k = `${indicatorInterval}@${indicatorAction}`
-                  this.indicatorsIntervalActionMap.set(
-                    k,
-                    (this.indicatorsIntervalActionMap.get(k) ?? 0) + 1,
-                  )
-                  this.indicators.set(key, {
-                    uuid,
-                    id: id,
-                    room,
-                    status: active ? (findInCurrent?.status ?? false) : false,
-                    statusSince: active
-                      ? findInCurrent?.statusSince
-                      : undefined,
-                    statusTo: active ? findInCurrent?.statusTo : undefined,
-                    numberOfSignals: active
-                      ? findInCurrent?.numberOfSignals
-                      : undefined,
-                    data: !!data,
-                    history: data ?? [],
-                    symbol,
-                    key,
-                    action: indicatorAction,
-                    maCross: false,
-                    section,
-                    interval: indicatorInterval,
-                    parentIndicator: '',
-                    childIndicator: maChild ? maUUID : xoChild ? xoUUID : '',
-                    cb,
-                    groupId: i.groupId,
-                    is1d: rrOrAr || hasLower,
-                  })
-                  const text = `Bot connected to ${type} indicator. Id: ${id}, room: ${room}`
-                  if (this.showIndicatorLogs()) {
-                    this.handleLog(text)
-                  } else {
-                    this.handleDebug(text)
-                  }
-                  if (maChild) {
-                    const load1d =
-                      hasLower &&
-                      timeIntervalMap[indicatorInterval] <=
-                        timeIntervalMap[maCrossingInterval]
-                    const indicatorChildData: BotParentIndicatorEventDto = {
-                      data: {
-                        indicatorConfig: {
-                          type,
-                          interval: maCrossingLength,
-                          maType: maCrossingValue,
-                        },
-                        interval: maCrossingInterval,
-                        symbol,
-                        exchange: this.data.exchange,
-                        test: false,
-                        load1d,
-                      },
-
-                      botId: this.botId,
-                      responseId: v4(),
-                      responseParams: { uuid: maUUID, symbol },
-                      event: 'subscribeIndicator',
-                      type: this.botType,
-                    }
-                    const {
-                      id: idChild,
-                      room: roomChild,
-                      data: dataChild,
-                      cb: cbChild,
-                    } = await this.sendIndicatorSubscribeEvent(
-                      indicatorChildData,
-                    )
-                    if (!idChild) {
-                      this.handleWarn(
-                        `Indicator ${maUUID} ${symbol} not connected`,
-                      )
-                      return
-                    }
-                    const maKey = `${maUUID}@${symbol}`
-                    const findInCurrent = _indicators.get(maKey)
-
-                    const active =
-                      !serviceRestart &&
-                      (findInCurrent?.statusTo ?? 0) > +new Date()
-                    this.indicators.set(maKey, {
-                      uuid: maUUID,
-                      id: idChild,
-                      room: roomChild,
-                      status: active ? (findInCurrent?.status ?? false) : false,
-                      statusSince: active
-                        ? findInCurrent?.statusSince
-                        : undefined,
-                      statusTo: active ? findInCurrent?.statusTo : undefined,
-                      numberOfSignals: active
-                        ? findInCurrent?.numberOfSignals
-                        : undefined,
-                      data: !!dataChild,
-                      history: dataChild ?? [],
-                      symbol,
-                      key: maKey,
-                      action: indicatorAction,
-                      maCross: true,
-                      section,
-                      interval: indicatorInterval,
-                      parentIndicator: uuid,
-                      childIndicator: '',
-                      cb: cbChild,
-                      groupId: '',
-                      is1d: load1d,
-                    })
-                    const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
-                    if (this.showIndicatorLogs()) {
-                      this.handleLog(text)
-                    } else {
-                      this.handleDebug(text)
-                    }
-                  }
-                  if (xoChild) {
-                    const load1d =
-                      hasLower &&
-                      timeIntervalMap[indicatorInterval] <=
-                        timeIntervalMap[
-                          xOscillator2Interval || indicatorInterval
-                        ]
-                    const indicatorChildData: BotParentIndicatorEventDto = {
-                      data: {
-                        indicatorConfig:
-                          xOscillator2 === IndicatorEnum.vo
-                            ? {
-                                type: xOscillator2,
-                                voLong: _xOscillator2voLong ?? voLong ?? 10,
-                                voShort: _xOscillator2voShort ?? voShort ?? 5,
-                              }
-                            : {
-                                type: xOscillator2 || IndicatorEnum.mfi,
-                                interval: xOscillator2length || indicatorLength,
-                              },
-                        interval: xOscillator2Interval || indicatorInterval,
-                        symbol,
-                        exchange: this.data.exchange,
-                        test: false,
-                        load1d,
-                      },
-                      event: 'subscribeIndicator',
-                      botId: this.botId,
-                      responseId: v4(),
-                      responseParams: { uuid: xoUUID, symbol },
-                      type: this.botType,
-                    }
-                    const {
-                      id: idChild,
-                      room: roomChild,
-                      data: dataChild,
-                      cb: cbChild,
-                    } = await this.sendIndicatorSubscribeEvent(
-                      indicatorChildData,
-                    )
-                    if (!idChild) {
-                      this.handleWarn(
-                        `Indicator ${xoUUID} ${symbol} not connected`,
-                      )
-                      return
-                    }
-                    const xoKey = `${xoUUID}@${symbol}`
-                    const findInCurrent = _indicators.get(xoKey)
-                    const active =
-                      !serviceRestart &&
-                      (findInCurrent?.statusTo ?? 0) > +new Date()
-                    this.indicators.set(xoKey, {
-                      uuid: xoUUID,
-                      id: idChild,
-                      room: roomChild,
-                      status: active ? (findInCurrent?.status ?? false) : false,
-                      statusSince: active
-                        ? findInCurrent?.statusSince
-                        : undefined,
-                      statusTo: active ? findInCurrent?.statusTo : undefined,
-                      numberOfSignals: active
-                        ? findInCurrent?.numberOfSignals
-                        : undefined,
-                      data: !!dataChild,
-                      history: dataChild ?? [],
-                      symbol,
-                      key: xoKey,
-                      action: indicatorAction,
-                      maCross: true,
-                      section,
-                      interval: indicatorInterval,
-                      childIndicator: '',
-                      parentIndicator: uuid,
-                      cb: cbChild,
-                      groupId: '',
-                      is1d: load1d,
-                    })
-                    const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
-                    if (this.showIndicatorLogs()) {
-                      this.handleLog(text)
-                    } else {
-                      this.handleDebug(text)
-                    }
-                  }
-                } else {
-                  this.handleDebug(
-                    `Bot start condition set to ${type}, but values wasn't provided.`,
-                  )
-                }
-              }
-            }),
+            filteredIndicators
+              .filter(
+                (i) =>
+                  !dueDca ||
+                  i.indicatorAction !== IndicatorAction.startDca ||
+                  dueDca.has(`${i.uuid}@${symbol}`),
+              )
+              .map((i) =>
+                this.connectSettingsIndicator(i, symbol, {
+                  settings,
+                  filteredIndicators,
+                  serviceRestart,
+                  previous: _indicators,
+                  dealCloseSymbols,
+                }),
+              ),
           )
           await sleep(0)
           this.handleDebug(
@@ -15076,16 +15050,544 @@ function createDCABotHelper<
       this.startSessionCheckTimer()
     }
 
+    /**
+     * DCA by indicators: each `startDca` indicator is one ladder level, and a
+     * deal only acts on the indicator of its NEXT level (`addDCAOrderByIndicator`
+     * drops every other one). So only that indicator is subscribed, per open
+     * deal, rather than every level on every pair.
+     *
+     * `null` when the bot does not DCA by indicators, or when scale-AR reads the
+     * `startDca` indicators as values — those stay subscribed as before.
+     */
+    private dueDcaIndicatorKeys(
+      settings: Schema['settings'],
+    ): Set<string> | null {
+      if (
+        this.scaleAr ||
+        !settings.useDca ||
+        settings.dcaCondition !== DCAConditionEnum.indicators
+      ) {
+        return null
+      }
+      const levels = (settings.indicators ?? []).filter(
+        (i) => i.indicatorAction === IndicatorAction.startDca,
+      )
+      const due = new Set<string>()
+      for (const d of this.getDealsByStatusAndSymbol({
+        status: DCADealStatusEnum.open,
+      })) {
+        const level = levels[nextLadderLevel(d.deal) - 1]
+        if (level) {
+          due.add(`${level.uuid}@${d.deal.symbol.symbol}`)
+        }
+      }
+      return due
+    }
+
+    @RunWithDelay((botId: string) => `${botId}syncDcaIndicatorLevels`, 1_000)
+    scheduleDcaIndicatorSync(_botId: string) {
+      this.syncDcaIndicatorLevels(this.botId)
+    }
+
+    /**
+     * Move DCA-level subscriptions to where the deals are now: drop the
+     * indicator of a level a deal has passed (or a closed deal's), subscribe
+     * the one it has reached. Runs coalesced after any deal change.
+     *
+     * A newly subscribed level is armed: its first data is the candle that
+     * closed BEFORE the deal reached the level, which the subscribe-everything
+     * engine had already spent while the deal was on the previous level. Only
+     * candles closing after the arm time can fire it.
+     */
+    @IdMute(mutex, (botId: string) => `${botId}openIndicators`)
+    async syncDcaIndicatorLevels(_botId: string) {
+      if (
+        !this.data ||
+        !this.redisSubIndicators ||
+        this.data.settings.dcaCondition !== DCAConditionEnum.indicators
+      ) {
+        return
+      }
+      const settings = await this.getAggregatedSettings()
+      const due = this.dueDcaIndicatorKeys(settings)
+      if (!due) {
+        return
+      }
+      for (const i of [...this.indicators.values()]) {
+        if (i.action !== IndicatorAction.startDca) {
+          continue
+        }
+        const levelKey = i.parentIndicator
+          ? `${i.parentIndicator}@${i.symbol}`
+          : i.key
+        if (due.has(levelKey)) {
+          continue
+        }
+        await this.sendIndicatorUnsubscribeEvent(i.id, i.room, i.cb)
+        this.indicators.delete(i.key)
+        this.lastIndicatorsDataMap.delete(i.key)
+        this.dcaIndicatorArmedAt.delete(i.key)
+        if (!i.parentIndicator) {
+          const k = `${i.interval}@${i.action}`
+          this.indicatorsIntervalActionMap.set(
+            k,
+            (this.indicatorsIntervalActionMap.get(k) ?? 1) - 1,
+          )
+        }
+      }
+      const filteredIndicators = (settings.indicators ?? []).filter(
+        (i) => i.type !== IndicatorEnum.unpnl && !isClockCondition(i),
+      )
+      for (const key of due) {
+        if (this.indicators.has(key)) {
+          continue
+        }
+        const at = key.indexOf('@')
+        const uuid = key.slice(0, at)
+        const symbol = key.slice(at + 1)
+        const i = filteredIndicators.find((f) => f.uuid === uuid)
+        if (!i) {
+          continue
+        }
+        this.handleDebug(`DCA Signals | Subscribe next level ${key}`)
+        await this.connectSettingsIndicator(i, symbol, {
+          settings,
+          filteredIndicators,
+          serviceRestart: false,
+          previous: new Map(),
+          armDcaLevel: true,
+        })
+      }
+      this.runAfterIndicatorsConnected(this.botId)
+    }
+
+    /**
+     * Subscribe one configured indicator (and its MA / XO child) on `symbol`.
+     * Split out of `openIndicators` so `syncDcaIndicatorLevels` can subscribe
+     * a single DCA level without rebuilding every subscription.
+     */
+    private async connectSettingsIndicator(
+      i: SettingsIndicators,
+      symbol: string,
+      {
+        settings,
+        filteredIndicators,
+        serviceRestart,
+        previous: _indicators,
+        armDcaLevel,
+        dealCloseSymbols,
+      }: {
+        settings: Schema['settings']
+        filteredIndicators: SettingsIndicators[]
+        serviceRestart?: boolean
+        previous: Map<string, LocalIndicators>
+        armDcaLevel?: boolean
+        /** symbols with open deals that close by indicator themselves */
+        dealCloseSymbols?: { tp: Set<string>; sl: Set<string> }
+      },
+    ) {
+      if (!this.data) {
+        return
+      }
+      const {
+        indicatorLength: _indicatorLength,
+        type,
+        uuid,
+        indicatorInterval,
+        maCrossingValue,
+        maCrossingInterval,
+        maCrossingLength,
+        maUUID,
+        indicatorAction,
+        section,
+        keepConditionBars,
+        xOscillator2,
+        xOscillator2Interval,
+        xOscillator2length: _xOscillator2length,
+        xoUUID,
+      } = i
+      const indicatorLength = +(_indicatorLength ?? 14)
+      const xOscillator2length = +(_xOscillator2length ?? 14)
+      if (
+        (settings.startCondition !== StartConditionEnum.ti &&
+          indicatorAction === IndicatorAction.startDeal) ||
+        (!settings.useRiskReward &&
+          indicatorAction === IndicatorAction.riskReward) ||
+        (settings.useRiskReward &&
+          indicatorAction === IndicatorAction.riskReward &&
+          settings.type === DCATypeEnum.terminal) ||
+        ((!settings.useTp ||
+          (settings.dealCloseCondition !==
+            CloseConditionEnum.techInd &&
+            !this.tpAr)) &&
+          !dealCloseSymbols?.tp.has(symbol) &&
+          indicatorAction === IndicatorAction.closeDeal &&
+          section !== IndicatorSection.sl) ||
+        ((!settings.useSl ||
+          (settings.dealCloseConditionSL !==
+            CloseConditionEnum.techInd &&
+            !this.slAr)) &&
+          !dealCloseSymbols?.sl.has(symbol) &&
+          indicatorAction === IndicatorAction.closeDeal &&
+          section === IndicatorSection.sl) ||
+        ((!settings.useDca ||
+          !(
+            settings.dcaCondition === DCAConditionEnum.indicators ||
+            this.scaleAr
+          )) &&
+          indicatorAction === IndicatorAction.startDca) ||
+        ((!settings.useBotController ||
+          settings.botStart !== BotStartTypeEnum.indicators) &&
+          indicatorAction === IndicatorAction.stopBot) ||
+        ((!settings.useBotController ||
+          settings.botActualStart !== BotStartTypeEnum.indicators) &&
+          indicatorAction === IndicatorAction.startBot)
+      ) {
+        return
+      }
+      if (indicatorLength && indicatorInterval) {
+        const rrOrAr =
+          indicatorAction === IndicatorAction.riskReward ||
+          (indicatorAction === IndicatorAction.startDca &&
+            this.scaleAr) ||
+          (indicatorAction === IndicatorAction.closeDeal &&
+            section !== IndicatorSection.sl &&
+            this.tpAr) ||
+          (indicatorAction === IndicatorAction.closeDeal &&
+            section === IndicatorSection.sl &&
+            this.slAr)
+        const otherOnType = rrOrAr
+          ? []
+          : filteredIndicators.filter(
+              (i) =>
+                i.indicatorAction === indicatorAction &&
+                ((!i.section && !section) || i.section === section),
+            )
+        const lowerIntervals = otherOnType.filter(
+          (i) =>
+            timeIntervalMap[i.indicatorInterval] <
+            timeIntervalMap[indicatorInterval],
+        ).length
+        const sameActionGroups = (this.indicatorGroupsToUse ?? []).filter(
+          (ig) =>
+            ig.action === i.indicatorAction &&
+            (i.indicatorAction !== IndicatorAction.closeDeal ||
+              (i.section === IndicatorSection.sl) ===
+                (ig.section === IndicatorSection.sl)),
+        )
+        const useAnd =
+          i.indicatorAction === IndicatorAction.closeDeal
+            ? i.section === IndicatorSection.sl
+              ? groupsJoinedByAnd(sameActionGroups, settings.stopDealSlLogic)
+              : groupsJoinedByAnd(sameActionGroups, settings.stopDealLogic)
+            : i.indicatorAction === IndicatorAction.startBot
+              ? groupsJoinedByAnd(sameActionGroups, settings.startBotLogic)
+              : i.indicatorAction === IndicatorAction.startDeal
+                ? groupsJoinedByAnd(sameActionGroups, settings.startDealLogic)
+                : i.indicatorAction === IndicatorAction.stopBot
+                  ? groupsJoinedByAnd(sameActionGroups, settings.stopBotLogic)
+                  : false
+        const hasLower = rrOrAr
+          ? false
+          : otherOnType.length > 1 && lowerIntervals > 0 && useAnd
+        if (hasLower) {
+          this.handleDebug(
+            `Indicator ${uuid} ${symbol} ${indicatorAction} has indicators with lower interval: ${lowerIntervals}`,
+          )
+        }
+        const indicatorData: BotParentIndicatorEventDto = {
+          data: {
+            indicatorConfig: buildIndicatorConfig(i),
+            interval: indicatorSubscribeInterval(type, indicatorInterval),
+            symbol,
+            exchange: this.data.exchange,
+            test: false,
+            limitMultiplier: serviceRestart
+              ? this.convertToMultiplier(keepConditionBars)
+              : undefined,
+            load1d: rrOrAr || hasLower,
+          },
+          event: 'subscribeIndicator',
+          botId: this.botId,
+          responseId: v4(),
+          responseParams: {
+            uuid,
+            symbol,
+          },
+          type: this.botType,
+        }
+        if (armDcaLevel) {
+          this.dcaIndicatorArmedAt.set(`${uuid}@${symbol}`, Date.now())
+        }
+        const { id, room, data, cb } =
+          await this.sendIndicatorSubscribeEvent(indicatorData)
+        if (!id) {
+          this.handleDebug(
+            `Indicator ${uuid} ${symbol} not connected`,
+          )
+          return
+        }
+        const maChild =
+          type === IndicatorEnum.ma &&
+          maCrossingValue !== MAEnum.price &&
+          maCrossingInterval &&
+          maCrossingLength &&
+          maUUID &&
+          maCrossingValue &&
+          indicatorAction !== IndicatorAction.riskReward &&
+          !(
+            this.scaleAr &&
+            indicatorAction === IndicatorAction.startDca
+          ) &&
+          !(
+            indicatorAction === IndicatorAction.closeDeal &&
+            section !== IndicatorSection.sl &&
+            this.tpAr
+          ) &&
+          !(
+            indicatorAction === IndicatorAction.closeDeal &&
+            section === IndicatorSection.sl &&
+            this.slAr
+          )
+        const xoChild =
+          type === IndicatorEnum.xo &&
+          xOscillator2 &&
+          xOscillator2Interval &&
+          xOscillator2length &&
+          xoUUID &&
+          indicatorAction !== IndicatorAction.riskReward &&
+          !(
+            this.scaleAr &&
+            indicatorAction === IndicatorAction.startDca
+          ) &&
+          !(
+            indicatorAction === IndicatorAction.closeDeal &&
+            section !== IndicatorSection.sl &&
+            this.tpAr
+          ) &&
+          !(
+            indicatorAction === IndicatorAction.closeDeal &&
+            section === IndicatorSection.sl &&
+            this.slAr
+          )
+        const key = `${uuid}@${symbol}`
+        const findInCurrent = serviceRestart
+          ? this.data.indicatorsData?.find(
+              (id) =>
+                id.signature === this.getIndicatorSignature(i) &&
+                id.symbol === symbol &&
+                id.uuid === uuid,
+            )
+          : _indicators.get(key)
+
+        const active = (findInCurrent?.statusTo ?? 0) > +new Date()
+        const k = `${indicatorInterval}@${indicatorAction}`
+        this.indicatorsIntervalActionMap.set(
+          k,
+          (this.indicatorsIntervalActionMap.get(k) ?? 0) + 1,
+        )
+        this.indicators.set(key, {
+          uuid,
+          id: id,
+          room,
+          status: active ? (findInCurrent?.status ?? false) : false,
+          statusSince: active
+            ? findInCurrent?.statusSince
+            : undefined,
+          statusTo: active ? findInCurrent?.statusTo : undefined,
+          numberOfSignals: active
+            ? findInCurrent?.numberOfSignals
+            : undefined,
+          data: !!data,
+          history: data ?? [],
+          symbol,
+          key,
+          action: indicatorAction,
+          maCross: false,
+          section,
+          interval: indicatorInterval,
+          parentIndicator: '',
+          childIndicator: maChild ? maUUID : xoChild ? xoUUID : '',
+          cb,
+          groupId: i.groupId,
+          is1d: rrOrAr || hasLower,
+        })
+        const text = `Bot connected to ${type} indicator. Id: ${id}, room: ${room}`
+        if (this.showIndicatorLogs()) {
+          this.handleLog(text)
+        } else {
+          this.handleDebug(text)
+        }
+        if (maChild) {
+          const load1d =
+            hasLower &&
+            timeIntervalMap[indicatorInterval] <=
+              timeIntervalMap[maCrossingInterval]
+          const indicatorChildData: BotParentIndicatorEventDto = {
+            data: {
+              indicatorConfig: buildMaCrossReferenceConfig(i),
+              interval: maCrossingInterval,
+              symbol,
+              exchange: this.data.exchange,
+              test: false,
+              load1d,
+            },
+
+            botId: this.botId,
+            responseId: v4(),
+            responseParams: { uuid: maUUID, symbol },
+            event: 'subscribeIndicator',
+            type: this.botType,
+          }
+          const {
+            id: idChild,
+            room: roomChild,
+            data: dataChild,
+            cb: cbChild,
+          } = await this.sendIndicatorSubscribeEvent(
+            indicatorChildData,
+          )
+          if (!idChild) {
+            this.handleWarn(
+              `Indicator ${maUUID} ${symbol} not connected`,
+            )
+            return
+          }
+          const maKey = `${maUUID}@${symbol}`
+          const findInCurrent = _indicators.get(maKey)
+
+          const active =
+            !serviceRestart &&
+            (findInCurrent?.statusTo ?? 0) > +new Date()
+          this.indicators.set(maKey, {
+            uuid: maUUID,
+            id: idChild,
+            room: roomChild,
+            status: active ? (findInCurrent?.status ?? false) : false,
+            statusSince: active
+              ? findInCurrent?.statusSince
+              : undefined,
+            statusTo: active ? findInCurrent?.statusTo : undefined,
+            numberOfSignals: active
+              ? findInCurrent?.numberOfSignals
+              : undefined,
+            data: !!dataChild,
+            history: dataChild ?? [],
+            symbol,
+            key: maKey,
+            action: indicatorAction,
+            maCross: true,
+            section,
+            interval: indicatorInterval,
+            parentIndicator: uuid,
+            childIndicator: '',
+            cb: cbChild,
+            groupId: '',
+            is1d: load1d,
+          })
+          const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
+          if (this.showIndicatorLogs()) {
+            this.handleLog(text)
+          } else {
+            this.handleDebug(text)
+          }
+        }
+        if (xoChild) {
+          const load1d =
+            hasLower &&
+            timeIntervalMap[indicatorInterval] <=
+              timeIntervalMap[xOscillator2Interval || indicatorInterval]
+          const indicatorChildData: BotParentIndicatorEventDto = {
+            data: {
+              indicatorConfig: buildXoReferenceConfig(i),
+              interval: xOscillator2Interval || indicatorInterval,
+              symbol,
+              exchange: this.data.exchange,
+              test: false,
+              load1d,
+            },
+            event: 'subscribeIndicator',
+            botId: this.botId,
+            responseId: v4(),
+            responseParams: { uuid: xoUUID, symbol },
+            type: this.botType,
+          }
+          const {
+            id: idChild,
+            room: roomChild,
+            data: dataChild,
+            cb: cbChild,
+          } = await this.sendIndicatorSubscribeEvent(
+            indicatorChildData,
+          )
+          if (!idChild) {
+            this.handleWarn(
+              `Indicator ${xoUUID} ${symbol} not connected`,
+            )
+            return
+          }
+          const xoKey = `${xoUUID}@${symbol}`
+          const findInCurrent = _indicators.get(xoKey)
+          const active =
+            !serviceRestart &&
+            (findInCurrent?.statusTo ?? 0) > +new Date()
+          this.indicators.set(xoKey, {
+            uuid: xoUUID,
+            id: idChild,
+            room: roomChild,
+            status: active ? (findInCurrent?.status ?? false) : false,
+            statusSince: active
+              ? findInCurrent?.statusSince
+              : undefined,
+            statusTo: active ? findInCurrent?.statusTo : undefined,
+            numberOfSignals: active
+              ? findInCurrent?.numberOfSignals
+              : undefined,
+            data: !!dataChild,
+            history: dataChild ?? [],
+            symbol,
+            key: xoKey,
+            action: indicatorAction,
+            maCross: true,
+            section,
+            interval: indicatorInterval,
+            childIndicator: '',
+            parentIndicator: uuid,
+            cb: cbChild,
+            groupId: '',
+            is1d: load1d,
+          })
+          const text = `Bot connected to ${type} indicator. Id: ${idChild}, room: ${roomChild}`
+          if (this.showIndicatorLogs()) {
+            this.handleLog(text)
+          } else {
+            this.handleDebug(text)
+          }
+        }
+      } else {
+        this.handleDebug(
+          `Bot start condition set to ${type}, but values wasn't provided.`,
+        )
+      }
+    }
+
     private startSessionCheckTimer() {
       this.stopSessionCheckTimer()
-      const sessionIndicator = this.data?.settings.indicators?.find(
-        (i) => i.type === IndicatorEnum.session,
+      // only the in / out rules are a clock filter; a Price levels Session is
+      // subscribed and evaluated from candles like any other indicator
+      const sessionIndicator = this.data?.settings.indicators?.find((i) =>
+        isClockCondition(i),
       )
       if (!sessionIndicator) {
         return
       }
       const days = sessionIndicator.sessionDays ?? [1, 2, 3, 4, 5]
       const rule = sessionIndicator.sessionRule ?? 'in'
+      const hours = {
+        start: sessionIndicator.sessionStart,
+        end: sessionIndicator.sessionEnd,
+        timezone: sessionIndicator.sessionTimezone,
+      }
       const { uuid, indicatorAction, section, groupId } = sessionIndicator
       // Register session indicator in the map for the first symbol
       // Session is time-based, not symbol-specific, so one entry per symbol
@@ -15114,7 +15616,7 @@ function createDCABotHelper<
       }
       const check = () => {
         this.handleDebug('Checking session indicator status')
-        const inSession = isInSession(Date.now(), days, rule)
+        const inSession = isInSession(Date.now(), days, rule, hours)
         const toProcess: (() => void)[] = []
         for (const [key, ind] of this.indicators.entries()) {
           if (ind.uuid === uuid) {
@@ -15162,11 +15664,30 @@ function createDCABotHelper<
 
     async openNewDealMan(_symbol?: string) {
       if (this.data) {
+        if (isStoppedForNewDeals(this.data.status, this.data.previousStatus)) {
+          // The deal-opening gates drop it for a stopped bot; tell the user
+          // instead of leaving the click without an answer.
+          this.handleLog('Open new deal manualy refused: bot is stopped')
+          // Not `handleErrors`: its log policy keeps one row per bot for this
+          // message, so every click after the first was answered with nothing.
+          await this.reportUserRefusal(stoppedBotNewDealMessage, _symbol)
+          return
+        }
         const settings = await this.getAggregatedSettings()
         const symbols = _symbol ? [_symbol] : (settings.pair ?? [])
         this.handleLog('Open new deal manualy')
         for (const symbol of symbols) {
-          this.openNewDeal(this.botId, symbol, true)
+          // Labelled so a refusal is reported on every click, not latched
+          // like the automatic retries (spec 144).
+          this.openNewDeal(
+            this.botId,
+            symbol,
+            true,
+            false,
+            0,
+            undefined,
+            'manual',
+          )
         }
       }
     }
@@ -15221,12 +15742,51 @@ function createDCABotHelper<
       return 0
     }
 
+    /**
+     * Pre-deal balance gate for the open-new-deal loop.
+     *
+     * A bot that cannot fund its next deal retries every cycle, and each try
+     * read the WHOLE account balance from the exchange (twice, with the 5 s
+     * re-check). On an account running hundreds of underfunded bots that is
+     * hundreds of full-account reads a minute against a venue budget shared
+     * with every other user.
+     *
+     * So the gate first decides from the stored, stream-maintained balances.
+     * A shortfall they already show is answered without an exchange call; a
+     * pass is confirmed with a live read before anything is opened, so a
+     * stored figure can only ever DELAY a deal, never open one the account
+     * cannot fund. Always live when the reported shortfall is itself used
+     * for sizing (reduce-to-available) or when stored balances are known to
+     * be incomplete for the venue (holds not streamed; no stored balances).
+     */
+    async checkBalanceGate(symbol: string) {
+      const settings = await this.getAggregatedSettings()
+      const exchange = this.data?.exchange
+      const storedUsable =
+        !!exchange &&
+        !holdFromRestOnly.has(exchange) &&
+        exchange !== ExchangeEnum.coinbase &&
+        exchange !== ExchangeEnum.ftx &&
+        !settings.reduceToAvailableBalance &&
+        // A spec-152 re-check: the stored figure is what refused this pair.
+        !this.newDealBalanceRetries?.has(symbol)
+      if (storedUsable) {
+        const stored = await this.checkBalance(symbol, 1, 'whole', 'stored')
+        if (!stored.status && !stored.unknown) {
+          return stored
+        }
+      }
+      return this.checkBalance(symbol)
+    }
+
     async checkBalance(
       symbol: string,
       /** the deal's size multiple of the configured size (1 = as configured) */
       sizeMultiplier = 1,
       /** what the multiple scales: the base order only, or the whole deal */
       sizeScope: 'base' | 'whole' = 'whole',
+      /** `stored`: decide from stored balances only — see checkBalanceGate */
+      source: 'live' | 'stored' = 'live',
     ): Promise<{
       status: boolean
       required: number
@@ -15237,6 +15797,11 @@ function createDCABotHelper<
        * the account holds — callers must not price a shortfall off it.
        */
       unknown?: boolean
+      /**
+       * The asset `required` / `available` are in, when it is not the one the
+       * bot's direction implies (a bot-funded short is refused on quote).
+       */
+      asset?: string
     }> {
       const result = {
         status: true,
@@ -15257,11 +15822,27 @@ function createDCABotHelper<
         this.handleLog(`Balance check skipped`)
         return result
       }
+      // A futures import adopts a position that is already open: its margin is
+      // already committed, so the venue has already taken it out of the free
+      // balance. Asking for it again can only refuse a valid import — and on a
+      // Binance Multi-Assets account the quote row it read was the BNFCR PnL
+      // ledger, not the collateral. Nothing is placed, so there is nothing to
+      // fund.
+      if (
+        this.futures &&
+        settings.terminalDealType === TerminalDealTypeEnum.import
+      ) {
+        this.handleLog(`Balance check skipped for a futures import`)
+        return result
+      }
       const ed = await this.getExchangeInfo(symbol)
       if (!ed) {
         return result
       }
-      const balance = await this.checkAssets(true, true)
+      const balance =
+        source === 'stored'
+          ? await this.checkAssets(true, false, true)
+          : await this.checkAssets(true, true)
       if (!balance) {
         // The read failed — it is already reported on its own by
         // `checkAssets()`. Bypass exactly like the `latestPrice === 0` and
@@ -15286,44 +15867,22 @@ function createDCABotHelper<
         const requiredQuote =
           (requiredBase * +(settings.baseOrderPrice ?? 0)) / leverage
         const quoteBalance = balance?.get(ed.quoteAsset.name)?.free ?? 0
-        if (this.futures) {
-          if (this.coinm) {
-            if (baseBalance < requiredBase) {
-              return {
-                status: false,
-                available: baseBalance,
-                required: requiredBase,
-                price: 0,
-              }
-            }
-          } else {
-            if (quoteBalance < requiredQuote) {
-              return {
-                status: false,
-                available: quoteBalance,
-                required: requiredQuote,
-                price: 0,
-              }
+        if (this.isLong) {
+          if (baseBalance < requiredBase) {
+            return {
+              status: false,
+              available: baseBalance,
+              required: requiredBase,
+              price: 0,
             }
           }
         } else {
-          if (this.isLong) {
-            if (baseBalance < requiredBase) {
-              return {
-                status: false,
-                available: baseBalance,
-                required: requiredBase,
-                price: 0,
-              }
-            }
-          } else {
-            if (quoteBalance < requiredQuote) {
-              return {
-                status: false,
-                available: quoteBalance,
-                required: requiredQuote,
-                price: 0,
-              }
+          if (quoteBalance < requiredQuote) {
+            return {
+              status: false,
+              available: quoteBalance,
+              required: requiredQuote,
+              price: 0,
             }
           }
         }
@@ -15402,6 +15961,44 @@ function createDCABotHelper<
           : 1
       const requiredAmount =
         baseAmount * m + gridAmount * (sizeScope === 'base' ? 1 : m)
+      // Main-app spec 044: a short spot deal the bot may fund itself. The
+      // requirement is every configured safety order, not only the ones rested
+      // in advance — they are funded once, upfront.
+      // Before the deal exists: the beta gate, asked live — and only when a
+      // funding mode would otherwise apply.
+      const fundingMode =
+        this.shortSpotFundingMode(settings, true) &&
+        (await this.baseFundingAllowed())
+          ? this.shortSpotFundingMode(settings, true)
+          : null
+      if (fundingMode) {
+        const safetyQty =
+          (await this.fundedSafetyQty(initialGrids, symbol)) *
+          (sizeScope === 'base' ? 1 : m)
+        const decision = await this.planShortSpotFunding(
+          symbol,
+          fundingMode,
+          baseAmount * m,
+          safetyQty,
+          latestPrice,
+          balance,
+        )
+        if (decision?.kind === 'fund') {
+          this.handleDebug(
+            `Balance check: deal funded by the bot (${fundingMode}), quote needed ${decision.quoteNeeded}`,
+          )
+          return result
+        }
+        if (decision?.kind === 'refuse') {
+          return {
+            status: false,
+            required: decision.required,
+            available: decision.available,
+            price: latestPrice,
+            asset: ed.quoteAsset.name,
+          }
+        }
+      }
       let available =
         (this.futures
           ? this.coinm
@@ -15410,6 +16007,16 @@ function createDCABotHelper<
           : this.isLong
             ? (balance?.get(ed.quoteAsset.name)?.free ?? 0)
             : balance?.get(ed.baseAsset.name)?.free) ?? 0
+      if (!this.futures) {
+        // Spec 044 §5: quote a bot-funded short's take profit will spend.
+        // §8: base a funded long hedge leg's take profit will sell.
+        const reserved = this.isLong
+          ? await this.reservedFundingQuote(ed.quoteAsset.name)
+          : await this.reservedFundingBase(ed.baseAsset.name)
+        if (reserved > 0) {
+          available = Math.max(0, available - reserved)
+        }
+      }
       if (requiredAmount / leverage > available) {
         available = await this.pooledMarginOrKeep(
           ed.quoteAsset.name,
@@ -15460,6 +16067,50 @@ function createDCABotHelper<
       for (const symbol of asapSymbols) {
         this.openNewDeal(this.botId, symbol)
       }
+    }
+
+    /**
+     * Spec 152. Called on a new-deal balance refusal. An ASAP bot has no
+     * other trigger that would try the pair again, so schedule a re-check on
+     * the {@link NEW_DEAL_BALANCE_RETRY_MS} back-off. While it is pending,
+     * {@link checkBalanceGate} reads the exchange. Once the delays are used up
+     * the pair is forgotten and nothing more is armed. Manual opens are answered
+     * on the click, and other start conditions re-run the gate on their own
+     * signal.
+     */
+    retryNewDealAfterBalanceRefusal(
+      symbol: string,
+      startCondition?: StartConditionEnum,
+      trigger?: NewDealTrigger,
+    ) {
+      if (!this.newDealBalanceRetries) {
+        this.newDealBalanceRetries = new Map()
+      }
+      const attempt = this.newDealBalanceRetries.get(symbol) ?? 0
+      const delay = NEW_DEAL_BALANCE_RETRY_MS[attempt]
+      if (
+        startCondition !== StartConditionEnum.asap ||
+        trigger === 'manual' ||
+        delay === undefined
+      ) {
+        this.newDealBalanceRetries.delete(symbol)
+        return
+      }
+      this.newDealBalanceRetries.set(symbol, attempt + 1)
+      this.handleDebug(
+        `Re-check balance for a new deal ${symbol} in ${delay / 1000}s (${attempt + 1}/${NEW_DEAL_BALANCE_RETRY_MS.length})`,
+      )
+      const prev = this.openNewDealTimer.get(symbol)
+      if (prev) {
+        clearTimeout(prev)
+      }
+      this.openNewDealTimer.set(
+        symbol,
+        setTimeout(() => {
+          this.openNewDealTimer.delete(symbol)
+          void this.openNewDeal(this.botId, symbol)
+        }, delay),
+      )
     }
 
     private async checkRiskRewardCondition(
@@ -15687,7 +16338,10 @@ function createDCABotHelper<
         : this.isLong
           ? precisionQuote
           : precisionBase
-      const balances = await this.checkAssets(true, true)
+      // Sizes the deal from the balance: always a live read.
+      const balances = await withExchangeCaller('bot.dealSizing', () =>
+        this.checkAssets(true, true),
+      )
       const asset =
         (this.futures
           ? this.coinm
@@ -16012,13 +16666,6 @@ function createDCABotHelper<
       }
     }
     /**
-     * Open new deal
-     */
-    @IdMute(
-      mutex,
-      (botId: string, symbol: string) => `${botId}newDeal@${symbol}`,
-    )
-    /**
      * Refuse a new deal whose base order or safety orders the exchange minimum
      * would raise past what the user configured. The default for DCA bots: a
      * bot opts back into the old behaviour — raise the orders to the minimum
@@ -16026,9 +16673,10 @@ function createDCABotHelper<
      * refuse; every bot that existed before this default was introduced had the
      * setting written `true` explicitly, so none of them changed behaviour.<br />
      *
-     * Regular DCA bots only. Terminal deals and hedge-DCA legs run through this
-     * engine too, but their forms do not offer the switch, so they keep raising
-     * rather than getting a behaviour their users cannot turn off.<br />
+     * Every bot on this engine: DCA, combo, both sides of a hedge DCA/combo bot
+     * and terminal deals. Every combo bot, hedge side and terminal deal that
+     * existed before it reached them had the setting written `true`, as the
+     * DCA bots did.<br />
      *
      * Sizes the deal exactly as it would open — {@link getBaseOrder} and the
      * {@link createInitialDealOrders} ladder at the current price — with no
@@ -16050,9 +16698,7 @@ function createDCABotHelper<
     ): Promise<boolean> {
       const settings = await this.getAggregatedSettings()
       if (
-        settings.type === DCATypeEnum.terminal ||
-        this.data?.parentBotId ||
-        (await this.allowsRaiseToExchangeMin(settings.allowRaiseToExchangeMin))
+        await this.allowsRaiseToExchangeMin(settings.allowRaiseToExchangeMin)
       ) {
         return false
       }
@@ -16195,6 +16841,61 @@ function createDCABotHelper<
     }
 
     /**
+     * Refuse an automatic new deal on a dated futures contract that delivers
+     * within `DELIVERY_NEW_DEAL_CUTOFF_MS` (`deliveryCutoff.ts`): a
+     * deal still open at delivery is settled by the exchange. Perpetuals and
+     * spot carry no `deliveryTime` and are never refused. A manual open and a
+     * terminal deal are the user's explicit choice and go through.
+     *
+     * Reported once per pair per re-arm window as a bot warning, like the
+     * other standing refusals (spec 008) — the start condition retries every
+     * cycle and nothing but the calendar changes the answer.
+     *
+     * @returns {boolean} true when the deal was refused
+     */
+    async refuseNewDealNearDelivery(
+      symbol: string,
+      ed: ClearPairsSchema | undefined,
+      skip: boolean,
+      dynamic: boolean,
+      trigger?: NewDealTrigger,
+    ): Promise<boolean> {
+      const key = standingConditionKey(newDealNearDelivery, symbol)
+      const delivery = deliveryRefusingNewDeal(ed, +new Date())
+      if (delivery === null) {
+        this.standingConditionLatch.clear(key)
+        return false
+      }
+      const settings = await this.getAggregatedSettings()
+      if (
+        (settings as { type?: DCATypeEnum }).type === DCATypeEnum.terminal ||
+        resolveNewDealTrigger(
+          skip,
+          dynamic,
+          settings.startCondition,
+          trigger,
+        ) === 'manual'
+      ) {
+        return false
+      }
+      const message = deliveryRefusalMessage(symbol, delivery)
+      this.handleLog(message)
+      if (this.standingConditionLatch.shouldReport(key, +new Date())) {
+        this.botEventDb.createData({
+          userId: this.userId,
+          botId: this.botId,
+          event: 'Bot warning',
+          botType: this.botType,
+          description: `Warning: ${message}`,
+          paperContext: !!this.data?.paperContext,
+          symbol,
+          type: MessageTypeEnum.warning,
+        })
+      }
+      return true
+    }
+
+    /**
      * Last-step approval of a new deal: asked after every built-in gate has
      * passed, immediately before the deal is created. The engine itself always
      * approves; a deployment may override this to add its own filter. To
@@ -16223,6 +16924,8 @@ function createDCABotHelper<
       trigger: NewDealTrigger | undefined,
       startCondition: StartConditionEnum | undefined,
       indicators?: SettingsIndicators[],
+      /** Spec 139 §3.2.7: an entry into this open position. */
+      entryDealId?: string,
     ): Promise<NewDealApprovalContext | null> {
       const resolved = resolveNewDealTrigger(
         skip,
@@ -16230,12 +16933,14 @@ function createDCABotHelper<
         startCondition,
         trigger,
       )
+      const entry = entryDealId ? { entry: true, dealId: entryDealId } : {}
       if (resolved === 'manual') {
         return {
           botId: this.botId,
           symbol,
           trigger: 'manual',
           time: +new Date(),
+          ...entry,
         }
       }
       let price: number | undefined
@@ -16253,6 +16958,7 @@ function createDCABotHelper<
           resolved === 'indicator' ? buildNewDealSignal(indicators) : undefined,
         price,
         time: +new Date(),
+        ...entry,
       }
       let approved = true
       try {
@@ -16328,6 +17034,60 @@ function createDCABotHelper<
     }
 
     /**
+     * Why a webhook's own TP / SL cannot open this deal, if they cannot. Not
+     * opening is the answer for a signal whose exits cannot be honoured:
+     * opening without them, or with exits that fire on placement, is worse.
+     */
+    async signalOverridesRefusal(
+      symbol: string,
+      o?: SignalDealOverrides | null,
+    ): Promise<string | undefined> {
+      if (!o) {
+        return
+      }
+      const settings = await this.getAggregatedSettings()
+      if (
+        hasSignalTpSl(o) &&
+        settings.useRiskReward &&
+        settings.type !== DCATypeEnum.terminal
+      ) {
+        return 'take profit / stop loss from the signal cannot be used on a risk/reward bot, whose size is derived from its own stop loss'
+      }
+      if (o.tpPrice || o.slPrice) {
+        if (this.combo) {
+          return 'tpPrice / slPrice are only available for DCA bots'
+        }
+        const price = await this.getLatestPrice(symbol)
+        if (!(price > 0)) {
+          return 'the current price is not available to check the signal prices against'
+        }
+        return signalPriceError(o, price, this.isLong)
+      }
+    }
+
+    /**
+     * A webhook's `baseOrderSize`, as a base-order-only size multiplier on the
+     * configured base order. Applied (and re-checked) by
+     * {@link applyNewDealSize} like any requested size; it replaces a size an
+     * approving hook may have asked for, since the sender's is explicit.
+     */
+    requestSignalBaseOrderSize(
+      ctx: NewDealApprovalContext | null,
+      settings: { baseOrderSize?: string },
+      o?: SignalDealOverrides | null,
+    ) {
+      if (!ctx || !o?.baseOrderSize) {
+        return
+      }
+      const configured = +(settings.baseOrderSize ?? '0')
+      // 0 lands on `out_of_bounds` and is reported, rather than dividing by 0.
+      ctx.sizeMultiplier = configured > 0 ? +o.baseOrderSize / configured : 0
+      ctx.sizeScope = 'base'
+      ctx.sizeSource = 'webhook'
+      delete ctx.extensionRef
+    }
+
+    /**
      * Applies an approving hook's `sizeMultiplier` to a new deal: base order
      * and every safety order scaled together (on top of compound /
      * risk-reduction `sizes`), then the balance and the exchange minimums are
@@ -16348,11 +17108,14 @@ function createDCABotHelper<
       if (!ctx || !Number.isFinite(requested) || requested === 1) {
         return { sizes, outcome: null }
       }
+      // Only a webhook size is labelled; an extension's outcome keeps its shape.
+      const source =
+        ctx.sizeSource === 'webhook' ? { source: ctx.sizeSource } : {}
       const keep = (
         reason: NewDealSizeOutcome['reason'],
       ): { sizes: Sizes | null | undefined; outcome: NewDealSizeOutcome } => ({
         sizes,
-        outcome: { requested, applied: 1, reason },
+        outcome: { requested, applied: 1, reason, ...source },
       })
       const settings = await this.getAggregatedSettings()
       if (
@@ -16377,7 +17140,11 @@ function createDCABotHelper<
       if (opts.reduced) {
         return keep('reduced_to_available')
       }
-      if (!(requested >= NEW_DEAL_SIZE_MIN && requested <= NEW_DEAL_SIZE_MAX)) {
+      if (
+        !(ctx.sizeSource === 'webhook'
+          ? requested > 0
+          : requested >= NEW_DEAL_SIZE_MIN && requested <= NEW_DEAL_SIZE_MAX)
+      ) {
         return keep('out_of_bounds')
       }
       const scope = ctx.sizeScope === 'base' ? 'base' : 'whole'
@@ -16401,19 +17168,17 @@ function createDCABotHelper<
           return keep('insufficient_balance')
         }
       }
-      // Combo deals always raise an order to the exchange minimum (they have
-      // no refusal); a DCA bot refuses unless it allows the raise.
+      // A bot refuses unless it allows the raise.
       if (
-        !this.combo &&
-        (await this.refuseDealBelowExchangeMin(symbol, opts.fixSize, scaled, {
+        await this.refuseDealBelowExchangeMin(symbol, opts.fixSize, scaled, {
           quiet: true,
-        }))
+        })
       ) {
         return keep('below_exchange_min')
       }
       return {
         sizes: { ...scaled, multiplier: requested, multiplierScope: scope },
-        outcome: { requested, applied: requested, scope },
+        outcome: { requested, applied: requested, scope, ...source },
       }
     }
 
@@ -16466,6 +17231,104 @@ function createDCABotHelper<
       }
     }
 
+    /**
+     * Spec 139 §3.5: pairs of a single-position bot whose start signal is being
+     * handled right now. Optional so a prototype-built instance works.
+     */
+    singlePositionBusy?: Set<string>
+    /** Spec 139 §3.5: entry orders sent and not booked yet, per deal. */
+    positionEntriesSent?: Map<string, Set<string>>
+    /** Spec 139 §4.2: adoptions / conversions running in this bot. */
+    positionOps?: number
+    private positionOpChain?: Promise<unknown>
+
+    /**
+     * Run one position-changing operation (merge, adoption, conversion) at a
+     * time per bot — the "same mutex as mergeDeals" of spec 139 §4.2. While one
+     * runs, start signals of a single-position bot are skipped (§3.5).
+     */
+    async runPositionOp<T>(fn: () => Promise<T>): Promise<T> {
+      const prev = this.positionOpChain ?? Promise.resolve()
+      this.positionOps = (this.positionOps ?? 0) + 1
+      const run = prev.then(fn, fn)
+      this.positionOpChain = run.catch(() => undefined)
+      try {
+        return await run
+      } finally {
+        this.positionOps = Math.max(0, (this.positionOps ?? 1) - 1)
+      }
+    }
+
+    /** Spec 139 §3.5: an addition sent for this position entry. */
+    notePositionEntrySent(dealId: string, clientOrderId: string) {
+      this.positionEntriesSent ??= new Map()
+      const set = this.positionEntriesSent.get(dealId) ?? new Set<string>()
+      set.add(clientOrderId)
+      this.positionEntriesSent.set(dealId, set)
+    }
+
+    /**
+     * Spec 139 §3.5: the position has an entry that is not booked yet — its
+     * base order (deal still `start`), a resting entry / base remainder, or an
+     * entry that filled and whose `updateDeal` has not run.
+     */
+    positionEntryInFlight(d: FullDeal<ExcludeDoc<Deal>>): boolean {
+      if (d.deal.status === DCADealStatusEnum.start) {
+        return true
+      }
+      if (
+        (d.deal.pendingAddFunds ?? []).some(
+          (p) => p.positionEntry || p.baseRemainder,
+        )
+      ) {
+        return true
+      }
+      const dealId = `${d.deal._id}`
+      if (
+        this.getOrdersByStatusAndDealId({
+          dealId,
+          status: ['NEW', 'PARTIALLY_FILLED'],
+        }).some((o) => o.positionEntry)
+      ) {
+        return true
+      }
+      const sent = this.positionEntriesSent?.get(dealId)
+      if (!sent) {
+        return false
+      }
+      const booked = this.dealUpdateOrders.get(dealId)
+      for (const id of [...sent]) {
+        const o = this.getOrderFromMap(id)
+        if (o && o.status === 'FILLED' && !booked?.has(id)) {
+          return true
+        }
+        if (!o || booked?.has(id) || o.status !== 'FILLED') {
+          sent.delete(id)
+        }
+      }
+      return false
+    }
+
+    /**
+     * Spec 139 §3.4.2 / §7: an ASAP single-position bot has no close to
+     * re-probe after, so ask for the next entry once one is booked; the
+     * cooldown and the dynamic filter decide when it goes.
+     */
+    armNextPositionEntry(symbol: string) {
+      if (
+        !this.singlePositionActive ||
+        this.data?.settings?.startCondition !== StartConditionEnum.asap
+      ) {
+        return
+      }
+      void this.openNewDeal(this.botId, symbol)
+    }
+
+    /**
+     * Opens a new deal — or, on a single-position bot whose pair already holds
+     * an open deal, adds an entry to it (spec 139 §3.1). Every start path
+     * (start condition, "+ New deal", API / webhook, Max, restart) comes here.
+     */
     async openNewDeal(
       _botId: string,
       symbol: string,
@@ -16474,7 +17337,325 @@ function createDCABotHelper<
       time = 0,
       cbIfNotOpened?: () => void,
       trigger?: NewDealTrigger,
+      signalOverrides?: SignalDealOverrides | null,
     ) {
+      if (!this.loadingComplete || !this.singlePositionActive) {
+        return this.openNewDealBody(
+          _botId,
+          symbol,
+          skip,
+          dynamic,
+          time,
+          cbIfNotOpened,
+          trigger,
+          signalOverrides,
+        )
+      }
+      // §3.5: start signals for one pair are serialised — a second signal
+      // that arrives while the first is being handled is skipped, so two
+      // near-simultaneous signals cannot both find the pair empty. So is one
+      // that arrives while a position is being merged / adopted.
+      this.singlePositionBusy ??= new Set()
+      if (this.singlePositionBusy.has(symbol) || (this.positionOps ?? 0) > 0) {
+        this.handleDebug(
+          `Single position | start signal for ${symbol} skipped: another one is being handled`,
+        )
+        if (trigger === 'manual') {
+          await this.reportUserRefusal(
+            manualEntryNotAddedMessage(
+              symbol,
+              'another entry or merge on this position is being processed, please try again in a moment',
+            ),
+            symbol,
+          )
+        }
+        if (cbIfNotOpened) {
+          cbIfNotOpened()
+        }
+        return
+      }
+      this.singlePositionBusy.add(symbol)
+      try {
+        const position = this.getOpenDeals(false, symbol).sort(
+          (a, b) => (a.deal.createTime ?? 0) - (b.deal.createTime ?? 0),
+        )[0]
+        if (!position) {
+          return await this.openNewDealBody(
+            _botId,
+            symbol,
+            skip,
+            dynamic,
+            time,
+            cbIfNotOpened,
+            trigger,
+            signalOverrides,
+          )
+        }
+        if (signalOverrides) {
+          // An entry joins a position that already has its own size and
+          // exits; the signal's are for a new deal.
+          this.handleLog(
+            `Single position | ${symbol}: signal base order / TP / SL not applied to an entry into ${position.deal._id}`,
+          )
+        }
+        return await this.addPositionEntry(
+          symbol,
+          position,
+          skip,
+          dynamic,
+          cbIfNotOpened,
+          trigger,
+        )
+      } finally {
+        this.singlePositionBusy.delete(symbol)
+      }
+    }
+
+    /**
+     * Spec 139 §3.2–§3.3: a start signal on a pair whose position is open adds
+     * one entry to it, through the add-funds machinery, after the ordinary
+     * gates in their usual order.
+     */
+    async addPositionEntry(
+      symbol: string,
+      position: FullDeal<ExcludeDoc<Deal>>,
+      skip: boolean,
+      dynamic: boolean,
+      cbIfNotOpened?: () => void,
+      trigger?: NewDealTrigger,
+    ) {
+      const _id = this.startMethod('addPositionEntry')
+      // `user`: what a manual "+ New deal" is told. Omitted where the refusal
+      // is reported on its own path (balance, the exchange minimum) or cannot
+      // occur for a manual entry (cooldown, price filter).
+      const refuse = async (debug: string, user?: string) => {
+        this.handleDebug(`Single position | ${symbol}: ${debug}`)
+        if (user && trigger === 'manual') {
+          await this.reportUserRefusal(
+            manualEntryNotAddedMessage(symbol, user),
+            symbol,
+          )
+        }
+        if (cbIfNotOpened) {
+          cbIfNotOpened()
+        }
+        this.endMethod(_id)
+      }
+      // §3.2.8: an entry is refused wherever a new deal would be. A bot the
+      // bot controller (or a stop condition) has put in monitoring opens no
+      // deal from a start signal (`openNewDealBody`), so it adds no entry
+      // either; a manual "+ New deal" (`skip`) still goes through, as there.
+      if (!skip && this.data?.status === BotStatusEnum.monitoring) {
+        return refuse('bot is in monitoring mode')
+      }
+      const dealId = `${position.deal._id}`
+      // §3.5: one entry in flight per position — skipped, not queued, and not
+      // reported to the user.
+      if (this.positionEntryInFlight(position)) {
+        return refuse(
+          `entry in flight on ${dealId}, signal skipped`,
+          'the previous entry on this position is not filled and booked yet, please try again once it is',
+        )
+      }
+      const settings = await this.getAggregatedSettings()
+      // §3.2.1: `maxNumberOfOpenDeals` is not consulted — the pair already
+      // holds its slot. §3.2.2: the entry limit instead.
+      if (positionIsFull(position.deal, settings.maxPositionEntries)) {
+        this.reportMaxDealsReached(
+          'entries',
+          symbol,
+          positionEntriesOf(position.deal),
+          maxPositionEntriesOf(settings.maxPositionEntries),
+        )
+        return refuse(
+          `position ${dealId} is full`,
+          'the position has reached its maximum number of entries',
+        )
+      }
+      // §3.2.3 / §3.2.4: the price filters; the dynamic one measures from the
+      // last entry's fill (`checkInDynamicRange`).
+      const skipRange = skip && !dynamic
+      if (!skipRange && !(await this.checkInRange(symbol))) {
+        return refuse('price filter refused the entry')
+      }
+      if (
+        this.data?.status === BotStatusEnum.closed ||
+        (this.data?.status === BotStatusEnum.error &&
+          this.data.previousStatus === BotStatusEnum.closed)
+      ) {
+        return refuse(
+          `bot status is ${this.data?.status}`,
+          'the bot is stopped',
+        )
+      }
+      // §3.2.6: balance, as for a base order. A single-position bot has no
+      // safety orders, so the requirement is the entry alone.
+      const checkBalance = await this.checkBalanceGate(symbol)
+      if (checkBalance.unknown) {
+        return refuse(
+          'cannot read balance',
+          'the account balance could not be read from the exchange, please try again',
+        )
+      }
+      const reduce = checkBalance.status
+        ? { ratio: null }
+        : await this.reduceToAvailableRatio(checkBalance, symbol)
+      if (!checkBalance.status && reduce.ratio === null) {
+        const msg = `Not enough balance to add an entry to the ${symbol} position. Required: ${checkBalance.required}, available: ${checkBalance.available}`
+        if (trigger === 'manual') {
+          await this.reportUserRefusal(msg, symbol)
+        } else if (
+          this.standingConditionLatch.shouldReport(
+            standingConditionKey(notEnoughBalanceNewDeal, symbol),
+            +new Date(),
+          )
+        ) {
+          this.handleErrors(
+            msg,
+            'openNewDeal',
+            '',
+            false,
+            true,
+            true,
+            false,
+            symbol,
+          )
+        }
+        return refuse('not enough balance')
+      }
+      if (checkBalance.status) {
+        this.standingConditionLatch.clear(
+          standingConditionKey(notEnoughBalanceNewDeal, symbol),
+        )
+      }
+      const release = () => this.releaseReduceToAvailableClaim(symbol)
+      // §3.2.5: cooldown after deal start counts from the last entry's fill
+      // (`lastOpenedDeal*`, written on that fill); cooldown after deal stop
+      // is unchanged.
+      if (!(skip && !dynamic)) {
+        for (const check of [
+          await this.checkCooldownStart(this.botId, symbol),
+          await this.checkCooldownStop(this.botId, symbol),
+        ]) {
+          if (!check.status) {
+            if (settings.startCondition === StartConditionEnum.asap) {
+              const prev = this.openNewDealTimer.get(symbol)
+              if (prev) {
+                clearTimeout(prev)
+              }
+              this.openNewDealTimer.set(
+                symbol,
+                setTimeout(
+                  () => this.openDealAfterTimer(),
+                  Math.max(0, check.last + check.cooldown - +new Date() - 1),
+                ),
+              )
+            }
+            release()
+            return refuse(
+              `cooldown: last ${check.last}, cooldown ${check.cooldown}`,
+            )
+          }
+        }
+      }
+      // §3.2.6: `allowRaiseToExchangeMin`, as for a base order.
+      if (await this.refuseDealBelowExchangeMin(symbol, 0, undefined)) {
+        release()
+        return refuse('entry below the exchange minimum')
+      }
+      // §3.2.7: approval hooks see an entry, not a new deal.
+      const approval = await this.checkNewDealApproval(
+        symbol,
+        skip,
+        dynamic,
+        trigger,
+        settings.startCondition,
+        settings.indicators,
+        dealId,
+      )
+      if (!approval) {
+        release()
+        return refuse('approval refused the entry')
+      }
+      // §3.3: sized and typed like the bot's base order.
+      const price = await this.getLatestPrice(symbol)
+      const base = price
+        ? await this.getBaseOrder(symbol, undefined, undefined, price)
+        : undefined
+      if (!base || !(+base.origQty > 0)) {
+        release()
+        return refuse(
+          'cannot size the entry',
+          'the entry size could not be calculated from the current price',
+        )
+      }
+      let qty = +base.origQty
+      if (reduce.ratio !== null) {
+        qty = this.math.round(
+          qty * reduce.ratio,
+          await this.baseAssetPrecision(symbol),
+          true,
+        )
+        const message = `Not enough balance for a full entry on ${symbol} (required: ${checkBalance.required}, available: ${checkBalance.available}). Adding it at ${this.math.round(reduce.ratio * 100, 1)}% of the configured size`
+        this.handleLog(message)
+        this.botEventDb.createData({
+          userId: this.userId,
+          botId: this.botId,
+          event: 'Deal',
+          botType: this.botType,
+          description: message,
+          paperContext: !!this.data?.paperContext,
+          symbol,
+          deal: dealId,
+          type: MessageTypeEnum.info,
+        })
+      }
+      const limit = base.type === OrderTypeEnum.limit
+      this.handleLog(
+        `Single position | ${symbol}: add entry ${positionEntriesOf(position.deal) + 1} to ${dealId}, qty ${qty}${limit ? ` @ ${base.price}` : ''}`,
+      )
+      await this.addDealFunds(this.botId, dealId, {
+        qty: `${qty}`,
+        asset: OrderSizeTypeEnum.base,
+        type: AddFundsTypeEnum.fixed,
+        useLimitPrice: limit,
+        limitPrice: limit ? `${base.price}` : undefined,
+        positionEntry: true,
+      })
+      release()
+      this.endMethod(_id)
+    }
+
+    /**
+     * Open new deal. One attempt per bot and pair at a time: the gates
+     * (max deals, balance, cooldown) and the base order run under one lock,
+     * so two triggers for the same pair cannot both pass them. On the body,
+     * not on {@link openNewDeal}, so a single-position bot still skips a
+     * second start signal instead of queueing it behind the first.
+     */
+    @IdMute(
+      mutex,
+      (botId: string, symbol: string) => `${botId}newDeal@${symbol}`,
+    )
+    protected async openNewDealBody(
+      _botId: string,
+      symbol: string,
+      skip = false,
+      dynamic = false,
+      time = 0,
+      cbIfNotOpened?: () => void,
+      trigger?: NewDealTrigger,
+      signalOverrides?: SignalDealOverrides | null,
+    ) {
+      // A manual "+ New deal" is answered at every exit that refuses it; the
+      // automatic triggers keep their quiet, latched reporting.
+      const refuseManual = (why: string) =>
+        trigger === 'manual'
+          ? this.reportUserRefusal(
+              manualNewDealNotOpenedMessage(symbol, why),
+              symbol,
+            )
+          : undefined
       if (!this.loadingComplete) {
         this.runAfterLoadingQueue.push(() =>
           this.openNewDeal.bind(this)(
@@ -16485,6 +17666,7 @@ function createDCABotHelper<
             time,
             cbIfNotOpened,
             trigger,
+            signalOverrides,
           ),
         )
         return this.handleLog('Loading not complete yet')
@@ -16508,6 +17690,7 @@ function createDCABotHelper<
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
+        await refuseManual('the pair is not in the bot settings')
         return this.handleDebug(`Bot settings does not contain ${symbol}`)
       }
       if (
@@ -16518,11 +17701,21 @@ function createDCABotHelper<
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
+        await refuseManual('the pair is not in the bot settings')
         return this.handleDebug(
           `Bot settings does not contain ${symbol}. Wont open new deal`,
         )
       }
       const ed = await this.getExchangeInfo(symbol)
+      if (
+        await this.refuseNewDealNearDelivery(symbol, ed, skip, dynamic, trigger)
+      ) {
+        this.endMethod(_id)
+        if (cbIfNotOpened) {
+          cbIfNotOpened()
+        }
+        return
+      }
       const skipRange = skip && !dynamic
       if (await this.checkMaxDeals(this.botId, symbol)) {
         this.handleLog(`Open new deal ${symbol}`)
@@ -16538,7 +17731,7 @@ function createDCABotHelper<
           this.handleLog(
             `Bot status is ${this.data?.status}, close after tp ${this.closeAfterTpFilled}`,
           )
-          let checkBalance = await this.checkBalance(symbol)
+          let checkBalance = await this.checkBalanceGate(symbol)
           if (!checkBalance.status) {
             this.handleDebug(
               checkBalance.unknown
@@ -16546,7 +17739,7 @@ function createDCABotHelper<
                 : `Not enough balance to start new deal. Required: ${checkBalance.required}, available: ${checkBalance.available}, repeat check in 5 seconds`,
             )
             await sleep(5000)
-            checkBalance = await this.checkBalance(symbol)
+            checkBalance = await this.checkBalanceGate(symbol)
           }
           if (checkBalance.unknown) {
             // The balance could not be READ — twice, with the retry above in
@@ -16564,6 +17757,9 @@ function createDCABotHelper<
             // report the user gets for a condition never actually observed.
             this.handleDebug(
               `Cannot read balance, wont open new deal ${symbol}`,
+            )
+            await refuseManual(
+              'the account balance could not be read from the exchange, please try again',
             )
             this.endMethod(_id)
             this.resetPending(this.botId, symbol)
@@ -16587,6 +17783,7 @@ function createDCABotHelper<
               this.standingConditionLatch.clear(
                 standingConditionKey(notEnoughBalanceNewDeal, symbol),
               )
+              this.newDealBalanceRetries?.delete(symbol)
             }
             if (!(skip && !dynamic)) {
               const cooldownStart = await this.checkCooldownStart(
@@ -16643,6 +17840,28 @@ function createDCABotHelper<
                 }
                 return
               }
+            }
+            const signalRefusal = await this.signalOverridesRefusal(
+              symbol,
+              signalOverrides,
+            )
+            if (signalRefusal) {
+              this.handleErrors(
+                `Deal for ${symbol} not opened: ${signalRefusal}`,
+                'openNewDeal',
+                '',
+                false,
+                true,
+                true,
+                false,
+                symbol,
+              )
+              this.resetPending(this.botId, symbol)
+              this.endMethod(_id)
+              if (cbIfNotOpened) {
+                cbIfNotOpened()
+              }
+              return
             }
             let fixSl = 0
             let fixTp = 0
@@ -16756,6 +17975,7 @@ function createDCABotHelper<
               }
               return
             }
+            this.requestSignalBaseOrderSize(approval, settings, signalOverrides)
             // A size multiplier from the approval: checked again at the
             // scaled size; anything that fails opens the configured size.
             const sized = await this.applyNewDealSize(symbol, approval, sizes, {
@@ -16791,6 +18011,9 @@ function createDCABotHelper<
               fixSize,
               dynamicAr,
               sizes,
+              undefined,
+              false,
+              signalOverrides,
             )
             this.releaseReduceToAvailableClaim(symbol)
             await this.reportNewDealSize(symbol, approval, sized.outcome)
@@ -16806,9 +18029,10 @@ function createDCABotHelper<
                 : this.isLong
                   ? ed.quoteAsset.name
                   : ed.baseAsset.name
+            const shown = checkBalance.asset ?? asset
             const msg = `Not enough balance to start new deal required: ${
               checkBalance.required
-            } ${asset}, available: ${checkBalance.available} ${asset}${
+            } ${shown}, available: ${checkBalance.available} ${shown}${
               checkBalance.price
                 ? `, price: ${checkBalance.price} ${ed.quoteAsset.name}`
                 : ''
@@ -16827,9 +18051,18 @@ function createDCABotHelper<
             // `required`/`price` are recomputed from the live price every cycle,
             // so the text differs each time while the condition is identical.
             // Terminal deals are exempt: that is a one-shot the user just asked
-            // for, it stops the bot below, and it must always be answered.
+            // for, it stops the bot below, and it must always be answered. So
+            // is a manual click, for the same reason (spec 144).
             if (
               settings.type === DCATypeEnum.terminal ||
+              trigger === 'manual'
+            ) {
+              // A click is answered on every click. `handleErrors` coalesces
+              // `Not enough balance` into one row per day (and `force` would
+              // only skip the backoff, not that), so a second click used to
+              // show nothing at all.
+              await this.reportUserRefusal(msg, symbol)
+            } else if (
               this.standingConditionLatch.shouldReport(
                 standingConditionKey(notEnoughBalanceNewDeal, symbol),
                 +new Date(),
@@ -16856,15 +18089,34 @@ function createDCABotHelper<
             }
             if (settings.type === DCATypeEnum.terminal) {
               this.stop()
+            } else {
+              this.retryNewDealAfterBalanceRefusal(
+                symbol,
+                settings.startCondition,
+                trigger,
+              )
             }
           }
         } else {
+          await refuseManual(
+            !ed
+              ? 'the exchange did not return trading rules for this pair'
+              : 'the bot is stopped',
+          )
           if (cbIfNotOpened) {
             cbIfNotOpened()
           }
           this.resetPending(this.botId, symbol)
         }
       } else {
+        // The limit refusal itself is latched (`reportMaxDealsReached`), so a
+        // repeated click was answered once a day at most.
+        if (trigger === 'manual') {
+          await this.reportUserRefusal(
+            manualNewDealMaxDealsMessage(symbol),
+            symbol,
+          )
+        }
         if (cbIfNotOpened) {
           cbIfNotOpened()
         }
@@ -16958,11 +18210,17 @@ function createDCABotHelper<
       _botId: string,
       _symbol?: string,
       ignoreSettings = false,
+      signalOverrides?: SignalDealOverrides | null,
     ) {
       this.handleLog('Open new deal by signal')
       if (!this.loadingComplete) {
         this.runAfterLoadingQueue.push(() =>
-          this.openDealBySignal.bind(this)(_botId, _symbol, ignoreSettings),
+          this.openDealBySignal.bind(this)(
+            _botId,
+            _symbol,
+            ignoreSettings,
+            signalOverrides,
+          ),
         )
         return this.handleLog('Loading not complete yet')
       }
@@ -16998,6 +18256,18 @@ function createDCABotHelper<
         settings.startCondition === StartConditionEnum.tradingviewSignals ||
         ignoreSettings
       ) {
+        // A price belongs to one pair; on a multi-pair bot it needs `symbol`.
+        if (
+          (signalOverrides?.tpPrice || signalOverrides?.slPrice) &&
+          pairsToUse.length > 1
+        ) {
+          return this.handleErrors(
+            'Received a signal with tpPrice / slPrice but no symbol. On a multi-pair bot a signal with prices must name its symbol',
+            'openDealBySignal',
+            '',
+            false,
+          )
+        }
         for (const symbol of pairsToUse) {
           await this.openNewDeal(
             this.botId,
@@ -17007,11 +18277,17 @@ function createDCABotHelper<
             0,
             undefined,
             'webhook',
+            signalOverrides,
           )
         }
       } else {
         this.handleDebug(
           `Only ${StartConditionEnum.tradingviewSignals} start condition can start deal by signals`,
+        )
+        // Still ignored — only the reason is new.
+        await this.reportIgnoredWebhookSignal(
+          `A start deal webhook signal was ignored: the bot's deal start condition is not Webhook`,
+          _symbol,
         )
       }
     }
@@ -17023,6 +18299,8 @@ function createDCABotHelper<
       _symbol?: string,
       ignoreSettings = false,
       sl = false,
+      /** Late close signal: only deals created before this instant. */
+      openedBefore?: number,
     ) {
       this.handleLog(`Close by signal${_symbol ? ` symbol:${_symbol}` : ''}`)
 
@@ -17057,7 +18335,70 @@ function createDCABotHelper<
           sl,
           undefined,
           DCACloseTriggerEnum.webhook,
+          openedBefore,
         )
+      } else {
+        // Deliberately ignored (no take profit / stop loss set to close by
+        // Webhook) — this used to leave no trace at all, not even a log line.
+        await this.reportIgnoredWebhookSignal(
+          `A ${sl ? 'stop loss ' : ''}close deal webhook signal was ignored: the bot's ${
+            sl ? 'stop loss' : 'take profit'
+          } close condition is not Webhook${
+            (sl ? settings.useSl : settings.useTp)
+              ? ''
+              : ` (${sl ? 'stop loss' : 'take profit'} is off)`
+          }`,
+          _symbol,
+        )
+      }
+    }
+    /**
+     * Give a safety-order level about to be placed an id the venue can accept.
+     * Spec 161.
+     *
+     * A level keeps the id it was built with, and the placement loop re-sends a
+     * level whose order is CANCELED. Under that same id, a venue that never
+     * reuses one (Bybit) refuses it, and the duplicate branch re-sends it as a
+     * `…2` the level never learns about — so the next pass sends the spent id
+     * again, and the level can fill twice. Here the level instead adopts a
+     * replacement that is still live or FILLED (the loop's own checks then skip
+     * it), or takes a fresh id when every id it carried is spent.
+     *
+     * The level object is updated in place, so the ladder holding it carries the
+     * live id from now on; a copy built earlier still finds it through
+     * `reissuedClientOrderIds`.
+     */
+    private reissueSpentLevelId(order: Grid): void {
+      // The loop's stop list names the level by this id; leave it to skip it.
+      if (
+        order.type !== TypeOrderEnum.dealRegular ||
+        this.stopList.has(order.newClientOrderId)
+      ) {
+        return
+      }
+      const reissued = (this.reissuedClientOrderIds ??= new Map())
+      const resolution = resolveLevelClientOrderId(
+        order.newClientOrderId,
+        reissued,
+        (id) => this.getOrderFromMap(id)?.status,
+      )
+      if (resolution.action === 'adopt') {
+        this.handleLog(
+          `Order ${order.newClientOrderId} was already re-sent as ${resolution.id}, use it`,
+        )
+        order.newClientOrderId = resolution.id
+        return
+      }
+      if (resolution.action === 'mint') {
+        const fresh = this.getOrderId(this.combo ? 'CMB-RO' : 'D-RO')
+        this.handleLog(
+          `Order ${resolution.spent} is ${
+            this.getOrderFromMap(resolution.spent)?.status ?? 'gone'
+          }, re-place its level as ${fresh}`,
+        )
+        reissued.set(order.newClientOrderId, fresh)
+        reissued.set(resolution.spent, fresh)
+        order.newClientOrderId = fresh
       }
     }
     /**
@@ -17123,12 +18464,19 @@ function createDCABotHelper<
       dealId: string,
       orders: { new: Grid[]; cancel: Grid[] },
     ): Promise<void | Order> {
-      return await this.placeOrdersHoldingDealLock(
+      const placed = await this.placeOrdersHoldingDealLock(
         _botId,
         symbol,
         dealId,
         orders,
       )
+      if (this.getDeal(dealId)?.deal.fundingHold) {
+        // Spec 044 §8.4: release what the just-placed orders held.
+        await this.syncFundingHold(dealId).catch((e: unknown) =>
+          this.handleWarn(`Cannot update funding hold of ${dealId}: ${e}`),
+        )
+      }
+      return placed
     }
 
     /**
@@ -17195,6 +18543,15 @@ function createDCABotHelper<
       }
       if (this.allowToPlaceOrders.get(dealId) === false) {
         this.handleLog(`Deal ${dealId} is not allowed to place orders`)
+        this.endMethod(_id)
+        return
+      }
+      // Spec `160`. Nothing to pull here: `processDealClose` owns the sweep of
+      // a released deal's orders.
+      if (this.dealReleased(dealId)) {
+        this.handleLog(
+          `Deal ${dealId} is no longer active. Skip place orders: ${orders.new.length}`,
+        )
         this.endMethod(_id)
         return
       }
@@ -17293,14 +18650,39 @@ function createDCABotHelper<
         // than it believes" is a real difference on a live position, and this
         // loop is a re-size rather than a teardown, so it is not one worth
         // trading for a round trip.
+        // Main-app spec 048 §3.2: combo grid lines whose cancel found them
+        // FILLED. Their base has already gone; a new order in this diff at the
+        // same level is their re-size, and placing it trades that base again.
+        const filledOnCancel: Grid[] = []
         for (const order of orders.cancel.sort((a) =>
           a.type === TypeOrderEnum.dealTP ? -1 : 1,
         )) {
+          // The previous take-profit leaves the diff because its replacement,
+          // sized net of `tpHistory`, is in `orders.new` — a re-size, never a
+          // close (spec `037`). Promoting a partly sold one to FILLED closed the
+          // deal on that fraction and market-sold the rest, the same defect the
+          // `toPlace` loop's cancel below opts out of (spec `007`). A TP the
+          // venue filled in full still comes back FILLED (spec `026`). Scoped to
+          // the DCA single take-profit, the set `setFilledInsteadOfCanceled`
+          // declined to promote before 1.56.3; multi-TP targets and combo keep
+          // their promotion.
+          const resizesTp =
+            order.type === TypeOrderEnum.dealTP &&
+            !order.tpSlTarget &&
+            this.botType === BotType.dca
           const o = await this.cancelGridOnExchange(
             order,
             order.type === TypeOrderEnum.dealTP,
             false,
+            !resizesTp,
           )
+          if (
+            o?.status === 'FILLED' &&
+            this.botType === BotType.combo &&
+            order.type === TypeOrderEnum.dealGrid
+          ) {
+            filledOnCancel.push(order)
+          }
           if (
             o?.status === 'FILLED' ||
             (o?.status === 'PARTIALLY_FILLED' &&
@@ -17327,6 +18709,21 @@ function createDCABotHelper<
          * Add new orders, add them to orders property
          */
         const toPlace = [...orders.new]
+          .filter((n) => {
+            const resize = filledOnCancel.find(
+              (f) =>
+                n.type === TypeOrderEnum.dealGrid &&
+                `${f.minigridId}` === `${n.minigridId}` &&
+                f.side === n.side &&
+                f.price === n.price,
+            )
+            if (resize) {
+              this.handleLog(
+                `Grid ${n.side} ${n.price} ${n.qty} not placed: the line it replaces (${resize.newClientOrderId}) filled before its cancel`,
+              )
+            }
+            return !resize
+          })
           .sort(
             (a, b) =>
               Math.abs(a.price - (deal?.deal?.lastPrice ?? 0)) -
@@ -17339,6 +18736,11 @@ function createDCABotHelper<
                 ? -1
                 : 0,
           )
+        // Spec 161: before either phase reads a level's id, so both send it
+        // under an id the venue can accept and skip it when it is already live.
+        for (const order of toPlace) {
+          this.reissueSpentLevelId(order)
+        }
         // Spec `082` §7. The plain ladder orders of this burst — and only
         // those — can share one venue call, so they are sent first, in the
         // order they are about to be walked in, and the loop below then runs
@@ -17514,10 +18916,17 @@ function createDCABotHelper<
               // replacement was refused `free 110,493 / required 934,119` —
               // 110,493 plus the 824,863 that order still held being the whole
               // wallet. The deal could not close.
+              // A resting reduce-funds order is typed `dealTP` but is not the
+              // deal's take profit: `getTPOrder` already sizes the TP net of
+              // it (`getPendingReduceFunds`). Counting it here read a limit
+              // withdrawal as an undersized TP and cancelled it on the next
+              // fill.
               const tp = this.getOrdersByStatusAndDealId({
                 dealId,
                 status: ['NEW', 'PARTIALLY_FILLED'],
-              }).filter((o) => o.typeOrder === TypeOrderEnum.dealTP)
+              }).filter(
+                (o) => o.typeOrder === TypeOrderEnum.dealTP && !o.reduceFundsId,
+              )
               // Compare on what the resting order can still SELL, not on the
               // size it was created for. `getTPOrder` already subtracts the
               // executed part (via `tpHistory`) from the replacement it sizes,
@@ -17528,6 +18937,22 @@ function createDCABotHelper<
                 ? parseFloat(tp[0].origQty) -
                   (parseFloat(tp[0].executedQty) || 0)
                 : 0
+              // A take-profit adaptive close already shrank to the free balance
+              // answers this same target: cancelling it to re-send the full
+              // size would only be refused and shrunk again, on every pass.
+              // It is re-sized once the target grows past what it was shrunk
+              // from (a safety order filled).
+              if (
+                tp.length > 0 &&
+                !settings.useMultiTp &&
+                tp[0].acBefore &&
+                order.qty <= tp[0].acBefore
+              ) {
+                this.handleDebug(
+                  `Deal TP ${tp[0].clientOrderId} was sized to the free balance (${restingTpQty} of ${tp[0].acBefore}). Keep it`,
+                )
+                continue
+              }
               if (
                 tp.length > 0 &&
                 restingTpQty < order.qty &&
@@ -17587,6 +19012,37 @@ function createDCABotHelper<
                 this.handleLog('Deal already has a TP order with higher qty')
                 continue
               }
+            }
+            // Spec `160`. One send can take tens of seconds (a venue lookup),
+            // so the deal may have closed since this burst started; the check
+            // at the top of the method cannot see that. The block after the
+            // loop pulls whatever ladder is left resting.
+            //
+            // Spec `182` §4.4: the same goes for a whole-deal close requested
+            // since — the flags the top of the method refuses on. The close is
+            // queued on this deal's lock and cancels whatever is on the book.
+            // A multi-TP `closeByTp` is one target, not the deal: the rest of
+            // the ladder still belongs on the book.
+            const closing = this.getDeal(dealId)
+            if (
+              !opts?.afterTerminalCloseRefusal &&
+              (closing?.closeBySl ||
+                (closing?.closeByTp && !settings.useMultiTp))
+            ) {
+              this.handleLog(
+                `Deal ${dealId} close requested while placing orders. Drop ${order.newClientOrderId} (${order.type}, qty ${order.qty}) and the rest`,
+              )
+              break
+            }
+            if (
+              this.dealReleased(dealId) ||
+              (!opts?.afterTerminalCloseRefusal &&
+                this.dealClosedByFilledTp(dealId, settings))
+            ) {
+              this.handleLog(
+                `Deal ${dealId} closed while placing orders. Drop ${order.newClientOrderId} (${order.type}, qty ${order.qty}) and the rest`,
+              )
+              break
             }
             const sendOptions: OrderAdditionalParams = {
               dealId,
@@ -17686,6 +19142,80 @@ function createDCABotHelper<
                   `Send new order request ${realFeeOrder.newClientOrderId}, qty ${realFeeOrder.qty}, price ${realFeeOrder.price}, side ${realFeeOrder.side}`,
                 )
               }
+            } else if (
+              order.type === TypeOrderEnum.dealTP &&
+              deal &&
+              !this.futures &&
+              this.data?.settings.adaptiveClose
+            ) {
+              // Adaptive close, for the resting take-profit as well as for the
+              // market close (`closeDealById`): a TP refused for balance is
+              // re-sent at what the wallet has free, never more than this deal
+              // holds. Without it a deal a few units short of its own TP — fee
+              // dust, or a sibling bot on the same pair and account — had no
+              // TP at all and error-stated the bot on every pass.
+              result = await this.sendGridToExchange(
+                order,
+                sendOptions,
+                ed,
+                true,
+              )
+              if (
+                typeof result === 'string' &&
+                notEnoughErrors.some((s) =>
+                  `${result}`.toLowerCase().includes(s.toLowerCase()),
+                )
+              ) {
+                const resized = await this.sendTpAtFreeBalance(
+                  deal,
+                  order,
+                  sendOptions,
+                  ed,
+                )
+                if (resized !== undefined) {
+                  result = resized
+                }
+              }
+              if (typeof result === 'string') {
+                this.handleOrderErrors(
+                  result,
+                  {
+                    symbol: ed.pair,
+                    orderId: '0',
+                    clientOrderId: order.newClientOrderId,
+                    transactTime: +new Date(),
+                    updateTime: +new Date(),
+                    price: `${order.price}`,
+                    origQty: `${order.qty}`,
+                    executedQty: '0',
+                    cummulativeQuoteQty: '0',
+                    status: 'CANCELED',
+                    type: 'LIMIT',
+                    side: order.side,
+                    quoteAsset: ed.quoteAsset.name,
+                    baseAsset: ed.baseAsset.name,
+                    typeOrder: order.type,
+                    exchange: this.data.exchange,
+                    exchangeUUID: this.data.exchangeUUID,
+                    botId: this.botId,
+                    userId: this.userId,
+                    origPrice: `${order.price}`,
+                  },
+                  'placeOrders()',
+                  `Send new order request ${order.newClientOrderId}, qty ${order.qty}, price ${order.price}, side ${order.side}`,
+                )
+              }
+            } else if (
+              order.type === TypeOrderEnum.dealTP &&
+              deal &&
+              this.futures
+            ) {
+              result = await this.sendFuturesRestingTp(
+                deal,
+                order,
+                sendOptions,
+                ed,
+              )
             } else {
               result = await this.sendGridToExchange(order, sendOptions, ed)
             }
@@ -19024,7 +20554,9 @@ function createDCABotHelper<
 
         balanceUseQty = d?.deal.balanceStart || 0
         if (!balanceUseQty) {
-          const balances = await this.getBalancesFromExchange()
+          const balances = await withExchangeCaller('bot.balanceStart', () =>
+            this.getBalancesFromExchange(),
+          )
           if (!balances || balances.status === StatusEnum.notok) {
             this.handleErrors(
               `Error getting user balances: ${balances?.reason}`,
@@ -19106,6 +20638,1337 @@ function createDCABotHelper<
         `Breakpoint created. Current price ${breakpoint.price}, next order price ${breakpoint.displacedPrice}.`,
       )
       return deal.gridBreakpoints
+    }
+
+
+    /**
+     * Spec 044 beta gate — the PHASE-1 hedge funding send, kept verbatim for
+     * deals created WITHOUT base funding (non-beta users): what production
+     * ran before phases 2–3, including its known defect (a `dealStart` row
+     * with the deal id, §6.6). Beta deals use {@link fundHedgeLegEntry}.
+     *
+     * Main-app spec 044 §6.5 — the funding trade a hedge leg's `buyDiff` /
+     * `buyForAll` / `sellDiff` / `sellForAll` action places at deal open,
+     * before the leg's base order is filled virtually. Sized by
+     * {@link planHedgeLegFunding}: the safety orders only, against the balance
+     * of the asset they consume.
+     *
+     * @returns true when the deal may proceed (traded, or nothing to trade);
+     *   false once the failure has been reported.
+     */
+    async placeHedgeFundingOrder(
+      symbol: string,
+      dealId: string,
+      deal: ExcludeDoc<Deal>,
+      action: ActionsEnum,
+    ): Promise<boolean> {
+      if (!this.data) {
+        return false
+      }
+      const lp = await this.getLatestPrice(symbol)
+      const orders = await this.createInitialDealOrders(
+        symbol,
+        lp,
+        dealId,
+        deal,
+      )
+      const ei = await this.getExchangeInfo(symbol)
+      const balances = await this.checkAssets(true, true)
+      const fee = await this.getUserFee(symbol)
+      const basePrecision = await this.baseAssetPrecision(symbol)
+      const funding = planHedgeLegFunding({
+        isLong: this.isLong,
+        action,
+        orders,
+        price: lp,
+        freeBase: balances?.get(ei?.baseAsset.name ?? '')?.free ?? 0,
+        freeQuote: balances?.get(ei?.quoteAsset.name ?? '')?.free ?? 0,
+        feeRate: fee?.taker ?? 0,
+        minNotional: ei?.quoteAsset.minAmount,
+        minBase: ei?.baseAsset.minAmount,
+        basePrecision,
+      })
+      this.handleDebug(
+        `Hedge funding ${action}: required ${funding?.plan.required} ${funding?.plan.needAsset}, held ${funding?.plan.held}, shortfall ${funding?.plan.shortfall}, price ${lp}`,
+      )
+      const trade = funding?.trade
+      if (!trade) {
+        return true
+      }
+      this.handleDebug(
+        `Hedge funding order ${trade.side} ${trade.baseQty}${trade.raisedToMin ? ' (raised to exchange minimum)' : ''}`,
+      )
+      const price = `${this.math.round(lp, ei?.priceAssetPrecision)}`
+      const qty = `${trade.baseQty}`
+      const r = await this.sendOrderToExchange(
+        {
+          clientOrderId: this.getOrderId('CMB-H'),
+          status: 'NEW',
+          executedQty: '0',
+          price: price,
+          origPrice: price,
+          cummulativeQuoteQty: `${+price * +qty}`,
+          orderId: '-1',
+          origQty: qty,
+          side: trade.side,
+          symbol,
+          type: OrderTypeEnum.market,
+          updateTime: new Date().getTime(),
+          transactTime: new Date().getTime(),
+          exchange: this.data.exchange,
+          exchangeUUID: this.data.exchangeUUID,
+          typeOrder: TypeOrderEnum.dealStart,
+          botId: this.botId,
+          userId: this.userId,
+          dealId,
+          fills: [],
+          baseAsset: ei?.baseAsset.name ?? '',
+          quoteAsset: ei?.quoteAsset.name ?? '',
+        },
+        true,
+      )
+      if (typeof r === 'string') {
+        this.handleErrors(
+          `Error placing order: ${r}`,
+          'placeBaseOrder',
+          '',
+          false,
+          false,
+          false,
+        )
+        return false
+      }
+      if (!r) {
+        this.handleErrors(
+          `Error placing order`,
+          'placeBaseOrder',
+          '',
+          false,
+          false,
+          false,
+        )
+        return false
+      }
+      this.handleDebug(`Order ${r.clientOrderId} filled`)
+      return true
+    }
+
+    /**
+     * Main-app spec 044 §8 (phase 3) — how a hedge leg on spot starts, for
+     * every start action that uses the account's funds, decided and recorded
+     * under the account's funding lock so the other leg of the same hedge
+     * plans after this one is recorded.
+     *
+     * - `buyDiff` / `buyForAll` / `sellDiff` / `sellForAll` with DCA: the base
+     *   order is a virtual entry re-priced to the latest price with its
+     *   reserve; the safety orders' asset is acquired upfront by one funding
+     *   trade (`TypeOrderEnum.funding`, no deal id). Short: buy base, reserve
+     *   the entry's quote. Long: sell base for quote, reserve the held base
+     *   the entry stands for. A `*Diff` leg whose own free funds cover the
+     *   whole deal trades nothing and runs on them (`held`).
+     * - `useBalance`, a funding action without DCA: the account's own funds
+     *   must cover the leg's real orders (`held`). (`useOppositeBalance`
+     *   spends nothing and does not come here.)
+     *
+     * What a `held` or funded leg's own orders need is held for it
+     * (`deal.fundingHold`) until they are on the book.
+     *
+     * @returns `virtual` — the base order is filled, start the deal; `held`
+     *   — send the base order as before; `refused` — reported, deal retired
+     *   or already gone.
+     */
+    async fundHedgeLegEntry(
+      symbol: string,
+      dealId: string,
+      baseOrder: Order,
+      action: ActionsEnum,
+    ): Promise<'virtual' | 'held' | 'refused'> {
+      const locked = await this.runFundingSerialised((lease) =>
+        this.fundHedgeLegEntryLocked(symbol, dealId, baseOrder, action, lease),
+      ).catch(
+        // Thrown mid-plan or mid-save (the lock is already released): the
+        // deal must not stay in `start` holding nothing (D6).
+        (e: unknown) => ({
+          acquired: false as const,
+          reason: `${(e as Error)?.message ?? e}`,
+        }),
+      )
+      if (!locked.acquired) {
+        this.handleErrors(
+          `Cannot fund this hedge leg: ${locked.reason}`,
+          'placeBaseOrder',
+          '',
+          false,
+          true,
+          true,
+        )
+        await this.retireUnfundedDeal(dealId)
+        return 'refused'
+      }
+      return locked.value
+    }
+
+    /**
+     * Extra the deal trades out of the account at open beyond its ladder, in
+     * base (combo: its fee order). 0 for DCA.
+     */
+    async dealOpenExtraNeed(
+      _symbol: string,
+      _ladder: Grid[],
+      _baseOrderQty: number,
+      _deal?: ExcludeDoc<Deal>,
+    ): Promise<number> {
+      return 0
+    }
+
+    /** {@link fundHedgeLegEntry} once the account's funding lock is held. */
+    async fundHedgeLegEntryLocked(
+      symbol: string,
+      dealId: string,
+      baseOrder: Order,
+      action: ActionsEnum,
+      lease: FundingLease,
+    ): Promise<'virtual' | 'held' | 'refused'> {
+      const refuse = async (message: string) => {
+        // Shown to the user as a bot warning (E4); the bot is not set in error.
+        this.handleErrors(message, 'placeBaseOrder', '', false, true, true)
+        await this.retireUnfundedDeal(dealId)
+        return 'refused' as const
+      }
+      // Read after the lock is held: the deal may have moved meanwhile.
+      const deal = this.getDeal(dealId)
+      if (!deal || !this.data) {
+        return refuse(`Cannot fund hedge leg deal ${dealId}: deal not found`)
+      }
+      if (deal.deal.status !== DCADealStatusEnum.start) {
+        this.handleWarn(
+          `Hedge leg deal ${dealId} is ${deal.deal.status}, not start: not funded`,
+        )
+        return 'refused'
+      }
+      const ed = await this.getExchangeInfo(symbol)
+      const price = await this.getLatestPrice(symbol)
+      if (!ed || !price) {
+        return refuse(
+          `Cannot fund this hedge leg: no ${!ed ? 'exchange info' : 'price'} for ${symbol}`,
+        )
+      }
+      const ladder = await this.createInitialDealOrders(
+        symbol,
+        price,
+        dealId,
+        deal.deal,
+      )
+      const balances = await this.checkAssets(true, true)
+      if (!balances) {
+        return refuse(`Cannot fund this hedge leg: balances could not be read`)
+      }
+      const fee = await this.getUserFee(symbol)
+      const useDca = !!deal.deal.settings?.useDca
+      const extra = useDca
+        ? await this.dealOpenExtraNeed(
+            symbol,
+            ladder,
+            +baseOrder.origQty,
+            deal.deal,
+          )
+        : 0
+      const decision = planHedgeLegDealFunding({
+        isLong: this.isLong,
+        action,
+        useDca,
+        baseOrderQty: +baseOrder.origQty,
+        safetyQty: this.isLong
+          ? 0
+          : (await this.fundedSafetyQty(ladder, symbol)) + extra,
+        safetyQuote: this.isLong
+          ? (await this.fundedSafetyQuote(ladder, symbol)) + extra * price
+          : 0,
+        price,
+        freeBase: balances.get(ed.baseAsset.name)?.free ?? 0,
+        freeQuote: balances.get(ed.quoteAsset.name)?.free ?? 0,
+        // Fresh: the other leg may have just saved its reservation. A
+        // restored deal's own hold is for exactly these orders: not counted
+        // against itself.
+        reservedQuote: Math.max(
+          0,
+          (await this.reservedFundingQuote(ed.quoteAsset.name, true)) -
+            (deal.deal.fundingHold?.asset === 'quote'
+              ? deal.deal.fundingHold.remaining
+              : 0),
+        ),
+        reservedBase: Math.max(
+          0,
+          (await this.reservedFundingBase(ed.baseAsset.name, true)) -
+            (deal.deal.fundingHold?.asset === 'base'
+              ? deal.deal.fundingHold.remaining
+              : 0),
+        ),
+        feeRate: fee?.taker ?? 0,
+        buyHeadroom: this.fundingBuyHeadroom(),
+        minNotional: ed.quoteAsset.minAmount,
+        minBase: ed.baseAsset.minAmount,
+        basePrecision: await this.baseAssetPrecision(symbol),
+      })
+      if (decision.kind === 'none') {
+        return refuse(`Cannot start this hedge leg: action ${action}`)
+      }
+      if (decision.kind === 'refuse') {
+        const asset =
+          decision.asset === 'base' ? ed.baseAsset.name : ed.quoteAsset.name
+        return refuse(
+          `Not enough ${asset} to ${HEDGE_FUNDING_ACTIONS.includes(action) && useDca ? 'fund' : 'start'} this hedge leg: required ${this.math.round(decision.required, 8)}, available ${this.math.round(decision.available, 8)} after what other bot-funded deals hold`,
+        )
+      }
+      const hold = (asset: 'base' | 'quote', need: number) =>
+        need > 0 ? { asset, committed: need, remaining: need } : undefined
+      const invalidate = () =>
+        FundingReservation.getInstance().invalidate(
+          this.data?.exchangeUUID ?? '',
+          ed.quoteAsset.name,
+          ed.baseAsset.name,
+        )
+      if (decision.kind === 'held') {
+        // Runs on its own funds: hold what its orders need until placed.
+        const fundingHold = hold(decision.needAsset, decision.required)
+        if (fundingHold) {
+          if (!(await lease.owned())) {
+            return refuse(
+              `Cannot start this hedge leg: the account's funding lock was lost`,
+            )
+          }
+          const current = this.getDeal(dealId) ?? deal
+          current.deal.fundingHold = fundingHold
+          await this.saveDeal(current, { fundingHold })
+          invalidate()
+        }
+        this.handleLog(
+          `Hedge leg deal ${dealId} (${action}) runs on the account's own funds: ${this.math.round(decision.required, 8)} ${decision.needAsset === 'base' ? ed.baseAsset.name : ed.quoteAsset.name} held for its orders`,
+        )
+        return 'held'
+      }
+      this.handleDebug(
+        `Hedge funding ${action}: ${decision.mode}, safety orders need ${decision.required} ${decision.needAsset}, held ${decision.held}, used ${decision.heldUsed}, price ${price}`,
+      )
+      const entryPrice = +this.math.round(price, ed.priceAssetPrecision)
+      const qty = +baseOrder.origQty
+      const planned: DealFunding = {
+        mode: decision.mode,
+        virtualEntry: this.isLong
+          ? { qty, price: entryPrice, quoteReserved: 0, baseReserved: qty }
+          : { qty, price: entryPrice, quoteReserved: entryPrice * qty },
+        lotIds: [],
+        sourcedByBot: decision.sourcedByBot,
+      }
+      let fundingHold = hold(decision.needAsset, decision.required)
+      const lotIds: string[] = []
+      if (decision.trade) {
+        const clientOrderId = this.getOrderId('D-FND')
+        // The reservation and the intent are recorded BEFORE the order goes
+        // out: a restart in between finds `pendingTrade` and resumes or
+        // retires the deal instead of sending a real base order.
+        const before = this.getDeal(dealId)
+        if (!before || before.deal.status !== DCADealStatusEnum.start) {
+          this.handleWarn(`Hedge leg deal ${dealId} left start: not funded`)
+          return 'refused'
+        }
+        if (!(await lease.owned())) {
+          return refuse(
+            `Cannot fund this hedge leg: the account's funding lock was lost before the trade`,
+          )
+        }
+        before.deal.botFunding = {
+          ...planned,
+          pendingTrade: {
+            clientOrderId,
+            side: decision.trade.side,
+            qty: decision.trade.baseQty,
+            at: Date.now(),
+          },
+        }
+        before.deal.fundingHold = fundingHold
+        await this.saveDeal(before, {
+          botFunding: before.deal.botFunding,
+          fundingHold,
+        })
+        invalidate()
+        const traded = await this.placeFundingTradeDetailed(
+          symbol,
+          dealId,
+          decision.trade,
+          price,
+          clientOrderId,
+        )
+        if (traded === null) {
+          await this.retireUnfundedDeal(dealId)
+          return 'refused'
+        }
+        if (traded.lotId) {
+          lotIds.push(traded.lotId)
+        }
+        // Fix round 3: what the safety orders can count on is what executed.
+        fundingHold = hold(
+          decision.needAsset,
+          this.fundedNeedAfterFill(
+            decision.required,
+            decision.heldUsed,
+            traded.executed,
+            decision.needAsset,
+            price,
+            fee?.taker ?? 0,
+          ),
+        )
+      }
+      // Re-read: the funding trade awaited its fill.
+      const current = this.getDeal(dealId)
+      if (!current || current.deal.status !== DCADealStatusEnum.start) {
+        this.handleWarn(
+          `Hedge leg deal ${dealId} was ${current ? current.deal.status : 'removed'} while its funding trade filled: not started. Funding lot ${lotIds[0] ?? '(none)'} records the purchase`,
+        )
+        return 'refused'
+      }
+      if (!(await lease.owned())) {
+        // The trade is done; recording it is the lesser evil.
+        this.handleErrors(
+          `Funding lock on this account was lost while deal ${dealId}'s funding trade ran; recording it anyway — another funding may have planned on the same balance`,
+          'placeBaseOrder',
+          '',
+          false,
+          true,
+          true,
+        )
+      }
+      current.deal.botFunding = { ...planned, lotIds }
+      current.deal.fundingHold = fundingHold
+      await this.saveDeal(current, {
+        botFunding: current.deal.botFunding,
+        fundingHold,
+      })
+      invalidate()
+      this.recordVirtualEntry(baseOrder, qty, entryPrice)
+      this.handleLog(
+        `Hedge leg deal ${dealId} funded by the bot (${action}): base order ${baseOrder.origQty} recorded at ${entryPrice} without a trade, ${this.isLong ? `${qty} ${ed.baseAsset.name}` : `${this.math.round(entryPrice * qty, 8)} ${ed.quoteAsset.name}`} reserved for it`,
+      )
+      return 'virtual'
+    }
+
+    /** The base order recorded filled at `price` with no venue trade. */
+    recordVirtualEntry(baseOrder: Order, qty: number, price: number) {
+      baseOrder.price = `${price}`
+      baseOrder.origPrice = `${price}`
+      baseOrder.origQty = `${qty}`
+      baseOrder.status = 'FILLED'
+      baseOrder.executedQty = `${qty}`
+      baseOrder.cummulativeQuoteQty = `${price * qty}`
+      // main-app spec 044 §3.3: no venue trade behind this fill.
+      baseOrder.fundingSource = 'virtual'
+      this.setOrder(baseOrder)
+      this.ordersDb.createData(baseOrder)
+    }
+
+    /**
+     * Restart safety (spec 044 §8, decision 8). A deal still in `start` that
+     * carries a funding record was funded (or was being funded) before a
+     * restart: it must never get a real base order. With `pendingTrade`, the
+     * funding order is looked up by client id (DB, then the exchange): filled
+     * ⇒ its lot is recorded and the deal resumes; otherwise (or not found) the
+     * deal is retired. With the record complete, the virtual entry is
+     * rebuilt from it and the deal starts.
+     *
+     * @returns `none` — not such a deal; `started` / `retired` — handled.
+     */
+    async resumeFundedEntry(
+      symbol: string,
+      dealId: string,
+      baseOrder: Order,
+    ): Promise<'none' | 'started' | 'retired'> {
+      const deal = this.getDeal(dealId)
+      const bf = deal?.deal.botFunding
+      if (
+        !deal ||
+        deal.deal.status !== DCADealStatusEnum.start ||
+        (!bf?.virtualEntry && !bf?.pendingTrade)
+      ) {
+        return 'none'
+      }
+      const retire = async (why: string) => {
+        this.handleWarn(`Deal ${dealId}: ${why}. Retiring it`)
+        await this.retireUnfundedDeal(dealId)
+        return 'retired' as const
+      }
+      if (bf.pendingTrade) {
+        const { clientOrderId } = bf.pendingTrade
+        let found: Order | undefined
+        const stored = await this.ordersDb
+          .readData({ clientOrderId } as any)
+          .catch(() => undefined)
+        if (stored?.status === StatusEnum.ok && stored.data?.result) {
+          found = stored.data.result as Order
+        }
+        if (!found || +found.executedQty <= 0) {
+          const venue = await this.getOrder(clientOrderId, symbol, false).catch(
+            () => undefined,
+          )
+          if (venue?.status === StatusEnum.ok && venue.data) {
+            found = venue.data as Order
+          }
+        }
+        if (!found || !(+found.executedQty > 0)) {
+          return retire(
+            `its funding order ${clientOrderId} was not found filled after a restart (${found?.status ?? 'not found'}); if it fills later, the base it bought stays on the account`,
+          )
+        }
+        // Linked when the lot was already written before the restart.
+        const lotId = await this.recordFundingLot(
+          symbol,
+          dealId,
+          found,
+          bf.virtualEntry?.price ?? +found.price,
+        )
+        const current = this.getDeal(dealId) ?? deal
+        const { pendingTrade: _done, ...rest } = current.deal.botFunding ?? bf
+        current.deal.botFunding = {
+          ...rest,
+          lotIds: [
+            ...(rest.lotIds ?? []).filter((l) => l !== lotId),
+            ...(lotId ? [lotId] : []),
+          ],
+        }
+        await this.saveDeal(current, { botFunding: current.deal.botFunding })
+        const ed = await this.getExchangeInfo(symbol)
+        const executed = this.fundingExecutedQty(found)
+        if (
+          bf.pendingTrade.qty - executed >
+          (ed?.baseAsset.step ?? 0) + 1e-12
+        ) {
+          return retire(
+            `its funding order ${clientOrderId} filled ${executed} of ${bf.pendingTrade.qty} (funding lot ${lotId || 'not recorded'})`,
+          )
+        }
+        this.handleWarn(
+          `Deal ${dealId}: resumed after a restart; funding order ${clientOrderId} had filled`,
+        )
+      }
+      const entry = (this.getDeal(dealId) ?? deal).deal.botFunding?.virtualEntry
+      if (!entry) {
+        return retire('its funding record has no entry to resume')
+      }
+      FundingReservation.getInstance().invalidate(
+        this.data?.exchangeUUID ?? '',
+        deal.deal.symbol.quoteAsset,
+        deal.deal.symbol.baseAsset,
+      )
+      this.recordVirtualEntry(baseOrder, entry.qty, entry.price)
+      await this.startFundedDeal(baseOrder)
+      return 'started'
+    }
+
+    /**
+     * Start a deal whose base order was filled virtually, then bring its
+     * `fundingHold` down to what its unplaced orders still need.
+     */
+    async startFundedDeal(baseOrder: Order) {
+      try {
+        return await this.startDeal(baseOrder)
+      } finally {
+        await this.syncFundingHold(baseOrder.dealId)
+      }
+    }
+
+    /**
+     * Spec 044 §8.4 — `deal.fundingHold.remaining` = what the deal's own
+     * orders committed at open (or after an add-DCA edit) still need, net of
+     * the ones placed (resting or filled: either way the venue has the funds).
+     * Called after `startDeal`, after every `placeOrders` of the deal and
+     * after a held leg's base order is sent. A closed deal's hold no longer
+     * counts (the reservation reads open deals only).
+     */
+    async syncFundingHold(dealId?: string) {
+      const current = dealId ? this.getDeal(dealId) : undefined
+      const hold = current?.deal.fundingHold
+      if (!current || !hold || !dealId) {
+        return
+      }
+      const remaining = await this.fundingHoldRemaining(
+        dealId,
+        hold.asset,
+        hold.committed,
+      )
+      if (Math.abs(remaining - hold.remaining) <= 1e-12) {
+        return
+      }
+      current.deal.fundingHold = { ...hold, remaining }
+      await this.saveDeal(current, { fundingHold: current.deal.fundingHold })
+      FundingReservation.getInstance().invalidate(
+        this.data?.exchangeUUID ?? '',
+        current.deal.symbol.quoteAsset,
+        current.deal.symbol.baseAsset,
+      )
+    }
+
+    /** `committed` minus the need of the deal's placed orders, ≥ 0. */
+    async fundingHoldRemaining(
+      dealId: string,
+      asset: 'base' | 'quote',
+      committed: number,
+    ) {
+      const deal = this.getDeal(dealId)
+      const side = asset === 'base' ? OrderSideEnum.sell : OrderSideEnum.buy
+      // A cancelled / expired row counts by what it executed (fix round 2):
+      // a level part-filled then cancelled and re-placed for the rest is
+      // fully placed, not half held forever.
+      const placed = this.getOrdersByStatusAndDealId({
+        dealId,
+        status: ['NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'EXPIRED'],
+      }).filter(
+        (o) =>
+          o.side === side &&
+          o.fundingSource !== 'virtual' &&
+          [
+            TypeOrderEnum.dealStart,
+            TypeOrderEnum.dealRegular,
+            TypeOrderEnum.fee,
+          ].includes(o.typeOrder),
+      )
+      const symbol = deal?.deal.symbol.symbol ?? ''
+      const closed = (o: Order) =>
+        o.status === 'CANCELED' || o.status === 'EXPIRED'
+      const qtyOf = (o: Order) =>
+        closed(o) ? Math.max(0, +(o.executedQty ?? 0) || 0) : +o.origQty
+      const live = placed.filter((o) => !closed(o) || qtyOf(o) > 0)
+      const asGrids = live
+        .filter((o) => o.typeOrder === TypeOrderEnum.dealRegular && !closed(o))
+        .map(
+          (o) =>
+            ({
+              qty: +o.origQty,
+              price: +o.price,
+              type: TypeOrderEnum.dealRegular,
+            }) as Grid,
+        )
+      // Executed parts of cancelled levels and the other rows, unpadded.
+      const others = live.filter(
+        (o) => o.typeOrder !== TypeOrderEnum.dealRegular || closed(o),
+      )
+      const placedNeed =
+        asset === 'base'
+          ? (await this.fundedSafetyQty(asGrids, symbol)) +
+            others.reduce((acc, o) => acc + qtyOf(o), 0)
+          : (await this.fundedSafetyQuote(asGrids, symbol)) +
+            others.reduce((acc, o) => acc + qtyOf(o) * +o.price, 0)
+      const left = committed - placedNeed
+      return left > Math.max(1e-12, committed * 1e-9) ? left : 0
+    }
+
+    /** A deal whose funding was refused or failed: retired, never left in `start`. */
+    async retireUnfundedDeal(dealId: string) {
+      await this.closeDealById(
+        this.botId,
+        dealId,
+        CloseDCATypeEnum.cancel,
+        false,
+      )
+    }
+
+    /**
+     * Run a plan → trade → save funding section under this account's funding
+     * lock (spec 044 §8 D5), across processes.
+     */
+    async runFundingSerialised<T>(
+      fn: (lease: FundingLease) => Promise<T>,
+    ): Promise<FundingLockResult<T>> {
+      return FundingLock.getInstance().run(
+        this.data?.exchangeUUID ?? '',
+        fn,
+        this.botId,
+      )
+    }
+
+    /**
+     * Spec 044 beta gate, asked live: may this bot's user's NEW deals (and
+     * pre-deal checks) use base funding? A deal follows its own stamp
+     * ({@link isBaseFundingDeal}) instead.
+     */
+    async baseFundingAllowed(): Promise<boolean> {
+      return BaseFundingGate.getInstance()
+        .isAllowed(this.userId)
+        .catch(() => false)
+    }
+
+    /**
+     * The hedge start action a new DCA deal records. Spec 044 beta gate: only
+     * on a beta deal — before the schema kept `action`, mongoose dropped it on
+     * every DCA deal, and a non-beta deal must behave exactly as then. Combo
+     * deals always kept it (combo's own `createDeal`).
+     */
+    dealStartAction(baseFundingBeta: boolean): ActionsEnum | undefined {
+      return this.data?.settings.futures || (!baseFundingBeta && !this.combo)
+        ? undefined
+        : this.data?.action
+    }
+
+    /** Spec 044 beta gate: the deal was created with base funding on. */
+    isBaseFundingDeal(deal?: { baseFundingBeta?: boolean } | null): boolean {
+      return !!deal?.baseFundingBeta
+    }
+
+    /**
+     * Main-app spec 044 §3.4 — the base-funding mode that applies to this
+     * bot's next deal, or null when the deal runs on the account's own base as
+     * before. Only a regular short spot DCA / combo bot with a market base
+     * order sized in base, quote or USD: a limit entry cannot be recorded
+     * filled before the venue fills it, a percentage-of-balance size follows
+     * the base the account holds, and hedge legs fund through their own
+     * start action.
+     */
+    shortSpotFundingMode(
+      settings: Partial<
+        Pick<
+          DCABotSchema['settings'],
+          | 'baseFunding'
+          | 'type'
+          | 'startOrderType'
+          | 'orderSizeType'
+          | 'useRiskReward'
+        >
+      >,
+      /**
+       * Spec 044 beta gate: base funding is on for this deal (its stamp) or,
+       * before a deal exists, for this bot's user (asked live). Off ⇒ null:
+       * the `baseFunding` setting is ignored, as `require`.
+       */
+      enabled: boolean,
+    ): BaseFundingEnum | null {
+      const mode = settings.baseFunding
+      if (
+        !enabled ||
+        (mode !== BaseFundingEnum.auto && mode !== BaseFundingEnum.botOnly) ||
+        this.futures ||
+        this.isLong ||
+        this.data?.parentBotId ||
+        this.data?.action ||
+        // `type`, not `terminalDealType`: the dashboard stores
+        // `terminalDealType: 'smart'` on regular bots too.
+        settings.type === DCATypeEnum.terminal ||
+        settings.useRiskReward ||
+        // Combo always enters at market (`comboHelper.getBaseOrder`),
+        // whatever `startOrderType` the bot carries.
+        (!this.combo && settings.startOrderType !== OrderTypeEnum.market) ||
+        ![
+          OrderSizeTypeEnum.base,
+          OrderSizeTypeEnum.quote,
+          OrderSizeTypeEnum.usd,
+        ].includes(settings.orderSizeType ?? OrderSizeTypeEnum.percFree)
+      ) {
+        return null
+      }
+      return mode
+    }
+
+    /**
+     * Quote this account's other bot-funded deals hold for their virtual
+     * entries (spec 044 §5) — subtracted from the free quote of every check.
+     */
+    async reservedFundingQuote(quoteAsset: string, fresh = false) {
+      return FundingReservation.getInstance().reservedQuote(
+        this.userId,
+        this.data?.exchangeUUID ?? '',
+        quoteAsset,
+        fresh,
+      )
+    }
+
+    /**
+     * Base this account's funded deals hold (spec 044 §8): a long hedge leg's
+     * virtual entry, and base committed to safety orders not yet placed.
+     */
+    async reservedFundingBase(baseAsset: string, fresh = false) {
+      return FundingReservation.getInstance().reservedBase(
+        this.userId,
+        this.data?.exchangeUUID ?? '',
+        baseAsset,
+        fresh,
+      )
+    }
+
+    /**
+     * Base a short deal's safety orders sell — what a bot-funded deal buys
+     * upfront (spec 044 §2.1). Combo adds its per-level padding.
+     */
+    async fundedSafetyQty(ladder: Grid[], _symbol: string) {
+      return ladder
+        .filter((g) => g.type === TypeOrderEnum.dealRegular)
+        .reduce((acc, g) => acc + g.qty, 0)
+    }
+
+    /**
+     * Quote a long deal's safety orders spend — what a funded long hedge leg
+     * raises upfront by selling base (spec 044 §8). No combo padding: the
+     * padding is base the short side's levels sell.
+     */
+    async fundedSafetyQuote(ladder: Grid[], _symbol: string) {
+      return ladder
+        .filter((g) => g.type === TypeOrderEnum.dealRegular)
+        .reduce((acc, g) => acc + g.qty * g.price, 0)
+    }
+
+    /** {@link planShortSpotDealFunding} against `balance` (or a live read). */
+    async planShortSpotFunding(
+      symbol: string,
+      mode: BaseFundingEnum,
+      baseOrderQty: number,
+      safetyQty: number,
+      price: number,
+      balance?: Map<string, { free: number }>,
+      /** Inside the funding lock: read reservations past the cache. */
+      fresh = false,
+    ): Promise<ShortSpotFundingDecision | null> {
+      const ed = await this.getExchangeInfo(symbol)
+      const balances = balance ?? (await this.checkAssets(true, true))
+      if (!ed || !balances) {
+        return null
+      }
+      const fee = await this.getUserFee(symbol)
+      return planShortSpotDealFunding({
+        mode,
+        baseOrderQty,
+        safetyQty,
+        price,
+        freeBase: balances.get(ed.baseAsset.name)?.free ?? 0,
+        freeQuote: balances.get(ed.quoteAsset.name)?.free ?? 0,
+        reservedQuote: await this.reservedFundingQuote(
+          ed.quoteAsset.name,
+          fresh,
+        ),
+        reservedBase: await this.reservedFundingBase(ed.baseAsset.name, fresh),
+        feeRate: fee?.taker ?? 0,
+        buyHeadroom: this.fundingBuyHeadroom(),
+        minNotional: ed.quoteAsset.minAmount,
+        minBase: ed.baseAsset.minAmount,
+        basePrecision: await this.baseAssetPrecision(symbol),
+      })
+    }
+
+    /**
+     * Place a funding trade (spec 044 §3.1–§3.2) and record its lot. The order
+     * carries no deal id on purpose: it is not one of the deal's orders, so no
+     * deal-scoped ledger, fee ledger or fill handler can count it. The lot
+     * names the deal. Returns the lot id ('' when only its record failed), or
+     * null once the failure has been reported.
+     */
+    async placeFundingTrade(
+      symbol: string,
+      dealId: string,
+      trade: FundingTrade,
+      price: number,
+      /** Pre-assigned when the intent was persisted first (restart safety). */
+      clientOrderId?: string,
+    ): Promise<string | null> {
+      const r = await this.placeFundingTradeDetailed(
+        symbol,
+        dealId,
+        trade,
+        price,
+        clientOrderId,
+      )
+      return r ? r.lotId : null
+    }
+
+    /**
+     * {@link placeFundingTrade}, also returning what the order actually
+     * traded, in base (fix round 3).
+     *
+     * - A MARKET order the venue acknowledges as NEW / PARTIALLY_FILLED is not
+     *   judged yet: it is re-queried (`getOrder`) with backoff until it is
+     *   final, all inside {@link fundingTradeTimeoutMs}; still open at the
+     *   timeout ⇒ the timeout path.
+     * - A final fill within {@link FUNDING_FILL_TOLERANCE} (plus one base
+     *   step) of the planned quantity funds the deal with what executed (info
+     *   line naming the shortfall); further short ⇒ reported, `null` (the
+     *   caller retires the deal), the lot stays as the record.
+     */
+    async placeFundingTradeDetailed(
+      symbol: string,
+      dealId: string,
+      trade: FundingTrade,
+      price: number,
+      clientOrderId?: string,
+    ): Promise<{ lotId: string; executed: number } | null> {
+      if (!this.data) {
+        return null
+      }
+      const ed = await this.getExchangeInfo(symbol)
+      const orderPrice = `${this.math.round(price, ed?.priceAssetPrecision)}`
+      const qty = `${trade.baseQty}`
+      const id = clientOrderId ?? this.getOrderId('D-FND')
+      this.handleLog(
+        `Funding trade for deal ${dealId}: ${trade.side} ${qty} ${ed?.baseAsset.name} at market (≈ ${this.math.round(trade.quoteValue, 8)} ${ed?.quoteAsset.name})${trade.raisedToMin ? ', raised to the exchange minimum' : ''}`,
+      )
+      const what =
+        trade.side === OrderSideEnum.buy
+          ? `buy the ${ed?.baseAsset.name ?? 'base'}`
+          : `sell ${ed?.baseAsset.name ?? 'base'} for the ${ed?.quoteAsset.name ?? 'quote'}`
+      const report = (why: string) => {
+        this.handleErrors(
+          `Cannot ${what} this deal's safety orders need: ${why}`,
+          'placeBaseOrder',
+          '',
+          false,
+          true,
+          true,
+        )
+        return null
+      }
+      const timeoutMs = this.fundingTradeTimeoutMs
+      const deadline = Date.now() + timeoutMs
+      // Bounded (fix round 2): the account's funding lock is held across
+      // these awaits, and nothing may hold it forever.
+      const beforeDeadline = async <T>(p: Promise<T>) => {
+        let timer: NodeJS.Timeout | undefined
+        const left = Math.max(0, deadline - Date.now())
+        const timedOut = new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), left)
+        })
+        return Promise.race([p, timedOut]).finally(() => clearTimeout(timer))
+      }
+      const timeoutWhy = `the order did not complete within ${Math.round(timeoutMs / 1000)} s. If it fills later, what it traded stays on the account`
+      let r: Order | string | void | 'timeout' = await beforeDeadline(
+        this.sendOrderToExchange(
+          {
+            clientOrderId: id,
+            status: 'NEW',
+            executedQty: '0',
+            price: orderPrice,
+            origPrice: orderPrice,
+            cummulativeQuoteQty: `${+orderPrice * +qty}`,
+            orderId: '-1',
+            origQty: qty,
+            side: trade.side,
+            symbol,
+            type: OrderTypeEnum.market,
+            updateTime: new Date().getTime(),
+            transactTime: new Date().getTime(),
+            exchange: this.data.exchange,
+            exchangeUUID: this.data.exchangeUUID,
+            typeOrder: TypeOrderEnum.funding,
+            botId: this.botId,
+            userId: this.userId,
+            fills: [],
+            baseAsset: ed?.baseAsset.name ?? '',
+            quoteAsset: ed?.quoteAsset.name ?? '',
+          },
+          true,
+        ),
+      )
+      if (r === 'timeout') {
+        return report(timeoutWhy)
+      }
+      if (typeof r === 'string' || !r) {
+        return report(typeof r === 'string' ? r : 'the order was not placed')
+      }
+      // (a) Not final yet: ask the venue again until it is.
+      let delay = this.fundingPollMs
+      while (r.status === 'NEW' || r.status === 'PARTIALLY_FILLED') {
+        if (Date.now() + delay >= deadline) {
+          return report(timeoutWhy)
+        }
+        await sleep(delay)
+        delay = Math.min(delay * 2, 10_000)
+        const q = await beforeDeadline(this.getOrder(id, symbol, false))
+        if (q === 'timeout') {
+          return report(timeoutWhy)
+        }
+        if (q?.status === StatusEnum.ok && q.data) {
+          r = { ...r, ...(q.data as Order) }
+        }
+      }
+      const executed = this.fundingExecutedQty(r)
+      const lotId =
+        executed > 0 ? await this.recordFundingLot(symbol, dealId, r, price) : ''
+      // (b) A fill short within the tolerance funds the deal as executed.
+      const step = ed?.baseAsset.step ?? 0
+      const shortfall = Math.max(0, trade.baseQty - executed)
+      if (shortfall > trade.baseQty * FUNDING_FILL_TOLERANCE + step + 1e-12) {
+        return report(
+          `the order filled ${executed} of ${trade.baseQty}${lotId ? ` (recorded in funding lot ${lotId})` : ''}`,
+        )
+      }
+      if (shortfall > 1e-12) {
+        this.handleLog(
+          `Funding trade ${id} filled ${executed} of ${trade.baseQty} ${ed?.baseAsset.name ?? ''} (short ${this.math.round(shortfall, 12)}, within tolerance): the deal is funded with what executed`,
+        )
+      }
+      return { lotId, executed }
+    }
+
+    /**
+     * The safety-order need a funding fill actually covers (fix round 3):
+     * held funds counted + what the trade acquired net of the fee, capped at
+     * the need. A fill inside the tolerance may leave the top level short by
+     * a hair; the hold must not claim funds the account does not have.
+     */
+    fundedNeedAfterFill(
+      required: number,
+      heldUsed: number,
+      executedBase: number,
+      needAsset: 'base' | 'quote',
+      price: number,
+      feeRate: number,
+    ) {
+      const net = 1 - Math.min(Math.max(feeRate, 0), 0.5)
+      const acquired =
+        needAsset === 'base' ? executedBase * net : executedBase * price * net
+      return Math.max(0, Math.min(required, heldUsed + acquired))
+    }
+
+    /** Funding trades (fix round 2): how long one may take before it fails. */
+    fundingTradeTimeoutMs = FUNDING_TRADE_TIMEOUT_MS
+    /** First re-query delay for a funding order not final yet (fix round 3). */
+    fundingPollMs = 500
+
+    /**
+     * Fix round 3 (c): venues that size a MARKET buy in quote at the plan
+     * price (`main.ts`: Bybit, Coinbase, Bitget spot) fill it `quote ÷ ask`
+     * — short by the spread. Funding buys there are grossed up by this
+     * fraction so the levels they fund are covered.
+     */
+    fundingBuyHeadroom() {
+      return !this.futures &&
+        [ExchangeEnum.bybit, ExchangeEnum.coinbase, ExchangeEnum.bitget].includes(
+          this.data?.exchange as ExchangeEnum,
+        )
+        ? FUNDING_QUOTE_SIZED_BUY_HEADROOM
+        : 0
+    }
+
+    /**
+     * What a funding order actually traded, in base. FILLED without an
+     * executed quantity is taken as the whole order; anything else counts
+     * only what it reports executed.
+     */
+    fundingExecutedQty(r: Order) {
+      const executed = +r.executedQty
+      if (Number.isFinite(executed) && executed > 0) {
+        return executed
+      }
+      return r.status === 'FILLED' ? +r.origQty || 0 : 0
+    }
+
+    /**
+     * The `fundinglots` row of a filled funding order. Returns the lot id, ''
+     * when the write failed (warned; the trade stands).
+     */
+    async recordFundingLot(
+      symbol: string,
+      dealId: string,
+      r: Order,
+      price: number,
+    ): Promise<string> {
+      if (!this.data) {
+        return ''
+      }
+      // Fix round 2: a restart may come after the lot was written — link it.
+      const existing = await fundingLotDb
+        .readData({ clientOrderId: r.clientOrderId } as any)
+        .catch(() => undefined)
+      if (existing?.status === StatusEnum.ok && existing.data?.result?._id) {
+        return `${existing.data.result._id}`
+      }
+      const ed = await this.getExchangeInfo(symbol)
+      const trade = {
+        side:
+          r.side === OrderSideEnum.buy ? OrderSideEnum.buy : OrderSideEnum.sell,
+      }
+      const executed = this.fundingExecutedQty(r)
+      const quote = +(r.cummulativeQuoteQty ?? 0)
+      const avg =
+        quote > 0 && +r.executedQty > 0 ? quote / +r.executedQty : +r.price
+      const lotPrice = Number.isFinite(avg) && avg > 0 ? avg : price
+      // A lot counts the asset it acquired: base for a buy, quote for a sell.
+      const acquired =
+        trade.side === OrderSideEnum.buy
+          ? executed
+          : quote > 0
+            ? quote
+            : executed * lotPrice
+      const lot = await fundingLotDb.createData({
+        userId: this.userId,
+        exchange: this.data.exchange,
+        exchangeUUID: this.data.exchangeUUID,
+        botId: this.botId,
+        botType: this.botType,
+        dealId,
+        symbol,
+        asset:
+          trade.side === OrderSideEnum.buy
+            ? (ed?.baseAsset.name ?? '')
+            : (ed?.quoteAsset.name ?? ''),
+        side: trade.side,
+        qty: acquired,
+        price: lotPrice,
+        fee: r.feePaid !== undefined ? +r.feePaid : undefined,
+        feeAsset: r.feeAsset,
+        orderId: `${r.orderId}`,
+        clientOrderId: r.clientOrderId,
+        remaining: acquired,
+        consumed: [],
+        paperContext: !!this.data.paperContext,
+      })
+      if (lot.status !== StatusEnum.ok) {
+        // The trade happened; only its record failed. The deal can still run
+        // — it just cannot report an account result later.
+        this.handleWarn(
+          `Funding trade ${r.clientOrderId} filled but its lot was not saved: ${lot.reason}`,
+        )
+        return ''
+      }
+      return `${lot.data._id}`
+    }
+
+    /**
+     * Spec 044 §2.1 at deal open. With a base-funding mode and too little free
+     * base, the base order is recorded filled at the current price with no
+     * trade (its quote reserved), and the safety orders' base is bought upfront.
+     *
+     * @returns `held` — send the base order as usual; `virtual` — the base
+     *   order is filled, start the deal; `refused` — reported, deal retired.
+     */
+    async fundShortSpotEntry(
+      symbol: string,
+      dealId: string,
+      baseOrder: Order,
+    ): Promise<'held' | 'virtual' | 'refused'> {
+      const settings = await this.getAggregatedSettings()
+      const deal = this.getDeal(dealId)
+      const mode = this.shortSpotFundingMode(
+        settings,
+        this.isBaseFundingDeal(deal?.deal),
+      )
+      if (!mode || !deal || baseOrder.type !== OrderTypeEnum.market) {
+        return 'held'
+      }
+      // A first look without the lock: a deal the account's own base covers
+      // never waits for it (phase 3, D5).
+      const probe = await this.planShortSpotEntry(
+        symbol,
+        dealId,
+        baseOrder,
+        mode,
+      )
+      if (!probe || probe.decision.kind === 'held') {
+        return 'held'
+      }
+      const locked = await this.runFundingSerialised((lease) =>
+        this.fundShortSpotEntryLocked(symbol, dealId, baseOrder, mode, lease),
+      ).catch((e: unknown) => ({
+        acquired: false as const,
+        reason: `${(e as Error)?.message ?? e}`,
+      }))
+      if (!locked.acquired) {
+        this.handleErrors(
+          `Cannot fund this deal: ${locked.reason}`,
+          'placeBaseOrder',
+          '',
+          false,
+          true,
+          true,
+        )
+        await this.retireUnfundedDeal(dealId)
+        return 'refused'
+      }
+      return locked.value
+    }
+
+    /** The {@link fundShortSpotEntry} plan over the deal's real ladder. */
+    async planShortSpotEntry(
+      symbol: string,
+      dealId: string,
+      baseOrder: Order,
+      mode: BaseFundingEnum,
+      fresh = false,
+    ) {
+      const deal = this.getDeal(dealId)
+      if (!deal) {
+        return null
+      }
+      const price = await this.getLatestPrice(symbol)
+      const ladder = await this.createInitialDealOrders(
+        symbol,
+        price,
+        dealId,
+        deal.deal,
+      )
+      // Combo: its fee order sells base at open too.
+      const safetyQty =
+        (await this.fundedSafetyQty(ladder, symbol)) +
+        (await this.dealOpenExtraNeed(
+          symbol,
+          ladder,
+          +baseOrder.origQty,
+          deal.deal,
+        ))
+      const decision = await this.planShortSpotFunding(
+        symbol,
+        mode,
+        +baseOrder.origQty,
+        safetyQty,
+        price,
+        undefined,
+        fresh,
+      )
+      return decision ? { decision, price, safetyQty, deal } : null
+    }
+
+    /** {@link fundShortSpotEntry} once the account's funding lock is held. */
+    async fundShortSpotEntryLocked(
+      symbol: string,
+      dealId: string,
+      baseOrder: Order,
+      mode: BaseFundingEnum,
+      lease: FundingLease,
+    ): Promise<'held' | 'virtual' | 'refused'> {
+      const refuse = async (message: string) => {
+        // Shown to the user as a bot warning (E4); the bot is not set in error.
+        this.handleErrors(message, 'placeBaseOrder', '', false, true, true)
+        await this.retireUnfundedDeal(dealId)
+        return 'refused' as const
+      }
+      if (this.getDeal(dealId)?.deal.status !== DCADealStatusEnum.start) {
+        this.handleWarn(`Deal ${dealId} left start: not funded`)
+        return 'refused'
+      }
+      // Re-planned fresh: another deal of this account may have just funded.
+      const planned = await this.planShortSpotEntry(
+        symbol,
+        dealId,
+        baseOrder,
+        mode,
+        true,
+      )
+      if (!planned || planned.decision.kind === 'held') {
+        return 'held'
+      }
+      const { decision, price, safetyQty } = planned
+      const ed = await this.getExchangeInfo(symbol)
+      if (decision.kind === 'refuse') {
+        return refuse(
+          `Not enough ${ed?.quoteAsset.name ?? 'quote'} to fund this deal: required ${this.math.round(decision.required, 8)}, available ${this.math.round(decision.available, 8)} after the quote other bot-funded deals hold`,
+        )
+      }
+      const entryPrice = +this.math.round(price, ed?.priceAssetPrecision)
+      const qty = +baseOrder.origQty
+      const record: DealFunding = {
+        mode,
+        virtualEntry: {
+          qty,
+          price: entryPrice,
+          quoteReserved: entryPrice * qty,
+        },
+        lotIds: [],
+        sourcedByBot: decision.sourcedByBot,
+      }
+      let fundingHold =
+        safetyQty > 0
+          ? {
+              asset: 'base' as const,
+              committed: safetyQty,
+              remaining: safetyQty,
+            }
+          : undefined
+      const invalidate = () =>
+        FundingReservation.getInstance().invalidate(
+          this.data?.exchangeUUID ?? '',
+          ed?.quoteAsset.name ?? '',
+          ed?.baseAsset.name,
+        )
+      const lotIds: string[] = []
+      if (decision.trade) {
+        const clientOrderId = this.getOrderId('D-FND')
+        const before = this.getDeal(dealId)
+        if (!before || before.deal.status !== DCADealStatusEnum.start) {
+          this.handleWarn(`Deal ${dealId} left start: not funded`)
+          return 'refused'
+        }
+        if (!(await lease.owned())) {
+          return refuse(
+            `Cannot fund this deal: the account's funding lock was lost before the trade`,
+          )
+        }
+        // Intent and reservation first (restart safety, spec 044 §8).
+        before.deal.botFunding = {
+          ...record,
+          pendingTrade: {
+            clientOrderId,
+            side: decision.trade.side,
+            qty: decision.trade.baseQty,
+            at: Date.now(),
+          },
+        }
+        before.deal.fundingHold = fundingHold
+        await this.saveDeal(before, {
+          botFunding: before.deal.botFunding,
+          fundingHold,
+        })
+        invalidate()
+        const traded = await this.placeFundingTradeDetailed(
+          symbol,
+          dealId,
+          decision.trade,
+          price,
+          clientOrderId,
+        )
+        if (traded === null) {
+          await this.retireUnfundedDeal(dealId)
+          return 'refused'
+        }
+        if (traded.lotId) {
+          lotIds.push(traded.lotId)
+        }
+        // Fix round 3: what the safety orders can count on is what executed.
+        const fee = await this.getUserFee(symbol)
+        const covered = this.fundedNeedAfterFill(
+          safetyQty,
+          decision.heldUsed,
+          traded.executed,
+          'base',
+          price,
+          fee?.taker ?? 0,
+        )
+        fundingHold =
+          covered > 0
+            ? { asset: 'base' as const, committed: covered, remaining: covered }
+            : undefined
+      }
+      // Re-read: the funding trade awaited its fill (see updateDealSettings).
+      const current = this.getDeal(dealId)
+      if (!current || current.deal.status !== DCADealStatusEnum.start) {
+        this.handleWarn(
+          `Deal ${dealId} was ${current ? current.deal.status : 'removed'} while its funding trade filled: not started. Funding lot ${lotIds[0] ?? '(none)'} records the purchase`,
+        )
+        return 'refused'
+      }
+      if (!(await lease.owned())) {
+        this.handleErrors(
+          `Funding lock on this account was lost while deal ${dealId}'s funding trade ran; recording it anyway — another funding may have planned on the same balance`,
+          'placeBaseOrder',
+          '',
+          false,
+          true,
+          true,
+        )
+      }
+      current.deal.botFunding = { ...record, lotIds }
+      current.deal.fundingHold = fundingHold
+      await this.saveDeal(current, {
+        botFunding: current.deal.botFunding,
+        fundingHold,
+      })
+      invalidate()
+      this.recordVirtualEntry(baseOrder, qty, entryPrice)
+      this.handleLog(
+        `Deal ${dealId} funded by the bot (${mode}): base order ${baseOrder.origQty} recorded at ${entryPrice} without a trade, ${decision.heldUsed} free base used for the safety orders`,
+      )
+      return 'virtual'
     }
     /**
      * Create initial deal orders
@@ -19309,6 +22172,23 @@ function createDCABotHelper<
           let balanceUseQty = 0
 
           const ordersCount = this.dcaLadderSize(settings)
+          // Spec `164`: a stored breakpoint beyond this ladder's deepest level
+          // (a wick past the deal's whole DCA coverage) is not applied. Only a
+          // percentage ladder has a closed-form depth; on every other ladder
+          // a breakpoint must still be a positive finite price.
+          const ladderEnd =
+            settings.dcaCondition === DCAConditionEnum.percentage && !scaleAr
+              ? this.math.round(
+                  percentageLadderEnd(
+                    latestPrice,
+                    gridStep,
+                    stepScale,
+                    ordersCount ?? 0,
+                    long,
+                  ),
+                  symbol.priceAssetPrecision,
+                )
+              : undefined
           const useVolumeChange =
             settings.dcaVolumeBaseOn === DCAVolumeType.change &&
             settings.useTp &&
@@ -19457,7 +22337,11 @@ function createDCABotHelper<
             price = this.math.round(price, ed.priceAssetPrecision)
             const findBreakpoint = breakpoints
               .sort((a, b) => (long ? b.price - a.price : a.price - b.price))
-              .find((b) => price === b.price)
+              .find(
+                (b) =>
+                  price === b.price &&
+                  isDisplacementInLadder(b.displacedPrice, ladderEnd, long),
+              )
             if (findBreakpoint) {
               price = this.math.round(
                 findBreakpoint.displacedPrice,
@@ -19799,6 +22683,19 @@ function createDCABotHelper<
                 .sort((a, b) => a.price - b.price)
             }
           }
+          if (!noCheck) {
+            // Spec `164` §1.1: a level that has filled is not a current order.
+            // In a burst of fills the filled count above lags, so the slice
+            // can still hold one; it was re-sent, and with the market past it
+            // given a breakpoint at the market price.
+            const filledLevels = this.getOrdersByStatusAndDealId({
+              status: 'FILLED',
+              dealId,
+            })
+            currentOrders = currentOrders.filter(
+              (o) => !isLevelFilled(o, filledLevels),
+            )
+          }
           const [firstOrder] = currentOrders
           if (!noCheck) {
             if (
@@ -19813,13 +22710,24 @@ function createDCABotHelper<
               !isNaN(left)
             ) {
               const latestPrice = await this.getLatestPrice(symbol)
-              if (
+              const gapped =
                 firstOrder &&
                 latestPrice !== 0 &&
                 ((latestPrice < firstOrder.price && this.isLong) ||
-                  (latestPrice > firstOrder.price && !this.isLong)) &&
-                deal
-              ) {
+                  (latestPrice > firstOrder.price && !this.isLong))
+              // Spec `164` §1.2: a market past the ladder's deepest level is a
+              // wick, not a place to rest one level. The level keeps its price.
+              const ladderEnd = long
+                ? Math.min(...orders.map((o) => o.price))
+                : Math.max(...orders.map((o) => o.price))
+              const beyondLadder =
+                gapped && !isDisplacementInLadder(latestPrice, ladderEnd, long)
+              if (beyondLadder) {
+                this.handleLog(
+                  `Deal ${dealId}: no breakpoint for level ${firstOrder.price} at market ${latestPrice}: beyond the ladder's deepest level ${ladderEnd}`,
+                )
+              }
+              if (gapped && !beyondLadder && deal) {
                 const breakpoint = {
                   price: firstOrder.price,
                   displacedPrice: latestPrice,
@@ -20006,6 +22914,14 @@ function createDCABotHelper<
           currentStatus === BotStatusEnum.open ||
           (setMonitoring && currentStatus === BotStatusEnum.monitoring))
       ) {
+        // A start signal on a running bot is a no-op. On a bot in error it is
+        // refused on purpose (a signal must not paper over the error), which
+        // the sender could not see.
+        if (webhook && currentStatus === BotStatusEnum.error) {
+          await this.reportIgnoredWebhookSignal(
+            'A start bot webhook signal was ignored: the bot is in error. Resolve the error and start the bot from the dashboard',
+          )
+        }
         this.endMethod(_id)
         return false
       }
@@ -20108,6 +23024,24 @@ function createDCABotHelper<
         status: 'FILLED',
       }).find((o) => o.typeOrder === TypeOrderEnum.dealTP && !o.reduceFundsId)
       return !!tp && this.underfilledTpQty(tp) === 0
+    }
+
+    /**
+     * Whether `dealId` has left this bot's deals — `processDealClose` drops a
+     * closed deal (`deleteDeal`) BEFORE its order sweep, and its order rows only
+     * after it, so for that whole window `dealClosedByFilledTp` has nothing to
+     * read. A placement queued on the deal lock meanwhile must treat the deal as
+     * gone, not unknown: its ladder was sized for a position that no longer
+     * exists (spec `160`). Simple terminal deals excluded, as above.
+     */
+    protected dealReleased(dealId: string): boolean {
+      if (
+        this.data?.settings.type === DCATypeEnum.terminal &&
+        this.data.settings.terminalDealType === TerminalDealTypeEnum.simple
+      ) {
+        return false
+      }
+      return !this.getDeal(`${dealId}`)
     }
 
     /**
@@ -20236,6 +23170,10 @@ function createDCABotHelper<
         : new Set<string>()
       if (dealId && !getSet.has(clientOrderId)) {
         this.processedFilled.set(dealId, getSet.add(clientOrderId))
+        const fillTime = +order.updateTime
+        if (fillTime > (this.latestDealFillTime.get(dealId) ?? 0)) {
+          this.latestDealFillTime.set(dealId, fillTime)
+        }
         if (order.typeOrder === TypeOrderEnum.dealTP && order.reduceFundsId) {
           return this.updateDeal(this.botId, order)
         }
@@ -20310,11 +23248,19 @@ function createDCABotHelper<
       const qty = parseFloat(order.executedQty)
       const { dealId } = order
       const findDeal = this.getDeal(dealId)
+      // A reduce-funds order `updateDeal` already booked (filled, or cancelled
+      // part filled — spec `159`) is in `reduceFunds`; a late partial-fill
+      // event must not count it again as a partial take profit.
+      const settledReduce =
+        !!order.reduceFundsId &&
+        !!dealId &&
+        !!this.dealUpdateOrders.get(dealId)?.has(order.clientOrderId)
       if (
         findDeal &&
         dealId &&
         this.orders &&
-        findDeal.deal.status === DCADealStatusEnum.open
+        findDeal.deal.status === DCADealStatusEnum.open &&
+        !settledReduce
       ) {
         findDeal.deal.tpHistory = [
           ...(findDeal.deal.tpHistory ?? []).filter(
@@ -20378,18 +23324,20 @@ function createDCABotHelper<
           DCACloseTriggerEnum.liquidation,
         )
         await this.linkLiquidationOrderToDeals(order, openBefore)
+        // Only the bot whose side was liquidated closed anything: a hedge
+        // partner on the same symbol receives the same report.
+        this.handleErrors(
+          `Deals on ${
+            order.symbol
+          } closed due to position liquidation at ${new Date(
+            order.updateTime,
+          ).toUTCString()}`,
+          'processLiquidationOrder',
+          '',
+          false,
+          true,
+        )
       }
-      this.handleErrors(
-        `Deals on ${
-          order.symbol
-        } closed due to position liquidation at ${new Date(
-          order.updateTime,
-        ).toUTCString()}`,
-        'processLiquidationOrder',
-        '',
-        false,
-        true,
-      )
     }
 
     /**
@@ -20565,6 +23513,12 @@ function createDCABotHelper<
       if (order.typeOrder !== TypeOrderEnum.dealTP) {
         return
       }
+      if (
+        order.reduceFundsId &&
+        (await this.settleCanceledReduceFunds(order))
+      ) {
+        return
+      }
       const executed = +order.executedQty
       const original = +order.origQty
       if (!isFinite(executed) || executed <= 0) {
@@ -20604,6 +23558,100 @@ function createDCABotHelper<
         return
       }
       await this.updatePartiallyFilledTP(order)
+    }
+
+    /**
+     * A reduce-funds order that ended CANCELED. Spec `159`.
+     *
+     * The order's entry in `pendingReduceFunds` is what keeps the withdrawal
+     * out of the deal's close: `getTPOrder` sizes every close net of it. Only
+     * a FILLED reduce order used to take the entry off, so one the venue
+     * cancelled stayed pending for good — its whole quantity kept out of every
+     * later close, while the part it did sell was subtracted a second time as
+     * a partial take profit. Those coins were left with no order to sell them.
+     *
+     * The executed part is a withdrawal like a filled one, so it is booked by
+     * the same `updateDeal` branch, which also drops the entry and re-sizes the
+     * close. With nothing executed the entry is just dropped.
+     *
+     * Not when the bot cancelled an order that is still pending: that is a
+     * reload or a settings update, and `resendPendingFunds` places it again
+     * from the entry (spec `110`). A user's cancel takes the entry off first
+     * (`cancelTerminalDealOrder`), so only its executed part is left here.
+     *
+     * @returns false to leave the order to the ordinary take-profit handling.
+     */
+    private async settleCanceledReduceFunds(order: Order): Promise<boolean> {
+      const findDeal = order.dealId ? this.getDeal(order.dealId) : undefined
+      if (!findDeal || findDeal.deal.status !== DCADealStatusEnum.open) {
+        return false
+      }
+      const pending = (findDeal.deal.pendingReduceFunds ?? []).some(
+        (r) => r.id === order.reduceFundsId,
+      )
+      if (pending && this.isOwnCancel(order.clientOrderId)) {
+        return false
+      }
+      const executed = +order.executedQty
+      // Same trust rule as the partial take profit: a quantity without a usable
+      // `updateTime` is not a stream report.
+      if (isFinite(executed) && executed > 0 && order.updateTime > 0) {
+        this.handleLog(
+          `Reduce funds order ${order.clientOrderId} of deal ${order.dealId} was ${order.status} with ${order.executedQty} of ${order.origQty} filled. Booking the filled part as a reduction`,
+        )
+        await this.updateDeal(this.botId, order)
+        return true
+      }
+      if (pending) {
+        await this.dropCanceledReduceFunds(order)
+      }
+      return true
+    }
+
+    @IdMute(mutex, (order: Order) => `${order.botId}${order.dealId}update`)
+    private async dropCanceledReduceFunds(order: Order) {
+      const { dealId } = order
+      const findDeal = dealId ? this.getDeal(dealId) : undefined
+      if (
+        !dealId ||
+        !findDeal ||
+        findDeal.deal.status !== DCADealStatusEnum.open
+      ) {
+        return
+      }
+      const before = findDeal.deal.pendingReduceFunds ?? []
+      const standing = before.filter((r) => r.id !== order.reduceFundsId)
+      if (standing.length === before.length) {
+        return
+      }
+      this.handleLog(
+        `Reduce funds order ${order.clientOrderId} of deal ${dealId} was ${order.status} with nothing filled. Removing it from the deal's pending reductions`,
+      )
+      findDeal.deal.pendingReduceFunds = standing as Deal['pendingReduceFunds']
+      findDeal.previousOrders = findDeal.currentOrders
+      findDeal.currentOrders = await this.createCurrentDealOrders(
+        findDeal.deal.symbol.symbol,
+        findDeal.deal.lastPrice,
+        findDeal.initialOrders,
+        findDeal.deal.settings.avgPrice || findDeal.deal.avgPrice,
+        findDeal.deal.initialPrice,
+        findDeal.deal._id,
+        false,
+        findDeal.deal,
+        false,
+      )
+      this.saveDeal(findDeal, {
+        pendingReduceFunds: findDeal.deal.pendingReduceFunds,
+      }).then(() => {
+        this.updateUsage(dealId)
+        this.updateAssets(dealId)
+      })
+      this.placeOrders(
+        this.botId,
+        findDeal.deal.symbol.symbol,
+        dealId,
+        this.findDiff(findDeal.currentOrders, findDeal.previousOrders),
+      )
     }
 
     /**
@@ -20816,6 +23864,8 @@ function createDCABotHelper<
      *
      * @param {string} [dealId] If specify - cancel order for specifi deal
      * @param {boolean} [cancelPartiallyFilled] cancel order with status PARTIALLY FILLED. Default = false
+     * @returns the orders whose cancel came back `FILLED` — each is also handed
+     * to `handleUnknownOrder`, which processes it in the background (spec `188`)
      */
 
     async cancelAllOrder(
@@ -20824,7 +23874,8 @@ function createDCABotHelper<
       cancelPartiallyFilled = false,
       excludeTP = false,
       side?: OrderSideEnum,
-    ): Promise<void> {
+    ): Promise<Order[]> {
+      const filled: Order[] = []
       if (this.exchange && this.data && this.orders) {
         let newOrders = this.getOrdersByStatusAndDealId({
           status: cancelPartiallyFilled ? this.orderStatuses : 'NEW',
@@ -20858,6 +23909,7 @@ function createDCABotHelper<
           for (const order of toCancel) {
             const result = await this.cancelOrderOnExchange(order)
             if (result?.status === 'FILLED') {
+              filled.push(result)
               this.handleUnknownOrder(result)
             }
           }
@@ -20865,6 +23917,7 @@ function createDCABotHelper<
           this.clearCancelBatch()
         }
       }
+      return filled
     }
 
     setEquityTimer() {
@@ -21608,10 +24661,17 @@ function createDCABotHelper<
         : undefined
       const slGroupLogicOr = slGroup?.logic === IndicatorsLogicEnum.or
       const tpGroupLogicOr = tpGroup?.logic === IndicatorsLogicEnum.or
-      const slLogicOr =
-        this.data?.settings.stopDealSlLogic === IndicatorsLogicEnum.or
-      const tpLogicOr =
-        this.data?.settings.stopDealLogic === IndicatorsLogicEnum.or
+      // Whether the unrealized-P&L indicator's group can close on its own.
+      const slLogicOr = groupStandsAlone(
+        slGroups ?? [],
+        slGroup?.id,
+        this.data?.settings.stopDealSlLogic,
+      )
+      const tpLogicOr = groupStandsAlone(
+        tpGroups ?? [],
+        tpGroup?.id,
+        this.data?.settings.stopDealLogic,
+      )
       const slInidcators = foundInSl
         ? (this.data?.settings.indicators ?? []).filter(
             (i) =>
@@ -21959,6 +25019,7 @@ function createDCABotHelper<
     removeDealFromStopLossMethods(dealId: string) {
       this.dealsForMoveSl.delete(dealId)
       this.dealsForTrailing.delete(dealId)
+      this.latestDealFillTime.delete(dealId)
       this.dealsForStopLoss.delete(dealId)
       this.dealsForStopLossCombo.delete(dealId)
       this.dealsDCALevelCheck.delete(dealId)
@@ -22174,63 +25235,74 @@ function createDCABotHelper<
 
     checkDealsPriceExtremum() {
       if (this.combo) {
-        const comboValues = [...this.dealsForStopLossCombo.entries()].map(
-          ([dealId, value]) => ({
-            deal: this.getDeal(dealId),
-            value,
-          }),
+        // Keep every symbol's static and trailing exits independent.
+        const bySymbol = <T>(entries: Iterable<[string, T]>) =>
+          [...entries].reduce((acc, [k, v]) => {
+            const symbol = this.getDeal(k)?.deal.symbol.symbol ?? ''
+            acc.set(symbol, [...(acc.get(symbol) ?? []), v])
+            return acc
+          }, new Map<string, T[]>())
+        const slTpBySymbol = bySymbol(
+          [...this.dealsForStopLossCombo.entries()].map(([id, value]) => [
+            id,
+            {
+              ...value,
+              trailingTp:
+                this.getDeal(id)?.deal.trailingMode === TrailingModeEnum.ttp,
+            },
+          ] as [string, DealStopLossCombo & { trailingTp: boolean }]),
         )
-        const comboLowerBounds = comboValues
-          .map(({ deal, value }) => {
-            const useTrailingTp =
-              deal?.deal.trailingMode === TrailingModeEnum.ttp
-            return this.isLong
-              ? [value.sl, useTrailingTp ? value.tp : 0]
-              : [useTrailingTp ? value.tp : Infinity, value.sl]
-          })
-          .flat()
-          .filter((v) => !!v && isFinite(v))
-        const comboUpperBounds = comboValues
-          .map(({ deal, value }) => {
-            const useTrailingTp =
-              deal?.deal.trailingMode === TrailingModeEnum.ttp
-            return this.isLong
-              ? [useTrailingTp ? Infinity : value.tp]
-              : [useTrailingTp ? 0 : value.tp, value.sl]
-          })
-          .flat()
-          .filter((v) => !!v && isFinite(v))
-        const min = this.isLong
-          ? comboLowerBounds.sort((a, b) => b - a)?.[0]
-          : comboUpperBounds.sort((a, b) => b - a)?.[0]
-        const max = this.isLong
-          ? comboUpperBounds.sort((a, b) => a - b)?.[0]
-          : comboLowerBounds.sort((a, b) => a - b)?.[0]
-        this.highestLow.set(this.data?.settings.pair[0] ?? '', min ?? 0)
-        this.lowestHigh.set(this.data?.settings.pair[0] ?? '', max || Infinity)
+        const dcaCheckBySymbol = bySymbol(this.dealsDCALevelCheck.entries())
+        const dcaByMarketBySymbol = bySymbol(this.dealsDCAByMarket.entries())
+        const symbols = new Set([
+          ...slTpBySymbol.keys(),
+          ...dcaCheckBySymbol.keys(),
+          ...dcaByMarketBySymbol.keys(),
+        ])
+        for (const symbol of symbols) {
+          const values = slTpBySymbol.get(symbol) ?? []
+          // Active TTP closes on retracement, opposite to an ordinary TP.
+          const lowerBounds = values
+            .flatMap((v) =>
+              this.isLong
+                ? [v.sl, v.trailingTp ? v.tp : 0]
+                : [v.trailingTp ? 0 : v.tp],
+            )
+            .filter((v) => Number.isFinite(v) && v > 0)
+          const upperBounds = values
+            .flatMap((v) =>
+              this.isLong
+                ? [v.trailingTp ? 0 : v.tp]
+                : [v.sl, v.trailingTp ? v.tp : 0],
+            )
+            .filter((v) => Number.isFinite(v) && v > 0)
+          const min = Math.max(0, ...lowerBounds)
+          const max = Math.min(Infinity, ...upperBounds)
 
-        const valuesDCACheck = [...this.dealsDCALevelCheck.values()]
-        const valuesDCAByMarketCheck = [...this.dealsDCAByMarket.values()]
-        const minDCACheck = this.isLong
-          ? Math.max(
-              valuesDCAByMarketCheck.sort((a, b) => b - a)?.[0] ?? 0,
-              valuesDCACheck.sort((a, b) => b - a)?.[0] ?? 0,
-            )
-          : 0
-        const maxDCACheck = this.isLong
-          ? Infinity
-          : Math.min(
-              valuesDCAByMarketCheck.sort((a, b) => a - b)?.[0] || Infinity,
-              valuesDCACheck.sort((a, b) => a - b)?.[0] || Infinity,
-            )
-        this.highestLow.set(
-          this.data?.settings.pair[0] ?? '',
-          Math.max(min ?? 0, minDCACheck),
-        )
-        this.lowestHigh.set(
-          this.data?.settings.pair[0] ?? '',
-          Math.min(max || Infinity, maxDCACheck),
-        )
+          const valuesDCACheck = dcaCheckBySymbol.get(symbol) ?? []
+          const valuesDCAByMarketCheck = dcaByMarketBySymbol.get(symbol) ?? []
+          const minDCACheck = this.isLong
+            ? Math.max(
+                valuesDCAByMarketCheck.sort((a, b) => b - a)?.[0] ?? 0,
+                valuesDCACheck.sort((a, b) => b - a)?.[0] ?? 0,
+              )
+            : 0
+          const maxDCACheck = this.isLong
+            ? Infinity
+            : Math.min(
+                valuesDCAByMarketCheck.sort((a, b) => a - b)?.[0] || Infinity,
+                valuesDCACheck.sort((a, b) => a - b)?.[0] || Infinity,
+              )
+          this.highestLow.set(symbol, Math.max(min ?? 0, minDCACheck))
+          this.lowestHigh.set(symbol, Math.min(max || Infinity, maxDCACheck))
+        }
+        for (const map of [this.highestLow, this.lowestHigh]) {
+          map.forEach((_, k) => {
+            if (!symbols.has(k)) {
+              map.delete(k)
+            }
+          })
+        }
       } else {
         const dealsForMoveSlMin = [...this.dealsForMoveSl.entries()].reduce(
           (acc, [k, v]) => {
@@ -22604,12 +25676,14 @@ function createDCABotHelper<
         this.allowedMethods.add('sendDealClosedAlert')
         this.allowedMethods.add('sendDealOpenedAlert')
         this.allowedMethods.add('sendSafetyOrderFilledAlert')
+        this.allowedMethods.add('sendMaxDealsReachedAlert')
         this.allowedMethods.add('sendEightyAlert')
         this.allowedMethods.add('sendHundredAlert')
       } else {
         this.allowedMethods.delete('sendDealClosedAlert')
         this.allowedMethods.delete('sendDealOpenedAlert')
         this.allowedMethods.delete('sendSafetyOrderFilledAlert')
+        this.allowedMethods.delete('sendMaxDealsReachedAlert')
         this.allowedMethods.delete('sendEightyAlert')
         this.allowedMethods.delete('sendHundredAlert')
       }
@@ -22930,6 +26004,10 @@ function createDCABotHelper<
                 this.handleWarn(
                   `Exchange info not found for ${p}. Will close all deals`,
                 )
+                await this.reportUserRefusal(
+                  exchangeInfoMissingPairRemovedMessage(p),
+                  p,
+                )
                 this.data.settings.pair = this.data.settings.pair.filter(
                   (d) => d !== p,
                 )
@@ -22952,6 +26030,11 @@ function createDCABotHelper<
               }
             } else {
               this.handleWarn(`Exchange info not found. Bot will stop`)
+              // The bot stops here — on a service restart too. Log-only meant
+              // a bot the user left running was found closed with no reason.
+              await this.reportUserRefusal(
+                exchangeInfoMissingStopMessage(removablePairs),
+              )
               this.loadingComplete = true
               await this.stop(CloseDCATypeEnum.cancel)
               this.loadingComplete = false
@@ -22971,7 +26054,12 @@ function createDCABotHelper<
         }
         this.loadingComplete = true
         await this.runAfterLoading()
-        await this.restoreWork()
+        // Publish the open status BEFORE restoreWork. On a user start
+        // restoreWork cancels and re-places the resting orders of every open
+        // deal one exchange call at a time — minutes on a bot with many deals —
+        // and the bot read as closed for that whole window, so a user who
+        // clicked Start saw nothing happen and clicked again. restoreWork's own
+        // stop/error paths write their status after this one, so they still win.
         if (
           this.data &&
           (this.data.status === 'open' || this.data?.status === 'monitoring')
@@ -22996,9 +26084,10 @@ function createDCABotHelper<
             workingShift: this.trimWorkingShift(this.data.workingShift),
             workingTimeNumber: this.getWorkingTimeNumber(),
           }
-          this.updateData(data)
+          await this.updateData(data)
           this.emit('bot settings update', data)
         }
+        await this.restoreWork()
         this.startPriceTimer()
         this.startConsumerHeartbeat()
         this.finishLoad = true
@@ -23013,6 +26102,14 @@ function createDCABotHelper<
           false,
         )
         logger.error(e)
+        // A start the user (or a settings reload) asked for must not fail
+        // silently. A service restart is not reported: an infrastructure blip
+        // would otherwise message every user on the worker at once.
+        if (!wasServiceRestart) {
+          await this.reportUserRefusal(
+            startFailedMessage((e as Error)?.message ?? `${e}`),
+          )
+        }
       }
       this.finishLoad = true
       this.secondRestart = true
@@ -23069,6 +26166,25 @@ function createDCABotHelper<
         const startDeals = openDeals.filter(
           (d) => d.deal.status === DCADealStatusEnum.start,
         )
+        // Every deal is closed one exchange round trip at a time BEFORE the
+        // bot is written `closed` below — minutes on a bot with many deals,
+        // while it still reads as running. There is no stopping status to
+        // publish instead (adding one is a contract change for every status
+        // reader), and writing `closed` first is not safe: the close paths
+        // read it. So say what is happening.
+        const closesDeals = !!closeType && closeType !== CloseDCATypeEnum.leave
+        const dealsToClose = closesDeals
+          ? startDeals.length +
+            openDeals.filter((d) => d.deal.status === DCADealStatusEnum.open)
+              .length
+          : 0
+        if (dealsToClose > 0) {
+          await this.reportUserRefusal(
+            stoppingNoticeMessage(dealsToClose),
+            undefined,
+            MessageTypeEnum.info,
+          )
+        }
         this.closeAfterTpFilled = true
         for (const d of startDeals) {
           await this.closeDealById(
@@ -23195,6 +26311,11 @@ function createDCABotHelper<
           false,
           false,
           false,
+        )
+        // `reportUserRefusal` honours `ignoreErrors`, so a delete / reset
+        // teardown stays quiet exactly as before.
+        await this.reportUserRefusal(
+          stopFailedMessage((e as Error)?.message ?? `${e}`),
         )
       }
     }
@@ -23578,6 +26699,8 @@ function createDCABotHelper<
       // observation of a fresh-because-we-served-it symbol reads as a live
       // tick and declares recovery one run early.
       const healthNoted: Set<string> = new Set()
+      /** Stale symbols to note, with the price the bot held before polling. */
+      const heldPrices: Map<string, number | undefined> = new Map()
       for (const d of this.getDealsByStatusAndSymbol({
         status: DCADealStatusEnum.open,
       }).filter((d) => !d.closeBySl && !d.deal.blockSl && !d.notCheckSl)) {
@@ -23599,11 +26722,14 @@ function createDCABotHelper<
         )
         // Info-level, state-change only: this REST poll is the fallback, and a
         // symbol that never leaves it has no live `trade@` stream at all.
+        // Noted after the REST read, which tells a quiet market from a
+        // missing stream (see PriceStreamGapTracker#note).
         if (noteHealth) {
-          this.trackPriceStreamHealth(symbol, true)
+          heldPrices.set(symbol, lastStreamData?.price)
         }
         symbols.add(symbol)
       }
+      const restPrices: Map<string, number> = new Map()
       if (this.exchange && symbols.size) {
         this.handleDebug(
           `Required prices for ${symbols.size} symbols in price timer`,
@@ -23613,6 +26739,7 @@ function createDCABotHelper<
         if (allPrices.status === StatusEnum.ok) {
           const prices = allPrices.data.filter((p) => symbols.has(p.pair))
           for (const p of prices) {
+            restPrices.set(p.pair, p.price)
             this.priceUpdateCallback(this.botId, {
               symbol: p.pair,
               price: p.price,
@@ -23621,6 +26748,13 @@ function createDCABotHelper<
             })
           }
         }
+      }
+      for (const [symbol, held] of heldPrices) {
+        this.trackPriceStreamHealth(
+          symbol,
+          true,
+          priceMovedSince(held, restPrices.get(symbol)),
+        )
       }
     }
     /** Check trailing conditions */
@@ -23653,6 +26787,17 @@ function createDCABotHelper<
         const lastStreamData = this.getLastStreamData(d.deal.symbol.symbol)
         const last = lastStreamData?.price
         if (!last) {
+          continue
+        }
+        // Spec 142: a lagging feed can still be delivering prices from before
+        // the deal's latest fill — a market that fill already left. Arming
+        // (or moving) the trail on one closes the deal below its average.
+        if (
+          isTickBeforeLatestFill(
+            lastStreamData?.time,
+            this.latestDealFillTime.get(deal),
+          )
+        ) {
           continue
         }
         const settings = await this.getAggregatedSettings(d.deal)
@@ -23982,6 +27127,146 @@ function createDCABotHelper<
     }
 
     /**
+     * Send a futures deal's resting take-profit. Spec
+     * `specs/143.resting-tp-refused-for-a-vanished-position.md`.
+     *
+     * Everything but the refusal handling is `sendGridToExchange` as the plain
+     * branch of `placeOrdersHoldingDealLock` calls it. The refusal is taken back
+     * (`returnError`) so that a `Futures position` one — the venue saying there
+     * is nothing for this reduce-only order to reduce — can be checked against
+     * the venue's position. That subType is `showUser: false`, so until now a
+     * deal whose position had gone re-sent its take-profit on every pass, for
+     * weeks, and the user was told nothing.
+     *
+     * @returns what `sendGridToExchange` returned, or nothing when the send was
+     *   skipped because the venue has already said this deal has no position.
+     */
+    private async sendFuturesRestingTp(
+      deal: FullDeal<ExcludeDoc<Deal>>,
+      order: Grid,
+      sendOptions: OrderAdditionalParams,
+      ed: ClearPairsSchema,
+    ): Promise<Order | string | void> {
+      const dealId = `${deal.deal._id}`
+      const gone = await restingTpPositionGoneBackoff.check([this.botId, dealId])
+      if (gone.suppressed) {
+        this.handleDebug(
+          `Deal ${dealId} TP ${order.newClientOrderId} not sent: the exchange reported no position for this deal (${gone.reason}). Next attempt after ${new Date(gone.until).toISOString()}`,
+        )
+        return
+      }
+      // With `returnError` the refusal is reported here instead of in
+      // `sendOrderToExchange`, and the same way it would have been there:
+      // `setError`/`sendError` from `needToSendOrder`, and nothing at all when
+      // the refusal is the account's auth cooldown being replayed rather than
+      // an answer from the venue (that tail's `authShortCircuit`).
+      const uuid = `${this.data?.exchangeUUID ?? ''}`
+      const authCooldown = uuid
+        ? (await AuthFailureGuard.check(uuid)).failed
+        : false
+      const result = await this.sendGridToExchange(
+        order,
+        sendOptions,
+        ed,
+        true,
+      )
+      if (typeof result !== 'string') {
+        if (result) {
+          // The venue took a take-profit for this deal, so whatever it said
+          // about the position before no longer holds.
+          await restingTpPositionGoneBackoff.clear([this.botId, dealId])
+        }
+        return result
+      }
+      const refused = this.convertGridToOrder(order, sendOptions, ed)
+      if (refused && !authCooldown) {
+        const setError = this.needToSendOrder(refused)
+        this.handleOrderErrors(
+          result,
+          refused,
+          'limitOrders()',
+          `Send new order request ${refused.clientOrderId}, qty ${refused.origQty}, price ${refused.price}, side ${refused.side}`,
+          setError,
+          setError,
+        )
+      }
+      if (
+        this.getErrorSubType(result) === futuresPosition &&
+        // A leverage misconfiguration shares the subType but is not about the
+        // position; `handleErrors` keeps it a visible error on its own.
+        result.toLowerCase().indexOf('leverage') === -1
+      ) {
+        await this.checkRefusedRestingTpPosition(deal, result)
+      }
+      return result
+    }
+
+    /**
+     * Spec `143` §4.2–§4.4. Ask the venue whether a deal whose resting
+     * take-profit it just refused as un-reducible still has a position. If it
+     * has none, hold the take-profit back for a while and tell the user — once
+     * per episode. The deal is never closed here and nothing is booked: unlike
+     * `reconcileDealPosition`, this deal never reached its take profit, and
+     * what happened to its position is for the user to see on the exchange.
+     */
+    private async checkRefusedRestingTpPosition(
+      deal: FullDeal<ExcludeDoc<Deal>>,
+      reason: string,
+    ) {
+      const dealId = `${deal.deal._id}`
+      const symbol = deal.deal.symbol.symbol
+      if (!this.exchange) {
+        return
+      }
+      const positions = await this.exchange.futures_getPositions(symbol)
+      const answered = positions?.status === StatusEnum.ok
+      // `closeDeal` is the reconciler's "the venue holds nothing for this
+      // deal"; here it only decides whether to hold the take-profit back.
+      const verdict = reconcileDealAgainstVenue(
+        answered && positions.data
+          ? { kind: 'positions', positions: positions.data }
+          : { kind: 'unavailable' },
+        symbol,
+        this.isLong ? 'LONG' : 'SHORT',
+        !!this.hedge,
+      )
+      if (!verdict.closeDeal) {
+        if (answered) {
+          await restingTpPositionGoneBackoff.clear([this.botId, dealId])
+        }
+        this.handleDebug(
+          `Deal ${dealId} TP refused (${reason}); ${verdict.verdict} — the take profit is retried as usual`,
+        )
+        return
+      }
+      const state = await restingTpPositionGoneBackoff.record(
+        [this.botId, dealId],
+        reason,
+      )
+      this.handleLog(
+        `Deal ${dealId} TP refused (${reason}) and ${verdict.verdict} on ${this.data?.exchange} — not re-sending the take profit until ${new Date(state.until).toISOString()} (refusal ${state.attempt}); the deal stays open`,
+      )
+      if (state.attempt === 1 && this.shouldProceed()) {
+        this.botEventDb.createData({
+          userId: this.userId,
+          botId: this.botId,
+          event: 'Deal',
+          botType: this.botType,
+          description: restingTpPositionGoneMessage({
+            dealId,
+            symbol,
+            exchange: `${this.data?.exchange ?? ''}`,
+            reason,
+          }),
+          paperContext: !!this.data?.paperContext,
+          deal: dealId,
+          symbol,
+          type: MessageTypeEnum.warning,
+        })
+      }
+    }
+
+    /**
      * Settle a deal whose venue position has vanished. Spec
      * `specs/005.zombie-deal-venue-position-reconciliation.md` (issue #630).
      *
@@ -24002,13 +27287,17 @@ function createDCABotHelper<
      *
      * @param trigger what the deal was doing when the probe ran, for the
      *   user-facing event. Defaults to `checkTPLevel`'s wording.
+     * @param settle how to close the deal once the venue has agreed twice that
+     *   its position is gone. Defaults to `closeDeal`, which books it closed
+     *   with no order. Combo passes its base-trigger close (spec `175`).
      * @returns true when the deal was booked closed and the caller must stop
      *   working it.
      */
-    private async reconcileDealPosition(
+    protected async reconcileDealPosition(
       deal: FullDeal<ExcludeDoc<Deal>>,
       outcome: string,
       trigger?: string,
+      settle?: () => Promise<unknown>,
     ): Promise<boolean> {
       const dealId = `${deal.deal._id}`
       const symbol = deal.deal.symbol.symbol
@@ -24031,7 +27320,7 @@ function createDCABotHelper<
       if (probeCooldown.suppressed) {
         return false
       }
-      const probe = await positionProbeBackoff.record(
+      await positionProbeBackoff.record(
         [this.botId, dealId],
         outcome,
       )
@@ -24055,7 +27344,9 @@ function createDCABotHelper<
         )
       } else {
         const ed = await this.getExchangeInfo(symbol)
-        const balances = await this.getBalancesFromExchange()
+        const balances = await withExchangeCaller('bot.reconcile', () =>
+          this.getBalancesFromExchange(),
+        )
         answered = balances?.status === StatusEnum.ok
         verdict = reconcileSpotDealAgainstVenue(
           answered && balances?.data
@@ -24070,27 +27361,32 @@ function createDCABotHelper<
           // The position is there — any window opened by an earlier probe is
           // stale, so this cannot slide forward forever.
           await positionProbeBackoff.clear([this.botId, dealId])
+          await positionGoneReadings.clear([this.botId, dealId])
         }
         this.handleDebug(
           `Deal ${dealId} TP level close ${outcome}; ${verdict.verdict} — leaving the deal open`,
         )
         return false
       }
-      if (probe.attempt < 2) {
-        // Two agreeing probes, five minutes apart, before booking a deal
-        // closed. The cost is asymmetric: these deals have been gone for
-        // months, so waiting one more window costs nothing, while acting on a
-        // single `{status: ok, data: []}` from a venue mid-outage would abandon
-        // a live position with no take profit and no stop loss. `clear()` above
-        // resets the count the moment the position is seen again, so a real
-        // divergence still converges on the next window.
+      const reading = await positionGoneReadings.record(
+        [this.botId, dealId],
+        outcome,
+      )
+      if (reading.attempt < 2) {
+        // Two agreeing answered probes, at least five minutes apart, before
+        // booking a deal closed. The cost is asymmetric: these deals have been
+        // gone for months, so waiting one more window costs nothing, while
+        // acting on a single `{status: ok, data: []}` from a venue mid-outage
+        // would abandon a live position with no take profit and no stop
+        // loss. `clear()` above resets the count the moment the position is
+        // seen again, so a real divergence still converges on the next window.
         this.handleLog(
           `Deal ${dealId} TP level close ${outcome} and ${verdict.verdict} on ${this.data?.exchange} — waiting for a second reading before closing the deal`,
         )
         return false
       }
       this.handleLog(
-        `Deal ${dealId} TP level close ${outcome} and ${verdict.verdict} on ${this.data?.exchange} (${probe.attempt} readings) — closing the deal instead of re-arming against a position that is gone`,
+        `Deal ${dealId} TP level close ${outcome} and ${verdict.verdict} on ${this.data?.exchange} (${reading.attempt} readings) — closing the deal instead of re-arming against a position that is gone`,
       )
       if (this.shouldProceed()) {
         this.botEventDb.createData({
@@ -24111,6 +27407,11 @@ function createDCABotHelper<
         })
       }
       await positionProbeBackoff.clear([this.botId, dealId])
+      await positionGoneReadings.clear([this.botId, dealId])
+      if (settle) {
+        await settle()
+        return true
+      }
       // The same primitive `closeDealById` uses for this condition: books the
       // deal closed keeping the P&L the filled targets already realised, with
       // no closing order — there is nothing to send one for.
@@ -24819,6 +28120,53 @@ function createDCABotHelper<
     }
 
     /**
+     * The part of the deal's ladder that is a re-placement size only and no
+     * commitment of funds. None on a DCA deal; a Combo deal's held add /
+     * reduce funds offsets (main-app spec 047).
+     */
+    protected fundsHeldOffset(_findDeal: FullDeal<ExcludeDoc<Deal>>): {
+      base: number
+      quote: number
+    } {
+      return { base: 0, quote: 0 }
+    }
+
+    /**
+     * Deals a cold restart loaded from Mongo instead of the Redis snapshot
+     * because the snapshot was older than the stored deal (main-app spec 047
+     * §2.3.7). Their orders are read from Mongo too.
+     */
+    protected snapshotStaleDeals: Set<string> = new Set()
+
+    /**
+     * The deal's whole book is being rebuilt elsewhere (none on a DCA deal; a
+     * Combo funds change in flight — main-app spec 047 §2.3.7): the restart
+     * check places nothing for it.
+     */
+    protected dealBookRebuildInFlight(_dealId: string): boolean {
+      return false
+    }
+
+    /**
+     * Extra Mongo conditions (ORed) for the restored deals whose stored copy
+     * may be newer than the Redis snapshot. None on a DCA deal.
+     */
+    protected snapshotStaleDealFilter(): Record<string, unknown>[] {
+      return []
+    }
+
+    /**
+     * Why the stored copy of a restored deal must win over the snapshot, or
+     * `null` to keep the snapshot. Never on a DCA deal.
+     */
+    protected snapshotStaleReason(
+      _snapshot: ExcludeDoc<Deal>,
+      _stored: ExcludeDoc<Deal>,
+    ): string | null {
+      return null
+    }
+
+    /**
      * Update deal balances
      *
      * @param {boolean} [skipUnbooked] Leave out fills whose `updateDeal` has
@@ -24849,6 +28197,7 @@ function createDCABotHelper<
           findDeal.deal.reduceFunds ??
           ([] as unknown as NonNullable<Deal['reduceFunds']>)
         ).reduce((acc, v) => acc + v.qty * v.price, 0)
+        const held = this.fundsHeldOffset(findDeal)
         findDeal.deal.initialBalances = {
           base: long
             ? 0
@@ -24858,7 +28207,8 @@ function createDCABotHelper<
               qty +
               fundsBase +
               pending.base -
-              reduceFundsBase,
+              reduceFundsBase -
+              held.base,
           quote: long
             ? findDeal.initialOrders
                 .filter((o) => o.side === OrderSideEnum.buy)
@@ -24866,7 +28216,8 @@ function createDCABotHelper<
               qty * price +
               fundsQuote +
               pending.quote -
-              reduceFundsQuote
+              reduceFundsQuote -
+              held.quote
             : 0,
         }
         // Spec `029`. This sum IS the deal's ledger, and everything in it is
@@ -24896,6 +28247,7 @@ function createDCABotHelper<
                 TypeOrderEnum.fee,
                 TypeOrderEnum.br,
                 TypeOrderEnum.rebalance,
+                TypeOrderEnum.funding,
               ].includes(o.typeOrder),
           )
           .filter((o) =>
@@ -24905,7 +28257,8 @@ function createDCABotHelper<
           )
           .filter(
             (o) =>
-              !skipUnbooked || !this.ordersInBetweenUpdates.has(o.clientOrderId),
+              !skipUnbooked ||
+              !this.ordersInBetweenUpdates.has(o.clientOrderId),
           )
         const filledBase =
           filled.reduce(
@@ -25119,6 +28472,317 @@ function createDCABotHelper<
       )
     }
     /**
+     * Main-app spec 044 §5 (phase 2) — before a settings patch that changes a
+     * short spot deal's ladder is applied, buy the base its unfilled safety
+     * orders need beyond what the account's free base (in `auto`) and the
+     * deal's own resting sells already cover.
+     *
+     * Phase 3 (§8, D7): a funded hedge leg (`deal.botFunding` on a hedge child
+     * bot) goes through here too, both sides — a long leg's added levels spend
+     * quote, raised by selling base. Planned first without the lock: an edit
+     * that needs no trade (a cut, or an increase the held funds cover) never
+     * touches the lock store. A trade is re-planned and placed under the
+     * account's funding lock.
+     *
+     * @returns false when the account cannot fund it (reported; the patch
+     *   must not be applied), true otherwise.
+     */
+    async fundAddedSafetyOrders(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      dealId: string,
+      patch: Partial<Deal['settings']>,
+    ): Promise<boolean> {
+      if (
+        findDeal.deal.status !== DCADealStatusEnum.open ||
+        !Object.keys(patch).some((k) => LADDER_SETTINGS.has(k))
+      ) {
+        return true
+      }
+      const settings = await this.getAggregatedSettings(findDeal.deal)
+      const mode =
+        this.shortSpotFundingMode(
+          settings,
+          this.isBaseFundingDeal(findDeal.deal),
+        ) ?? this.hedgeLegFundingMode(findDeal.deal)
+      if (!mode) {
+        return true
+      }
+      const probe = await this.planAddedSafetyOrders(
+        findDeal,
+        dealId,
+        patch,
+        mode,
+        false,
+      )
+      if (!probe) {
+        // Nothing to size against; leave it to the order placement as before.
+        return true
+      }
+      if (!probe.trade) {
+        await this.holdAddedSafetyOrders(dealId, probe.committedDelta)
+        return true
+      }
+      const locked = await this.runFundingSerialised((lease) =>
+        this.fundAddedSafetyOrdersLocked(dealId, patch, mode, lease),
+      ).catch((e: unknown) => ({
+        acquired: false as const,
+        reason: `${(e as Error)?.message ?? e}`,
+      }))
+      if (!locked.acquired) {
+        this.handleErrors(
+          `Cannot fund the new DCA levels: ${locked.reason}. The deal was not changed`,
+          'updateDealSettings',
+          '',
+          false,
+          true,
+          true,
+          true,
+        )
+        return false
+      }
+      return locked.value
+    }
+
+    /**
+     * The funding mode of a hedge leg's deal the bot funded at open (spec 044
+     * §8), or null. The leg's settings carry no `baseFunding`; its start
+     * action's mapping was stored on the deal.
+     */
+    hedgeLegFundingMode(deal: ExcludeDoc<Deal>): BaseFundingEnum | null {
+      if (
+        this.futures ||
+        !this.data?.parentBotId ||
+        !this.isBaseFundingDeal(deal)
+      ) {
+        return null
+      }
+      const mode = deal.botFunding?.virtualEntry ? deal.botFunding.mode : null
+      return mode === BaseFundingEnum.auto || mode === BaseFundingEnum.botOnly
+        ? mode
+        : null
+    }
+
+    /**
+     * The add-DCA funding plan (§7.5, §8 D7). Need = the patched ladder's
+     * unfilled levels; covered = the deal's resting levels + free funds net
+     * of OTHER deals' reservations (`auto`) — this deal's own hold is for
+     * exactly these levels, so it is not subtracted from itself.
+     */
+    async planAddedSafetyOrders(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      dealId: string,
+      patch: Partial<Deal['settings']>,
+      mode: BaseFundingEnum,
+      fresh: boolean,
+    ) {
+      const symbol = findDeal.deal.symbol.symbol
+      const ed = await this.getExchangeInfo(symbol)
+      const balances = await this.checkAssets(true, true)
+      const price = await this.getLatestPrice(symbol)
+      if (!ed || !balances || !price) {
+        return null
+      }
+      const long = this.isLong
+      const ladderOf = async (dealSettings: Deal['settings']) =>
+        (
+          await this.createInitialDealOrders(
+            symbol,
+            findDeal.deal.initialPrice,
+            dealId,
+            { ...findDeal.deal, settings: dealSettings },
+          )
+        )
+          .filter((o) => o.type === TypeOrderEnum.dealRegular)
+          .sort((a, b) => a.number - b.number)
+      const needOf = async (grids: Grid[]) =>
+        long
+          ? await this.fundedSafetyQuote(grids, symbol)
+          : await this.fundedSafetyQty(grids, symbol)
+      const ladder = await ladderOf({ ...findDeal.deal.settings, ...patch })
+      const before = await ladderOf(findDeal.deal.settings)
+      const filledLevels = this.getOrdersByStatusAndDealId({
+        dealId,
+        status: ['FILLED', 'PARTIALLY_FILLED'],
+      }).filter((o) => isLadderOrder(o)).length
+      const needed = await needOf(ladder.slice(filledLevels))
+      // The deal's own resting safety orders already hold their funds.
+      const resting = this.getOrdersByStatusAndDealId({
+        dealId,
+        defaultStatuses: true,
+      })
+        .filter(
+          (o) =>
+            o.typeOrder === TypeOrderEnum.dealRegular &&
+            o.side === (long ? OrderSideEnum.buy : OrderSideEnum.sell),
+        )
+        .reduce((acc, o) => {
+          const left = Math.max(0, +o.origQty - +(o.executedQty ?? 0))
+          return acc + (long ? left * +o.price : left)
+        }, 0)
+      const own = findDeal.deal.fundingHold
+      const ownHold = (asset: 'base' | 'quote') =>
+        own?.asset === asset ? Math.max(0, own.remaining ?? 0) : 0
+      const reservedQuote = Math.max(
+        0,
+        (await this.reservedFundingQuote(ed.quoteAsset.name, fresh)) -
+          ownHold('quote'),
+      )
+      const reservedBase = Math.max(
+        0,
+        (await this.reservedFundingBase(ed.baseAsset.name, fresh)) -
+          ownHold('base'),
+      )
+      const freeBase = balances.get(ed.baseAsset.name)?.free ?? 0
+      const freeQuote = balances.get(ed.quoteAsset.name)?.free ?? 0
+      const availableBase = Math.max(0, freeBase - reservedBase)
+      const availableQuote = Math.max(0, freeQuote - reservedQuote)
+      const held =
+        mode === BaseFundingEnum.auto
+          ? long
+            ? availableQuote
+            : availableBase
+          : 0
+      const fee = await this.getUserFee(symbol)
+      const plan = planFunding({
+        needAsset: long ? 'quote' : 'base',
+        required: needed,
+        held,
+        inOrders: resting,
+        price,
+        feeRate: fee?.taker ?? 0,
+        buyHeadroom: this.fundingBuyHeadroom(),
+        minNotional: ed.quoteAsset.minAmount,
+        minBase: ed.baseAsset.minAmount,
+        basePrecision: await this.baseAssetPrecision(symbol),
+        spendable: long ? availableBase : availableQuote,
+      })
+      return {
+        symbol,
+        ed,
+        price,
+        long,
+        needed,
+        resting,
+        held,
+        plan,
+        trade: plan.diff,
+        committedDelta: (await needOf(ladder)) - (await needOf(before)),
+      }
+    }
+
+    /**
+     * Grow (or shrink) the deal's `fundingHold` by the ladder change: the new
+     * levels are not on the book until `rebuildDealOrders` places them.
+     */
+    async holdAddedSafetyOrders(dealId: string, committedDelta: number) {
+      const current = this.getDeal(dealId)
+      const hold = current?.deal.fundingHold
+      if (!current || !hold || !committedDelta) {
+        return
+      }
+      const committed = Math.max(0, hold.committed + committedDelta)
+      current.deal.fundingHold = {
+        ...hold,
+        committed,
+        remaining: await this.fundingHoldRemaining(
+          dealId,
+          hold.asset,
+          committed,
+        ),
+      }
+      await this.saveDeal(current, { fundingHold: current.deal.fundingHold })
+      FundingReservation.getInstance().invalidate(
+        this.data?.exchangeUUID ?? '',
+        current.deal.symbol.quoteAsset,
+        current.deal.symbol.baseAsset,
+      )
+    }
+
+    /** {@link fundAddedSafetyOrders} once the account's funding lock is held. */
+    async fundAddedSafetyOrdersLocked(
+      dealId: string,
+      patch: Partial<Deal['settings']>,
+      mode: BaseFundingEnum,
+      lease: FundingLease,
+    ): Promise<boolean> {
+      // Re-read and re-plan fresh under the lock.
+      const findDeal = this.getDeal(dealId)
+      if (!findDeal || findDeal.deal.status !== DCADealStatusEnum.open) {
+        return true
+      }
+      const planned = await this.planAddedSafetyOrders(
+        findDeal,
+        dealId,
+        patch,
+        mode,
+        true,
+      )
+      if (!planned) {
+        return true
+      }
+      const { symbol, ed, price, long, needed, resting, held, plan, trade } =
+        planned
+      if (!trade) {
+        await this.holdAddedSafetyOrders(dealId, planned.committedDelta)
+        return true
+      }
+      if (trade.affordable === false) {
+        // setError=false: a refused manual action is not a bot fault.
+        this.handleErrors(
+          long
+            ? `Not enough ${ed.baseAsset.name} to sell for the ${this.math.round(plan.shortfall, 8)} ${ed.quoteAsset.name} the new DCA levels need (≈ ${this.math.round(trade.baseQty, 8)} ${ed.baseAsset.name}). The deal was not changed`
+            : `Not enough ${ed.quoteAsset.name} to buy the ${this.math.round(trade.baseQty, 8)} ${ed.baseAsset.name} the new DCA levels need (≈ ${this.math.round(trade.quoteValue, 8)} ${ed.quoteAsset.name}). The deal was not changed`,
+          'updateDealSettings',
+          '',
+          false,
+          true,
+          true,
+          true,
+        )
+        return false
+      }
+      if (!(await lease.owned())) {
+        this.handleErrors(
+          `Cannot fund the new DCA levels: the account's funding lock was lost. The deal was not changed`,
+          'updateDealSettings',
+          '',
+          false,
+          true,
+          true,
+          true,
+        )
+        return false
+      }
+      const lotId = await this.placeFundingTrade(symbol, dealId, trade, price)
+      if (lotId === null) {
+        return false
+      }
+      if (!(await lease.owned())) {
+        this.handleErrors(
+          `Funding lock on this account was lost while deal ${dealId}'s DCA funding trade ran; recording it anyway`,
+          'updateDealSettings',
+          '',
+          false,
+          true,
+          true,
+        )
+      }
+      const heldUsed = Math.min(held, Math.max(0, needed - resting))
+      // Re-read: the trade awaited its fill (see updateDealSettings).
+      const current = this.getDeal(dealId) ?? findDeal
+      const prev = current.deal.botFunding
+      current.deal.botFunding = {
+        ...(prev ?? {}),
+        mode,
+        virtualEntry: prev?.virtualEntry,
+        lotIds: [...(prev?.lotIds ?? []), ...(lotId ? [lotId] : [])],
+        sourcedByBot: !!prev?.sourcedByBot && heldUsed === 0,
+      }
+      await this.saveDeal(current, { botFunding: current.deal.botFunding })
+      await this.holdAddedSafetyOrders(dealId, planned.committedDelta)
+      return true
+    }
+    /**
      * Update deal settings
      */
 
@@ -25136,6 +28800,18 @@ function createDCABotHelper<
       settings = withoutUnusableAvgPrice(settings)
       const keys = Object.keys(settings)
       if (keys.length > 0) {
+        // Main-app spec 044: added DCA levels on a short spot deal are funded
+        // before anything changes; a refusal leaves the deal as it was. The
+        // deal is read only after: the funding trade waits for its fill, and
+        // the deal map may hold a new object by then — mutating the old one
+        // left the order placement working from the previous ladder.
+        const beforeFunding = this.getDeal(dealId)
+        if (
+          beforeFunding &&
+          !(await this.fundAddedSafetyOrders(beforeFunding, dealId, settings))
+        ) {
+          return
+        }
         const findDeal = this.getDeal(dealId)
         // "Change DCA levels" (both dashboards) sends exactly `ordersCount`,
         // plus `useDca: true` when it switches DCA back on. An indicator /
@@ -25186,6 +28862,9 @@ function createDCABotHelper<
             findDeal.deal.trailingLevel = 0
             findDeal.deal.trailingMode = undefined
           }
+          const tpOnly = this.isTpOnlyDealEdit(findDeal, settings)
+          const activeOrdersOnly =
+            !tpOnly && this.isActiveOrdersCountOnlyDealEdit(findDeal, settings)
           findDeal.deal.settings = {
             ...findDeal.deal.settings,
             ...settings,
@@ -25267,21 +28946,145 @@ function createDCABotHelper<
             changed: reset ? false : keysToCheck.filter((k) => !k).length !== 0,
             slChangedByUser: reset ? false : currentSlPerc !== settings.slPerc,
           }
-          await this.rebuildDealOrders(findDeal, dealId)
+          await this.rebuildDealOrders(
+            findDeal,
+            dealId,
+            activeOrdersOnly ? { tpOnly, activeOrdersOnly } : { tpOnly },
+          )
         }
       }
       await this.afterDealUpdate(dealId)
     }
+
+    /**
+     * Whether a deal settings patch changes only how the deal takes profit.
+     * Such an edit has no business touching the safety-order ladder: the
+     * ladder's prices and sizes do not read any of these keys, so cancelling
+     * and re-placing it only re-prices it at today's price and costs every
+     * level its place in the book. Compared by value against the deal's
+     * effective setting (the deal's own, else the bot's), because clients
+     * send whole forms — Edit Deal and mass edit include every key, changed
+     * or not. Anything unrecognised falls back to the full rebuild. A patch
+     * that changes nothing (the same save sent twice) has no ladder input to
+     * apply either, so it counts as take-profit only (spec 194).
+     * DCA only: a Combo rebuild also re-prepares its minigrids.
+     */
+    protected isTpOnlyDealEdit(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      patch: Partial<Deal['settings']>,
+    ): boolean {
+      if (this.botType !== BotType.dca) {
+        return false
+      }
+      return this.changedDealSettingKeys(findDeal, patch).every((k) =>
+        tpOnlyDealKeys.has(k),
+      )
+    }
+
+    /**
+     * The keys of a deal settings patch whose value differs from the deal's
+     * effective setting (the deal's own, else the bot's). Clients send whole
+     * forms, so a key's presence in the patch does not mean it changed.
+     */
+    protected changedDealSettingKeys(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      patch: Partial<Deal['settings']>,
+    ): string[] {
+      const effective = (k: string) => {
+        // @ts-ignore keyed read of the settings shape
+        const own = findDeal.deal.settings?.[k]
+        // @ts-ignore keyed read of the settings shape
+        return own !== undefined ? own : this.data?.settings?.[k]
+      }
+      const same = (a: unknown, b: unknown) =>
+        a === b || JSON.stringify(a) === JSON.stringify(b)
+      return Object.keys(patch).filter(
+        (k) =>
+          k !== 'changed' &&
+          // @ts-ignore keyed read of the patch
+          !same(patch[k], effective(k)),
+      )
+    }
+
+    /**
+     * Whether a deal settings patch changes only how many ladder levels the
+     * deal has or rests: the number of active smart orders (spec 195) and/or
+     * the total number of safety orders (spec 196 — with `dcaLevelsCap`, the
+     * form that count takes on an indicator / custom ladder). No level's price
+     * or size reads them — a level is generated from its index alone, and the
+     * take profit from the filled position — so such an edit cancels the
+     * levels it drops and places the ones it adds; the levels that stay and
+     * the take profit are left resting. "Change DCA levels" also sends
+     * `useDca: true`, which is not a change while DCA is already on
+     * (`changedDealSettingKeys` compares by value). DCA only, like
+     * {@link isTpOnlyDealEdit}.
+     */
+    protected isActiveOrdersCountOnlyDealEdit(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      patch: Partial<Deal['settings']>,
+    ): boolean {
+      if (this.botType !== BotType.dca) {
+        return false
+      }
+      const changed = this.changedDealSettingKeys(findDeal, patch)
+      return (
+        changed.length > 0 && changed.every((k) => ladderCountDealKeys.has(k))
+      )
+    }
     /**
      * Cancel a deal's resting orders, regenerate its ladder and take profit
      * from its current state, and place them again. Shared by a deal settings
-     * update and `restartDeal`.
+     * update and `restartDeal`, and by a Combo add / reduce funds fill
+     * (main-app spec 047), which keeps the deal's level counts as they are:
+     * its fill is a `dealRegular` row that is not a ladder level.
      */
-    private async rebuildDealOrders(
+    protected async rebuildDealOrders(
       findDeal: FullDeal<ExcludeDoc<Deal>>,
       dealId: string,
+      opts: {
+        keepLevels?: boolean
+        tpOnly?: boolean
+        activeOrdersOnly?: boolean
+      } = {},
     ) {
-      await this.cancelAllOrder(findDeal.deal.lastPrice, dealId, true)
+      // A take-profit-only edit replaces the take profit and nothing else
+      // (see `isTpOnlyDealEdit`); the ladder stays on the book as it is.
+      const tpOnly =
+        !!opts.tpOnly && findDeal.deal.status !== DCADealStatusEnum.start
+      // An active-smart-orders-only edit (see
+      // `isActiveOrdersCountOnlyDealEdit`) cancels the levels it drops and
+      // places the levels it adds once the ladder is regenerated below. A
+      // partly filled resting level takes the full rebuild, as before: the
+      // re-size diff does not cancel a partly filled level.
+      const activeOrdersOnly =
+        !tpOnly &&
+        !!opts.activeOrdersOnly &&
+        findDeal.deal.status !== DCADealStatusEnum.start &&
+        !this.getOrdersByStatusAndDealId({
+          status: 'PARTIALLY_FILLED',
+          dealId,
+        }).some((o) => isLadderOrder(o))
+      if (tpOnly) {
+        const restingTps = this.getOrdersByStatusAndDealId({
+          status: this.orderStatuses,
+          dealId,
+        }).filter(
+          // A reduce-funds order is a dealTP too (a resting DCA limit reduce,
+          // an in-flight Combo reduce); it is not the deal's take profit and
+          // must never be cancelled by a take-profit edit — also when its row
+          // reached memory without its funds id (`D-TPR` client id).
+          (o) =>
+            o.typeOrder === TypeOrderEnum.dealTP && !isComboFundsOrderRow(o),
+        )
+        for (const o of restingTps) {
+          const result = await this.cancelOrderOnExchange(o)
+          if (result?.status === 'FILLED') {
+            this.handleUnknownOrder(result)
+          }
+        }
+      } else if (!activeOrdersOnly) {
+        await this.cancelAllOrder(findDeal.deal.lastPrice, dealId, true)
+      }
       if (findDeal.deal.status !== DCADealStatusEnum.start) {
         findDeal.initialOrders = await this.createInitialDealOrders(
           findDeal.deal.symbol.symbol,
@@ -25301,7 +29104,11 @@ function createDCABotHelper<
           false,
         )
         findDeal.initialOrders = this.getDealInitialOrders(dealId)
-
+      }
+      if (
+        findDeal.deal.status !== DCADealStatusEnum.start &&
+        !opts.keepLevels
+      ) {
         const completeLevels =
           (this.getOrdersByStatusAndDealId({
             dealId: findDeal.deal._id,
@@ -25380,7 +29187,43 @@ function createDCABotHelper<
         }
       })
 
-      if (findDeal.deal.status !== DCADealStatusEnum.start) {
+      if (tpOnly) {
+        // A Combo deal's restart set regenerates (and re-caps) its minigrid
+        // ladders in memory, which a take-profit edit must not touch: its
+        // take profit is taken straight from the rebuilt deal orders.
+        const toPlace = this.combo
+          ? { new: findDeal.currentOrders, cancel: [] }
+          : await this.getOrdersToRestartAfterSettingsUpdate(dealId)
+        await this.placeOrders(
+          this.botId,
+          findDeal.deal.symbol.symbol,
+          dealId,
+          {
+            ...toPlace,
+            new: toPlace.new.filter((o) => o.type === TypeOrderEnum.dealTP),
+            cancel: [],
+          },
+        )
+      } else if (activeOrdersOnly) {
+        // The routine re-size diff, on the safety orders alone: resting
+        // levels the regenerated ladder no longer holds are cancelled, its
+        // levels with nothing resting are placed. A level is matched by price
+        // and side — the active count does not size it.
+        await this.placeOrders(
+          this.botId,
+          findDeal.deal.symbol.symbol,
+          dealId,
+          this.findDiff(
+            findDeal.currentOrders.filter(
+              (o) => o.type === TypeOrderEnum.dealRegular,
+            ),
+            this.getOrdersByStatusAndDealId({ status: 'NEW', dealId })
+              .filter((o) => isLadderOrder(o))
+              .map((o) => this.mapOrderToGrid(o)),
+            true,
+          ),
+        )
+      } else if (findDeal.deal.status !== DCADealStatusEnum.start) {
         await this.placeOrders(
           this.botId,
           findDeal.deal.symbol.symbol,
@@ -25429,8 +29272,407 @@ function createDCABotHelper<
         )
       }
       this.handleLog(`Restart deal ${dealId}`)
+      // A restart is how the user re-sends orders refused for funds, so an
+      // earlier not-enough-balance cooldown must not answer it.
+      await this.clearNotEnoughBalanceForSymbol(findDeal.deal.symbol.symbol)
       await this.rebuildDealOrders(findDeal, dealId)
       await this.afterDealUpdate(dealId)
+    }
+
+    /**
+     * Spec 139 §5.2.4: on a single-position bot a merge that would leave two
+     * open deals on the pair is routed to an adoption into the position — the
+     * oldest open deal of this bot on the pair, whether or not it was among the
+     * selected deals. Null: an ordinary merge (no position on the pair yet;
+     * the merged deal becomes the position, §5.2.2).
+     */
+    async singlePositionMergeRoute(
+      dealIds: string[],
+    ): Promise<{ target: string; sources: string[] } | null> {
+      const read = await this.dealsDb.readData(
+        {
+          _id: { $in: dealIds },
+          status: DCADealStatusEnum.open,
+          userId: this.userId,
+        } as any,
+        undefined,
+        {},
+        true,
+      )
+      if (read.status === StatusEnum.notok || !read.data.result.length) {
+        return null
+      }
+      const symbol = read.data.result[0].symbol?.symbol
+      if (!symbol) {
+        return null
+      }
+      const candidates = [
+        ...this.getOpenDeals(true, symbol).map((d) => d.deal),
+        ...read.data.result.filter(
+          (d) =>
+            `${d.botId}` === `${this.botId}` && d.symbol?.symbol === symbol,
+        ),
+      ] as { _id: string; createTime: number; symbol: { symbol: string } }[]
+      if (!candidates.length) {
+        return null
+      }
+      const [plan] = planPositionsByPair(
+        candidates.map((d) => ({ ...d, _id: `${d._id}` })),
+      )
+      const target = `${plan.target._id}`
+      const sources = [...new Set(dealIds.map((id) => `${id}`))].filter(
+        (id) => id !== target,
+      )
+      return sources.length ? { target, sources } : null
+    }
+
+    /**
+     * Spec 139 §4: fold open deals into the open deal `targetDealId`, which
+     * keeps its id, creation time and history. Runs one at a time with
+     * merges and conversions (`runPositionOp`).
+     */
+    async adoptDeals(targetDealId: string, dealIds: string[]) {
+      return this.runPositionOp(() =>
+        this.adoptDealsBody(`${targetDealId}`, dealIds),
+      )
+    }
+
+    private async adoptDealsBody(targetDealId: string, dealIds: string[]) {
+      if (!this.shouldProceed()) {
+        this.handleLog(this.notProceedMessage('adopt deals'))
+        return
+      }
+      // §4.1: combo positions are spread over minigrids (spec 138 §2.4);
+      // one position per side of a hedge bot is follow-up work (§2.4).
+      if (this.combo) {
+        return this.handleErrors(
+          SINGLE_POSITION_ADOPT_COMBO_REASON,
+          'adoptDeals()',
+          'combo',
+          false,
+          false,
+          false,
+        )
+      }
+      if (this.data?.parentBotId) {
+        return this.handleErrors(
+          SINGLE_POSITION_ADOPT_HEDGE_REASON,
+          'adoptDeals()',
+          'hedge',
+          false,
+          false,
+          false,
+        )
+      }
+      if (!this.data) {
+        return
+      }
+      const _id = this.startMethod('adoptDeals')
+      const prefix = 'Adopt deals | '
+      const fail = (reason: string) => {
+        this.endMethod(_id)
+        return this.handleErrors(
+          reason,
+          'adoptDeals()',
+          '',
+          false,
+          false,
+          false,
+        )
+      }
+      const target = this.getDeal(targetDealId)
+      if (!target || target.deal.status !== DCADealStatusEnum.open) {
+        return fail(`Deal ${targetDealId} must be an open deal of this bot`)
+      }
+      const sourceIds = [...new Set(dealIds.map((id) => `${id}`))].filter(
+        (id) => id !== targetDealId,
+      )
+      if (!sourceIds.length) {
+        return fail('No deals to adopt')
+      }
+      const read = await this.dealsDb.readData(
+        {
+          _id: { $in: sourceIds },
+          status: DCADealStatusEnum.open,
+          userId: this.userId,
+        } as any,
+        undefined,
+        {},
+        true,
+      )
+      if (read.status === StatusEnum.notok) {
+        return fail(`Read deals error. ${read.reason}`)
+      }
+      const sources = read.data.result
+      if (sources.length < sourceIds.length) {
+        return fail('Cannot find all deals to adopt — they must be open')
+      }
+      if (sources.some((d) => d.symbol?.symbol !== target.deal.symbol.symbol)) {
+        return fail('All deals must be the same pair')
+      }
+      if (sources.some((d) => d.strategy !== target.deal.strategy)) {
+        return fail('All deals must be the same strategy')
+      }
+      if (sources.some((d) => d.parentBotId)) {
+        this.endMethod(_id)
+        return this.handleErrors(
+          SINGLE_POSITION_ADOPT_HEDGE_REASON,
+          'adoptDeals()',
+          'hedge',
+          false,
+          false,
+          false,
+        )
+      }
+      const ordersRead = await this.ordersDb.readData(
+        {
+          userId: this.userId,
+          dealId: { $in: sourceIds },
+          status: { $in: ['FILLED', 'PARTIALLY_FILLED'] },
+          typeOrder: {
+            $in: [
+              TypeOrderEnum.dealStart,
+              TypeOrderEnum.dealRegular,
+              TypeOrderEnum.dealTP,
+            ],
+          },
+        },
+        undefined,
+        {},
+        true,
+      )
+      if (ordersRead.status === StatusEnum.notok) {
+        return fail(`Cannot get orders from db. ${ordersRead.reason}`)
+      }
+      const orders = ordersRead.data.result.filter((o) => +o.executedQty > 0)
+      this.handleLog(
+        `${prefix}${sourceIds.join(', ')} into ${targetDealId}, ${orders.length} filled orders`,
+      )
+      // §4.2.1: marked merged-away BEFORE the cancel, so the stats the cancel
+      // triggers skip them (spec 138 §2.1.4). Re-asserted after it.
+      const mergedAway = { child: true, parentId: targetDealId }
+      await this.dealsDb.updateManyData({ _id: { $in: sourceIds } } as any, {
+        $set: mergedAway,
+      })
+      for (const id of sourceIds) {
+        const local = this.getDeal(id)
+        if (local) {
+          Object.assign(local.deal, mergedAway)
+        }
+      }
+      // §4.2.2: the ordinary close path cancels each source's resting orders
+      // and credits whatever it booked to its own bot. A deal of this bot is
+      // closed here directly — this worker's method queue is busy with the
+      // adoption, so a request routed back to it would wait for the adoption
+      // to end.
+      const botInstance = new Bot(false)
+      for (const d of sources) {
+        if (`${d.botId}` === `${this.botId}`) {
+          await this.closeDealById(
+            this.botId,
+            `${d._id}`,
+            CloseDCATypeEnum.cancel,
+            false,
+          )
+        } else {
+          await botInstance.closeDCADeal(
+            this.userId,
+            d.botId,
+            `${d._id}`,
+            CloseDCATypeEnum.cancel,
+            false,
+            !!this.data.paperContext,
+          )
+        }
+      }
+      await sleep(2 * 1000)
+      await this.dealsDb.updateManyData({ _id: { $in: sourceIds } } as any, {
+        $set: mergedAway,
+      })
+      // §4.2.3: the sources' fills move to the position. Entry fills are
+      // booked like additions (`addFundsId` + `deal.funds`), so the position
+      // keeps ONE base order and every fold that reads the add-funds ledger
+      // (average, balances, usage, TP size) counts them; TP fills stay TP
+      // fills.
+      const booked =
+        this.dealUpdateOrders.get(targetDealId) ?? new Set<string>()
+      const adoptedFunds: { price: number; qty: number }[] = []
+      for (const o of orders) {
+        const entry = o.typeOrder !== TypeOrderEnum.dealTP
+        const data: Partial<Order> = entry
+          ? {
+              dealId: targetDealId,
+              botId: this.botId,
+              typeOrder: TypeOrderEnum.dealRegular,
+              addFundsId: o.addFundsId || `adopted-${o.dealId}`,
+              positionEntry: true,
+            }
+          : { dealId: targetDealId, botId: this.botId }
+        const changedOrder = { ...o, ...data } as Order
+        if (entry) {
+          adoptedFunds.push({ price: +o.price, qty: +o.executedQty })
+        }
+        if (this.shouldProceed()) {
+          await this.ordersDb.updateData(
+            { clientOrderId: o.clientOrderId },
+            { $set: data },
+          )
+        }
+        if (this.getOrderFromMap(o.clientOrderId)) {
+          this.deleteOrder(o.clientOrderId, false)
+        }
+        this.setOrder(changedOrder)
+        // Never routed through `updateDeal`: not an entry in flight.
+        booked.add(o.clientOrderId)
+        this.emit('bot update', changedOrder)
+      }
+      this.dealUpdateOrders.set(targetDealId, booked)
+      // §4.2.4: recompute the position from all of its filled orders.
+      const position = this.getDeal(targetDealId) ?? target
+      position.deal.funds = [...(position.deal.funds ?? []), ...adoptedFunds]
+      position.deal.tpHistory = [
+        ...(position.deal.tpHistory ?? []),
+        ...sources.flatMap((d) => d.tpHistory ?? []),
+      ]
+      position.deal.positionEntries =
+        positionEntriesOf(position.deal) + sources.length
+      position.deal.adoptedIds = [
+        ...new Set([...(position.deal.adoptedIds ?? []), ...sourceIds]),
+      ]
+      const avg = await this.getAvgPrice(targetDealId)
+      if (avg.avg > 0) {
+        position.deal.avgPrice = avg.avg
+        position.deal.displayAvg = avg.display
+        position.deal.settings.avgPrice = avg.avg
+      }
+      // §4.2.5: a position has no safety orders (§2.3.1); its unfilled ones
+      // go with the rebuild, which also re-sizes the TP and the SL.
+      position.deal.settings.useDca = false
+      position.deal.bestPrice = 0
+      await this.updateDealBalances(position)
+      // `saveDeal` is queued per deal and REPLACES the map's entry with a
+      // copy. Wait for it, then rebuild on the live entry: `rebuildDealOrders`
+      // writes the new orders onto the object it is given and places what the
+      // MAP holds, so a stale `position` re-placed the pre-adoption TP.
+      await this.saveDeal(position, {
+        funds: position.deal.funds,
+        tpHistory: position.deal.tpHistory,
+        positionEntries: position.deal.positionEntries,
+        adoptedIds: position.deal.adoptedIds,
+        avgPrice: position.deal.avgPrice,
+        displayAvg: position.deal.displayAvg,
+        'settings.avgPrice': position.deal.settings.avgPrice,
+        bestPrice: 0,
+        initialBalances: position.deal.initialBalances,
+        currentBalances: position.deal.currentBalances,
+      })
+      const live = this.getDeal(targetDealId) ?? position
+      await this.rebuildDealOrders(live, targetDealId)
+      await this.updateUsage(targetDealId)
+      const rebuilt = this.getDeal(targetDealId) ?? live
+      await this.checkDealSlMethods(rebuilt)
+      // §4.2.6
+      this.emit('bot deal update', rebuilt.deal)
+      this.endMethod(_id)
+      return {
+        status: StatusEnum.ok as const,
+        reason: null,
+        data: `${sourceIds.length} deals adopted into ${targetDealId}`,
+      }
+    }
+
+    /**
+     * Spec 139 §5.1.1: an open deal becomes its pair's position — its unfilled
+     * safety orders are cancelled and its TP rebuilt.
+     */
+    private async convertToPosition(dealId: string) {
+      const d = this.getDeal(dealId)
+      if (!d || d.deal.status !== DCADealStatusEnum.open) {
+        return
+      }
+      d.deal.positionEntries = positionEntriesOf(d.deal)
+      // Settled before the rebuild below reads the map (see adoptDealsBody).
+      await this.saveDeal(d, { positionEntries: d.deal.positionEntries })
+      if (d.deal.settings.useDca !== false) {
+        await this.updateDealSettings(dealId, {
+          useDca: false,
+        } as Partial<Deal['settings']>)
+      }
+    }
+
+    /**
+     * Spec 139 §5.1: the bot was just switched to single position. Reload it
+     * on the saved settings, then leave one position per pair: the oldest
+     * open deal adopts the others, a lone deal is converted. A deal still
+     * waiting for its base order on a pair that holds a position is cancelled.
+     */
+    async enableSinglePosition(_botId: string, adoptOpenDeals = false) {
+      await this.reloadBot(this.botId, false, true)
+      if (!this.singlePositionActive) {
+        return
+      }
+      return this.runPositionOp(async () => {
+        const plans = planPositionsByPair(
+          this.getOpenDeals(true).map((d) => ({
+            ...d.deal,
+            _id: `${d.deal._id}`,
+          })),
+        )
+        for (const plan of plans) {
+          if (plan.sources.length) {
+            if (!adoptOpenDeals) {
+              // The server refused the change unless the caller asked for
+              // the adoption; a deal that opened in between is adopted all
+              // the same — the invariant wins.
+              this.handleWarn(
+                `Single position | ${plan.symbol}: adopting ${plan.sources.length} deals opened while the setting was being switched on`,
+              )
+            }
+            await this.adoptDealsBody(
+              plan.target._id,
+              plan.sources.map((s) => s._id),
+            )
+          } else {
+            await this.convertToPosition(plan.target._id)
+          }
+        }
+        const held = new Set(plans.map((p) => p.symbol))
+        for (const d of this.getDealsByStatusAndSymbol({
+          status: DCADealStatusEnum.start,
+        })) {
+          if (held.has(d.deal.symbol.symbol)) {
+            this.handleLog(
+              `Single position | ${d.deal.symbol.symbol}: cancelling ${d.deal._id}, which has not started, in favour of the open position`,
+            )
+            await this.closeDealById(
+              this.botId,
+              `${d.deal._id}`,
+              CloseDCATypeEnum.cancel,
+              false,
+            )
+          }
+        }
+      })
+    }
+
+    /**
+     * Merge deals (spec 138). On a single-position bot, routed to an adoption
+     * when the pair already holds a position (spec 139 §5.2).
+     */
+    /**
+     * @param options Whether the merged deal takes the bot's take profit and
+     * stop loss. Omitted (older callers) keeps the original rule: only an
+     * indicator or webhook close carries over. Adoption into a single-position
+     * deal ignores it — that deal keeps its own exits.
+     */
+    async mergeDeals(_deals: string[], options?: MergeDealsOptions) {
+      if (this.singlePositionActive) {
+        const route = await this.singlePositionMergeRoute(_deals)
+        if (route) {
+          return this.adoptDeals(route.target, route.sources)
+        }
+      }
+      return this.runPositionOp(() => this.mergeDealsBody(_deals, options))
     }
 
     /**
@@ -25439,10 +29681,25 @@ function createDCABotHelper<
      * @param {(botId: string, dealId: string, close?: CloseDCATypeEnum, reopen?: boolean) => Promise<{status: StatusEnum.ok, reason: null, data: string} | undefined}> closeFn Closed deal funstion
      */
 
-    async mergeDeals(_deals: string[]) {
+    private async mergeDealsBody(
+      _deals: string[],
+      options?: MergeDealsOptions,
+    ) {
       if (!this.shouldProceed()) {
         this.handleLog(this.notProceedMessage('merge deals'))
         return
+      }
+      if (this.combo) {
+        // Combo deals are not merged: a combo position is spread over its
+        // minigrids, which a single merged deal cannot take over. Spec 138 §2.4.
+        return this.handleErrors(
+          `Merging deals is not available for combo bots`,
+          'mergeDeals()',
+          'combo',
+          false,
+          false,
+          false,
+        )
       }
       const _id = this.startMethod('mergeDeals')
       const prefix = `Merge Deals | `
@@ -25690,6 +29947,46 @@ function createDCABotHelper<
           if (isNaN(relative) || !isFinite(relative)) {
             relative = 0
           }
+          // Only flags every source was computed under: a flag selects how a
+          // deal's numbers are booked, and the merged deal books all of them.
+          const botSettings = this.data.settings
+          // Risk-reward and dynamic-AR exits are sized from what their deal
+          // opened with, which a merged deal does not have: never followed.
+          const followTp =
+            options?.useTp &&
+            !botSettings.useRiskReward &&
+            botSettings.dealCloseCondition !== CloseConditionEnum.dynamicAr
+          const followSl =
+            options?.useSl &&
+            !botSettings.useRiskReward &&
+            botSettings.dealCloseConditionSL !== CloseConditionEnum.dynamicAr
+          const useTp =
+            options?.useTp === undefined
+              ? botSettings.useTp &&
+                (botSettings.dealCloseCondition ===
+                  CloseConditionEnum.techInd ||
+                  botSettings.dealCloseCondition === CloseConditionEnum.webhook)
+              : !!(followTp && botSettings.useTp)
+          const useSl =
+            options?.useSl === undefined
+              ? botSettings.useSl &&
+                (botSettings.dealCloseConditionSL ===
+                  CloseConditionEnum.techInd ||
+                  botSettings.dealCloseConditionSL ===
+                    CloseConditionEnum.webhook)
+              : !!(followSl && botSettings.useSl)
+          const followDca = !!options?.useDca && mergeDcaSupported(botSettings)
+          const botOrders = Math.max(1, +(botSettings.ordersCount ?? 1) || 1)
+          const dcaOrders = followDca
+            ? Math.min(
+                botOrders,
+                Math.max(1, Math.floor(options?.dcaOrders ?? botOrders)),
+              )
+            : 1
+          const sourceFlags: DCADealFlags[] = deals[0].flags ?? []
+          const flags = sourceFlags.filter((f) =>
+            deals.every((d) => d.flags?.includes(f)),
+          )
           const mergedDeals: Omit<CleanDCADealsSchema, '_id'> = {
             botId: this.botId,
             userId: this.userId,
@@ -25715,12 +30012,17 @@ function createDCABotHelper<
               base: 0,
               quote: 0,
             },
+            // Funding cursor from the merge on, as `createDeal` seeds it: the
+            // funding commit is a compare-and-swap on `funding.offset`, so a
+            // deal without it silently drops every funding write.
+            funding: { total: 0, totalUsd: 0, offset: time, lastTime: 0 },
+            flags,
             lastPrice: avgPrice,
             commission: 0,
             createTime: time,
             updateTime: time,
             levels: {
-              all: 1,
+              all: followDca ? dcaOrders + 1 : 1,
               complete: 1,
             },
             usage: {
@@ -25748,48 +30050,46 @@ function createDCABotHelper<
             },
             settings: {
               changed: true,
-              ordersCount: 1,
+              ordersCount: dcaOrders,
               tpPerc: this.data.settings.tpPerc,
               profitCurrency: this.data.settings.profitCurrency,
               avgPrice: avgPrice,
               baseOrderSize: `${initialQuote}`,
-              orderSize: `${initialQuote}`,
-              useTp:
-                this.data.settings.useTp &&
-                (this.data.settings.dealCloseCondition ===
-                  CloseConditionEnum.techInd ||
-                  this.data.settings.dealCloseCondition ===
-                    CloseConditionEnum.webhook),
-              useSl:
-                this.data.settings.useSl &&
-                (this.data.settings.dealCloseConditionSL ===
-                  CloseConditionEnum.techInd ||
-                  this.data.settings.dealCloseConditionSL ===
-                    CloseConditionEnum.webhook),
+              orderSize: followDca ? botSettings.orderSize : `${initialQuote}`,
+              useTp,
+              useSl,
               slPerc: this.data.settings.slPerc,
-              useDca: false,
-              useSmartOrders: false,
-              activeOrdersCount: 1,
+              useDca: followDca,
+              useSmartOrders: followDca && !!botSettings.useSmartOrders,
+              activeOrdersCount: followDca
+                ? Math.min(
+                    dcaOrders,
+                    +(botSettings.activeOrdersCount ?? 1) || 1,
+                  )
+                : 1,
               orderSizePercQty: 0,
-              trailingSl: false,
-              moveSL: false,
+              trailingSl: !!(followSl && botSettings.trailingSl),
+              moveSL: !!(followSl && botSettings.moveSL),
               moveSLTrigger: this.data.settings.moveSLTrigger,
               moveSLValue: this.data.settings.moveSLValue,
-              trailingTp: false,
+              trailingTp: !!(followTp && botSettings.trailingTp),
               trailingTpPerc: this.data.settings.trailingTpPerc,
               useMinTP: this.data.settings.useMinTP,
               minTp: this.data.settings.minTp,
               orderSizeType: this.data.settings.orderSizeType,
-              useMultiSl: false,
-              multiSl: [],
-              useMultiTp: false,
-              multiTp: [],
+              useMultiSl: !!(followSl && botSettings.useMultiSl),
+              multiSl: followSl ? (botSettings.multiSl ?? []) : [],
+              useMultiTp: !!(followTp && botSettings.useMultiTp),
+              multiTp: followTp ? (botSettings.multiTp ?? []) : [],
               useLimitPrice: false,
               startOrderType: this.data.settings.startOrderType,
-              volumeScale: '1',
-              stepScale: '1',
-              minimumDeviation: '0',
-              step: '1',
+              volumeScale: followDca ? botSettings.volumeScale : '1',
+              stepScale: followDca ? botSettings.stepScale : '1',
+              minimumDeviation: followDca ? botSettings.minimumDeviation : '0',
+              step: followDca ? botSettings.step : '1',
+              ...(followDca
+                ? { dcaCondition: DCAConditionEnum.percentage }
+                : {}),
               futures: this.futures,
               coinm: this.coinm,
               marginType: this.data.settings.marginType,
@@ -25829,6 +30129,9 @@ function createDCABotHelper<
             },
             type: this.data.settings.type,
             tpHistory: deals.map((d) => d.tpHistory ?? []).flat(),
+            // Spec 139 §5.2.2: on a single-position bot the merged deal is
+            // the pair's position.
+            ...(this.singlePositionActive ? { positionEntries: 1 } : {}),
           }
           const newDeal = await this.dealsDb.createData(mergedDeals as any)
           if (newDeal.status === StatusEnum.notok) {
@@ -25841,33 +30144,35 @@ function createDCABotHelper<
           } else {
             this.handleLog(`${prefix} Created parent deal ${newDeal.data._id}`)
           }
+          // Mark the sources merged-away BEFORE cancelling them, so the stats
+          // their cancel triggers skip them (spec 138 §2.1.4). Written again
+          // after the cancels settle, as before.
+          const mergedAway = { child: true, parentId: `${newDeal.data._id}` }
+          await this.dealsDb.updateManyData({ _id: { $in: _deals } } as any, {
+            $set: mergedAway,
+          })
+          for (const d of deals) {
+            const local = this.getDeal(`${d._id}`)
+            if (local) {
+              Object.assign(local.deal, mergedAway)
+            }
+          }
           const botInstance = new Bot(false)
           for (const d of deals) {
-            if (this.combo) {
-              await botInstance.closeComboDeal(
-                this.userId,
-                d.botId,
-                `${d._id}`,
-                CloseDCATypeEnum.cancel,
-                false,
-                !!this.data.paperContext,
-              )
-            } else {
-              await botInstance.closeDCADeal(
-                this.userId,
-                d.botId,
-                `${d._id}`,
-                CloseDCATypeEnum.cancel,
-                false,
-                !!this.data.paperContext,
-              )
-            }
+            await botInstance.closeDCADeal(
+              this.userId,
+              d.botId,
+              `${d._id}`,
+              CloseDCATypeEnum.cancel,
+              false,
+              !!this.data.paperContext,
+            )
             this.handleLog(`${prefix} Closing deal ${d._id}`)
           }
           this.handleLog(`${prefix} Waiting for 2 seconds`)
           await sleep(2 * 1000)
           await this.dealsDb.updateManyData({ _id: { $in: _deals } } as any, {
-            $set: { child: true, parentId: `${newDeal.data._id}` },
+            $set: mergedAway,
           })
           const dealData = {
             ...mergedDeals,
@@ -25882,7 +30187,8 @@ function createDCABotHelper<
                   : TypeOrderEnum.dealStart,
               botId: this.botId,
             }
-            const changedOrder = { ...o, data }
+            // The realtime event carries what the database now holds.
+            const changedOrder = { ...o, ...data }
 
             if (this.shouldProceed()) {
               await this.ordersDb.updateData(
@@ -25940,6 +30246,25 @@ function createDCABotHelper<
         }
       }
       this.endMethod(_id)
+    }
+
+    /**
+     * Whether `deal` was merged into another deal (spec 138 §1.2). The merge
+     * writes `child: true` before it cancels its sources, but a source can
+     * belong to another bot's process, whose copy of the deal never saw it —
+     * so a canceled deal not flagged here is checked against the database.
+     */
+    async isMergedAway(deal: ExcludeDoc<Deal>) {
+      if (deal.child) {
+        return true
+      }
+      if (deal.status !== DCADealStatusEnum.canceled) {
+        return false
+      }
+      const read = await this.dealsDb.readData({ _id: deal._id } as any, {
+        child: 1,
+      })
+      return !!read.data?.result?.child
     }
 
     async getLeverageMultipler(deal?: ExcludeDoc<Deal>) {
@@ -26004,7 +30329,8 @@ function createDCABotHelper<
       _symbol?: string,
       type?: AddFundsTypeEnum,
       fromWebhook = false,
-      limitPrice = false,
+      /** Place a resting LIMIT order at this price; omitted = MARKET. */
+      limitPrice?: string,
       convert = true,
       dealId?: string,
     ) {
@@ -26022,7 +30348,8 @@ function createDCABotHelper<
           {
             qty,
             asset,
-            useLimitPrice: limitPrice,
+            useLimitPrice: !!limitPrice,
+            limitPrice,
             type,
           },
           fromWebhook,
@@ -26036,7 +30363,8 @@ function createDCABotHelper<
       _symbol?: string,
       type?: AddFundsTypeEnum,
       fromWebhook = false,
-      limitPrice = false,
+      /** Place a resting LIMIT order at this price; omitted = MARKET. */
+      limitPrice?: string,
       convert = true,
       dealId?: string,
     ) {
@@ -26054,7 +30382,8 @@ function createDCABotHelper<
           {
             qty,
             asset,
-            useLimitPrice: limitPrice,
+            useLimitPrice: !!limitPrice,
+            limitPrice,
             type,
           },
           fromWebhook,
@@ -26398,6 +30727,15 @@ function createDCABotHelper<
         price = +settings.limitPrice
         if (isNaN(price)) {
           price = 0
+        } else {
+          // A webhook price is computed (ATR steps, levels), not picked off
+          // the book — align it to the pair's tick or the venue rejects it.
+          const precision = (
+            await this.getExchangeInfo(deal.deal.symbol.symbol)
+          )?.priceAssetPrecision
+          if (precision !== undefined) {
+            price = this.math.round(price, precision)
+          }
         }
       }
       if (price === 0) {
@@ -26524,8 +30862,13 @@ function createDCABotHelper<
             : PositionSide.SHORT
           : PositionSide.BOTH,
         addFundsId,
+        // Spec 139 §3.3: told apart from a user's addition and counted.
+        ...(settings.positionEntry ? { positionEntry: true } : {}),
       }
       this.handleDebug(`Add funds | create order ${order.clientOrderId}`)
+      if (settings.positionEntry) {
+        this.notePositionEntrySent(dealId, order.clientOrderId)
+      }
       const result = await this.sendOrderToExchange(order)
       if (result && result.status === 'FILLED') {
         this.processFilledOrder(result)
@@ -26598,6 +30941,15 @@ function createDCABotHelper<
         price = +settings.limitPrice
         if (isNaN(price)) {
           price = 0
+        } else {
+          // A webhook price is computed (ATR steps, levels), not picked off
+          // the book — align it to the pair's tick or the venue rejects it.
+          const precision = (
+            await this.getExchangeInfo(deal.deal.symbol.symbol)
+          )?.priceAssetPrecision
+          if (precision !== undefined) {
+            price = this.math.round(price, precision)
+          }
         }
       }
       if (price === 0) {
@@ -26880,7 +31232,7 @@ function createDCABotHelper<
       if (order.typeOrder === TypeOrderEnum.dealTP) {
         deal.deal.pendingReduceFunds = (
           deal.deal.pendingReduceFunds ?? []
-        ).filter((paf) => order && paf.id !== order.addFundsId)
+        ).filter((paf) => order && paf.id !== order.reduceFundsId)
       }
       deal.initialOrders = await this.createInitialDealOrders(
         deal.deal.symbol.symbol,
@@ -27374,6 +31726,12 @@ function createDCABotHelper<
         return
       }
       if (this.data?.ignoreStats) {
+        this.endMethod(_id)
+        return
+      }
+      // A merged-away deal is not a deal: its position goes on in the merged
+      // deal, which is what gets counted when it closes (spec 138 §2.1).
+      if (await this.isMergedAway(d.deal)) {
         this.endMethod(_id)
         return
       }

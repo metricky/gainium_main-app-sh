@@ -1,5 +1,9 @@
 import type DB from '../db'
 import {
+  exchangeInfoMissingStopMessage,
+  startFailedMessage,
+} from './userNotice'
+import {
   OrderSideEnum,
   StatusEnum,
   TypeOrderEnum,
@@ -18,6 +22,7 @@ import {
 } from '../../types'
 import MainBot, {
   isDefinitiveOrderNotFound,
+  isReconcileDeferred,
   reconcileUnresolvedWarn,
 } from './main'
 import { observedFeeOnSide, observedFeeSplit } from './orderFee'
@@ -44,6 +49,7 @@ import { IdMutex, IdMute } from '../utils/mutex'
 import { botDb, transactionDb } from '../db/dbInit'
 import { DealStats } from './worker/statsService'
 import { botMonitor, CalculateGridLiveStatsParams } from './botMonitor'
+import { priceMovedSince } from './priceStreamGap'
 
 /**
  * Price in initial grids
@@ -1304,6 +1310,7 @@ function createBotHelper<
         for (const o of toCheck) {
           let attemptsForOrder = 0
           const getOrder = await this.getOrderForReconcile(o, {
+            pace: true,
             onAttempts: (n) => (attemptsForOrder = n),
           })
           if (!getOrder || !getOrder.data) {
@@ -1584,8 +1591,11 @@ function createBotHelper<
               const exchangeData = await this.getOrderForReconcile(o, {
                 fromCache: true,
                 symbol: pair,
+                pace: true,
               })
-              if (isDefinitiveOrderNotFound(exchangeData)) {
+              if (isReconcileDeferred(exchangeData)) {
+                // Left for a later pass; counted in the probe summary.
+              } else if (isDefinitiveOrderNotFound(exchangeData)) {
                 this.handleWarn(
                   `Order ${o.clientOrderId} not found on exchange: ${exchangeData?.reason}`,
                 )
@@ -2756,6 +2766,10 @@ function createBotHelper<
         }
         if (this.pairsNotFound.size) {
           this.handleWarn(`Exchange info not found. Bot will stop`)
+          // The bot stops here — on a service restart too — so say why.
+          await this.reportUserRefusal(
+            exchangeInfoMissingStopMessage([...this.pairsNotFound]),
+          )
           this.ignoreErrors = true
           this.serviceRestart = false
           await this.stop()
@@ -2864,6 +2878,12 @@ function createBotHelper<
           false,
           false,
         )
+        // Answer a start the user asked for; a service restart stays quiet.
+        if (!serviceRestartAtEntry) {
+          await this.reportUserRefusal(
+            startFailedMessage((e as Error)?.message ?? `${e}`),
+          )
+        }
       }
       this.finishLoad = true
       this.secondRestart = false
@@ -3215,6 +3235,8 @@ function createBotHelper<
       }
     }
     private async processFilledStop(order: Order) {
+      // Spec 189: every path that books the closing fill latches the close.
+      this.stopFilled = true
       if (this.closeOrderTimer) {
         clearTimeout(this.closeOrderTimer)
       }
@@ -4901,7 +4923,9 @@ function createBotHelper<
       // grid bot on a symbol with no live stream evaluates its TP/SL on this
       // timer's cadence, not the market's. Logged only for bots that actually
       // depend on the price, and only after the gate above.
-      this.trackPriceStreamHealth(symbol, true)
+      // Noted after the REST read, which tells a quiet market from a missing
+      // stream (see PriceStreamGapTracker#note).
+      let restPrice: number | undefined
       if (this.exchange) {
         this.handleDebug(`Grid Required prices for ${symbol} in price timer`)
         const allPrices = await this.exchange?.getAllPrices(true)
@@ -4909,6 +4933,7 @@ function createBotHelper<
         if (allPrices.status === StatusEnum.ok) {
           const prices = allPrices.data.filter((p) => p.pair === symbol)
           for (const p of prices) {
+            restPrice = p.price
             this.priceUpdateCallback(this.botId, {
               symbol: p.pair,
               price: p.price,
@@ -4918,6 +4943,11 @@ function createBotHelper<
           }
         }
       }
+      this.trackPriceStreamHealth(
+        symbol,
+        true,
+        priceMovedSince(lastStreamData?.price, restPrice),
+      )
     }
 
     @IdMute(mutex, (botId: string) => `${botId}closeBotByTp`)
@@ -4929,6 +4959,14 @@ function createBotHelper<
     ) {
       const ed = await this.getExchangeInfo(msg.symbol)
       if (!ed || !this.data) {
+        return
+      }
+      // Spec 189: one close per bot. Ticks that queued on this mutex while a
+      // close was in flight re-ran `tpSl()` against balances the close never
+      // updated in memory, and sold the whole grid amount again. A fresh
+      // trigger after the close started (`blockLimit`), or any re-entry after
+      // the stop order filled, has nothing left to do.
+      if (this.stopFilled || (!oldTpSl && this.blockLimit)) {
         return
       }
       if (oldTpSl) {
@@ -5084,6 +5122,7 @@ function createBotHelper<
               return
             }
             if (resultOrder && resultOrder.status === 'FILLED') {
+              this.stopFilled = true
               this.handleLog('Stop order filled. Processing stop...')
             }
             if (

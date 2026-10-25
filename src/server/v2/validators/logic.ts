@@ -11,6 +11,7 @@ import {
   IndicatorEnum,
   IndicatorSection,
   IndicatorStartConditionEnum,
+  indicatorsLimit,
   RRSlTypeEnum,
   ScaleDcaTypeEnum,
   StartConditionEnum,
@@ -23,6 +24,9 @@ import { CreateDCABotInputRaw } from '../api'
 import { DCA_FORM_DEFAULTS } from '../botDefaults'
 import { Types } from 'mongoose'
 import { findPairBySymbol } from '../../../bot/utils'
+import { singlePositionSettingsError } from '../../../bot/dca/singlePosition'
+import { billableIndicators } from '../../../bot/billableIndicators'
+import { smoothingSettingsGaps } from '../../../indicators/conditions/smoothing'
 
 const indicatorsCheck: {
   condition: (input: DCABotSettings) => boolean
@@ -208,6 +212,21 @@ const betweenConditionErrors = (
     })
 
 /**
+ * Oscillator smoothing: type `none` or an allowed average (case-insensitive),
+ * a whole length 1..1000, compare `value` / `line`, no `bw` with `line`, and
+ * no smoothing on an indicator that cannot be smoothed.
+ */
+const smoothingErrors = (
+  indicators: DCABotSettings['indicators'],
+): [string, string][] =>
+  indicators.flatMap((i) =>
+    smoothingSettingsGaps(i).map((g): [string, string] => [
+      'indicators',
+      `${g.field}: ${g.message}`,
+    ]),
+  )
+
+/**
  * Cross-field indicator rules shared by bot creation and by bot updates that
  * replace `indicators` / `indicatorGroups`. `input` is the complete settings
  * object the bot will run with — for an update, the stored settings merged
@@ -220,14 +239,17 @@ export const indicatorConsistencyErrors = (
   const errors: [string, string][] = []
   const indicators = input.indicators ?? []
   const indicatorGroups = input.indicatorGroups ?? []
-  if (indicators.length > 20) {
+  // The DCA-by-indicators ladder counts as one indicator.
+  const counted = billableIndicators(input)
+  if (counted > indicatorsLimit) {
     errors.push([
       'indicators',
-      `A maximum of 20 indicators is allowed. Currently provided: ${indicators.length}`,
+      `A maximum of ${indicatorsLimit} indicators is allowed (DCA indicators count as one). Currently counted: ${counted}`,
     ])
   }
   errors.push(...requiredIndicatorErrors(input))
   errors.push(...betweenConditionErrors(indicators))
+  errors.push(...smoothingErrors(indicators))
 
   if (
     indicatorsCheck.every((check) => !check.condition(input)) &&
@@ -453,6 +475,13 @@ export const validateCreateDCABotInputLogic = async <
       'moveSL',
       `Move SL cannot be used together with Trailing SL. Please choose one of these options.`,
     ])
+  }
+
+  // Spec 139 §7 / §2.3.3: a single-position bot needs a way to space its
+  // entries, and cannot close after X deals opened.
+  const singlePositionError = singlePositionSettingsError(input)
+  if (singlePositionError) {
+    response.errors.push(['singlePosition', singlePositionError])
   }
 
   if (

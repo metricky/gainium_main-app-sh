@@ -13,6 +13,7 @@ import {
   BaseSlOnEnum,
   ComboTpBase,
   CooldownUnits,
+  CooldownStopTriggerEnum,
   DCABotSettings,
   OrderSizeTypeEnum,
   StartConditionEnum,
@@ -26,6 +27,7 @@ import {
 import utils from '../utils'
 import { detailedDiff } from 'deep-object-diff'
 import { ProjectionFields } from 'mongoose'
+import { singlePositionSettingsError } from './dca/singlePosition'
 const { mapToArray, mapToObject } = utils
 
 export const convertDCABot = (input: ClearDCABotSchema): ClearDCABotSchema => {
@@ -324,6 +326,8 @@ const botSettingsKeyToPropertyName = (
       return 'Cooldown after deal stop interval'
     case 'cooldownAfterDealStopUnits':
       return 'Cooldown after deal stop units'
+    case 'cooldownAfterDealStopTrigger':
+      return 'Cooldown after deal stop trigger'
     case 'dealCloseCondition':
       return 'Take profit condition'
     case 'dealCloseConditionSL':
@@ -416,6 +420,10 @@ const botSettingsKeyToPropertyName = (
       return 'Volume scale'
     case 'useTp':
       return 'Use TP'
+    case 'singlePosition':
+      return 'Single position per pair'
+    case 'maxPositionEntries':
+      return 'Max entries per position'
     default:
       return key
   }
@@ -522,6 +530,23 @@ export const closeNotActioned = 'Close request not actioned'
 export const trailingCloseFailed = 'Trailing take profit not executed'
 
 /**
+ * The engine refused, dropped or failed an action the USER asked for (a start,
+ * a stop, a close, a manual "+ New deal"). Written through
+ * `MainBot.reportUserRefusal`, which writes one row per occurrence, never
+ * puts the bot into error and is never rate limited or grouped: a click must
+ * always be answered. Raised directly, never through `errorDict`.
+ */
+export const userActionRefused = 'User action refused'
+
+/**
+ * A webhook signal arrived and was deliberately ignored by the bot's settings
+ * (e.g. a close signal on a bot whose close condition is not Webhook). Unlike
+ * {@link userActionRefused} it keeps the ordinary re-raise backoff and log
+ * policy: signals can arrive every bar, so the user is told, not flooded.
+ */
+export const webhookSignalIgnored = 'Webhook signal ignored'
+
+/**
  * The venue refused a MARKET base order because its book is in limit-only mode,
  * so the entry was re-placed as a LIMIT one instead of being abandoned. Not a
  * malfunction of the bot — the substitution is the right call and it worked —
@@ -548,7 +573,16 @@ export const limitOnlyEntryReplaced = 'Market entry replaced with limit'
  */
 export const orderBelowExchangeMinSubType = 'Order below exchange minimum'
 
+/**
+ * The venue refused an order because position + resting orders on the contract
+ * have reached the account's risk tier. Same name as the builtin boterrorrules
+ * subType, so installs without the DB rule classify it identically. Gated per
+ * order level by `riskTierGuard.ts`.
+ */
+export const riskTierLimit = 'Risk tier limit'
+
 export const errorDict = {
+  'current risk tier': riskTierLimit,
   'Leverage cannot exceed': futuresPosition,
   'was left open on the exchange': positionLeftOpen,
   unknownOid: orderProcessing,
@@ -1228,6 +1262,13 @@ export const checkDCADealSettings = (
   return { status: StatusEnum.ok }
 }
 
+/** Spec 139: the single-position keys a DCA settings update accepts. */
+const singlePositionKeys = [
+  'singlePosition',
+  'maxPositionEntries',
+  'adoptOpenDeals',
+]
+
 export const checkDCABotSettings = (
   botSettings: DCABotSettings,
   settings: Partial<DCABotSettings>,
@@ -1265,6 +1306,7 @@ export const checkDCABotSettings = (
     'cooldownAfterDealStop',
     'cooldownAfterDealStopInterval',
     'cooldownAfterDealStopUnits',
+    'cooldownAfterDealStopTrigger',
     'useActiveMinigrids',
     'comboActiveMinigrids',
     'comboUseSmartGrids',
@@ -1272,8 +1314,14 @@ export const checkDCABotSettings = (
     // Full-array replacements, validated by applyIndicatorSettingsUpdate.
     'indicators',
     'indicatorGroups',
+    // Spec 139 — single position per pair (DCA only). `adoptOpenDeals` is
+    // not a setting: it lets the change adopt the open deals (§5.1.2).
+    ...singlePositionKeys,
   ]
-  const onlyDcaKeys = [...onlyDcaSettingsKeys].filter((v) => v !== 'orderSize')
+  const onlyDcaKeys = [
+    ...[...onlyDcaSettingsKeys].filter((v) => v !== 'orderSize'),
+    ...singlePositionKeys,
+  ]
 
   const onlyComboKeys = [
     ...onlyComboSettingsKeys,
@@ -1368,6 +1416,11 @@ export const checkDCABotSettings = (
       CooldownUnits.seconds,
     ]) &&
     checkNumber(settings.cooldownAfterDealStopInterval, true) &&
+    checkStringAsEnum(settings.cooldownAfterDealStopTrigger, [
+      CooldownStopTriggerEnum.any,
+      CooldownStopTriggerEnum.sl,
+      CooldownStopTriggerEnum.loss,
+    ]) &&
     checkBoolean(settings.useActiveMinigrids) &&
     checkBoolean(settings.comboUseSmartGrids) &&
     checkStringAsNumber(settings.comboActiveMinigrids, true) &&
@@ -1518,6 +1571,28 @@ export const checkDCABotSettings = (
         }
       }
     }
+  }
+
+  if (
+    !checkBoolean(settings.singlePosition) ||
+    !checkBoolean((settings as { adoptOpenDeals?: unknown }).adoptOpenDeals) ||
+    !(
+      typeof settings.maxPositionEntries === 'undefined' ||
+      settings.maxPositionEntries === '' ||
+      (checkStringAsNumber(settings.maxPositionEntries) &&
+        Number.isInteger(+settings.maxPositionEntries) &&
+        +settings.maxPositionEntries >= 0)
+    )
+  ) {
+    return { status: StatusEnum.notok, reason: 'Wrong settings' }
+  }
+  // Spec 139 §7 / §2.3.3, on the settings the bot will run with.
+  const singlePositionError = singlePositionSettingsError({
+    ...botSettings,
+    ...settings,
+  })
+  if (singlePositionError) {
+    return { status: StatusEnum.notok, reason: singlePositionError }
   }
 
   return { status: StatusEnum.ok }

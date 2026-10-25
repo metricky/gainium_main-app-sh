@@ -4,6 +4,7 @@ import type {
   BotEventSchema,
   ChangeTrailSchema,
   ReconcileSweepSchema,
+  FundingLotSchema,
   QuantRulesEventSchema,
   BotMessageSchema,
   BotSchema,
@@ -73,6 +74,7 @@ import {
   TradingviewAnalysisConditionEnum,
   TradingviewAnalysisSignalEnum,
   TypeOrderEnum,
+  BaseFundingEnum,
   CooldownUnits,
   BuyTypeEnum,
   TrailingModeEnum,
@@ -93,6 +95,7 @@ import {
   ComboTpBase,
   CoinbaseKeysType,
   CooldownOptionsEnum,
+  CooldownStopTriggerEnum,
   PairPrioritizationEnum,
   ppValueEnum,
   ppValueTypeEnum,
@@ -109,9 +112,11 @@ import {
   OBFVGValueEnum,
   OBFVGRefEnum,
   SessionRuleEnum,
+  SessionLevelEnum,
   LWValueEnum,
   RRSlTypeEnum,
   LWConditionEnum,
+  OTELegEnum,
   StreamWatchdogConfigTypeEnum,
   StreamWatchdogConfigStatusEnum,
 } from '../../types'
@@ -189,6 +194,13 @@ const favoritePairsSchema: Schema<FavoritePairsSchema> = new Schema({
 const favoriteIndicatorsSchema: Schema<FavoriteIndicatorsSchema> = new Schema({
   userId: RequiredString,
   indicators: [{ type: String, enum: IndicatorEnum }],
+  presets: [
+    {
+      _id: false,
+      indicator: { type: String, enum: IndicatorEnum },
+      params: String,
+    },
+  ],
   ...CreatedUpdated,
 })
 
@@ -274,6 +286,42 @@ const reconcileSweepSchema: Schema<ReconcileSweepSchema> = new Schema(
   // name (e.g. `dcaBots` → `dcabots`); the admin-app reader + backfill must
   // match this exact name or they silently read an empty collection.
   { collection: 'reconcilesweepcatches' },
+)
+
+// Funding trades the bot placed itself (main-app spec 044 §3.2) — the cost
+// basis of base it bought. Not TTL'd: a lot is a deal's accounting record.
+const fundingLotSchema: Schema<FundingLotSchema> = new Schema(
+  {
+    userId: RequiredString,
+    exchange: { ...RequiredString, enum: ExchangeEnum },
+    exchangeUUID: RequiredString,
+    botId: RequiredString,
+    botType: { ...RequiredString, enum: BotType },
+    dealId: String,
+    symbol: RequiredString,
+    asset: RequiredString,
+    side: { ...RequiredString, enum: SideEnum },
+    qty: RequiredNumber,
+    price: RequiredNumber,
+    fee: Number,
+    feeAsset: String,
+    orderId: RequiredString,
+    clientOrderId: RequiredString,
+    remaining: RequiredNumber,
+    consumed: [
+      {
+        _id: false,
+        orderId: RequiredString,
+        qty: RequiredNumber,
+        price: RequiredNumber,
+        time: RequiredNumber,
+      },
+    ],
+    paperContext: Boolean,
+    ...CreatedUpdated,
+  },
+  // Pinned: mongoose would lowercase the model name anyway, but say it.
+  { collection: 'fundinglots' },
 )
 
 // Binance Futures Quantitative Rules (-4400) cooldown events. Written by the
@@ -412,6 +460,8 @@ const userSchema: Schema<UserSchema> = new Schema({
     type: String,
     enum: ThemeMode,
   },
+  // Dashboard reporting fiat (USD when unset); see REPORTING_FIATS.
+  reportingCurrency: String,
   ...CreatedUpdated,
   paperContext: Boolean,
   apiKeys: [userAPIKeys],
@@ -503,7 +553,9 @@ const feeSizingFallback = {
   required: false,
 }
 
-const BuyTypeEnumDB = [BuyTypeEnum.X, BuyTypeEnum.all, BuyTypeEnum.proceed]
+// Every value: a grid started with "buy difference" / "sell difference" and a
+// start price stores its choice in `swapType` until the price is reached.
+const BuyTypeEnumDB = Object.values(BuyTypeEnum)
 
 const Symbols = {
   symbol: String,
@@ -802,6 +854,12 @@ const orderSchema: Schema<OrderSchema> = new Schema({
   transactTime: Number,
   price: RequiredString,
   origPrice: String,
+  // Placement stamps for MARKET orders (see `Order.refPrice`). No defaults:
+  // absent means "not observed", like `feePaid` below.
+  refPrice: String,
+  refPriceAt: Number,
+  sentAt: Number,
+  ackAt: Number,
   origQty: RequiredString,
   executedQty: RequiredString,
   cummulativeQuoteQty: String,
@@ -870,6 +928,9 @@ const orderSchema: Schema<OrderSchema> = new Schema({
   minigridId: String,
   addFundsId: String,
   reduceFundsId: String,
+  positionEntry: Boolean,
+  // main-app spec 044 §3.3 — recorded FILLED without a venue trade.
+  fundingSource: { type: String, enum: ['virtual'] },
   minigridBudget: Number,
   liquidation: Boolean,
   sl: Boolean,
@@ -1014,6 +1075,10 @@ const botMessageSchema: Schema<BotMessageSchema> = new Schema({
   // `always`-mode rows and on everything written before this shipped, which is
   // exactly what keeps them out of the unique index.
   bucket: Number,
+  // Read is not delete (spec 137): a read row stays out of the tombstone TTL
+  // and in the feed's `read`/`all` views until `botMessageReadHistoryTtl`.
+  isRead: Boolean,
+  readAt: Date,
   paperContext: Boolean,
   terminal: Boolean,
   showUser: Boolean,
@@ -1030,6 +1095,8 @@ const rateSchema: Schema<RateSchema> = new Schema({
       _id: false,
       asset: RequiredString,
       usdRate: RequiredNumber,
+      source: String,
+      updated: Date,
     },
   ],
   ...CreatedUpdated,
@@ -1090,6 +1157,14 @@ const pairsSchema: Schema<PairsSchema> = new Schema({
   // Clean equity ticker behind a tokenized-stock market (`AAPL` for `rAAPL`);
   // see `resolveUnderlying`. Absent => the base name is the ticker.
   underlying: String,
+  // Leverage limits from the exchange's instrument info (futures; see
+  // `normalizePairLeverage`). Absent = unknown. Display/filter data for the
+  // pair picker — the bot engine doesn't read them.
+  minLeverage: Number,
+  maxLeverage: Number,
+  // Delivery time (ms epoch) of a dated futures contract, from the exchange's
+  // instrument info. Absent = perpetual / spot. See `deliveryCutoff.ts`.
+  deliveryTime: Number,
   ...CreatedUpdated,
 })
 
@@ -1182,6 +1257,7 @@ const indicatorGroup = new Schema(
     logic: { type: String, enum: IndicatorsLogicEnum },
     action: { type: String, enum: IndicatorAction },
     section: String,
+    join: { type: String, enum: IndicatorsLogicEnum },
   },
   { _id: false },
 )
@@ -1316,6 +1392,9 @@ const indicatorsSettings = new Schema({
   factor: Number,
   atrLength: Number,
   stCondition: String,
+  smoothing: String,
+  smoothingLength: Number,
+  smoothingCompare: String,
   pcUp: String,
   pcDown: String,
   pcCondition: String,
@@ -1340,10 +1419,19 @@ const indicatorsSettings = new Schema({
   obfvgRef: { type: String, enum: OBFVGRefEnum },
   sessionDays: [Number],
   sessionRule: { type: String, enum: SessionRuleEnum },
+  sessionStart: String,
+  sessionEnd: String,
+  sessionTimezone: String,
+  sessionLevelA: { type: String, enum: SessionLevelEnum },
+  sessionLevelB: { type: String, enum: SessionLevelEnum },
   lwThreshold: Schema.Types.Mixed,
   lwMaxDuration: Schema.Types.Mixed,
   lwValue: { type: String, enum: LWValueEnum },
   lwCondition: { type: String, enum: LWConditionEnum },
+  oteLeftBars: Schema.Types.Mixed,
+  oteMinLegSize: Schema.Types.Mixed,
+  oteLevel: Schema.Types.Mixed,
+  oteLeg: { type: String, enum: OTELegEnum },
 })
 
 const multiTP = new Schema({
@@ -1402,6 +1490,7 @@ const dcaBotSettings = new Schema({
   hodlDay: String,
   hodlAt: String,
   hodlHourly: Boolean,
+  hodlWeekdays: { type: [Number], default: undefined },
   hodlNextBuy: Number,
   hodleIgnoreAt: Boolean,
   maxNumberOfOpenDeals: String,
@@ -1422,6 +1511,10 @@ const dcaBotSettings = new Schema({
   cooldownAfterDealStopInterval: Number,
   cooldownAfterDealStartOption: { type: String, enum: CooldownOptionsEnum },
   cooldownAfterDealStopOption: { type: String, enum: CooldownOptionsEnum },
+  cooldownAfterDealStopTrigger: {
+    type: String,
+    enum: CooldownStopTriggerEnum,
+  },
   moveSL: Boolean,
   moveSLTrigger: String,
   moveSLValue: String,
@@ -1462,7 +1555,10 @@ const dcaBotSettings = new Schema({
   allowRaiseToExchangeMin: Boolean,
   reduceToAvailableBalance: Boolean,
   reduceToAvailableMinSize: String,
+  baseFunding: { type: String, enum: BaseFundingEnum },
   dcaByMarket: Boolean,
+  singlePosition: Boolean,
+  maxPositionEntries: String,
   terminalDealType: { type: String, enum: TerminalDealTypeEnum },
   useMultiTp: Boolean,
   multiTp: [multiTP],
@@ -1537,6 +1633,7 @@ const dcaBotSettings = new Schema({
 const comboBotSettings = new Schema<ComboBotSettings>({
   ...botSettingsCommon,
   skipBalanceCheck: Boolean,
+  baseFunding: { type: String, enum: BaseFundingEnum },
   dcaCondition: { type: String, enum: DCAConditionEnum },
   dcaVolumeBaseOn: String,
   dcaVolumeRequiredChange: String,
@@ -1610,6 +1707,7 @@ const comboBotSettings = new Schema<ComboBotSettings>({
   hodlDay: String,
   hodlAt: String,
   hodlHourly: Boolean,
+  hodlWeekdays: { type: [Number], default: undefined },
   hodlNextBuy: Number,
   maxNumberOfOpenDeals: String,
   indicators: [indicatorsSettings],
@@ -1629,6 +1727,10 @@ const comboBotSettings = new Schema<ComboBotSettings>({
   cooldownAfterDealStopInterval: Number,
   cooldownAfterDealStartOption: { type: String, enum: CooldownOptionsEnum },
   cooldownAfterDealStopOption: { type: String, enum: CooldownOptionsEnum },
+  cooldownAfterDealStopTrigger: {
+    type: String,
+    enum: CooldownStopTriggerEnum,
+  },
   moveSL: Boolean,
   moveSLTrigger: String,
   moveSLValue: String,
@@ -1710,6 +1812,7 @@ const comboBotSettings = new Schema<ComboBotSettings>({
   maxDealsOverPerSymbol: String,
   maxDealsUnderPerSymbol: String,
   dcaByMarket: Boolean,
+  allowRaiseToExchangeMin: Boolean,
 })
 
 const botProfitChart: Schema<BotProfitChartSchema> = new Schema({
@@ -1901,6 +2004,10 @@ const comboBotSchema: Schema<ComboBotSchema> = new Schema({
   lastClosedDeal: Number,
   lastOpenedDealPerSymbol: [{ symbol: String, time: Number }],
   lastClosedDealPerSymbol: [{ symbol: String, time: Number }],
+  lastClosedDealByTrigger: { sl: Number, loss: Number },
+  lastClosedDealByTriggerPerSymbol: [
+    { symbol: String, sl: Number, loss: Number },
+  ],
   lastPricesPerSymbol: [
     { symbol: String, avg: Number, entry: Number, time: Number },
   ],
@@ -1988,6 +2095,10 @@ const dcaBotSchema: Schema<DCABotSchema> = new Schema({
   lastClosedDeal: Number,
   lastOpenedDealPerSymbol: [{ symbol: String, time: Number }],
   lastClosedDealPerSymbol: [{ symbol: String, time: Number }],
+  lastClosedDealByTrigger: { sl: Number, loss: Number },
+  lastClosedDealByTriggerPerSymbol: [
+    { symbol: String, sl: Number, loss: Number },
+  ],
   lastPricesPerSymbol: [
     { symbol: String, avg: Number, entry: Number, time: Number },
   ],
@@ -2028,6 +2139,10 @@ const funds = [
     // Spec 111: the resting rest of a part-filled base order.
     baseRemainder: Boolean,
     baseTotal: String,
+    // Spec 139 §3.3: a single-position entry.
+    positionEntry: Boolean,
+    // Combo add / reduce funds: position base when the order was sent.
+    positionBase: Number,
   },
 ]
 
@@ -2035,6 +2150,9 @@ const filledFunds = [
   {
     price: Number,
     qty: Number,
+    // Spec 165: set on the fill of a base-order remainder (spec 111).
+    id: String,
+    baseRemainder: Boolean,
   },
 ]
 
@@ -2076,11 +2194,42 @@ const trailingClose = {
   required: false,
 }
 
+// main-app spec 044 — how the bot funded a deal itself.
+const dealFunding = {
+  mode: { type: String, enum: BaseFundingEnum },
+  virtualEntry: {
+    qty: Number,
+    price: Number,
+    quoteReserved: Number,
+    // phase 3: held base backing a long hedge leg's virtual entry
+    baseReserved: Number,
+  },
+  pendingTrade: {
+    clientOrderId: String,
+    side: String,
+    qty: Number,
+    at: Number,
+  },
+  lotIds: [String],
+  sourcedByBot: Boolean,
+}
+
+// spec 044 §8.4 — funds the deal's unplaced orders still need.
+const dealFundingHold = {
+  asset: String,
+  committed: Number,
+  remaining: Number,
+}
+
 const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
   startBlocked,
   trailingClose,
   feeSizingFallback,
   closeTrigger: { type: String, enum: DCACloseTriggerEnum },
+  // Hedge leg start action (spec 044 §8.9): `createDeal` writes it; without
+  // it in the schema mongoose dropped it and a hedge DCA leg's deal never
+  // reached its funding branch. Same as combo.
+  action: { type: String, enum: ActionsEnum },
   flags: [String],
   note: String,
   botId: RequiredString,
@@ -2107,6 +2256,20 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
   avgPrice: Number,
   displayAvg: Number,
   commission: Number,
+  // Close-time cost facts (`DCADealsSchema.slippage` / `feesEstimated`).
+  // No defaults: absent means "not recorded", and the API computes it.
+  slippage: {
+    type: {
+      quote: Number,
+      bps: Number,
+      orders: Number,
+      reconstructed: Boolean,
+      notional: Number,
+    },
+    required: false,
+    default: undefined,
+  },
+  feesEstimated: Boolean,
   createTime: Number,
   updateTime: Number,
   closeTime: Number,
@@ -2235,6 +2398,9 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
   allowBaseProcess: Boolean,
   pendingAddFunds: funds,
   pendingReduceFunds: funds,
+  // Spec 139: single position.
+  positionEntries: Number,
+  adoptedIds: [String],
   blockOrders: [
     { price: Number, qty: Number, side: { type: String, enum: SideEnum } },
   ],
@@ -2254,12 +2420,22 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
     multiplier: Number,
     multiplierScope: String,
   },
+  botFunding: dealFunding,
+  fundingHold: dealFundingHold,
+  baseFundingBeta: Boolean,
   tags: [String],
   ac: {
     before: Number,
     after: Number,
   },
   fixSize: Number,
+  signalOverrides: {
+    baseOrderSize: String,
+    tpPerc: String,
+    slPerc: String,
+    tpPrice: String,
+    slPrice: String,
+  },
   orderSizeType: String,
   enterMarketPrice: Boolean,
   eightySent: Number,
@@ -2301,6 +2477,20 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
   avgPrice: Number,
   displayAvg: Number,
   commission: Number,
+  // Close-time cost facts (`DCADealsSchema.slippage` / `feesEstimated`).
+  // No defaults: absent means "not recorded", and the API computes it.
+  slippage: {
+    type: {
+      quote: Number,
+      bps: Number,
+      orders: Number,
+      reconstructed: Boolean,
+      notional: Number,
+    },
+    required: false,
+    default: undefined,
+  },
+  feesEstimated: Boolean,
   createTime: Number,
   updateTime: Number,
   closeTime: Number,
@@ -2432,7 +2622,33 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
     origDca: [Number],
     multiplier: Number,
     multiplierScope: String,
+    // Combo add / reduce funds: per-level base offsets (main-app spec 047).
+    fundsDca: [Number],
+    fundsDcaHeld: [Number],
   },
+  // Combo add / reduce funds (same shapes as the DCA deal).
+  pendingAddFunds: funds,
+  pendingReduceFunds: funds,
+  funds: filledFunds,
+  reduceFunds: filledFunds,
+  fundsScale: [{ id: String, k: Number, time: Number }],
+  comboFundsRebuild: String,
+  comboFundsRequest: {
+    type: new Schema(
+      {
+        id: String,
+        clientOrderId: String,
+        direction: String,
+        positionBase: Number,
+        k: Number,
+      },
+      { _id: false },
+    ),
+    default: undefined,
+  },
+  botFunding: dealFunding,
+  fundingHold: dealFundingHold,
+  baseFundingBeta: Boolean,
   tags: [String],
   flags: [String],
   ac: {
@@ -2440,6 +2656,13 @@ const comboDealSchema: Schema<ComboDealsSchema> = new Schema({
     after: Number,
   },
   fixSize: Number,
+  signalOverrides: {
+    baseOrderSize: String,
+    tpPerc: String,
+    slPerc: String,
+    tpPrice: String,
+    slPrice: String,
+  },
   fullFee: Number,
   eightySent: Number,
   hundredSent: Number,
@@ -2980,6 +3203,8 @@ const comboMinigrid = new Schema<ComboMinigridSchema>({
     sell: Number,
   },
   lockClose: Boolean,
+  appliedFundsScale: [String],
+  closeReason: String,
   ...CreatedUpdated,
 })
 const paperHedge = new Schema({
@@ -3017,6 +3242,7 @@ const userProfitByHour = new Schema<UserProfitByHour>({
   botType: { type: String, enum: BotType },
   terminal: Boolean,
   paperContext: Boolean,
+  exchangeUUID: String,
   ...CreatedUpdated,
 })
 
@@ -3175,6 +3401,10 @@ export const registerIndexes = () => {
   // Retain ~90 days of catches; bounds growth without manual cleanup.
   reconcileSweepSchema.index({ created: 1 }, { expireAfterSeconds: 7776000 })
 
+  fundingLotSchema.index({ dealId: 1 })
+  fundingLotSchema.index({ userId: 1, exchangeUUID: 1, asset: 1, remaining: 1 })
+  fundingLotSchema.index({ clientOrderId: 1 }, { unique: true })
+
   quantRulesEventSchema.index({ userId: 1, created: -1 })
   quantRulesEventSchema.index({ until: -1 })
   // Retain ~90 days of cooldown events; bounds growth without manual cleanup.
@@ -3270,6 +3500,36 @@ export const registerIndexes = () => {
     isDeleted: 1,
     created: -1,
   })
+
+  // Same feed, now that read rows stay `isDeleted:false` (spec 137): without
+  // `isRead` in the key the unread feed (and its badge count) would FETCH every
+  // read row in the 90-day history only to discard it. getBotMessage always
+  // constrains `isRead` as a point-set, so this index bounds it exactly and
+  // still supplies {created:-1} via SORT_MERGE. Supersedes the 5-field index
+  // above for the feed; that one is left in place because dropping an index is
+  // a separate, deliberate prod operation.
+  botMessageSchema.index(
+    {
+      userId: 1,
+      showUser: 1,
+      paperContext: 1,
+      isDeleted: 1,
+      isRead: 1,
+      created: -1,
+    },
+    { name: 'botMessageFeedByRead' },
+  )
+  // READ HISTORY RETENTION (spec 137 §2.6): a read message is kept 90 days from
+  // when it was read. A TTL index only expires documents whose field holds a
+  // date, so unread rows (no `readAt`) are never touched, and no row predates
+  // this field, so building it reaps nothing.
+  botMessageSchema.index(
+    { readAt: 1 },
+    {
+      name: 'botMessageReadHistoryTtl',
+      expireAfterSeconds: 7776000, // 90d
+    },
+  )
 
   botMessageSchema.index({
     userId: 1,
@@ -3390,6 +3650,8 @@ export const registerIndexes = () => {
   comboBotSchema.index({ userId: 1 })
   comboBotSchema.index({ userId: 1, status: 1, created: -1 })
   comboBotSchema.index({ userId: 1, created: -1 })
+  // Webhook path looks bots up by uuid in every bot collection — see dcaBotSchema.
+  comboBotSchema.index({ uuid: 1 })
   // Hedge-sibling lookup — see the dcaBotSchema note below; identical shape,
   // same call sites (`core/src/bot/main.ts` picks comboBotDb for combo bots).
   comboBotSchema.index({ parentBotId: 1 })
@@ -3398,6 +3660,18 @@ export const registerIndexes = () => {
 
   comboDealSchema.index({ userId: 1 })
   comboDealSchema.index({ botId: 1 })
+  // Spec 044 §8.13 reservation reads (FundingReservation): only deals stamped
+  // `baseFundingBeta` ever hold funds, and both reads carry that stamp and the
+  // user, so this index holds beta deals only.
+  // Without it the read scanned every deal of the collection on each spot
+  // balance check (2026-10-18 incident).
+  // Built on the cloud database by the 2.156.2 boot (2026-10-18 16:28Z) as
+  // `userId_1_status_1` with this partial filter: keep keys, order and the
+  // filter exactly as they are, or `syncIndexes()` drops and rebuilds it.
+  comboDealSchema.index(
+    { userId: 1, status: 1 },
+    { partialFilterExpression: { baseFundingBeta: true } },
+  )
 
   comboMinigrid.index({ botId: 1 })
 
@@ -3445,9 +3719,11 @@ export const registerIndexes = () => {
   hedgeComboBotSchema.index({ userId: 1 })
   hedgeComboBotSchema.index({ userId: 1, status: 1, created: -1 })
   hedgeComboBotSchema.index({ userId: 1, created: -1 })
+  hedgeComboBotSchema.index({ uuid: 1 })
   hedgeDcaBotSchema.index({ userId: 1 })
   hedgeDcaBotSchema.index({ userId: 1, status: 1, created: -1 })
   hedgeDcaBotSchema.index({ userId: 1, created: -1 })
+  hedgeDcaBotSchema.index({ uuid: 1 })
 
   dcaDealSchema.index({ userId: 1 })
   dcaDealSchema.index({ botId: 1 })
@@ -3466,6 +3742,18 @@ export const registerIndexes = () => {
   // absence of options exactly as they are, or `syncIndexes()` drops and
   // rebuilds it on the next start.
   dcaDealSchema.index({ userId: 1, status: 1, createTime: -1 })
+  // Spec 044 §8.13 reservation reads (FundingReservation): only deals stamped
+  // `baseFundingBeta` ever hold funds, and both reads carry that stamp and the
+  // user, so this index holds beta deals only.
+  // Without it the read scanned every deal of the collection on each spot
+  // balance check (2026-10-18 incident).
+  // Built on the cloud database by the 2.156.2 boot (2026-10-18 16:28Z) as
+  // `userId_1_status_1` with this partial filter: keep keys, order and the
+  // filter exactly as they are, or `syncIndexes()` drops and rebuilds it.
+  dcaDealSchema.index(
+    { userId: 1, status: 1 },
+    { partialFilterExpression: { baseFundingBeta: true } },
+  )
 
   favoritePairsSchema.index({ userId: 1 })
 
@@ -3588,6 +3876,7 @@ const schema = {
   botEvent: botEventSchema,
   changeTrail: changeTrailSchema,
   reconcileSweep: reconcileSweepSchema,
+  fundingLot: fundingLotSchema,
   quantRulesEvent: quantRulesEventSchema,
   favoritePairs: favoritePairsSchema,
   favoriteIndicators: favoriteIndicatorsSchema,

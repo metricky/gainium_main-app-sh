@@ -385,6 +385,8 @@ const DCA_SECTIONS: SectionLayout[] = [
       'startCondition',
       'maxNumberOfOpenDeals',
       'maxDealsPerPair',
+      'singlePosition',
+      'maxPositionEntries',
       'useSeparateMaxDealsOverAndUnder',
       'maxDealsOver',
       'maxDealsUnder',
@@ -422,6 +424,7 @@ const DCA_SECTIONS: SectionLayout[] = [
       'cooldownAfterDealStopInterval',
       'cooldownAfterDealStopUnits',
       'cooldownAfterDealStopOption',
+      'cooldownAfterDealStopTrigger',
     ],
   },
   {
@@ -527,6 +530,7 @@ const DCA_SECTIONS: SectionLayout[] = [
       'allowRaiseToExchangeMin',
       'reduceToAvailableBalance',
       'reduceToAvailableMinSize',
+      'baseFunding',
       'dcaCustom',
       'useSmartOrders',
       'gridLevel',
@@ -536,6 +540,7 @@ const DCA_SECTIONS: SectionLayout[] = [
       'hodlAt',
       'hodlNextBuy',
       'hodlHourly',
+      'hodlWeekdays',
     ],
   },
   {
@@ -667,6 +672,7 @@ const COMBO_SECTIONS: SectionLayout[] = [
       'cooldownAfterDealStopInterval',
       'cooldownAfterDealStopUnits',
       'cooldownAfterDealStopOption',
+      'cooldownAfterDealStopTrigger',
     ],
   },
   {
@@ -873,7 +879,8 @@ const FIELD_NOTES: Record<string, { note?: string; example?: unknown }> = {
 // We resolve them from the compiled validator config where they already appear
 // as enum values.
 function getIndicatorEnumValues(): string[] {
-  // Read from the indicatorCoreConfig's 'type' field which has enum: Object.values(IndicatorEnum)
+  // Read from the indicatorCoreConfig's 'type' field: CONDITION_INDICATOR_TYPES,
+  // the types a bot can run, so discovery never advertises any other.
   return (indicatorCoreConfig['type']?.enum as string[]) ?? []
 }
 
@@ -897,6 +904,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -923,6 +933,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -974,6 +987,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1060,6 +1076,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1086,6 +1105,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1139,6 +1161,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1156,31 +1181,6 @@ const INDICATOR_META: Record<
       indicatorAction: 'startDeal',
     },
   },
-  BullBear: {
-    name: 'Bull Bear Power',
-    description:
-      'EMA-based oscillator measuring the difference between bulls and bears power.',
-    typeSpecificFields: [
-      'percentile',
-      'percentileLookback',
-      'percentilePercentage',
-    ],
-    supportedActions: [
-      'startDeal',
-      'closeDeal',
-      'startDca',
-      'stopBot',
-      'startBot',
-    ],
-    example: {
-      type: 'BullBear',
-      indicatorLength: 13,
-      indicatorValue: '0',
-      indicatorCondition: 'cd',
-      indicatorInterval: '1h',
-      indicatorAction: 'startDeal',
-    },
-  },
   UO: {
     name: 'Ultimate Oscillator',
     description:
@@ -1193,6 +1193,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1210,31 +1213,6 @@ const INDICATOR_META: Record<
       uoFast: 7,
       uoMiddle: 14,
       uoSlow: 28,
-      indicatorAction: 'startDeal',
-    },
-  },
-  IC: {
-    name: 'Ichimoku Cloud',
-    description:
-      'Multi-component indicator defining support, resistance, momentum and trend direction.',
-    typeSpecificFields: [
-      'percentile',
-      'percentileLookback',
-      'percentilePercentage',
-    ],
-    supportedActions: [
-      'startDeal',
-      'closeDeal',
-      'startDca',
-      'stopBot',
-      'startBot',
-    ],
-    example: {
-      type: 'IC',
-      indicatorLength: 9,
-      indicatorValue: '0',
-      indicatorCondition: 'cd',
-      indicatorInterval: '1h',
       indicatorAction: 'startDeal',
     },
   },
@@ -1341,6 +1319,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1393,6 +1374,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1422,6 +1406,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1531,6 +1518,9 @@ const INDICATOR_META: Record<
       'trendFilterLookback',
       'trendFilterType',
       'trendFilterValue',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1564,6 +1554,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1775,6 +1768,9 @@ const INDICATOR_META: Record<
       'percentile',
       'percentileLookback',
       'percentilePercentage',
+      'smoothing',
+      'smoothingLength',
+      'smoothingCompare',
     ],
     supportedActions: [
       'startDeal',
@@ -1855,8 +1851,16 @@ const INDICATOR_META: Record<
   SESSION: {
     name: 'Session Selector',
     description:
-      'Filters signals based on the day of the week (UTC). Select which days are active and whether to trade in or out of the selected sessions.',
-    typeSpecificFields: ['sessionDays', 'sessionRule'],
+      'Filters signals by day of the week and, optionally, time of day. sessionDays are the active weekdays (0=Sunday). sessionStart/sessionEnd (local HH:MM, end exclusive) limit the session to those hours, read in sessionTimezone (IANA name, default UTC, follows daylight saving). An end before the start is an overnight session belonging to the day it opens. Without start/end the whole day counts. sessionRule in / out picks trading in or out of the session. sessionRule levels (Price levels) compares sessionLevelA with sessionLevelB using indicatorCondition (cd/cu/gt/lt) on indicatorInterval candles (default 15m), and only fires during the session. Levels: prevOpen, prevHigh, prevMid, prevLow, prevClose of the last completed session, curOpen (open of the session in progress), curMid (midpoint of the session in progress so far: (highest high + lowest low) / 2), price (latest close). A level with no value yet, or A equal to B, never fires; crossings never count across a new session. Example: price crossing up prevHigh = breakout of the previous session high.',
+    typeSpecificFields: [
+      'sessionDays',
+      'sessionRule',
+      'sessionStart',
+      'sessionEnd',
+      'sessionTimezone',
+      'sessionLevelA',
+      'sessionLevelB',
+    ],
     supportedActions: [
       'startDeal',
       'closeDeal',
@@ -1872,6 +1876,9 @@ const INDICATOR_META: Record<
       indicatorInterval: '1h',
       sessionDays: [1, 2, 3, 4, 5],
       sessionRule: 'in',
+      sessionStart: '09:30',
+      sessionEnd: '16:00',
+      sessionTimezone: 'America/New_York',
       indicatorAction: 'startDeal',
     },
   },
@@ -1896,6 +1903,31 @@ const INDICATOR_META: Record<
       lwThreshold: 2,
       lwMaxDuration: 1000,
       lwValue: 'any',
+      indicatorAction: 'startDeal',
+    },
+  },
+  OTE: {
+    name: 'Discount/Premium OTE Levels',
+    description:
+      "Tracks the latest valid price leg between a swing low and a swing high (oteLeftBars bars to the left, confirmed one bar later) that is at least oteMinLegSize percent long, and compares the close with one Fibonacci retracement level of it (oteLevel: 0 = the leg's end, 1 = its origin, 0.5 = equilibrium, 0.618-0.79 = the optimal trade entry zone). oteLeg picks bullish legs (swing low up to swing high), bearish legs or any. indicatorCondition: cd/cu = the close crossed the level on the same leg, gt/lt = the close is above/below it. A long entry in the OTE zone of an up-move is oteLeg bullish, oteLevel 0.705, indicatorCondition cd.",
+    typeSpecificFields: ['oteLeftBars', 'oteMinLegSize', 'oteLevel', 'oteLeg'],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'OTE',
+      indicatorLength: 1,
+      indicatorValue: '0',
+      indicatorCondition: 'cd',
+      indicatorInterval: '1h',
+      oteLeftBars: 10,
+      oteMinLegSize: 1,
+      oteLevel: 0.705,
+      oteLeg: 'bullish',
       indicatorAction: 'startDeal',
     },
   },

@@ -9,6 +9,10 @@ import {
   ExchangeEnum,
   DeleteBotDto,
 } from '../../../types'
+import {
+  reportBotNotLoaded,
+  userInitiatedBotMethods,
+} from './botNotLoadedNotice'
 import { IdMute, IdMutex } from '../../utils/mutex'
 import logger from '../../utils/logger'
 import v8 from 'v8'
@@ -153,7 +157,11 @@ class BotOperations {
   @IdMute(mutex, (data: MethodBotDto) =>
     data.method === 'getStats' || data.method === 'openDealBySignal'
       ? v4()
-      : data.method === 'mergeDeals'
+      : // Spec 139: adoption / conversion run with merges, on their own key
+        // — they cancel deals of this bot through its ordinary methods.
+        ['mergeDeals', 'adoptDeals', 'enableSinglePosition'].includes(
+            data.method,
+          )
         ? `mergeDeals${data.botId}`
         : `methodBot${data.botId}`,
   )
@@ -202,6 +210,9 @@ class BotOperations {
       }
       if (!bot) {
         logger.warn(`Worker ${threadId} bot not found ${botId} ${botType}`)
+        if (userInitiatedBotMethods.has(method)) {
+          await reportBotNotLoaded(botId, botType)
+        }
       }
       if (responseId) {
         parentPort?.postMessage({

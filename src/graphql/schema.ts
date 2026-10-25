@@ -18,6 +18,7 @@ export const BasicSchema = /* GraphQL */ `
   }
   type Query {
     getUsdRate: getUsdRateResponse
+    getFiatRates: getFiatRatesResponse
     getPairInfo(input: getPairInput!): getPairResponse
     getAllPairs: getAllPairsResponse
   }
@@ -25,6 +26,20 @@ export const BasicSchema = /* GraphQL */ `
     status: Status
     reason: String
     data: Float
+  }
+  # Latest cached fiat rates, as "1 unit of asset = usdRate USD".
+  type fiatRate {
+    asset: String
+    usdRate: Float
+    # kraken | ecb | erApi
+    source: String
+    # Last successful fetch of this rate.
+    updated: Date
+  }
+  type getFiatRatesResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [fiatRate]
   }
   input getPairInput {
     pair: String!
@@ -93,6 +108,9 @@ export const BasicSchema = /* GraphQL */ `
     isCanonical: Boolean
     underlying: String
     source: String
+    minLeverage: Float
+    maxLeverage: Float
+    deliveryTime: Float
   }
   type allPairInfo {
     result: [pairDetailedInfo]
@@ -203,6 +221,14 @@ export const UserSchema = /* GraphQL */ `
     userFee(input: userFeeInput!): userFeeResponse
     multipleUserFees(input: multipleUserFeesInput!): multipleUserFeesResponse
     getBalances(input: getBalancesInput!): getBalancesResponse
+    # What a short spot deal the bot funds itself will do (main-app spec 044).
+    previewFunding(input: previewFundingInput!): previewFundingResponse
+    # Both legs of a hedge on spot, planned jointly SHORT then LONG (main-app spec 044 §8).
+    previewHedgeFunding(
+      input: previewHedgeFundingInput!
+    ): previewHedgeFundingResponse
+    # Spec 044 beta gate: is base funding on for the session user? Never an error.
+    baseFundingAccess: baseFundingAccess!
     updateBalance(input: updateBalanceInput): getPortfolioResponse
     updateStatus: updateStatusResponse
     getUserPeriods: getUserPeriodsResponse
@@ -363,6 +389,8 @@ export const UserSchema = /* GraphQL */ `
   }
   input favoriteIndicatorInput {
     indicator: IndicatorsEnum!
+    "JSON object of the indicator's settings to keep with the favorite"
+    params: String
   }
   type favoritePairsResponse implements BasicResponse {
     status: Status
@@ -381,6 +409,11 @@ export const UserSchema = /* GraphQL */ `
   }
   type favoriteIndicators {
     indicators: [IndicatorsEnum]
+    presets: [favoriteIndicatorPreset]
+  }
+  type favoriteIndicatorPreset {
+    indicator: IndicatorsEnum
+    params: String
   }
   type favoritePairs {
     provider: Exchange
@@ -492,6 +525,7 @@ export const UserSchema = /* GraphQL */ `
     timezone: String
     theme: ThemeMode
     weekStart: String
+    reportingCurrency: String
     name: String
     lastName: String
     picture: String
@@ -736,9 +770,119 @@ export const UserSchema = /* GraphQL */ `
     reason: String
     data: [getBalancesResponseData]
   }
+  input previewFundingInput {
+    exchangeUUID: String!
+    exchange: Exchange!
+    pair: String!
+    # require | auto | botOnly
+    mode: String!
+    # The deal's base order in base; 0 for an add-DCA preview.
+    baseOrderQty: Float!
+    # Safety orders the deal commits to, in base (add-DCA: its unfilled levels after the edit).
+    safetyQty: Float!
+    price: Float!
+    # Add-DCA preview: the deal whose resting sells already cover part of it.
+    dealId: String
+  }
+  type previewFundingData {
+    # held: runs on the account's own base | fund: the bot buys / records a virtual entry | refuse: not enough quote
+    kind: String
+    baseAsset: String
+    quoteAsset: String
+    freeBase: Float
+    freeQuote: Float
+    # Quote other bot-funded deals of this account hold.
+    reservedQuote: Float
+    # Deal open: base order recorded at the current price without a trade, and the quote it holds.
+    virtualEntryQty: Float
+    quoteReserved: Float
+    # Free base counted toward the safety orders.
+    heldUsed: Float
+    quoteNeeded: Float
+    # The upfront market buy.
+    buyQty: Float
+    buyQuote: Float
+    raisedToMin: Boolean
+    sourcedByBot: Boolean
+    # refuse: quote required and available. Add-DCA: base required by the levels.
+    required: Float
+    available: Float
+    # Add-DCA: base already resting in the deal's sell orders, and what is still missing.
+    inOrders: Float
+    shortfall: Float
+  }
+  type previewFundingResponse {
+    status: Status
+    reason: String
+    data: previewFundingData
+  }
+  input previewHedgeFundingLegInput {
+    # "LONG" | "SHORT"
+    side: String!
+    # ActionsEnum value
+    action: String!
+    # base qty of the leg's base order
+    baseOrderQty: Float!
+    # Σ base qty of the leg's safety orders (dealRegular), as rendered
+    safetyQty: Float!
+    # Σ qty*price of the leg's safety orders
+    safetyQuote: Float!
+    useDca: Boolean!
+    # Combo only (optional): bot gridLevel and the leg's safety-level count — short-leg padding (base step × gridLevel per level)
+    comboGridLevel: Float
+    safetyLevels: Int
+    # Combo only (optional): the bot places a fee order at deal open
+    feeOrder: Boolean
+  }
+  input previewHedgeFundingInput {
+    exchangeUUID: String!
+    exchange: String!
+    pair: String!
+    price: Float!
+    legs: [previewHedgeFundingLegInput!]!
+  }
+  type previewHedgeFundingLeg {
+    side: String!
+    action: String!
+    # "none" | "fund" | "refuse"
+    kind: String!
+    # "BUY" | "SELL" when kind=fund
+    tradeSide: String
+    tradeBaseQty: Float
+    tradeQuote: Float
+    raisedToMin: Boolean
+    # in needAsset
+    required: Float
+    # in needAsset, after other reservations
+    held: Float
+    # base or quote asset symbol
+    needAsset: String
+    # quoteReserved (short) or baseReserved (long)
+    reservedForEntry: Float
+    # refusal reason, human readable
+    message: String
+  }
+  type previewHedgeFundingData {
+    baseAsset: String!
+    quoteAsset: String!
+    freeBase: Float!
+    freeQuote: Float!
+    reservedQuote: Float!
+    reservedBase: Float!
+    legs: [previewHedgeFundingLeg!]!
+  }
+  type baseFundingAccess {
+    available: Boolean!
+  }
+  type previewHedgeFundingResponse {
+    status: Status!
+    reason: String
+    data: previewHedgeFundingData
+  }
   input userSettingsInput {
     timezone: String
     theme: ThemeMode
+    reportingCurrency: String
     paperContext: Boolean
     shouldOnBoard: Boolean
     shouldOnBoardExchange: Boolean
@@ -781,6 +925,11 @@ export const BotSchema = /* GraphQL */ `
     getHedgeDcaDeals: getComboDealsResponse
     getBotOrders(input: getBotOrdersInput!): botOrdersResponse
     getDealOrders(input: getDealOrdersInput!): dealOrdersResponse
+    # Closed-deal fees + slippage of the account, one row per quote asset
+    # (main-app spec 050 §5.2).
+    tradingCostsSummary(
+      input: tradingCostsSummaryInput
+    ): tradingCostsSummaryResponse
     getComboDealOrders(input: getDealOrdersInput!): dealOrdersResponse
     getHedgeComboDealOrders(input: getDealOrdersInput!): dealOrdersResponse
     getHedgeDCADealOrders(input: getDealOrdersInput!): dealOrdersResponse
@@ -934,8 +1083,12 @@ export const BotSchema = /* GraphQL */ `
     closeComboDeal(input: closeDCADeal!): openDCADealResponse
     changeStatus(input: changeStatusInput!): getBotResponse
     deleteBotMessage(input: deleteBotMessageInput!): deleteBotMessageResponse
+    markBotMessageRead(
+      input: markBotMessageReadInput!
+    ): markBotMessageReadResponse
     deleteBot(input: deleteBotInput!): deleteBotResponse
     mergeDeals(input: mergeDealsInput!): mergeDealsResponse
+    adoptDeals(input: adoptDealsInput!): mergeDealsResponse
     mergeComboDeals(input: mergeDealsInput!): mergeDealsResponse
     saveBacktest(input: backtestInput!): saveBacktestsResponse
     saveComboBacktest(input: comboBacktestInput!): saveBacktestsResponse
@@ -1013,6 +1166,11 @@ export const BotSchema = /* GraphQL */ `
     id: [String!]!
   }
   input getMessageBotInput {
+    "unread | read | all; wins over unreadOnly"
+    view: String
+    "severity: error | warning | info"
+    type: String
+    botId: String
     unreadOnly: Boolean
     page: Int
     pageSize: Int
@@ -1254,6 +1412,9 @@ export const BotSchema = /* GraphQL */ `
     limitPrice: String
     asset: String!
     type: String
+    # The deal is a Combo deal. Optional: resolved from the deal when omitted.
+    # A Combo add / reduce scales every rung of the deal (MARKET only).
+    combo: Boolean
   }
   """
   Execute a DCA deal's next safety order immediately, at market.
@@ -1512,6 +1673,73 @@ export const BotSchema = /* GraphQL */ `
     shareId: String
     dealId: String!
     all: Boolean
+  }
+  input tradingCostsSummaryInput {
+    # ms epoch bounds on the deal's closeTime, inclusive.
+    from: Float
+    to: Float
+    # dca | terminal | combo | hedgeDca | hedgeCombo; omitted = all.
+    botType: String
+  }
+  type tradingCostsSummaryResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: [TradingCosts]
+  }
+  # Slippage of a deal's executed MARKET orders. Null when none counted.
+  type DealSlippage {
+    # Sum of the orders' slippageQuote; positive = adverse.
+    quote: Float
+    # Reference-notional weighted average bps.
+    bps: Float
+    # MARKET orders counted.
+    orders: Int
+    # True if any counted order's reference was reconstructed.
+    reconstructed: Boolean
+  }
+  # A finished deal's booked result, decomposed:
+  # grossQuote - feesQuote - slippageQuote = netQuote = profit.total in quote.
+  type DealCostBreakdown {
+    grossQuote: Float
+    feesQuote: Float
+    feesEstimated: Boolean
+    slippageQuote: Float
+    netQuote: Float
+    # Fees the venue charged in a third asset (BNB/BGB/KCS), valued in quote
+    # at each fill's market price. NOT included in feesQuote or netQuote: the
+    # deal's books did not deduct them. Null when the deal has none, or none
+    # could be valued.
+    unbookedFeesQuote: Float
+    # true when at least one such fee could not be valued; unbookedFeesQuote
+    # covers only the others.
+    unbookedFeesPartial: Boolean
+    # The assets those fees were charged in.
+    unbookedFeeAssets: [String]
+    # true when profit.totalUsd already has these fees' USD value subtracted
+    # (deals carrying the fee ledger); profit.total never does. For such a
+    # deal totalUsd / total is not a plain quote->USD rate:
+    # (totalUsd + unbookedFeesUsd) / total is.
+    unbookedFeesInUsdProfit: Boolean
+    # The USD amount subtracted from profit.totalUsd (fee ledger, priced when
+    # the deal closed); null when unbookedFeesInUsdProfit is not true.
+    unbookedFeesUsd: Float
+  }
+  type TradingCosts {
+    feesQuote: Float
+    slippageQuote: Float
+    grossQuote: Float
+    netQuote: Float
+    deals: Int
+    slippageReconstructed: Boolean
+    feesEstimated: Boolean
+    quoteAsset: String
+    # Sum of the deals' DealCostBreakdown.unbookedFeesQuote (not in
+    # feesQuote / netQuote); null when no deal had any.
+    unbookedFeesQuote: Float
+    unbookedFeesPartial: Boolean
+    # The part of unbookedFeesQuote whose deals' USD profit already has them
+    # subtracted. Never part of netQuote; null when none.
+    unbookedFeesInUsdProfitQuote: Float
   }
   input getBotTransactionsInput {
     id: String!
@@ -2673,6 +2901,8 @@ export const BotSchema = /* GraphQL */ `
     terminal: Boolean
     symbol: String
     exchange: String
+    isRead: Boolean
+    readAt: Float
   }
   type botMessageList {
     result: [messageData]
@@ -2954,6 +3184,7 @@ export const BotSchema = /* GraphQL */ `
     _id: String
     clientOrderId: String
     reduceFundsId: String
+    addFundsId: String
     cummulativeQuoteQty: String
     executedQty: String
     fills: [orderFill]
@@ -2998,6 +3229,31 @@ export const BotSchema = /* GraphQL */ `
     sl: Boolean
     acBefore: Float
     acAfter: Float
+    # MARKET orders only (main-app spec 050). refPrice is the reference the
+    # slippage is measured against (the stored refPrice, or one reconstructed
+    # from the order's origPrice); null whenever slippage is null.
+    refPrice: String
+    refPriceAt: Float
+    sentAt: Float
+    ackAt: Float
+    # Signed, positive = adverse (paid more on a buy / received less on a sell).
+    slippageBps: Float
+    slippageQuote: Float
+    # recorded (stored refPrice only) | reconstructed (from origPrice or the
+    # DCA-entry shift) | null (LIMIT, inverse, unknown or out of range).
+    slippageSource: String
+    # Fee for this order in the pair's quote currency: the venue-reported fee
+    # where it resolves to the pair, else the stored-rate estimate. A fee the
+    # venue charged in a third asset (BNB/BGB/KCS) is valued at that asset's
+    # market price in the minute of the fill (see feeConverted); null when it
+    # cannot be valued, for an order that did not execute, or an inverse
+    # contract.
+    feeQuote: Float
+    # true when feeQuote is the estimate; false when venue-reported; null when unknown.
+    feeEstimated: Boolean
+    # true when feeQuote includes a third-asset fee valued at market prices
+    # at the fill; false for any other known fee; null when feeQuote is null.
+    feeConverted: Boolean
   }
   type multiPairBotOrders {
     key: String
@@ -3160,6 +3416,7 @@ export const BotSchema = /* GraphQL */ `
     logic: String
     action: String
     section: String
+    join: String
   }
   type indicatorSettingsType {
     indicatorLength: Int
@@ -3242,6 +3499,9 @@ export const BotSchema = /* GraphQL */ `
     factor: Float
     atrLength: Float
     stCondition: String
+    smoothing: String
+    smoothingLength: Int
+    smoothingCompare: String
     pcUp: String
     pcDown: String
     pcCondition: String
@@ -3266,10 +3526,19 @@ export const BotSchema = /* GraphQL */ `
     dcValue: String
     sessionDays: [Int]
     sessionRule: String
+    sessionStart: String
+    sessionEnd: String
+    sessionTimezone: String
+    sessionLevelA: String
+    sessionLevelB: String
     lwMaxDuration: String
     lwThreshold: StringOrNumber
     lwValue: StringOrNumber
     lwCondition: String
+    oteLeftBars: StringOrNumber
+    oteMinLegSize: StringOrNumber
+    oteLevel: StringOrNumber
+    oteLeg: String
   }
   enum MAEnum {
     sma
@@ -3316,6 +3585,8 @@ export const BotSchema = /* GraphQL */ `
     dcaVolumeRequiredChangeRef: String
     dcaVolumeMaxValue: String
     skipBalanceCheck: Boolean
+    # Short spot when free base is short: require (refuse, default) | auto (use free base, buy the shortfall) | botOnly (always buy). main-app spec 044
+    baseFunding: String
     baseSlOn: String
     closeByTimer: Boolean
     closeByTimerValue: Float
@@ -3387,6 +3658,7 @@ export const BotSchema = /* GraphQL */ `
     useDca: Boolean
     hodlAt: String
     hodlHourly: Boolean
+    hodlWeekdays: [Int]
     hodlDay: String
     hodlNextBuy: Float
     maxNumberOfOpenDeals: String
@@ -3405,6 +3677,7 @@ export const BotSchema = /* GraphQL */ `
     cooldownAfterDealStopInterval: Int
     cooldownAfterDealStartOption: String
     cooldownAfterDealStopOption: String
+    cooldownAfterDealStopTrigger: String
     moveSL: Boolean
     moveSLTrigger: String
     moveSLValue: String
@@ -3429,6 +3702,8 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXopen: String
     useMulti: Boolean
     maxDealsPerPair: String
+    singlePosition: Boolean
+    maxPositionEntries: String
     ignoreStartDeals: Boolean
     comboTpBase: String
     comboSmartGridsCount: String
@@ -3447,7 +3722,9 @@ export const BotSchema = /* GraphQL */ `
     reduceToAvailableBalance: Boolean
     reduceToAvailableMinSize: String
     rejectBelowExchangeMin: Boolean
-      @deprecated(reason: "Renamed with inverted meaning; use allowRaiseToExchangeMin. Always null.")
+      @deprecated(
+        reason: "Renamed with inverted meaning; use allowRaiseToExchangeMin. Always null."
+      )
     dcaByMarket: Boolean
     terminalDealType: TerminalDealTypeEnum
     useMultiTp: Boolean
@@ -3495,6 +3772,9 @@ export const BotSchema = /* GraphQL */ `
     dcaVolumeRequiredChangeRef: String
     dcaVolumeMaxValue: String
     skipBalanceCheck: Boolean
+    # Short spot when free base is short: require (refuse, default) | auto (use free base, buy the shortfall) | botOnly (always buy). main-app spec 044
+    baseFunding: String
+    allowRaiseToExchangeMin: Boolean
     baseSlOn: String
     closeByTimer: Boolean
     closeByTimerValue: Float
@@ -3566,6 +3846,7 @@ export const BotSchema = /* GraphQL */ `
     useDca: Boolean
     hodlAt: String
     hodlHourly: Boolean
+    hodlWeekdays: [Int]
     hodlDay: String
     hodlNextBuy: Float
     maxNumberOfOpenDeals: String
@@ -3584,6 +3865,7 @@ export const BotSchema = /* GraphQL */ `
     cooldownAfterDealStopInterval: Int
     cooldownAfterDealStartOption: String
     cooldownAfterDealStopOption: String
+    cooldownAfterDealStopTrigger: String
     moveSL: Boolean
     moveSLTrigger: String
     moveSLValue: String
@@ -3858,6 +4140,8 @@ export const BotSchema = /* GraphQL */ `
     symbol: String
   }
   type fullDCABot {
+    # Closed-deal fees + slippage in the bot's main quote asset (spec 050 §5.1).
+    tradingCosts: TradingCosts
     _id: String
     userId: String
     status: BotStatus
@@ -3968,6 +4252,8 @@ export const BotSchema = /* GraphQL */ `
     short: usedBotAssets
   }
   type fullHedgeComboBot {
+    # Closed-deal fees + slippage in the bot's main quote asset (spec 050 §5.1).
+    tradingCosts: TradingCosts
     _id: String
     created: Date
     updated: Date
@@ -3997,6 +4283,8 @@ export const BotSchema = /* GraphQL */ `
     cost: Float
   }
   type fullComboBot {
+    # Closed-deal fees + slippage in the bot's main quote asset (spec 050 §5.1).
+    tradingCosts: TradingCosts
     _id: String
     userId: String
     status: BotStatus
@@ -4415,6 +4703,7 @@ export const BotSchema = /* GraphQL */ `
     origDca: [Float]
     multiplier: Float
     multiplierScope: String
+    fundsDca: [Float]
   }
   type filledHistory {
     id: String
@@ -4425,6 +4714,8 @@ export const BotSchema = /* GraphQL */ `
     startBlocked: dealStartBlock
     paperContext: Boolean
     parentBotId: String
+    positionEntries: Float
+    adoptedIds: [String]
     flags: [String]
     closeTrigger: String
     note: String
@@ -4444,6 +4735,8 @@ export const BotSchema = /* GraphQL */ `
     funding: Funding
     feePaid: FeePaid
     feeByAsset: [FeeByAsset]
+    slippage: DealSlippage
+    costBreakdown: DealCostBreakdown
     avgPrice: Float
     displayAvg: Float
     commission: Float
@@ -4528,6 +4821,8 @@ export const BotSchema = /* GraphQL */ `
   type dealFunds {
     price: Float
     qty: Float
+    id: String
+    baseRemainder: Boolean
   }
   type comboDeal {
     startBlocked: dealStartBlock
@@ -4552,6 +4847,8 @@ export const BotSchema = /* GraphQL */ `
     funding: Funding
     feePaid: FeePaid
     feeByAsset: [FeeByAsset]
+    slippage: DealSlippage
+    costBreakdown: DealCostBreakdown
     avgPrice: Float
     displayAvg: Float
     commission: Float
@@ -4586,6 +4883,10 @@ export const BotSchema = /* GraphQL */ `
     sizes: dealSizes
     tags: [String]
     ac: dealAc
+    funds: [dealFunds]
+    reduceFunds: [dealFunds]
+    pendingAddFunds: [pendingAddFunds]
+    pendingReduceFunds: [pendingAddFunds]
   }
   type comboTransactions {
     buy: Float
@@ -4905,6 +5206,7 @@ export const BotSchema = /* GraphQL */ `
     OBFVG
     LW
     SESSION
+    OTE
   }
   enum BBCrossingEnum {
     middle
@@ -4920,6 +5222,7 @@ export const BotSchema = /* GraphQL */ `
     logic: String
     action: String
     section: String
+    join: String
   }
   input indicatorSettings {
     indicatorLength: Int
@@ -5002,6 +5305,9 @@ export const BotSchema = /* GraphQL */ `
     factor: Float
     atrLength: Float
     stCondition: String
+    smoothing: String
+    smoothingLength: Int
+    smoothingCompare: String
     pcUp: String
     pcDown: String
     pcCondition: String
@@ -5026,10 +5332,19 @@ export const BotSchema = /* GraphQL */ `
     dcValue: String
     sessionDays: [Int]
     sessionRule: String
+    sessionStart: String
+    sessionEnd: String
+    sessionTimezone: String
+    sessionLevelA: String
+    sessionLevelB: String
     lwMaxDuration: String
     lwThreshold: StringOrNumber
     lwValue: StringOrNumber
     lwCondition: String
+    oteLeftBars: StringOrNumber
+    oteMinLegSize: StringOrNumber
+    oteLevel: StringOrNumber
+    oteLeg: String
   }
   enum IndicatorSection {
     sl
@@ -5076,6 +5391,8 @@ export const BotSchema = /* GraphQL */ `
     dcaVolumeRequiredChangeRef: String
     dcaVolumeMaxValue: String
     skipBalanceCheck: Boolean
+    # Short spot when free base is short: require (refuse, default) | auto (use free base, buy the shortfall) | botOnly (always buy). main-app spec 044
+    baseFunding: String
     baseSlOn: String
     closeByTimer: Boolean
     closeByTimerValue: Float
@@ -5148,6 +5465,7 @@ export const BotSchema = /* GraphQL */ `
     useDca: Boolean!
     hodlAt: String
     hodlHourly: Boolean
+    hodlWeekdays: [Int]
     hodlDay: String
     hodlNextBuy: Float
     exchange: Exchange
@@ -5169,6 +5487,7 @@ export const BotSchema = /* GraphQL */ `
     cooldownAfterDealStopInterval: Int
     cooldownAfterDealStartOption: String
     cooldownAfterDealStopOption: String
+    cooldownAfterDealStopTrigger: String
     moveSL: Boolean
     moveSLTrigger: String
     moveSLValue: String
@@ -5191,6 +5510,8 @@ export const BotSchema = /* GraphQL */ `
     closeAfterX: String
     useMulti: Boolean
     maxDealsPerPair: String
+    singlePosition: Boolean
+    maxPositionEntries: String
     ignoreStartDeals: Boolean
     comboTpBase: String
     comboSmartGridsCount: String
@@ -5300,6 +5621,8 @@ export const BotSchema = /* GraphQL */ `
     dcaVolumeRequiredChangeRef: String
     dcaVolumeMaxValue: String
     skipBalanceCheck: Boolean
+    # Short spot when free base is short: require (refuse, default) | auto (use free base, buy the shortfall) | botOnly (always buy). main-app spec 044
+    baseFunding: String
     baseSlOn: String
     closeByTimer: Boolean
     closeByTimerValue: Float
@@ -5372,6 +5695,7 @@ export const BotSchema = /* GraphQL */ `
     useDca: Boolean!
     hodlAt: String
     hodlHourly: Boolean
+    hodlWeekdays: [Int]
     hodlDay: String
     hodlNextBuy: Float
     exchange: Exchange
@@ -5393,6 +5717,7 @@ export const BotSchema = /* GraphQL */ `
     cooldownAfterDealStopInterval: Int
     cooldownAfterDealStartOption: String
     cooldownAfterDealStopOption: String
+    cooldownAfterDealStopTrigger: String
     moveSL: Boolean
     moveSLTrigger: String
     moveSLValue: String
@@ -5432,6 +5757,12 @@ export const BotSchema = /* GraphQL */ `
     closeDealType: CloseDCATypeEnum
     closeOrderType: OrderTypeEnum
     dcaByMarket: Boolean
+    """
+    Raise a Base/DCA order below the exchange minimum instead of refusing the
+    deal. Also carries a hedge DCA side, which both hedge inputs type as a combo
+    input. See createDCABotInput.
+    """
+    allowRaiseToExchangeMin: Boolean
     terminalDealType: TerminalDealTypeEnum
     useMultiTp: Boolean
     multiTp: [inputMultiTP]
@@ -5500,6 +5831,8 @@ export const BotSchema = /* GraphQL */ `
     dcaVolumeRequiredChangeRef: String
     dcaVolumeMaxValue: String
     skipBalanceCheck: Boolean
+    # Short spot when free base is short: require (refuse, default) | auto (use free base, buy the shortfall) | botOnly (always buy). main-app spec 044
+    baseFunding: String
     baseSlOn: String
     closeByTimer: Boolean
     closeByTimerValue: Float
@@ -5572,6 +5905,7 @@ export const BotSchema = /* GraphQL */ `
     useDca: Boolean
     hodlAt: String
     hodlHourly: Boolean
+    hodlWeekdays: [Int]
     hodlDay: String
     hodlNextBuy: Float
     maxNumberOfOpenDeals: String
@@ -5589,6 +5923,7 @@ export const BotSchema = /* GraphQL */ `
     cooldownAfterDealStopInterval: Int
     cooldownAfterDealStartOption: String
     cooldownAfterDealStopOption: String
+    cooldownAfterDealStopTrigger: String
     moveSL: Boolean
     moveSLTrigger: String
     moveSLValue: String
@@ -5610,6 +5945,9 @@ export const BotSchema = /* GraphQL */ `
     closeAfterXprofitCond: String
     closeAfterX: String
     maxDealsPerPair: String
+    singlePosition: Boolean
+    maxPositionEntries: String
+    adoptOpenDeals: Boolean
     ignoreStartDeals: Boolean
     comboTpBase: String
     comboSmartGridsCount: String
@@ -5683,6 +6021,8 @@ export const BotSchema = /* GraphQL */ `
     dcaVolumeRequiredChangeRef: String
     dcaVolumeMaxValue: String
     skipBalanceCheck: Boolean
+    # Short spot when free base is short: require (refuse, default) | auto (use free base, buy the shortfall) | botOnly (always buy). main-app spec 044
+    baseFunding: String
     baseSlOn: String
     closeByTimer: Boolean
     closeByTimerValue: Float
@@ -5755,6 +6095,7 @@ export const BotSchema = /* GraphQL */ `
     useDca: Boolean
     hodlAt: String
     hodlHourly: Boolean
+    hodlWeekdays: [Int]
     hodlDay: String
     hodlNextBuy: Float
     maxNumberOfOpenDeals: String
@@ -5772,6 +6113,7 @@ export const BotSchema = /* GraphQL */ `
     cooldownAfterDealStopInterval: Int
     cooldownAfterDealStartOption: String
     cooldownAfterDealStopOption: String
+    cooldownAfterDealStopTrigger: String
     moveSL: Boolean
     moveSLTrigger: String
     moveSLValue: String
@@ -5810,6 +6152,12 @@ export const BotSchema = /* GraphQL */ `
     closeDealType: CloseDCATypeEnum
     closeOrderType: OrderTypeEnum
     dcaByMarket: Boolean
+    """
+    Raise a Base/DCA order below the exchange minimum instead of refusing the
+    deal. Also carries a hedge DCA side, which both hedge inputs type as a combo
+    input. See createDCABotInput.
+    """
+    allowRaiseToExchangeMin: Boolean
     orderSizeType: OrderSizeTypeEnum
     useMultiTp: Boolean
     multiTp: [inputMultiTP]
@@ -5926,6 +6274,9 @@ export const BotSchema = /* GraphQL */ `
   input deleteBotMessageInput {
     id: String
   }
+  input markBotMessageReadInput {
+    id: String
+  }
   enum botTypeEnum {
     grid
     dca
@@ -5942,6 +6293,10 @@ export const BotSchema = /* GraphQL */ `
     reason: String
   }
   type deleteBotMessageResponse implements BasicResponse {
+    status: Status
+    reason: String
+  }
+  type markBotMessageReadResponse implements BasicResponse {
     status: Status
     reason: String
   }
@@ -5966,6 +6321,7 @@ export const BotSchema = /* GraphQL */ `
     timezone: String
     timeframe: Int
     terminal: Boolean
+    exchangeUUIDs: [String]
   }
   input getPortfolioByUser {
     timezone: String
@@ -6031,6 +6387,19 @@ export const BotSchema = /* GraphQL */ `
   }
   input mergeDealsInput {
     botId: String!
+    dealIds: [String!]!
+    "Merged deal takes the bot's take profit. Omitted: only an indicator or webhook close carries over."
+    useTp: Boolean
+    "Merged deal takes the bot's stop loss. Omitted: only an indicator or webhook close carries over."
+    useSl: Boolean
+    "Merged deal restarts the bot's DCA ladder from the merged average (percentage ladders sized in quote or base only)."
+    useDca: Boolean
+    "Levels of that ladder, capped at the bot's. Omitted: the bot's."
+    dcaOrders: Int
+  }
+  input adoptDealsInput {
+    botId: String!
+    targetDealId: String!
     dealIds: [String!]!
   }
   type mergeDealsResponse implements BasicResponse {
