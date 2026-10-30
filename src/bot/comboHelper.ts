@@ -3997,6 +3997,7 @@ function createComboBotHelper<
       sl = false,
       closeTrigger?: DCACloseTriggerEnum,
       count = 0,
+      holdingCloseLock = false,
     ) {
       const args = [
         botId,
@@ -4011,6 +4012,7 @@ function createComboBotHelper<
         sl,
         closeTrigger,
         count,
+        holdingCloseLock,
       ] as const
       const tracked =
         (closeType === CloseDCATypeEnum.closeByMarket ||
@@ -6106,6 +6108,8 @@ function createComboBotHelper<
           const d = this.getDeal(dealId)
           if (d) {
             await this.checkDealSlMethods(d)
+            // Spec 204 §1.5, as DCA's `startDeal`.
+            await this.setCloseByTimer(d.deal)
           }
         })
         await this.placeFeeOrder(this.botId, dealId, orderBo.clientOrderId)
@@ -6872,6 +6876,20 @@ function createComboBotHelper<
         const reserved = this.isLong
           ? await this.reservedFundingQuote(ed.quoteAsset.name)
           : await this.reservedFundingBase(ed.baseAsset.name)
+        if (reserved === null) {
+          // What they hold could not be read — not "nothing": like an
+          // unreadable balance, the deal is not opened this cycle.
+          this.handleDebug(
+            'Cannot read what bot-funded deals hold, bypass check balance',
+          )
+          return {
+            status: false,
+            required: 0,
+            available: 0,
+            price: 0,
+            unknown: true,
+          }
+        }
         if (reserved > 0) {
           available = Math.max(0, available - reserved)
         }
@@ -7971,6 +7989,10 @@ function createComboBotHelper<
               if (baseOrder.clientOrderId !== result.clientOrderId) {
                 baseOrder.clientOrderId = result.clientOrderId
               }
+              // A Combo entry arms no base-order timer, so a CANCELED answer
+              // to the send is a report of the venue's cancel the deal must
+              // not wait on the order queue for. Spec 205.
+              this.checkUnfilledBaseEntryCancel(result)
             }
           }
         }
@@ -8370,6 +8392,12 @@ function createComboBotHelper<
       )
       await this.checkDealsForStopLossMethods()
       this.checkDealsPriceExtremum()
+    }
+    /** Spec 204 §1.4: a timer close uses the deal close type, as the TP does. */
+    protected override timerCloseOrder(settings: { comboTpLimit?: boolean }) {
+      return settings.comboTpLimit
+        ? { closeType: CloseDCATypeEnum.closeByLimit, forceMarket: false }
+        : { closeType: CloseDCATypeEnum.closeByMarket, forceMarket: true }
     }
     async triggerStopLossCombo(
       dealId: string,
@@ -9392,6 +9420,8 @@ function createComboBotHelper<
           if (dealMinigrids.length === 0) {
             this.handleDebug(`Deal doesn't have active minigrid`)
           }
+          // Spec 204 §1.5: timers do not survive a stop; re-arm, as DCA does.
+          await this.setCloseByTimer(d.deal)
           if (!serviceRestart) {
             this.updateDealBalances(d)
             d.deal = {

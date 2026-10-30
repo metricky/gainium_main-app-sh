@@ -11,10 +11,15 @@ import {
   IndicatorStartConditionEnum,
   MAEnum,
   SessionLevelEnum,
+  SqzMomentumEnum,
+  SqzSignalEnum,
 } from '../../../types'
 import type { SettingsIndicators } from '../../../types'
 import {
+  divergenceRangeInvalid,
+  priceChangeRangeProblem,
   indicatorLengthOf,
+  isAdxDmi,
   isSessionLevels,
   referenceSubscription,
 } from './config'
@@ -81,6 +86,11 @@ export const INDICATOR_CONDITION_KINDS: Record<
   [IndicatorEnum.session]: { source: 'clock' },
   [IndicatorEnum.lw]: { source: 'room' },
   [IndicatorEnum.ote]: { source: 'room' },
+  [IndicatorEnum.kdj]: { source: 'room' },
+  [IndicatorEnum.vwap]: { source: 'room' },
+  [IndicatorEnum.candle]: { source: 'room', newestBarOnly: true },
+  [IndicatorEnum.ob]: { source: 'room' },
+  [IndicatorEnum.sqz]: { source: 'room' },
 }
 
 /**
@@ -131,6 +141,11 @@ const OWN_RULE_TYPES = [
   IndicatorEnum.pc,
   IndicatorEnum.lw,
   IndicatorEnum.ote,
+  IndicatorEnum.kdj,
+  IndicatorEnum.vwap,
+  IndicatorEnum.candle,
+  IndicatorEnum.ob,
+  IndicatorEnum.sqz,
   IndicatorEnum.st,
   IndicatorEnum.div,
   IndicatorEnum.qfl,
@@ -157,7 +172,67 @@ export function conditionSettingsGaps(
   if (!i.indicatorInterval)
     gaps.push({ field: 'indicatorInterval', message: 'Choose a timeframe.' })
   gaps.push(...smoothingSettingsGaps(i))
+  if (type === IndicatorEnum.kdj) {
+    // kdjCondition: missing line = k, compare-to = d; the same line on both
+    // sides never fires
+    if ((i.kdjLine ?? 'k') === (i.kdjCompareTo ?? 'd'))
+      gaps.push({
+        field: 'kdjCompareTo',
+        message: 'Choose a different line or a level to compare with.',
+      })
+    return gaps
+  }
+  if (type === IndicatorEnum.sqz) {
+    // squeezeCondition: missing signal = fired, momentum = positive; both
+    // 'any' never fires
+    if (
+      (i.sqzSignal ?? SqzSignalEnum.fired) === SqzSignalEnum.any &&
+      (i.sqzMomentum ?? SqzMomentumEnum.positive) === SqzMomentumEnum.any
+    )
+      gaps.push({
+        field: 'sqzMomentum',
+        message: 'Choose a squeeze state or a momentum.',
+      })
+    return gaps
+  }
+  if (type === IndicatorEnum.ob) {
+    // orderBlockCondition: missing condition = cd; only cd/cu/gt/lt fire
+    if (
+      indicatorCondition !== undefined &&
+      indicatorCondition !== IndicatorStartConditionEnum.cd &&
+      indicatorCondition !== IndicatorStartConditionEnum.cu &&
+      indicatorCondition !== IndicatorStartConditionEnum.gt &&
+      indicatorCondition !== IndicatorStartConditionEnum.lt
+    )
+      gaps.push({ field: 'indicatorCondition', message: 'Choose a condition.' })
+    return gaps
+  }
+  if (type === IndicatorEnum.pc) {
+    // priceChangeCondition: bw needs pcValue2 with pcValue's sign and a
+    // different size, else it never fires
+    const problem = priceChangeRangeProblem(i)
+    if (problem) gaps.push({ field: 'pcValue2', message: problem })
+    return gaps
+  }
+  if (divergenceRangeInvalid(i)) {
+    gaps.push({
+      field: 'divRangeUpper',
+      message: 'The upper range must be above the lower range.',
+    })
+    return gaps
+  }
   if (OWN_RULE_TYPES.includes(type)) return gaps
+  if (isAdxDmi(i)) {
+    // DMI mode reads +DI against −DI only; indicatorValue is not read
+    if (
+      indicatorCondition !== IndicatorStartConditionEnum.cd &&
+      indicatorCondition !== IndicatorStartConditionEnum.cu &&
+      indicatorCondition !== IndicatorStartConditionEnum.gt &&
+      indicatorCondition !== IndicatorStartConditionEnum.lt
+    )
+      gaps.push({ field: 'indicatorCondition', message: 'Choose a condition.' })
+    return gaps
+  }
   if (isSessionLevels(i)) {
     // sessionLevelsCondition: missing A = price, B = prevHigh, condition = cu
     const levels = Object.values(SessionLevelEnum) as string[]

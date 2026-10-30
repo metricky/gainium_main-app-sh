@@ -192,6 +192,15 @@ response = requests.post(
 
 ### Replace a Bot's Indicators
 `indicators` and `indicatorGroups` are **full replacements** on update and clone: send the complete list the bot should have. Keep an existing indicator by sending it back with its `uuid` (a read-modify-write of the bot's current list works as-is); `[]` removes all. The result must stay consistent with the bot's settings — e.g. `startCondition: "TechnicalIndicators"` needs a `startDeal` indicator, `dcaCondition: "indicators"` needs a `startDca` indicator in section `dca` — otherwise the call returns 400 with an `errors` list.
+
+Some indicators have modes that change what the condition reads — check the type's definition (`GET /api/v2/discovery/indicators/{type}`) before building one:
+- `ADX` with `adxMode: "dmi"` compares +DI with −DI (`indicatorCondition` cu/cd/gt/lt); `indicatorValue` is not read.
+- `MA` (like `MAR`) with `trendFilter: true` also requires the average to trend (`trendFilterLookback`, `trendFilterType`, `trendFilterValue`).
+- `KDJ` compares `kdjLine` with `kdjCompareTo` (another line, or `custom` = `indicatorValue`); `VWAP` compares the close with `vwapLine` of the period set by `vwapAnchor`.
+- `CANDLE` is N candles of one colour in a row (`candleSource`, `candleColor`, `candleCount`, `candleTrigger`); `SQZ` is a squeeze state AND a momentum (`sqzSignal`, `sqzMomentum`; both `any` never fires; `sqzBBMult` defaults to 1.5, as the chart TradingView displays). Neither reads `indicatorCondition` or `indicatorValue`.
+- `PC` (Price Change) reads the latest candle's move from its open, in percent: `pcValue` > 0 = the move up to the high, < 0 = the move down to the low. `pcCompare` `gt` (default) = greater than |pcValue|, `lt` = lower than, `bw` = between |pcValue| and |pcValue2| (same sign, e.g. `"2"` and `"5"`, or `"-2"` and `"-5"`).
+- `OB` compares the close (`indicatorCondition` cu/cd/gt/lt) with `obLevel` of the latest `obSide` order block; no active block = no signal.
+- `DIV` takes optional pivot settings (`divPivotLeft`, `divPivotRight`, `divRangeLower` < `divRangeUpper`); leave them out for the defaults. `SESSION` Price levels runs only during the session unless `sessionLevelsActive` is `outside` or `always` (then a crossing of the price with a `prev*` level also fires on the first candle after the session, e.g. a Monday range broken on Tuesday 00:00).
 ```python
 response = requests.put(
     "https://api.gainium.io/api/v2/bots/dca/550e8400-e29b-41d4-a716-446655440000",

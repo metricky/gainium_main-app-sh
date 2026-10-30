@@ -20,12 +20,29 @@
  *    consumed.
  */
 import { gt, lt, lte, gte, eq } from '@gainium/indicators'
-import { oteCondition, sessionLevelsCondition } from '@gainium/indicators'
+import {
+  candleCondition,
+  dmiCondition,
+  kdjCondition,
+  orderBlockCondition,
+  priceChangeCondition,
+  squeezeCondition,
+  oteCondition,
+  sessionLevelsCondition,
+  trendFilterCondition,
+  vwapCondition,
+} from '@gainium/indicators'
 import type {
+  ADXResult,
+  CandleResult,
+  KDJResult,
+  OrderBlockResult,
+  SqueezeResult,
   OBFVGResult,
   LongWickResult,
   OTEResult,
   SessionLevelsResult,
+  VWAPResult,
 } from '@gainium/indicators'
 import type {
   DIVResult,
@@ -47,7 +64,6 @@ import {
   MAEnum,
   OBFVGRefEnum,
   OBFVGValueEnum,
-  PCConditionEnum,
   SRCrossingEnum,
   STConditionEnum,
   StochRangeEnum,
@@ -60,6 +76,7 @@ import {
   timeIntervalMap,
 } from '../../../types'
 import { getSmoothingMode, smoothingLineOperands } from './smoothing'
+import { isAdxDmi } from './config'
 import type {
   IndicatorHistory,
   MAResult,
@@ -155,6 +172,8 @@ export function evaluateIndicatorCondition(
     trendFilterType,
     stCondition,
     pcValue,
+    pcValue2,
+    pcCompare,
     ppValue,
     ppType,
     dcValue,
@@ -166,6 +185,18 @@ export function evaluateIndicatorCondition(
     oteLeg,
     sessionLevelA,
     sessionLevelB,
+    kdjLine,
+    kdjCompareTo,
+    vwapLine,
+    vwapBandMultiplier,
+    candleColor,
+    candleCount,
+    candleTrigger,
+    obSide,
+    obLevel,
+    sqzSignal,
+    sqzMomentum,
+    sessionLevelsActive,
   } = find
   const uuid = find.uuid
   const { symbol, showLog } = ctx
@@ -283,21 +314,24 @@ export function evaluateIndicatorCondition(
                   : bullLt
               : false
   } else if (type === IndicatorEnum.pc) {
-    const pcCondition =
-      +(pcValue ?? '5') > 0 ? PCConditionEnum.up : PCConditionEnum.down
     const [last] = [...data].sort((a, b) => b.time - a.time)
-    action =
-      (pcCondition === PCConditionEnum.down && (last.value as PCResult).down) ||
-      (pcCondition === PCConditionEnum.up && (last.value as PCResult).up)
+    const pc = last?.value as PCResult
+    action = priceChangeCondition(pc, {
+      value: pcValue,
+      value2: pcValue2,
+      compare: pcCompare,
+    })
     if (action && showLog) {
       ctx.debug(
         `${uuid}@${type}@${indicatorInterval}@${
           ctx.exchange
-        }@${symbol} trigger action: up: ${(last.value as PCResult).up}, down: ${
-          (last.value as PCResult).down
-        }, condition: ${pcCondition}, last time ${new Date(
-          lastTime,
-        )?.toISOString()}`,
+        }@${symbol} trigger action: up: ${pc.up}, down: ${
+          pc.down
+        }, upPct: ${pc.upPct}, downPct: ${pc.downPct}, value: ${
+          pcValue ?? '5'
+        }, value2: ${pcValue2}, compare: ${
+          pcCompare ?? 'gt'
+        }, last time ${new Date(lastTime)?.toISOString()}`,
       )
     }
   } else if (type === IndicatorEnum.lw) {
@@ -334,6 +368,62 @@ export function evaluateIndicatorCondition(
       leg: oteLeg,
       condition: indicatorCondition,
     })
+  } else if (type === IndicatorEnum.vwap) {
+    // the close against the VWAP or a band; the decision lives in
+    // @gainium/indicators so the backtester fires on the same bars
+    const [ld, pd] = sortedByTime
+    action = vwapCondition(ld?.value as VWAPResult, pd?.value as VWAPResult, {
+      line: vwapLine,
+      bandMultiplier: vwapBandMultiplier ?? 1,
+      condition: indicatorCondition,
+    })
+  } else if (type === IndicatorEnum.kdj) {
+    // a KDJ line against another line or the level indicatorValue, with
+    // Stochastic's zone filter; shared with the backtester
+    const [ld, pd] = sortedByTime
+    action = kdjCondition(ld?.value as KDJResult, pd?.value as KDJResult, {
+      line: kdjLine,
+      compareTo: kdjCompareTo,
+      level: indicatorValue,
+      condition: indicatorCondition,
+      zone: stochRange,
+      stochUpper,
+      stochLower,
+    })
+  } else if (type === IndicatorEnum.candle) {
+    // N candles of a colour in a row (regular or Heikin Ashi); the decision
+    // lives in @gainium/indicators so the backtester fires on the same bars
+    const [ld, pd] = sortedByTime
+    action = candleCondition(
+      ld?.value as CandleResult,
+      pd?.value as CandleResult,
+      { color: candleColor, count: candleCount, trigger: candleTrigger },
+    )
+  } else if (type === IndicatorEnum.ob) {
+    // the close against a level of the latest bullish / bearish order
+    // block; a crossing needs the same block on both bars. Shared with the
+    // backtester
+    const [ld, pd] = sortedByTime
+    action = orderBlockCondition(
+      ld?.value as OrderBlockResult,
+      pd?.value as OrderBlockResult,
+      { side: obSide, level: obLevel, condition: indicatorCondition },
+    )
+  } else if (type === IndicatorEnum.sqz) {
+    // squeeze state AND momentum; shared with the backtester
+    const [ld, pd] = sortedByTime
+    action = squeezeCondition(
+      ld?.value as SqueezeResult,
+      pd?.value as SqueezeResult,
+      { signal: sqzSignal, momentum: sqzMomentum },
+    )
+  } else if (isAdxDmi(find)) {
+    // ADX in DMI mode: +DI against −DI, indicatorValue is not read; shared
+    // with the backtester
+    const [ld, pd] = sortedByTime
+    action = dmiCondition(ld?.value as ADXResult, pd?.value as ADXResult, {
+      condition: indicatorCondition,
+    })
   } else if (type === IndicatorEnum.session) {
     // Price levels (the only Session rule evaluated from room bars; in / out
     // are the bot's clock filter). The decision lives in @gainium/indicators
@@ -342,7 +432,13 @@ export function evaluateIndicatorCondition(
     action = sessionLevelsCondition(
       ld?.value as SessionLevelsResult,
       pd?.value as SessionLevelsResult,
-      { a: sessionLevelA, b: sessionLevelB, condition: indicatorCondition },
+      {
+        a: sessionLevelA,
+        b: sessionLevelB,
+        condition: indicatorCondition,
+        // missing = only inside the session, as before
+        active: sessionLevelsActive,
+      },
     )
   } else if (type === IndicatorEnum.st) {
     const [ld, pd] = sortedByTime
@@ -644,6 +740,14 @@ export function evaluateIndicatorCondition(
     ) {
       last = lastData.value.ma
       prev = prevData.value.ma
+      if (trendFilter) {
+        // the Moving Average's trend filter (its room is MATrendFilter):
+        // the shared gate, ANDed with the comparison below
+        trendFilterAction = trendFilterCondition(lastData.value, {
+          trendFilterType,
+        })
+        trendValue = lastData.value.trend
+      }
       if (maCrossingValue === MAEnum.price) {
         value = lastData.value.price
         prevValue = prevData.value.price
@@ -992,6 +1096,22 @@ export function evaluateIndicatorCondition(
         )?.toISOString()}`,
       )
     }
+  }
+
+  if (
+    trendFilter &&
+    (type === IndicatorEnum.vwap ||
+      type === IndicatorEnum.kdj ||
+      type === IndicatorEnum.candle ||
+      type === IndicatorEnum.ob ||
+      type === IndicatorEnum.sqz ||
+      isAdxDmi(find))
+  ) {
+    // A leftover trendFilter on VWAP, KDJ, DMI, Candle colour, Order Blocks
+    // or Squeeze Momentum keeps the condition false,
+    // as the backtester's catch-all trend gate does (these results carry no
+    // trend code) and as an ADX with trendFilter already behaves here.
+    action = false
   }
 
   return { action, compared: reported }

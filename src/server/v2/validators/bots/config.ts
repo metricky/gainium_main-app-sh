@@ -5,6 +5,7 @@ import {
   BotStatusEnum,
   LWConditionEnum,
   OTELegEnum,
+  ADXModeEnum,
   CloseConditionEnum,
   CloseDCATypeEnum,
   BaseFundingEnum,
@@ -63,10 +64,33 @@ import {
 } from '../../../../../types'
 import { CONDITION_INDICATOR_TYPES } from '../../../../indicators/conditions/catalog'
 import {
+  KDJLineEnum as IndicatorsKDJLineEnum,
+  VWAPAnchorEnum as IndicatorsVWAPAnchorEnum,
+  VWAPLineEnum as IndicatorsVWAPLineEnum,
+  CandleSourceEnum as IndicatorsCandleSourceEnum,
+  CandleColorEnum as IndicatorsCandleColorEnum,
+  CandleTriggerEnum as IndicatorsCandleTriggerEnum,
+  OBSideEnum as IndicatorsOBSideEnum,
+  OBLevelEnum as IndicatorsOBLevelEnum,
+  SqzSignalEnum as IndicatorsSqzSignalEnum,
+  SqzMomentumEnum as IndicatorsSqzMomentumEnum,
+  SessionLevelsActiveEnum as IndicatorsSessionLevelsActiveEnum,
+  PCCompareEnum as IndicatorsPCCompareEnum,
+} from '@gainium/indicators'
+import {
   COMBO_FORM_DEFAULTS,
   DCA_FORM_DEFAULTS,
   GRID_FORM_DEFAULTS,
 } from '../../botDefaults'
+
+/**
+ * MA types for the Bollinger, MACD and Keltner averages. McGinley Dynamic is
+ * a Moving Average / MA Ratio type only: those indicators' classes would
+ * compute it as an EMA.
+ */
+const BASIS_MA_TYPES = Object.values(MAEnum).filter(
+  (t) => t !== MAEnum.mcginley,
+)
 
 /** Conditions that compare against one value — `bw` needs two. */
 const SINGLE_VALUE_CONDITIONS = Object.values(
@@ -612,7 +636,7 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
   bbwMa: {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
-    enum: Object.values(MAEnum),
+    enum: BASIS_MA_TYPES,
   },
   bbwMaLength: {
     required: false,
@@ -641,12 +665,12 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
   macdMaSource: {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
-    enum: Object.values(MAEnum),
+    enum: BASIS_MA_TYPES,
   },
   macdMaSignal: {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
-    enum: Object.values(MAEnum),
+    enum: BASIS_MA_TYPES,
   },
   divOscillators: {
     required: false,
@@ -735,6 +759,20 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
       ValidatorsEnum.shouldBeValidNumber,
     ],
   },
+  // Price Change: gt (missing) / lt / bw against |pcValue| (and |pcValue2|)
+  pcCompare: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsPCCompareEnum),
+  },
+  // Price Change: the second bound for bw (same sign as pcValue)
+  pcValue2: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeString,
+      ValidatorsEnum.shouldBeValidNumber,
+    ],
+  },
   ppHighLeft: {
     required: false,
     validators: [
@@ -809,7 +847,7 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
   kcMa: {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
-    enum: Object.values(MAEnum),
+    enum: BASIS_MA_TYPES,
   },
   kcRange: {
     required: false,
@@ -939,6 +977,209 @@ export const indicatorCoreConfig: Record<string, NestedFieldConfig> = {
     required: false,
     validators: [ValidatorsEnum.shouldBeValidEnumValue],
     enum: Object.values(OTELegEnum),
+  },
+  // ADX: 'dmi' = +DI against −DI (indicatorValue is not read)
+  adxMode: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(ADXModeEnum),
+  },
+  // KDJ: allowed lines are the indicators package's own
+  kdjLength: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+  },
+  kdjKSmooth: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+  },
+  kdjDSmooth: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+  },
+  kdjLine: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsKDJLineEnum),
+  },
+  kdjCompareTo: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: [...Object.values(IndicatorsKDJLineEnum), 'custom'],
+  },
+  // VWAP: allowed anchors and lines are the indicators package's own
+  vwapAnchor: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsVWAPAnchorEnum),
+  },
+  vwapLine: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsVWAPLineEnum),
+  },
+  vwapBandMultiplier: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+    ],
+  },
+  // Candle colour: allowed values are the indicators package's own
+  candleSource: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsCandleSourceEnum),
+  },
+  candleColor: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsCandleColorEnum),
+  },
+  candleCount: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 1,
+    max: 50,
+  },
+  candleTrigger: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsCandleTriggerEnum),
+  },
+  // Order Blocks (indicatorCondition cu / cd / gt / lt)
+  obSwingLength: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 2,
+    max: 50,
+  },
+  obSide: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsOBSideEnum),
+  },
+  obLevel: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsOBLevelEnum),
+  },
+  // Squeeze Momentum: lengths whole, multipliers may have decimals
+  sqzLength: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 2,
+    max: 500,
+  },
+  sqzBBMult: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+    ],
+    min: 0.1,
+    max: 10,
+  },
+  sqzKCLength: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 2,
+    max: 500,
+  },
+  sqzKCMult: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+    ],
+    min: 0.1,
+    max: 10,
+  },
+  sqzSignal: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsSqzSignalEnum),
+  },
+  sqzMomentum: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsSqzMomentumEnum),
+  },
+  // Divergence pivots / range (missing = 3 / 1 / 1 / 60); the lower range
+  // must be below the upper one (checked across fields)
+  divPivotLeft: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 1,
+    max: 50,
+  },
+  divPivotRight: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 1,
+    max: 50,
+  },
+  divRangeLower: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 1,
+    max: 500,
+  },
+  divRangeUpper: {
+    required: false,
+    validators: [
+      ValidatorsEnum.shouldBeNumber,
+      ValidatorsEnum.shouldBePositive,
+      ValidatorsEnum.shouldBeInteger,
+    ],
+    min: 2,
+    max: 500,
+  },
+  // Session Price levels: where the condition is evaluated (missing = session)
+  sessionLevelsActive: {
+    required: false,
+    validators: [ValidatorsEnum.shouldBeValidEnumValue],
+    enum: Object.values(IndicatorsSessionLevelsActiveEnum),
   },
   percentile: {
     required: false,

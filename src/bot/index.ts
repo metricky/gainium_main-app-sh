@@ -4,6 +4,8 @@ import { v4 } from 'uuid'
 import { Worker, isMainThread, threadId } from 'worker_threads'
 import logger from '../utils/logger'
 import {
+  malformedWebhookFields,
+  malformedWebhookFieldsReason,
   missingWebhookFields,
   missingWebhookFieldsReason,
   webhookBotNotRunningReason,
@@ -160,6 +162,18 @@ import {
   buildDealListFilter,
   dealListTotalsPipeline,
 } from './dealListFilter'
+import {
+  CLOSED_DEAL_STATUSES,
+  CLOSED_GRID_STATUSES,
+  GRID_AS_DEAL_STAGE,
+  closedTradeSort,
+  keysFacet,
+  mergeClosedTradeKeys,
+  withStatuses,
+  withWorkingTimeTotal,
+  type ClosedTradeKey,
+  type ClosedTradeKind,
+} from './closedTradeList'
 import RabbitClient from '../db/rabbit'
 import {
   botDb,
@@ -1523,6 +1537,7 @@ class Bot<T extends UserSchema = UserSchema> {
 
   /** Stored status of the non-deleted bot holding a webhook uuid, if any. */
   private async webhookBotStatus(uuid: string): Promise<string | undefined> {
+    if (typeof uuid !== 'string') return undefined
     const filter = { uuid, isDeleted: { $ne: true } }
     for (const db of [
       this.dcaBotDb,
@@ -1956,6 +1971,172 @@ class Bot<T extends UserSchema = UserSchema> {
       },
       total: request.data.count,
       [DEAL_TOTALS_ARGS]: { combo: true, search },
+    }
+  }
+
+  /**
+   * The Trades page's closed trades — closed DCA, terminal and combo deals and
+   * stopped grid bots — as one list paged on the server (spec 200).
+   */
+  public async getClosedTradeListGraphQl(
+    user: ExcludeDoc<UserSchema>,
+    paperContext?: boolean,
+    dataGridFilter?: DataGridFilterInput,
+  ) {
+    const userId = user._id.toString()
+    const context = paperContext ? { $eq: true } : { $ne: true }
+    const dealInput = withStatuses(dataGridFilter, CLOSED_DEAL_STATUSES)
+    const dealScope = (terminal: boolean) => ({
+      paperContext: context,
+      type: terminal
+        ? { $eq: DCATypeEnum.terminal }
+        : { $nin: [DCATypeEnum.terminal] },
+      parentBotId: { $exists: false },
+    })
+    const [dca, terminal, combo] = await Promise.all([
+      this.dealListSearch(user, false, dealScope(false), dealInput),
+      this.dealListSearch(user, false, dealScope(true), dealInput),
+      this.dealListSearch(user, true, dealScope(false), dealInput),
+    ])
+    const grid = await buildDealListFilter(
+      withStatuses(dataGridFilter, CLOSED_GRID_STATUSES),
+      {
+        timezone: user.timezone,
+        botIdsByName: async (nameCond) => {
+          const bots = await this.botDb.readData(
+            { userId, ...nameCond } as never,
+            { _id: 1 },
+            {},
+            true,
+          )
+          return bots.status === StatusEnum.ok
+            ? bots.data.result.map((b) => `${b._id}`)
+            : []
+        },
+      },
+    )
+    const { skip, limit: requested } = dca.built
+    const limit = Math.min(500, requested ?? 500)
+    const { field, dir } = closedTradeSort(dca.built.sort)
+    type KeysFacet = {
+      rows: { _id: unknown; k?: number | null }[]
+      total: { n: number }[]
+    }
+    const keysOf =
+      (db: typeof this.dcaDealsDb) => (pipeline: PipelineStage[]) =>
+        db.aggregate<KeysFacet>(pipeline)
+    const sources: {
+      kind: ClosedTradeKind
+      run: ReturnType<typeof keysOf>
+      match: PipelineStage[]
+    }[] = [
+      {
+        kind: 'dca',
+        run: keysOf(this.dcaDealsDb),
+        match: [{ $match: dca.search }],
+      },
+      {
+        kind: 'terminal',
+        run: keysOf(this.dcaDealsDb),
+        match: [{ $match: terminal.search }],
+      },
+      {
+        kind: 'combo',
+        run: keysOf(this.comboDealsDb as unknown as typeof this.dcaDealsDb),
+        match: [{ $match: combo.search }],
+      },
+      {
+        kind: 'grid',
+        run: keysOf(this.botDb as unknown as typeof this.dcaDealsDb),
+        match: [
+          {
+            $match: { userId, paperContext: context, isDeleted: { $ne: true } },
+          },
+          GRID_AS_DEAL_STAGE,
+          { $match: grid.filter },
+        ],
+      },
+    ]
+    const facets = await Promise.all(
+      sources.map((s) => s.run(keysFacet(s.match, field, dir, skip + limit))),
+    )
+    const keys: ClosedTradeKey[] = []
+    let total = 0
+    for (const [i, res] of facets.entries()) {
+      if (res.status === StatusEnum.notok) return res
+      const facet = res.data.result[0]
+      total += facet?.total[0]?.n ?? 0
+      for (const r of facet?.rows ?? []) {
+        keys.push({ kind: sources[i].kind, id: `${r._id}`, k: r.k ?? null })
+      }
+    }
+    const page = mergeClosedTradeKeys(keys, dir, skip, limit)
+    const idsOf = (kind: ClosedTradeKind) =>
+      page.filter((r) => r.kind === kind).map((r) => r.id)
+
+    const withBotNames = async (
+      dealDb: typeof this.dcaDealsDb,
+      namesDb: typeof this.dcaBotDb,
+      ids: string[],
+    ) => {
+      if (!ids.length) return []
+      const deals = await dealDb.readData(
+        { _id: { $in: ids } } as never,
+        {},
+        {},
+        true,
+      )
+      if (deals.status === StatusEnum.notok) return []
+      const names = await namesDb.readData(
+        { _id: { $in: deals.data.result.map((d) => d.botId) } } as never,
+        { 'settings.name': 1, _id: 1 },
+        undefined,
+        true,
+      )
+      const nameOf = new Map(
+        (names.data?.result ?? []).map((b) => [`${b._id}`, b.settings.name]),
+      )
+      return deals.data.result.map((d) => {
+        delete d.__v
+        return {
+          ...d,
+          paperContext: !!paperContext,
+          botName: nameOf.get(d.botId) || '',
+        }
+      })
+    }
+    const gridIds = idsOf('grid')
+    const [dcaRows, terminalRows, comboRows, gridRows] = await Promise.all([
+      withBotNames(this.dcaDealsDb, this.dcaBotDb, idsOf('dca')),
+      withBotNames(this.dcaDealsDb, this.dcaBotDb, idsOf('terminal')),
+      withBotNames(
+        this.comboDealsDb as unknown as typeof this.dcaDealsDb,
+        this.comboBotDb as unknown as typeof this.dcaBotDb,
+        idsOf('combo'),
+      ),
+      gridIds.length
+        ? this.botDb.readData(
+            { _id: { $in: gridIds } } as never,
+            undefined,
+            {},
+            true,
+          )
+        : null,
+    ])
+    return {
+      status: StatusEnum.ok,
+      reason: null,
+      total,
+      data: {
+        order: page.map(({ kind, id }) => ({ kind, id })),
+        dca: dcaRows,
+        terminal: terminalRows,
+        combo: comboRows,
+        grid:
+          gridRows?.status === StatusEnum.ok
+            ? gridRows.data.result.map(withWorkingTimeTotal)
+            : [],
+      },
     }
   }
 
@@ -4054,7 +4235,9 @@ class Bot<T extends UserSchema = UserSchema> {
   ) {
     // Spec 044 beta gate.
     await coerceBaseFundingSetting(userId, _settings)
-    const { vars, ...rest } = _settings
+    // The bot uuid is the key a webhook signal is routed by, so the server
+    // mints it: a uuid supplied with the settings is dropped, never stored.
+    const { vars, uuid: _suppliedUuid, ...rest } = _settings
     // Same invariant as changeDCABot: a bot that scales DCA on atr/adr needs
     // the startDca indicator that prices its ladder, or it can never open a
     // deal. Seed it at creation so no client can produce one without. Bug #463.
@@ -4136,7 +4319,7 @@ class Bot<T extends UserSchema = UserSchema> {
       reason: null,
       data: {
         userId,
-        uuid: settings.uuid ?? v4(),
+        uuid: v4(),
         status: BotStatusEnum.closed,
         settings: { ...settings, type },
         exchange: settings.exchange,
@@ -7922,7 +8105,7 @@ class Bot<T extends UserSchema = UserSchema> {
 
   /** Bot type holding a webhook uuid, looked up in the order the API always used. */
   protected async webhookBotType(uuid?: string): Promise<BotType | undefined> {
-    if (!uuid) return undefined
+    if (!uuid || typeof uuid !== 'string') return undefined
     if ((await this.dcaBotDb.readData({ uuid }))?.data?.result) return BotType.dca
     if ((await this.comboBotDb.readData({ uuid }))?.data?.result)
       return BotType.combo
@@ -9557,7 +9740,25 @@ class Bot<T extends UserSchema = UserSchema> {
         options,
       )
     }
-    const findLocal = this.dcaBots.find((d) => d.id === botId && d.userId)
+    // Every deal being merged must belong to the caller. The deals may come
+    // from several of the caller's bots, so ownership is checked per user.
+    const ids = [...new Set((dealIds ?? []).map((d) => `${d}`))]
+    if (!ids.length) {
+      return this.entityNotFound('Deal')
+    }
+    const owned = await this.dcaDealsDb.countData({
+      _id: { $in: ids },
+      userId,
+    } as any)
+    if (owned.status === StatusEnum.notok) {
+      return owned
+    }
+    if (owned.data.result !== ids.length) {
+      return this.entityNotFound('Deal')
+    }
+    const findLocal = this.dcaBots.find(
+      (d) => d.id === botId && d.userId === userId,
+    )
     if (findLocal) {
       this.getWorkerById(findLocal.worker)?.postMessage({
         do: 'method',
@@ -9572,7 +9773,9 @@ class Bot<T extends UserSchema = UserSchema> {
         botId: botId,
         botType: BotType.dca,
         event: 'Merge DCA deals',
-        description: `DCA deals was merged: ${dealIds.join(' ')}`,
+        // The request only: the worker records the merge when it is done, and
+        // reports why when it is refused.
+        description: `Merge requested for DCA deals: ${dealIds.join(' ')}`,
         paperContext,
       })
       return {
@@ -9612,7 +9815,9 @@ class Bot<T extends UserSchema = UserSchema> {
         botId: botId,
         botType: BotType.dca,
         event: 'Merge DCA deals',
-        description: `DCA deals was merged: ${dealIds.join(' ')}`,
+        // The request only: the worker records the merge when it is done, and
+        // reports why when it is refused.
+        description: `Merge requested for DCA deals: ${dealIds.join(' ')}`,
         paperContext,
       })
     } else {
@@ -9757,6 +9962,16 @@ class Bot<T extends UserSchema = UserSchema> {
     ignoreSettings = false,
   ) {
     if (!this.useBots) {
+      // Every bot lookup below matches on `uuid`: refuse the payload before
+      // any of them if a field is not plain text.
+      const malformed = [
+        ...new Set([data].flat().flatMap((d) => malformedWebhookFields(d))),
+      ]
+      if (malformed.length) {
+        const reason = malformedWebhookFieldsReason(malformed)
+        this.handleWarn(reason)
+        return { status: StatusEnum.notok as const, reason, data: null }
+      }
       // The API is where a signal is received: stamp it here, over anything
       // the sender put in the field (logging only), and never let a sender
       // mark its own signal as a replay.
@@ -10007,6 +10222,14 @@ class Bot<T extends UserSchema = UserSchema> {
         reason,
         data: null,
       }
+    }
+    // Refused before the bot lookups below, every one of which matches on
+    // `uuid`.
+    const malformed = malformedWebhookFields(data)
+    if (malformed.length) {
+      const reason = malformedWebhookFieldsReason(malformed)
+      this.handleWarn(reason)
+      return { status: StatusEnum.notok as const, reason, data: null }
     }
     if (action && uuid) {
       // A signal runs within WEBHOOK_SIGNAL_MAX_AGE_MS of reaching the API or
@@ -13725,20 +13948,7 @@ class Bot<T extends UserSchema = UserSchema> {
     return {
       status: StatusEnum.ok,
       reason: null,
-      data: result.map((r) => ({
-        ...r,
-        workingTimeTotal:
-          r.workingShift && r.workingShift.length > 0
-            ? r.workingShift.reduce((acc, v) => {
-                if (v.end) {
-                  acc += v.end - v.start
-                } else if (!v.end) {
-                  acc += new Date().getTime() - v.start
-                }
-                return acc
-              }, 0)
-            : 0,
-      })),
+      data: result.map(withWorkingTimeTotal),
       total,
     }
   }

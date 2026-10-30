@@ -16,6 +16,12 @@ import {
   LongWickResult,
   OTEResult,
   SessionLevelsResult,
+  ADXResult,
+  KDJResult,
+  VWAPResult,
+  CandleResult,
+  OrderBlockResult,
+  SqueezeResult,
 } from '@gainium/indicators'
 import {
   DCABacktestingInput,
@@ -656,6 +662,13 @@ export type SettingsIndicators = {
   pcDown?: string
   pcCondition?: PCConditionEnum
   pcValue?: string
+  /**
+   * Price Change: the move greater than (missing = as before) / lower than
+   * |pcValue|, or between |pcValue| and |pcValue2| (bw).
+   */
+  pcCompare?: PCCompareEnum
+  /** Price Change: the second bound for bw, same sign as pcValue. */
+  pcValue2?: string
   ppHighLeft?: number
   ppHighRight?: number
   ppLowLeft?: number
@@ -696,6 +709,74 @@ export type SettingsIndicators = {
   /** OTE Levels: retracement level price is compared with (0 = leg end, 1 = origin). */
   oteLevel?: string
   oteLeg?: OTELegEnum
+  /**
+   * ADX: missing / 'adx' = the ADX line, exactly as before; 'dmi' = DMI mode,
+   * indicatorCondition reads +DI against −DI and indicatorValue is ignored.
+   */
+  adxMode?: ADXModeEnum
+  /** KDJ: RSV window (default 9). */
+  kdjLength?: number
+  /** KDJ: K smoothing (default 3). */
+  kdjKSmooth?: number
+  /** KDJ: D smoothing (default 3). */
+  kdjDSmooth?: number
+  /** KDJ: line the condition reads (default k). */
+  kdjLine?: KDJLineEnum
+  /**
+   * KDJ: what that line is compared with (default d); 'custom' = the fixed
+   * level indicatorValue. The zone filter is stochRange / stochUpper /
+   * stochLower, read as the Stochastic condition reads them.
+   */
+  kdjCompareTo?: KDJCompareToEnum
+  /** VWAP: where the anchored VWAP restarts, UTC (default day). */
+  vwapAnchor?: VWAPAnchorEnum
+  /** VWAP: line the close is compared with (default vwap). */
+  vwapLine?: VWAPLineEnum
+  /** VWAP: band width in standard deviations (default 1; condition only). */
+  vwapBandMultiplier?: number
+  /** Candle colour: the candle the colour is read from (default heikinAshi). */
+  candleSource?: CandleSourceEnum
+  /** Candle colour: the colour required (default green). */
+  candleColor?: CandleColorEnum
+  /** Candle colour: N candles in a row, 1..50 (default 1). */
+  candleCount?: number
+  /**
+   * Candle colour: `streak` (default) = true while the last N closed candles
+   * are that colour; `start` = only on the N-th candle of the run.
+   */
+  candleTrigger?: CandleTriggerEnum
+  /** Order Blocks: pivot bars on each side of a swing, 2..50 (default 5). */
+  obSwingLength?: number
+  /** Order Blocks: the block the close is compared with (default bullish). */
+  obSide?: OBSideEnum
+  /** Order Blocks: the level of that block (default top). */
+  obLevel?: OBLevelEnum
+  /** Squeeze Momentum: Bollinger length (default 20). */
+  sqzLength?: number
+  /** Squeeze Momentum: Bollinger multiplier (default 2, decimals allowed). */
+  sqzBBMult?: number
+  /** Squeeze Momentum: Keltner length (default 20). */
+  sqzKCLength?: number
+  /** Squeeze Momentum: Keltner multiplier (default 1.5, decimals allowed). */
+  sqzKCMult?: number
+  /** Squeeze Momentum: the squeeze state required (default fired). */
+  sqzSignal?: SqzSignalEnum
+  /** Squeeze Momentum: the momentum required (default positive). */
+  sqzMomentum?: SqzMomentumEnum
+  /**
+   * Divergence: pivot bars left / right and the bars range between two
+   * pivots. Missing = the DIV defaults (3 / 1 / 1 / 60) and the room the
+   * condition always had; each one joins the room only when it is set.
+   */
+  divPivotLeft?: number
+  divPivotRight?: number
+  divRangeLower?: number
+  divRangeUpper?: number
+  /**
+   * Session Price levels: where the condition is evaluated — `session`
+   * (missing, the behaviour before), `outside` the session, or `always`.
+   */
+  sessionLevelsActive?: SessionLevelsActiveEnum
 } & Percentile &
   TrendFilter
 
@@ -727,6 +808,105 @@ export enum LWValueEnum {
   top = 'top',
   bottom = 'bottom',
   any = 'any',
+}
+
+/** ADX: what the condition reads — the ADX line (default) or +DI vs −DI. */
+export enum ADXModeEnum {
+  adx = 'adx',
+  dmi = 'dmi',
+}
+
+/** KDJ: a line a condition reads (same values as `@gainium/indicators` KDJLineEnum). */
+export enum KDJLineEnum {
+  k = 'k',
+  d = 'd',
+  j = 'j',
+}
+
+/** KDJ: what the chosen line is compared with — another line, or the fixed level. */
+export enum KDJCompareToEnum {
+  k = 'k',
+  d = 'd',
+  j = 'j',
+  custom = 'custom',
+}
+
+/** VWAP: where the anchored VWAP restarts, UTC (same values as `@gainium/indicators` VWAPAnchorEnum). */
+export enum VWAPAnchorEnum {
+  day = 'day',
+  week = 'week',
+  month = 'month',
+}
+
+/** VWAP: the line the close is compared with (same values as `@gainium/indicators` VWAPLineEnum). */
+export enum VWAPLineEnum {
+  vwap = 'vwap',
+  upper = 'upper',
+  lower = 'lower',
+}
+
+/** Candle colour: the candle the colour is read from (same values as `@gainium/indicators`). */
+export enum CandleSourceEnum {
+  regular = 'regular',
+  heikinAshi = 'heikinAshi',
+}
+
+/** Candle colour: the colour a condition requires (same values as `@gainium/indicators`). */
+export enum CandleColorEnum {
+  green = 'green',
+  red = 'red',
+}
+
+/** Candle colour: when a condition is true (same values as `@gainium/indicators`). */
+export enum CandleTriggerEnum {
+  streak = 'streak',
+  start = 'start',
+}
+
+/** Order Blocks: which block a condition reads (same values as `@gainium/indicators`). */
+export enum OBSideEnum {
+  bullish = 'bullish',
+  bearish = 'bearish',
+}
+
+/** Order Blocks: the level of the block a condition reads (same values as `@gainium/indicators`). */
+export enum OBLevelEnum {
+  top = 'top',
+  middle = 'middle',
+  bottom = 'bottom',
+}
+
+/** Squeeze Momentum: the squeeze state a condition requires (same values as `@gainium/indicators`). */
+export enum SqzSignalEnum {
+  fired = 'fired',
+  on = 'on',
+  off = 'off',
+  any = 'any',
+}
+
+/** Squeeze Momentum: the momentum a condition requires (same values as `@gainium/indicators`). */
+export enum SqzMomentumEnum {
+  positive = 'positive',
+  negative = 'negative',
+  rising = 'rising',
+  falling = 'falling',
+  crossUp = 'crossUp',
+  crossDown = 'crossDown',
+  any = 'any',
+}
+
+/** Price Change: how the candle's move is compared with pcValue / pcValue2 (same values as `@gainium/indicators`). */
+export enum PCCompareEnum {
+  gt = 'gt',
+  lt = 'lt',
+  bw = 'bw',
+}
+
+/** Session Price levels: on which candles the condition is evaluated (same values as `@gainium/indicators`). */
+export enum SessionLevelsActiveEnum {
+  session = 'session',
+  outside = 'outside',
+  always = 'always',
 }
 
 /** Which leg direction an OTE Levels condition reads. */
@@ -4455,6 +4635,11 @@ export enum IndicatorEnum {
   session = 'SESSION',
   lw = 'LW',
   ote = 'OTE',
+  kdj = 'KDJ',
+  vwap = 'VWAP',
+  candle = 'CANDLE',
+  ob = 'OB',
+  sqz = 'SQZ',
 }
 
 /**
@@ -4487,6 +4672,7 @@ export enum MAEnum {
   vwma = 'vwma',
   hma = 'hma',
   rma = 'rma',
+  mcginley = 'mcginley',
 }
 
 export enum RangeType {
@@ -4499,6 +4685,11 @@ export type MAResult = {
   ma: number
   maType: string
   price: number
+  /**
+   * Trend filter on only: MAR's trend code of the MA against itself
+   * `trendFilterLookback` bars ago (see `MATrendResult`); absent otherwise.
+   */
+  trend?: number
 }
 
 export type IndicatorHistory = { time: number } & (
@@ -4563,6 +4754,13 @@ export type IndicatorHistory = { time: number } & (
   | { type: IndicatorEnum.psar; value: { psar: number; price: number } }
   | { type: IndicatorEnum.lw; value: LongWickResult }
   | { type: IndicatorEnum.ote; value: OTEResult }
+  /** ADX in DMI mode (`adxMode: 'dmi'`): the ADX result plus +DI / −DI */
+  | { type: IndicatorEnum.adx; value: ADXResult }
+  | { type: IndicatorEnum.kdj; value: KDJResult }
+  | { type: IndicatorEnum.vwap; value: VWAPResult }
+  | { type: IndicatorEnum.candle; value: CandleResult }
+  | { type: IndicatorEnum.ob; value: OrderBlockResult }
+  | { type: IndicatorEnum.sqz; value: SqueezeResult }
   | { type: IndicatorEnum.session; value: boolean }
   | { type: IndicatorEnum.session; value: SessionLevelsResult }
 )
@@ -4611,6 +4809,42 @@ type Smoothing = {
 export type IndicatorConfig =
   | { type: IndicatorEnum.lw; lwThreshold: number; lwMaxDuration: number }
   | { type: IndicatorEnum.ote; oteLeftBars: number; oteMinLegSize: number }
+  | {
+      type: IndicatorEnum.kdj
+      kdjLength: number
+      kdjKSmooth: number
+      kdjDSmooth: number
+    }
+  | {
+      // the band multiplier is a condition setting, not part of the room
+      type: IndicatorEnum.vwap
+      vwapAnchor: VWAPAnchorEnum
+    }
+  | {
+      // colour, count and trigger are condition settings, not part of the room
+      type: IndicatorEnum.candle
+      source: CandleSourceEnum
+    }
+  | {
+      // side and level are condition settings, not part of the room
+      type: IndicatorEnum.ob
+      swingLength: number
+    }
+  | {
+      // signal and momentum are condition settings, not part of the room
+      type: IndicatorEnum.sqz
+      length: number
+      bbMult: number
+      kcLength: number
+      kcMult: number
+    }
+  | ({
+      // ADX in DMI mode: the result also carries +DI / −DI
+      type: IndicatorEnum.adx
+      interval: number
+      dmi: true
+    } & Percentile &
+      Smoothing)
   | {
       type: IndicatorEnum.session
       sessionRule: SessionRuleEnum.levels
@@ -4742,11 +4976,12 @@ export type IndicatorConfig =
       laggingSpan2Periods: number
       laggingSpan: number
     }
-  | {
+  | ({
+      // with trendFilter on, the indicator is MATrendFilter ({ value, trend })
       type: IndicatorEnum.ma
       maType: MAEnum
       interval: number
-    }
+    } & TrendFilter)
   | {
       type: IndicatorEnum.sr
       leftBars: number

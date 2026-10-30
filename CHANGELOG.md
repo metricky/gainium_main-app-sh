@@ -1,5 +1,211 @@
 # Changelog
 
+## [1.123.10] - 2026-10-30
+
+### Fixed
+
+- Grid bots that take profit in the quote currency with order size fixed in quote now fit their start-up spend inside the budget. Each sell level holds the coin bought one level below it, but the budget split reserved it at the level's own sell price, so the start committed about one grid step too much on every sell level (around 0.7% of the budget with 20 levels, more with wider levels). On an account funded with exactly the budget, the farthest buy order was then refused for balance. Applies to bots created from November 2, 2026; running bots keep their current order sizes.
+
+## [1.123.9] - 2026-10-30
+
+### Fixed
+
+- When a DCA deal closes after some of its take profits had sold part of the position, those partial sales are no longer subtracted twice if the deal's balance had been recalculated in the meantime (after an added-funds fill, a restart or a settings change). The market sell of what is left now sells everything the deal still holds instead of a smaller amount that left coins in the account, and the deal's closing balances are recorded correctly.
+
+## [1.123.8] - 2026-10-30
+
+### Fixed
+
+- A DCA deal is no longer closed by the order check that runs after a reconnect when it finds a take profit the bot had already cancelled and replaced after a partial fill. That check could take over a minute to work through its list, and treated the cancelled take profit's partial fill as the deal's close. The deal's remaining coins were then left in the account with no deal tracking them.
+- When the market sell of a deal's leftover is refused because one of the deal's own take profits is still holding the coins, the deal stays open. That take profit is cancelled and the rest is closed with a limit order, the same way a limit-only order book is handled.
+
+## [1.123.7] - 2026-10-30
+
+### Fixed
+
+- A DCA deal whose limit base order was being moved to a new price when the bot service restarted now gets its new base order. Before, the restart could treat the base order it had just cancelled as still open, refuse to place the new one, and leave the deal waiting with no order on the exchange.
+
+## [1.123.6] - 2026-10-30
+
+### Fixed
+
+- The automatic re-send of a missing take profit (1.123.5) no longer applies to deals that close at market, which never rest a take profit, or to deals on bots that are not running. It stops after five re-sends, and it no longer posts a bot message. The refusal itself is still reported.
+
+## [1.123.5] - 2026-10-30
+
+### Fixed
+
+- Merging DCA deals pulls the source deals' take profits off the exchange before the merged deal is created. If the exchange refuses a cancel, nothing is merged and the take profits already pulled are put back. Before, the merge went ahead in the database while the old take profits stayed on the exchange holding the coins, so the merged deal's own take profit was refused for balance.
+- Merging is refused up front while the exchange is refusing the account's API key, with that reason.
+- The "Merge DCA deals" event is written when the merge completes and names the merged deal. The request itself is logged as a request.
+- A deal merged into another is reported as merged into that deal, not as "position left open on the exchange, no take profit will be applied".
+- A spot DCA deal whose take profit is not on the exchange after it was sent now says so once and sends it again automatically (after 30s, 1m, 2m, 5m, then every 15m) until one rests. Before, a refused take profit was only reported as "Not enough balance" and was never placed again until the next fill.
+- Hyperliquid's "User or API Wallet … does not exist" (expired or unapproved API wallet) counts as a dead API key: the account goes on the auth cooldown instead of sending every order and cancel to the exchange.
+- A bot's error badge is no longer cleared before each order placement while the exchange is refusing the account's API key, so the error stays visible instead of flickering.
+
+## [1.123.4] - 2026-10-30
+
+### Fixed
+
+- A successful balance refresh now marks every balance of that exchange account as just fetched, including holdings whose amount did not change. Before, an unchanged holding kept the time of its last change, so the "balance may be out of date" marker stayed on it after "Refresh balance".
+
+## [1.123.3] - 2026-10-30
+
+### Fixed
+
+- A failed or timed-out read of what an account's bot-funded deals hold no longer counts as nothing held. The new-deal balance check, the bot-funding planners and the funding preview now treat it like an unreadable balance: the deal is not opened this cycle and the next check reads again. Such a failed read is no longer cached either.
+
+## [1.123.2] - 2026-10-29
+
+### Fixed
+
+- A DCA base order filled short of its size and topped up to the remainder now opens its deal on the merged quantity: the placement answer waits for (or itself sends) the top-up through `fillPartiallyFilledOrder` instead of opening the deal on the part-fill while the user stream's top-up is still in flight. One top-up per order, sized as before.
+
+## [1.123.1] - 2026-10-29
+
+### Changed
+
+- Bots re-send their user-stream open when the user-stream balancer names their connection in a `serviceLog` `{reopen: 'userStream', uuids}` message (Hyperliquid accounts moved off a stopped worker). `{restart: 'userStream'}` is unchanged.
+
+## [1.123.0] - 2026-10-29
+
+### Changed
+
+- Session Price levels with `sessionLevelsActive` `outside` / `always`: a crossing of the price with a previous-session level now also fires on the first candle after the session ends, compared with the level that candle sees (a Monday range broken on Tuesday 00:00 now fires). `session` / missing is unchanged. Decided by `sessionLevelsCondition` from `@gainium/indicators` 1.14.0.
+- Squeeze Momentum: the default Bollinger Bands multiplier (`sqzBBMult`) is 1.5 (was 2), matching the chart TradingView displays — in the indicators package, the public API defaults, the OpenAPI spec, the indicator definitions and the schema docs. A stored `sqzBBMult` is unchanged.
+
+## [1.122.1] - 2026-10-29
+
+### Fixed
+
+- Ownership and session checks are tightened on several account-scoped requests
+- API keys restricted to one bot or to paper/real trading are enforced against the bot or deal a request acts on, and restricted keys are now enforced on self-hosted installs too
+
+## [1.122.0] - 2026-10-29
+
+### Added
+
+- Price Change range: `pcCompare` (`gt` greater than, `lt` lower than, `bw` between) and `pcValue2` on the Price Change indicator. The latest candle's move from its open (up to the high for a positive `pcValue`, down to the low for a negative one, in percent) is compared with |`pcValue`|, or must lie strictly between |`pcValue`| and |`pcValue2`|. Missing `pcCompare` = greater than = exactly the behaviour before. The decision is `priceChangeCondition` from `@gainium/indicators` 1.13.0, the function the backtester uses; the indicator room is unchanged. GraphQL, the database schema and the public API (validator: `bw` needs `pcValue2` with the same sign and a different size; OpenAPI, indicator definitions, schema docs) accept the new fields.
+
+## [1.121.2] - 2026-10-29
+
+### Fixed
+
+- DCA bot creation: the server always generates the new bot's uuid; a uuid supplied with the settings is ignored and not stored.
+
+## [1.121.1] - 2026-10-29
+
+### Fixed
+
+- Ownership and session checks are tightened on several account-scoped requests.
+
+## [1.121.0] - 2026-10-29
+
+### Added
+
+- Candle colour indicator (`type: CANDLE`): N closed candles of one colour in a row, read from Heikin Ashi (default) or regular candles (`candleSource`, `candleColor`, `candleCount` 1–50, `candleTrigger`): `streak` is true while the last N candles are that colour, `start` only on the N-th candle of a run. A doji (close equal to open) is neither colour and breaks every run. Only the candle source is part of the indicator room.
+- Order Blocks indicator (`type: OB`): non-repainting blocks formed when a close breaks the latest swing high (bullish) or swing low (bearish), with `obSwingLength` pivot bars on each side (2–50, default 5), removed when a close passes through them. A condition compares the close with the top, middle or bottom (`obLevel`) of the latest bullish or bearish block (`obSide`) by crossing up / down or above / below; a crossing needs the same block on both candles, so a new block replacing the old one never counts as one.
+- Squeeze Momentum indicator (`type: SQZ`, LazyBear): Bollinger Bands inside / outside Keltner Channels and a linear-regression momentum (`sqzLength`, `sqzBBMult`, `sqzKCLength`, `sqzKCMult`; multipliers may have decimals). A condition is a squeeze state (`sqzSignal`: fired, on, off, any) AND a momentum (`sqzMomentum`: positive, negative, rising, falling, crossUp, crossDown, any); both `any` never fires.
+- Divergence pivot settings (`divPivotLeft`, `divPivotRight`, `divRangeLower`, `divRangeUpper`, defaults 3 / 1 / 1 / 60) reach the divergence detector. Each joins the indicator room only when it is set, so a Divergence without them keeps exactly the room and the signals it had. The API requires `divRangeLower` below `divRangeUpper`.
+- Session Price levels outside the session (`sessionLevelsActive`: `session` (default), `outside`, `always`): with `outside` / `always` the condition is also evaluated on candles outside the session, against the last completed session's levels (current-session levels have no value there); a crossing never counts between in and out of a session. Missing = only inside the session, as before. Example: the Monday range = Session days Monday without hours, Price levels, `outside`, price crossing up the previous session high.
+- The decisions come from `@gainium/indicators` 1.12.0 (`candleCondition`, `orderBlockCondition`, `squeezeCondition`, `sessionLevelsCondition` with `active`), the functions the backtester uses, so live bots and backtests fire on the same bars. GraphQL, the database schema and the public API (validators with ranges, defaults, OpenAPI, indicator definitions, schema docs) accept the new types and fields. A leftover `trendFilter` on the new types keeps the condition false, as on other indicators.
+
+### Changed
+
+- The public API documentation states that Bollinger multipliers (`bbwMult` on BB, BBW, BB %B) and the SuperTrend `factor` accept decimals; the validator already did.
+
+## [1.120.3] - 2026-10-29
+
+### Fixed
+
+- When an order's status was confirmed by asking the exchange (for example after a cancel answered "unknown order"), the bot kept the filled quantity it last heard from the user stream instead of the exchange's. A take-profit that had fully filled could be recorded as a small partial fill, and the deal close then sent a market order to sell the "remaining" coins it had already sold. The exchange's filled quantity and value are now recorded; a take-profit that genuinely filled only in part still has its remainder sold.
+
+## [1.120.2] - 2026-10-29
+
+### Fixed
+
+- An order refused while its bot was stopping stayed listed as open with no exchange order id: stopping clears the bot's in-memory orders, and the refusal's write-off was skipped when that list was empty. A definitive refusal is now retired (CANCELED, or removed when a local guard refused it) whether or not the bot is still running. An ambiguous failure on a stopped bot is still not written off.
+
+## [1.120.1] - 2026-10-29
+
+### Fixed
+
+- Grid "stop and sell" on take profit or stop loss could sell again after its closing order filled: stopping the bot reset the single-close latch, so price ticks queued behind the stop triggered a new close. The latch now holds until the next start, and a stopped bot no longer checks take profit / stop loss.
+
+## [1.120.0] - 2026-10-29
+
+### Added
+
+- VWAP indicator (`type: VWAP`): the volume-weighted average price, anchored to the UTC day, week (Monday) or month (`vwapAnchor`), with standard-deviation bands. A condition compares the close with the VWAP or a band (`vwapLine`, `vwapBandMultiplier`) by crossing up / down or above / below; a crossing counts only within one anchor period, and the first, partial period after the bot subscribes has no value. The live indicator service feeds it each candle's open time and volume.
+- KDJ indicator (`type: KDJ`): K, D and J lines (`kdjLength`, `kdjKSmooth`, `kdjDSmooth`, default 9 / 3 / 3). A condition compares one line with another or with a fixed level (`kdjLine`, `kdjCompareTo`, `indicatorValue`), with Stochastic's zone filter (`stochRange`, `stochUpper`, `stochLower`; missing = no zone).
+- DMI mode on ADX (`adxMode: dmi`): the condition compares +DI with −DI and does not read `indicatorValue`; between is rejected. Without `adxMode`, or with `adx`, ADX conditions are unchanged.
+- Trend filter on the Moving Average, with MA Ratio's settings (`trendFilter`, `trendFilterLookback`, `trendFilterType`, `trendFilterValue`), for every MA type: the condition fires only when the average also moved as the filter asks. With the filter off nothing changes.
+- The decisions come from `@gainium/indicators` 1.11.0 (`vwapCondition`, `kdjCondition`, `dmiCondition`, `trendFilterCondition`), the functions the backtester uses, so live bots and backtests fire on the same bars. GraphQL, the database schema and the public API (validators, defaults, OpenAPI, indicator definitions, schema docs) accept the new types and fields.
+
+### Changed
+
+- A Moving Average condition stored with `trendFilter` on (the bot form offered the trend filter only on MA Ratio) never fired before, because no trend was computed for a Moving Average. It now applies the trend filter its settings describe. A leftover `trendFilter` on VWAP, KDJ or a DMI-mode ADX keeps the condition false, as on other indicators.
+
+## [1.119.0] - 2026-10-29
+
+### Added
+
+- McGinley Dynamic is a Moving Average type (`maType: mcginley`): a moving average that catches up faster when price runs away from it. It works wherever a Moving Average condition does, against the price or against a second MA, and as either leg of MA Ratio. GraphQL, the database schema and the public API accept it on those fields; Bollinger, MACD and Keltner averages do not, and the API rejects it there.
+
+## [1.118.1] - 2026-10-27
+
+### Fixed
+
+- A DCA or Combo deal whose market base order the exchange answered as cancelled, with nothing filled, now gets cancelled about 15 seconds later even if the live order stream never reports that cancel. Until now only the stream's report freed the deal, so when it was lost the deal stayed in "start" with nothing on the exchange until the daily clean-up of old start deals.
+
+## [1.118.0] - 2026-10-26
+
+### Added
+
+- Combo bots, single- and multi-pair, can close each deal a set time after its base order filled (Close by timer), as DCA bots can. The close uses the deal's own close type (limit or market), cancels its DCA and grid orders and closes the whole position. The timer is re-armed when the bot restarts, and only runs while take profit is on. Off by default. The public API accepts the three timer settings on Combo bot and deal updates.
+
+## [1.117.4] - 2026-10-26
+
+### Fixed
+
+- A DCA or Combo deal whose limit base order the exchange cancelled before any of it traded now gets cancelled about 15 seconds later, so the bot can open a new one. Until now that only happened on bots that do not reposition their limit entry. With repositioning or an enter-market timeout on, the cancel was left to the reposition timer, which found no order and stopped there. The deal then stayed in "start" with nothing on the exchange until the daily clean-up of old start deals. The bot's own reposition cancels and part-filled entries are handled as before.
+
+## [1.117.3] - 2026-10-26
+
+### Fixed
+
+- Webhook signals now require `action` and `uuid` (and the internal signal id) to be plain text of at most 64 characters. A signal carrying an object, an array or a number in one of those fields is answered 400 with the reason before any bot is looked up. The trade-signal log line escapes the sender's values.
+
+## [1.117.2] - 2026-10-26
+
+### Fixed
+
+- A DCA bot whose "stop after X deals" limit was already met could hang on its next deal close when it still held deals that had not started: the automatic stop waited on the close that triggered it, so that close, every later close and every stop request queued behind it until the worker restarted, and the bot kept running. The automatic stop now cancels those deals inside the close it was triggered from. While a bot is stopping it no longer opens new deals from any start condition, so no deal can open that the stop never sees. A webhook start-deal signal that arrives then is ignored, and the bot says so.
+
+## [1.117.1] - 2026-10-26
+
+### Changed
+
+- Dependency security updates: body-parser 2.4.0, follow-redirects 1.16.2, zod 4.6.7 (under `@scalar/types`), `@graphql-tools/utils` 12.0.4. No behaviour change.
+
+## [1.117.0] - 2026-10-26
+
+### Changed
+
+- Tokenized ETFs are listed under ETFs instead of Stocks. Exchanges tag them as stocks; a stock pair whose underlying ticker is a US-listed ETF in the Nasdaq Trader symbol directory (refreshed daily) is now classified as an ETF.
+
+## [1.116.1] - 2026-10-26
+
+### Fixed
+
+- A grid bot whose resting orders were cancelled on the exchange without the bot asking (an account-wide cancel, or orders cancelled by hand on the exchange) kept showing its levels as active while nothing rested, until the bot was restarted. It now places those levels again a couple of seconds after the cancels stop, in one pass. Orders the bot cancels itself, and orders the exchange refuses as they are placed, are not retried.
+
+## [1.116.0] - 2026-10-26
+
+### Added
+
+- `closedTradeList` query: closed DCA, terminal and combo deals and stopped grid bots as one list, paged, sorted (close or open time) and filtered on the server, so the Trades page can show closed trades of every kind without loading them all.
+
 ## [1.115.8] - 2026-10-25
 
 ### Fixed

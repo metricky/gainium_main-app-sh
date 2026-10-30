@@ -14,10 +14,19 @@ import {
   IndicatorEnum,
   IndicatorSection,
   IndicatorsLogicEnum,
+  KDJCompareToEnum,
+  KDJLineEnum,
   SettingsIndicators,
   StartConditionEnum,
   StatusEnum,
+  VWAPAnchorEnum,
+  VWAPLineEnum,
 } from '../../../types'
+import {
+  KDJLineEnum as IndicatorsKDJLineEnum,
+  VWAPAnchorEnum as IndicatorsVWAPAnchorEnum,
+  VWAPLineEnum as IndicatorsVWAPLineEnum,
+} from '@gainium/indicators'
 
 const rsi = (uuid: string, groupId = 'g1') =>
   ({
@@ -151,6 +160,341 @@ describe('spec 126 — REST bot update replaces indicators', () => {
         errorsOf(r).filter(([f]) => f.includes('ote'))
       expect(oteErrors(update('bullish'))).to.deep.equal([])
       expect(oteErrors(update('sideways')).length).to.equal(1)
+    })
+    it('accepts the KDJ, VWAP, ADX DMI and MA trend filter fields and rejects unknown values', () => {
+      const update = (type: IndicatorEnum, fields: Record<string, unknown>) =>
+        applyIndicatorSettingsUpdate(
+          { ...tiBot(), startCondition: StartConditionEnum.ti },
+          {
+            indicators: [
+              {
+                ...rsi('new'),
+                type,
+                indicatorCondition: 'cu',
+                ...fields,
+              } as unknown as SettingsIndicators,
+            ],
+          },
+        )
+      const fieldErrors = (
+        r: ReturnType<typeof update>,
+        re: RegExp,
+      ): [string, string][] => errorsOf(r).filter(([f]) => re.test(f))
+      const kdj = /kdj/
+      expect(
+        fieldErrors(
+          update(IndicatorEnum.kdj, {
+            kdjLength: 9,
+            kdjKSmooth: '3',
+            kdjDSmooth: 3,
+            kdjLine: 'j',
+            kdjCompareTo: 'custom',
+          }),
+          kdj,
+        ),
+      ).to.deep.equal([])
+      expect(
+        fieldErrors(update(IndicatorEnum.kdj, { kdjLine: 'x' }), kdj).length,
+      ).to.equal(1)
+      expect(
+        fieldErrors(update(IndicatorEnum.kdj, { kdjCompareTo: 'level' }), kdj)
+          .length,
+      ).to.equal(1)
+      expect(
+        fieldErrors(update(IndicatorEnum.kdj, { kdjLength: 0 }), kdj).length,
+      ).to.be.greaterThan(0)
+      const vwap = /vwap/
+      expect(
+        fieldErrors(
+          update(IndicatorEnum.vwap, {
+            vwapAnchor: 'week',
+            vwapLine: 'lower',
+            vwapBandMultiplier: 2,
+          }),
+          vwap,
+        ),
+      ).to.deep.equal([])
+      expect(
+        fieldErrors(update(IndicatorEnum.vwap, { vwapAnchor: 'year' }), vwap)
+          .length,
+      ).to.equal(1)
+      expect(
+        fieldErrors(update(IndicatorEnum.vwap, { vwapLine: 'middle' }), vwap)
+          .length,
+      ).to.equal(1)
+      expect(
+        fieldErrors(update(IndicatorEnum.adx, { adxMode: 'dmi' }), /adxMode/),
+      ).to.deep.equal([])
+      expect(
+        fieldErrors(update(IndicatorEnum.adx, { adxMode: 'di' }), /adxMode/)
+          .length,
+      ).to.equal(1)
+      // DMI compares two lines: no between
+      const bw = (adxMode: string) =>
+        errorsOf(
+          update(IndicatorEnum.adx, {
+            adxMode,
+            indicatorCondition: 'bw',
+            indicatorValue: '20',
+            indicatorValue2: '40',
+          }),
+        ).filter(([, m]) => m.includes('between'))
+      expect(bw('adx')).to.deep.equal([])
+      expect(bw('dmi').length).to.equal(1)
+      expect(
+        fieldErrors(
+          update(IndicatorEnum.ma, {
+            maType: 'mcginley',
+            maCrossingValue: 'price',
+            trendFilter: true,
+            trendFilterLookback: 10,
+            trendFilterType: 'higher',
+            trendFilterValue: 1,
+          }),
+          /trendFilter/,
+        ),
+      ).to.deep.equal([])
+      expect(
+        fieldErrors(
+          update(IndicatorEnum.ma, {
+            trendFilter: true,
+            trendFilterType: 'up',
+          }),
+          /trendFilter/,
+        ).length,
+      ).to.equal(1)
+    })
+    it('accepts the Candle colour, Order Blocks, Squeeze, DIV pivot and Session active fields and rejects out-of-range ones', () => {
+      const update = (type: IndicatorEnum, fields: Record<string, unknown>) =>
+        applyIndicatorSettingsUpdate(
+          { ...tiBot(), startCondition: StartConditionEnum.ti },
+          {
+            indicators: [
+              {
+                ...rsi('new'),
+                type,
+                indicatorCondition: 'cd',
+                ...fields,
+              } as unknown as SettingsIndicators,
+            ],
+          },
+        )
+      const fieldErrors = (
+        r: ReturnType<typeof update>,
+        re: RegExp,
+      ): [string, string][] => errorsOf(r).filter(([f]) => re.test(f))
+      const count = (
+        type: IndicatorEnum,
+        fields: Record<string, unknown>,
+        re: RegExp,
+      ) => fieldErrors(update(type, fields), re).length
+      // Candle colour
+      const candle = /candle/
+      expect(
+        count(
+          IndicatorEnum.candle,
+          {
+            candleSource: 'regular',
+            candleColor: 'red',
+            candleCount: 50,
+            candleTrigger: 'start',
+          },
+          candle,
+        ),
+      ).to.equal(0)
+      expect(
+        count(IndicatorEnum.candle, { candleSource: 'renko' }, candle),
+      ).to.equal(1)
+      expect(
+        count(IndicatorEnum.candle, { candleColor: 'blue' }, candle),
+      ).to.equal(1)
+      expect(
+        count(IndicatorEnum.candle, { candleTrigger: 'end' }, candle),
+      ).to.equal(1)
+      expect(count(IndicatorEnum.candle, { candleCount: 51 }, candle)).to.equal(
+        1,
+      )
+      expect(
+        count(IndicatorEnum.candle, { candleCount: 0 }, candle),
+      ).to.be.greaterThan(0)
+      expect(
+        count(IndicatorEnum.candle, { candleCount: 1.5 }, candle),
+      ).to.equal(1)
+      // Order Blocks
+      const ob = /obSwingLength|obSide|obLevel/
+      expect(
+        count(
+          IndicatorEnum.ob,
+          { obSwingLength: 2, obSide: 'bearish', obLevel: 'middle' },
+          ob,
+        ),
+      ).to.equal(0)
+      expect(count(IndicatorEnum.ob, { obSwingLength: 1 }, ob)).to.equal(1)
+      expect(count(IndicatorEnum.ob, { obSwingLength: 51 }, ob)).to.equal(1)
+      expect(count(IndicatorEnum.ob, { obSide: 'any' }, ob)).to.equal(1)
+      expect(count(IndicatorEnum.ob, { obLevel: 'mid' }, ob)).to.equal(1)
+      // Squeeze Momentum: decimal multipliers pass
+      const sqz = /sqz/
+      expect(
+        count(
+          IndicatorEnum.sqz,
+          {
+            sqzLength: 20,
+            sqzBBMult: 1.5,
+            sqzKCLength: '14',
+            sqzKCMult: '2.25',
+            sqzSignal: 'fired',
+            sqzMomentum: 'crossUp',
+          },
+          sqz,
+        ),
+      ).to.equal(0)
+      expect(count(IndicatorEnum.sqz, { sqzLength: 1 }, sqz)).to.equal(1)
+      expect(count(IndicatorEnum.sqz, { sqzKCLength: 501 }, sqz)).to.equal(1)
+      expect(count(IndicatorEnum.sqz, { sqzLength: 20.5 }, sqz)).to.equal(1)
+      expect(count(IndicatorEnum.sqz, { sqzBBMult: 0.05 }, sqz)).to.equal(1)
+      expect(count(IndicatorEnum.sqz, { sqzKCMult: 11 }, sqz)).to.equal(1)
+      expect(count(IndicatorEnum.sqz, { sqzSignal: 'release' }, sqz)).to.equal(
+        1,
+      )
+      expect(count(IndicatorEnum.sqz, { sqzMomentum: 'up' }, sqz)).to.equal(1)
+      // Decimal standard deviations / SuperTrend factor
+      expect(count(IndicatorEnum.bb, { bbwMult: 2.5 }, /bbwMult/)).to.equal(0)
+      expect(count(IndicatorEnum.bbw, { bbwMult: '0.1' }, /bbwMult/)).to.equal(
+        0,
+      )
+      expect(count(IndicatorEnum.bbpb, { bbwMult: 1.7 }, /bbwMult/)).to.equal(0)
+      expect(count(IndicatorEnum.st, { factor: 2.5 }, /factor/)).to.equal(0)
+      // Divergence pivots / range
+      const div = /divPivot|divRange/
+      expect(
+        count(
+          IndicatorEnum.div,
+          {
+            divPivotLeft: 5,
+            divPivotRight: '2',
+            divRangeLower: 5,
+            divRangeUpper: 500,
+          },
+          div,
+        ),
+      ).to.equal(0)
+      expect(
+        count(IndicatorEnum.div, { divPivotLeft: 0 }, div),
+      ).to.be.greaterThan(0)
+      expect(count(IndicatorEnum.div, { divPivotRight: 51 }, div)).to.equal(1)
+      expect(count(IndicatorEnum.div, { divRangeUpper: 1 }, div)).to.equal(1)
+      expect(count(IndicatorEnum.div, { divRangeLower: 2.5 }, div)).to.equal(1)
+      const rangeErrors = (fields: Record<string, unknown>) =>
+        errorsOf(update(IndicatorEnum.div, fields)).filter(([, m]) =>
+          m.includes('divRangeLower must be below divRangeUpper'),
+        )
+      expect(
+        rangeErrors({ divRangeLower: 5, divRangeUpper: 30 }),
+      ).to.deep.equal([])
+      expect(rangeErrors({})).to.deep.equal([])
+      expect(
+        rangeErrors({ divRangeLower: 30, divRangeUpper: 30 }).length,
+      ).to.equal(1)
+      expect(rangeErrors({ divRangeLower: 61 }).length).to.equal(1)
+      // Session Price levels: where it is evaluated
+      const active = /sessionLevelsActive/
+      for (const v of ['session', 'outside', 'always'])
+        expect(
+          count(
+            IndicatorEnum.session,
+            { sessionRule: 'levels', sessionLevelsActive: v },
+            active,
+          ),
+        ).to.equal(0)
+      expect(
+        count(
+          IndicatorEnum.session,
+          { sessionRule: 'levels', sessionLevelsActive: 'weekend' },
+          active,
+        ),
+      ).to.equal(1)
+      // Price Change range
+      const pc = /pcCompare|pcValue2/
+      for (const pcCompare of ['gt', 'lt'])
+        expect(
+          count(IndicatorEnum.pc, { pcValue: '-2', pcCompare }, pc),
+        ).to.equal(0)
+      expect(
+        count(
+          IndicatorEnum.pc,
+          { pcValue: '2', pcValue2: '5', pcCompare: 'bw' },
+          pc,
+        ),
+      ).to.equal(0)
+      expect(count(IndicatorEnum.pc, { pcCompare: 'between' }, pc)).to.equal(1)
+      expect(
+        count(IndicatorEnum.pc, { pcCompare: 'bw', pcValue2: 'x' }, pc),
+      ).to.be.greaterThan(0)
+      const pcRange = (fields: Record<string, unknown>) =>
+        errorsOf(update(IndicatorEnum.pc, fields)).filter(([, m]) =>
+          m.startsWith('Price Change:'),
+        )
+      expect(pcRange({})).to.deep.equal([])
+      expect(pcRange({ pcValue: '2', pcCompare: 'lt' })).to.deep.equal([])
+      // a stray pcValue2 outside bw is ignored
+      expect(pcRange({ pcValue: '2', pcValue2: '-5' })).to.deep.equal([])
+      expect(
+        pcRange({ pcValue: '2', pcValue2: '5', pcCompare: 'bw' }),
+      ).to.deep.equal([])
+      expect(
+        pcRange({ pcValue: '-5', pcValue2: '-2', pcCompare: 'bw' }),
+      ).to.deep.equal([])
+      // pcValue missing = 5
+      expect(pcRange({ pcValue2: '2', pcCompare: 'bw' })).to.deep.equal([])
+      expect(pcRange({ pcValue: '2', pcCompare: 'bw' }).length).to.equal(1)
+      expect(
+        pcRange({ pcValue: '2', pcValue2: '-5', pcCompare: 'bw' }).length,
+      ).to.equal(1)
+      expect(
+        pcRange({ pcValue: '0', pcValue2: '5', pcCompare: 'bw' }).length,
+      ).to.equal(1)
+      expect(
+        pcRange({ pcValue: '-3', pcValue2: '-3', pcCompare: 'bw' }).length,
+      ).to.equal(1)
+    })
+    it('KDJ and VWAP enums are the indicators package’s', () => {
+      expect(Object.values(KDJLineEnum)).to.deep.equal(
+        Object.values(IndicatorsKDJLineEnum),
+      )
+      expect(Object.values(VWAPAnchorEnum)).to.deep.equal(
+        Object.values(IndicatorsVWAPAnchorEnum),
+      )
+      expect(Object.values(VWAPLineEnum)).to.deep.equal(
+        Object.values(IndicatorsVWAPLineEnum),
+      )
+      expect(Object.values(KDJCompareToEnum)).to.deep.equal([
+        ...Object.values(IndicatorsKDJLineEnum),
+        'custom',
+      ])
+    })
+    it('accepts McGinley as an MA type and rejects it as a Bollinger average', () => {
+      const update = (fields: Record<string, string>) =>
+        applyIndicatorSettingsUpdate(
+          { ...tiBot(), startCondition: StartConditionEnum.ti },
+          {
+            indicators: [
+              {
+                ...rsi('mg'),
+                type: IndicatorEnum.ma,
+                ...fields,
+              } as unknown as SettingsIndicators,
+            ],
+          },
+        )
+      const maErrors = (r: ReturnType<typeof update>) =>
+        errorsOf(r).filter(([f]) => /ma|Ma/.test(f))
+      expect(
+        maErrors(update({ maType: 'mcginley', maCrossingValue: 'price' })),
+      ).to.deep.equal([])
+      expect(maErrors(update({ mar1type: 'mcginley' }))).to.deep.equal([])
+      expect(maErrors(update({ bbwMa: 'mcginley' })).length).to.equal(1)
+      expect(maErrors(update({ kcMa: 'mcginley' })).length).to.equal(1)
     })
     it('accepts the Session Price levels rule and rejects an unknown level', () => {
       const update = (sessionLevelA: string, sessionRule = 'levels') =>

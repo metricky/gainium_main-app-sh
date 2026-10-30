@@ -3753,6 +3753,11 @@ components:
             - SESSION
             - LW
             - OTE
+            - KDJ
+            - VWAP
+            - CANDLE
+            - OB
+            - SQZ
           example: RSI
         indicatorLength:
           type: number
@@ -3835,6 +3840,7 @@ components:
             - vwma
             - hma
             - rma
+            - mcginley
           example: ema
         maCrossingValue:
           type: string
@@ -3849,6 +3855,7 @@ components:
             - vwma
             - hma
             - rma
+            - mcginley
           example: price
         maCrossingLength:
           type: number
@@ -4094,6 +4101,7 @@ components:
             - vwma
             - hma
             - rma
+            - mcginley
           example: ema
         mar2length:
           type: number
@@ -4112,10 +4120,11 @@ components:
             - vwma
             - hma
             - rma
+            - mcginley
           example: sma
         bbwMult:
           type: number
-          description: Bollinger Band width multiplier
+          description: Bollinger Band width multiplier, in standard deviations (BB, BBW, BB %B; decimals allowed, e.g. 2.5)
           example: 2
         bbwMa:
           type: string
@@ -4192,9 +4201,33 @@ components:
           type: number
           description: Minimum divergence count
           example: 2
+        divPivotLeft:
+          type: integer
+          description: Divergence — bars to the left of a pivot (1-50). Default 3 when missing.
+          minimum: 1
+          maximum: 50
+          example: 3
+        divPivotRight:
+          type: integer
+          description: Divergence — bars to the right of a pivot (1-50); a pivot is confirmed this many bars later. Default 1 when missing.
+          minimum: 1
+          maximum: 50
+          example: 1
+        divRangeLower:
+          type: integer
+          description: Divergence — fewest bars between the two pivots compared (1-500, below divRangeUpper). Default 1 when missing.
+          minimum: 1
+          maximum: 500
+          example: 1
+        divRangeUpper:
+          type: integer
+          description: Divergence — most bars between the two pivots compared (2-500, above divRangeLower). Default 60 when missing.
+          minimum: 2
+          maximum: 500
+          example: 60
         factor:
           type: number
-          description: Supertrend multiplier factor
+          description: Supertrend multiplier factor (decimals allowed, e.g. 2.5)
           example: 3
         atrLength:
           type: number
@@ -4243,6 +4276,18 @@ components:
           type: string
           description: Price change value
           example: "10"
+        pcCompare:
+          type: string
+          description: "Price Change — how the candle's move is compared: gt (default, also when missing) = greater than |pcValue|, lt = lower than |pcValue|, bw = strictly between |pcValue| and |pcValue2|."
+          enum:
+            - gt
+            - lt
+            - bw
+          example: bw
+        pcValue2:
+          type: string
+          description: "Price Change — the second bound for pcCompare bw: same sign as pcValue, a different absolute value (order does not matter)."
+          example: "5"
         ppHighLeft:
           type: number
           description: Pivot high left bars
@@ -4467,6 +4512,183 @@ components:
             - bullish
             - bearish
             - any
+        adxMode:
+          type: string
+          description: "ADX only. adx (default, also when missing) = the ADX line against indicatorValue, as before. dmi = DMI mode: indicatorCondition cu/cd = +DI crosses above/below -DI, gt/lt = +DI above/below -DI; indicatorValue is not read and bw is not accepted."
+          enum:
+            - adx
+            - dmi
+          example: dmi
+        kdjLength:
+          type: number
+          description: KDJ — RSV window in bars. Default 9.
+          example: 9
+        kdjKSmooth:
+          type: number
+          description: KDJ — K smoothing length. Default 3.
+          example: 3
+        kdjDSmooth:
+          type: number
+          description: KDJ — D smoothing length. Default 3.
+          example: 3
+        kdjLine:
+          type: string
+          description: KDJ — the line the condition reads (J = 3K - 2D, may leave 0-100). Default k.
+          enum:
+            - k
+            - d
+            - j
+          example: k
+        kdjCompareTo:
+          type: string
+          description: "KDJ — what kdjLine is compared with by indicatorCondition (cu/cd/gt/lt): another line, or custom = the fixed level indicatorValue. Default d. The zone filter is stochRange with stochUpper/stochLower, read as for Stochastic (not applied to custom); unlike Stochastic, a missing stochRange means no zone."
+          enum:
+            - k
+            - d
+            - j
+            - custom
+          example: d
+        vwapAnchor:
+          type: string
+          description: "VWAP — where the anchored VWAP restarts, in UTC: day (00:00), week (Monday 00:00) or month (the 1st). Default day. The first, partial period after the bot subscribes has no value."
+          enum:
+            - day
+            - week
+            - month
+          example: day
+        vwapLine:
+          type: string
+          description: "VWAP — the line the close is compared with by indicatorCondition: vwap, upper or lower band (vwap ± vwapBandMultiplier standard deviations). cu/cd count only within one anchor period. Default vwap."
+          enum:
+            - vwap
+            - upper
+            - lower
+          example: vwap
+        vwapBandMultiplier:
+          type: number
+          description: VWAP — band width in standard deviations for vwapLine upper/lower. Default 1.
+          example: 1
+        trendFilter:
+          type: boolean
+          description: "MA Ratio and Moving Average: AND the condition with a trend filter — the line now against itself trendFilterLookback bars ago, by trendFilterValue percent. Off (false or missing) = no filter."
+          example: false
+        trendFilterLookback:
+          type: number
+          description: Trend filter — bars back the line is compared with.
+          example: 10
+        trendFilterType:
+          type: string
+          description: "Trend filter — lower = the line fell at least trendFilterValue percent, higher = rose at least that much, between = moved less than that either way."
+          enum:
+            - lower
+            - higher
+            - between
+          example: higher
+        trendFilterValue:
+          type: number
+          description: Trend filter — threshold in percent.
+          example: 2
+        sessionLevelsActive:
+          type: string
+          description: "Session Price levels rule — where the condition is evaluated: session (default, also when missing) = only during the session, outside = only outside it (e.g. the Monday range on the other days), always = both. Outside a session the prev* levels are the last completed session's and curOpen/curMid have no value; crossings never count between in and out of a session, except price crossing a prev* level on the first candle after the session (compared with the level that candle sees, e.g. a Monday range broken on Tuesday 00:00)."
+          enum:
+            - session
+            - outside
+            - always
+          example: outside
+        candleSource:
+          type: string
+          description: Candle colour — the candle the colour is read from. Default heikinAshi.
+          enum:
+            - regular
+            - heikinAshi
+          example: heikinAshi
+        candleColor:
+          type: string
+          description: "Candle colour — the colour required: green = close above open, red = close below open (a doji is neither and breaks every run). Default green."
+          enum:
+            - green
+            - red
+          example: green
+        candleCount:
+          type: integer
+          description: Candle colour — N candles of that colour in a row (1-50). Default 1.
+          minimum: 1
+          maximum: 50
+          example: 2
+        candleTrigger:
+          type: string
+          description: "Candle colour — streak (default) = true while the last candleCount closed candles are all that colour; start = only on the candleCount-th candle of a run (once per run)."
+          enum:
+            - streak
+            - start
+          example: streak
+        obSwingLength:
+          type: integer
+          description: Order Blocks — pivot bars on each side of a swing (2-50). Default 5.
+          minimum: 2
+          maximum: 50
+          example: 5
+        obSide:
+          type: string
+          description: "Order Blocks — the block the close is compared with by indicatorCondition (cu/cd/gt/lt): the latest bullish block (formed by a close above the last swing high) or bearish block. No active block = false; a crossing needs the same block on both candles. Default bullish."
+          enum:
+            - bullish
+            - bearish
+          example: bullish
+        obLevel:
+          type: string
+          description: Order Blocks — the level of that block (middle = (top + bottom) / 2). Default top.
+          enum:
+            - top
+            - middle
+            - bottom
+          example: top
+        sqzLength:
+          type: integer
+          description: Squeeze Momentum — Bollinger Bands length (2-500). Default 20.
+          minimum: 2
+          maximum: 500
+          example: 20
+        sqzBBMult:
+          type: number
+          description: Squeeze Momentum — Bollinger Bands multiplier in standard deviations (0.1-10, decimals allowed). Default 1.5, as the script TradingView displays; set 2 for LazyBear's corrected v2.
+          minimum: 0.1
+          maximum: 10
+          example: 1.5
+        sqzKCLength:
+          type: integer
+          description: Squeeze Momentum — Keltner Channels length (2-500), also the momentum length. Default 20.
+          minimum: 2
+          maximum: 500
+          example: 20
+        sqzKCMult:
+          type: number
+          description: Squeeze Momentum — Keltner Channels multiplier of the average true range (0.1-10, decimals allowed). Default 1.5.
+          minimum: 0.1
+          maximum: 10
+          example: 1.5
+        sqzSignal:
+          type: string
+          description: "Squeeze Momentum — the squeeze state required: fired (default) = the squeeze released on this candle, on = in a squeeze, off = out of one, any = no requirement. ANDed with sqzMomentum; both any never fires."
+          enum:
+            - fired
+            - "on"
+            - "off"
+            - any
+          example: fired
+        sqzMomentum:
+          type: string
+          description: "Squeeze Momentum — the momentum required: positive (default), negative, rising, falling, crossUp / crossDown (through zero) or any."
+          enum:
+            - positive
+            - negative
+            - rising
+            - falling
+            - crossUp
+            - crossDown
+            - any
+          example: positive
       description: SettingsIndicators configuration
     UpdateComboBotInput:
       type: object

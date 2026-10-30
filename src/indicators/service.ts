@@ -29,6 +29,7 @@ import type {
   DEMA,
   TEMA,
   RMA,
+  McGinley,
   SupportResistance,
   QFL,
   PSAR,
@@ -52,8 +53,15 @@ import type {
   LongWick,
   OTELevels,
   SessionLevels,
+  KDJ,
+  VWAP,
+  MATrendFilter,
+  Candle,
+  OrderBlocks,
+  Squeeze,
 } from '@gainium/indicators'
 import { v4 } from 'uuid'
+import { indicatorHistoryValue } from './historyValue'
 import {
   ExchangeEnum,
   ExchangeIntervals,
@@ -299,6 +307,7 @@ class InternalIndicator {
     | DEMA
     | TEMA
     | RMA
+    | McGinley
     | SupportResistance
     | QFL
     | PSAR
@@ -322,6 +331,12 @@ class InternalIndicator {
     | LongWick
     | OTELevels
     | SessionLevels
+    | KDJ
+    | VWAP
+    | MATrendFilter
+    | Candle
+    | OrderBlocks
+    | Squeeze
   private data: IndicatorHistory[]
   private lastPrice = 0
   private subscribers: IndicatorSubscribers[]
@@ -808,7 +823,8 @@ class InternalIndicator {
     // Per-class instanceof dispatch lives in @gainium/indicators' feedCandle —
     // one source of truth for "which input shape goes to which indicator."
     // `t` is the candle's open time (every caller passes it as `time`):
-    // Session Price levels groups candles into sessions by it.
+    // Session Price levels groups candles into sessions by it, and VWAP finds
+    // its anchor period by it (the feed also carries the volume VWAP weighs).
     feedCandle(this.indicator, {
       o: +value.o,
       h: +value.h,
@@ -823,19 +839,12 @@ class InternalIndicator {
         this.data.push({
           time,
           // @ts-ignore
-          value:
-            this.type === IndicatorEnum.psar
-              ? { psar: result as number, price: +value.c }
-              : this.type !== IndicatorEnum.ma
-                ? this.type !== IndicatorEnum.bb &&
-                  this.type !== IndicatorEnum.kc
-                  ? result
-                  : { result, price: +value.c }
-                : {
-                    ma: result as number,
-                    price: +value.c,
-                    maType: this.indicatorName,
-                  },
+          value: indicatorHistoryValue(
+            this.type,
+            result,
+            +value.c,
+            this.indicatorName,
+          ),
           type: this.type,
         })
         if (this.data.length > 3) {

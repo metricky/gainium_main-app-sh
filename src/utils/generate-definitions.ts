@@ -927,8 +927,9 @@ const INDICATOR_META: Record<
   ADX: {
     name: 'Average Directional Index (ADX)',
     description:
-      'Measures the strength of a trend without regard to direction, with higher values indicating a stronger trend.',
+      'Measures the strength of a trend without regard to direction, with higher values indicating a stronger trend. adxMode dmi switches the condition to the Directional Movement Index: indicatorCondition cu/cd = +DI crosses above/below -DI, gt/lt = +DI above/below -DI, and indicatorValue is not read (bw is not accepted). Missing adxMode or adx = the ADX line against indicatorValue.',
     typeSpecificFields: [
+      'adxMode',
       'indicatorValue2',
       'percentile',
       'percentileLookback',
@@ -956,7 +957,7 @@ const INDICATOR_META: Record<
   BB: {
     name: 'Bollinger Bands (BB)',
     description:
-      'Displays volatility by plotting standard deviations above and below a moving average. Band widening suggests increased volatility.',
+      'Displays volatility by plotting standard deviations above and below a moving average. Band widening suggests increased volatility. bbwMult is the number of standard deviations (decimals allowed, e.g. 2.5).',
     typeSpecificFields: ['bbCrossingValue', 'bbwMult', 'bbwMa', 'bbwMaLength'],
     supportedActions: [
       'startDeal',
@@ -978,7 +979,7 @@ const INDICATOR_META: Record<
   BBW: {
     name: 'Bollinger Band Width (BBW)',
     description:
-      'Quantifies the gap between the Bollinger Bands. Wider bands indicate higher volatility, and narrower bands indicate lower volatility.',
+      'Quantifies the gap between the Bollinger Bands. Wider bands indicate higher volatility, and narrower bands indicate lower volatility. bbwMult is the number of standard deviations (decimals allowed, e.g. 2.5).',
     typeSpecificFields: [
       'indicatorValue2',
       'bbwMult',
@@ -1241,13 +1242,17 @@ const INDICATOR_META: Record<
   MA: {
     name: 'Moving Averages',
     description:
-      'Indicates the average price of a security over a set period, smoothing out price data to identify trends. The rule reads <maType> <indicatorCondition> <maCrossingValue>: the moving average is compared to the reference, so price above EMA 100 is maType ema, indicatorLength 100, indicatorCondition lt, maCrossingValue price (cu/cd work the same way: EMA crossing down price = price crossing up EMA).',
+      'Indicates the average price of a security over a set period, smoothing out price data to identify trends. The rule reads <maType> <indicatorCondition> <maCrossingValue>: the moving average is compared to the reference, so price above EMA 100 is maType ema, indicatorLength 100, indicatorCondition lt, maCrossingValue price (cu/cd work the same way: EMA crossing down price = price crossing up EMA). maType mcginley is McGinley Dynamic, an average that speeds up when price runs away from it. trendFilter (as on MA Ratio) also requires the average itself to trend: compared with its value trendFilterLookback bars ago it fell (trendFilterType lower), rose (higher) by at least trendFilterValue percent, or moved less than that (between).',
     typeSpecificFields: [
       'maType',
       'maCrossingValue',
       'maCrossingLength',
       'maCrossingInterval',
       'maUUID',
+      'trendFilter',
+      'trendFilterLookback',
+      'trendFilterType',
+      'trendFilterValue',
     ],
     supportedActions: [
       'startDeal',
@@ -1545,7 +1550,7 @@ const INDICATOR_META: Record<
   BBPB: {
     name: 'Bollinger Bands %B (BB %B)',
     description:
-      'Measures where the last price is in relation to the BB bands, indicating overbought or oversold conditions.',
+      'Measures where the last price is in relation to the BB bands, indicating overbought or oversold conditions. bbwMult is the number of standard deviations (decimals allowed, e.g. 2.5).',
     typeSpecificFields: [
       'indicatorValue2',
       'bbwMult',
@@ -1577,8 +1582,16 @@ const INDICATOR_META: Record<
   DIV: {
     name: 'Divergences',
     description:
-      'Occurs when the price trend and a momentum indicator like RSI or MACD move in opposite directions, potentially signaling a price direction change.',
-    typeSpecificFields: ['divType', 'divOscillators', 'divMinCount'],
+      'Occurs when the price trend and a momentum indicator like RSI or MACD move in opposite directions, potentially signaling a price direction change. Optional pivot settings: divPivotLeft / divPivotRight (bars left / right of a pivot, 1-50, default 3 / 1; a pivot is confirmed divPivotRight bars later) and divRangeLower / divRangeUpper (bars between the two pivots compared, default 1 / 60, lower below upper). Leave them out for the defaults.',
+    typeSpecificFields: [
+      'divType',
+      'divOscillators',
+      'divMinCount',
+      'divPivotLeft',
+      'divPivotRight',
+      'divRangeLower',
+      'divRangeUpper',
+    ],
     supportedActions: [
       'startDeal',
       'closeDeal',
@@ -1599,7 +1612,8 @@ const INDICATOR_META: Record<
   },
   ST: {
     name: 'SuperTrend',
-    description: 'The Supertrend is a trend following indicator.',
+    description:
+      'The Supertrend is a trend following indicator. factor is the ATR multiplier (decimals allowed, e.g. 2.5).',
     typeSpecificFields: ['stCondition', 'factor', 'atrLength'],
     supportedActions: [
       'startDeal',
@@ -1622,8 +1636,15 @@ const INDICATOR_META: Record<
   PC: {
     name: 'Price Change',
     description:
-      'Measures the price change within a candle, indicating buying or selling pressure.',
-    typeSpecificFields: ['pcUp', 'pcDown', 'pcCondition', 'pcValue'],
+      'Measures the price change within a candle, indicating buying or selling pressure. The move of the latest candle from its open, in percent: pcValue > 0 reads the move up to the high, pcValue < 0 the move down to the low (default 5). pcCompare gt (default, also when missing) = the move is greater than |pcValue|, lt = lower than |pcValue|, bw = strictly between |pcValue| and |pcValue2| (pcValue2 required, same sign as pcValue, a different size). Example: pcValue "2", pcValue2 "5", pcCompare bw = a candle that rose 2-5 % above its open.',
+    typeSpecificFields: [
+      'pcUp',
+      'pcDown',
+      'pcCondition',
+      'pcValue',
+      'pcCompare',
+      'pcValue2',
+    ],
     supportedActions: [
       'startDeal',
       'closeDeal',
@@ -1851,7 +1872,7 @@ const INDICATOR_META: Record<
   SESSION: {
     name: 'Session Selector',
     description:
-      'Filters signals by day of the week and, optionally, time of day. sessionDays are the active weekdays (0=Sunday). sessionStart/sessionEnd (local HH:MM, end exclusive) limit the session to those hours, read in sessionTimezone (IANA name, default UTC, follows daylight saving). An end before the start is an overnight session belonging to the day it opens. Without start/end the whole day counts. sessionRule in / out picks trading in or out of the session. sessionRule levels (Price levels) compares sessionLevelA with sessionLevelB using indicatorCondition (cd/cu/gt/lt) on indicatorInterval candles (default 15m), and only fires during the session. Levels: prevOpen, prevHigh, prevMid, prevLow, prevClose of the last completed session, curOpen (open of the session in progress), curMid (midpoint of the session in progress so far: (highest high + lowest low) / 2), price (latest close). A level with no value yet, or A equal to B, never fires; crossings never count across a new session. Example: price crossing up prevHigh = breakout of the previous session high.',
+      'Filters signals by day of the week and, optionally, time of day. sessionDays are the active weekdays (0=Sunday). sessionStart/sessionEnd (local HH:MM, end exclusive) limit the session to those hours, read in sessionTimezone (IANA name, default UTC, follows daylight saving). An end before the start is an overnight session belonging to the day it opens. Without start/end the whole day counts. sessionRule in / out picks trading in or out of the session. sessionRule levels (Price levels) compares sessionLevelA with sessionLevelB using indicatorCondition (cd/cu/gt/lt) on indicatorInterval candles (default 15m). sessionLevelsActive sets where Price levels is evaluated: session (default) = only during the session, outside = only outside it, always = both; outside a session the previous-session levels are those of the last completed session and curOpen/curMid have no value. Monday range: sessionDays [1] without hours, sessionLevelsActive outside, price crossing up prevHigh. Levels: prevOpen, prevHigh, prevMid, prevLow, prevClose of the last completed session, curOpen (open of the session in progress), curMid (midpoint of the session in progress so far: (highest high + lowest low) / 2), price (latest close). A level with no value yet, or A equal to B, never fires; crossings never count across a new session or between in and out of it, except (outside / always) price crossing a prev* level on the first candle after the session, compared with the level that candle sees. Example: price crossing up prevHigh = breakout of the previous session high.',
     typeSpecificFields: [
       'sessionDays',
       'sessionRule',
@@ -1860,6 +1881,7 @@ const INDICATOR_META: Record<
       'sessionTimezone',
       'sessionLevelA',
       'sessionLevelB',
+      'sessionLevelsActive',
     ],
     supportedActions: [
       'startDeal',
@@ -1928,6 +1950,151 @@ const INDICATOR_META: Record<
       oteMinLegSize: 1,
       oteLevel: 0.705,
       oteLeg: 'bullish',
+      indicatorAction: 'startDeal',
+    },
+  },
+  KDJ: {
+    name: 'KDJ',
+    description:
+      'Stochastic-style oscillator with three lines: K and D (0-100, RSV over kdjLength bars smoothed by kdjKSmooth and kdjDSmooth) and J = 3K - 2D, which can leave 0-100. kdjLine (k/d/j) is compared by indicatorCondition (cu/cd/gt/lt) with kdjCompareTo: another line, or custom = the fixed level indicatorValue. Optional zone filter as on Stochastic: stochRange lower/upper/both with stochUpper/stochLower (none or missing = no zone; not applied to custom). A bullish K/D cross below 20 is kdjLine k, kdjCompareTo d, indicatorCondition cu, stochRange lower, stochUpper 20.',
+    typeSpecificFields: [
+      'kdjLength',
+      'kdjKSmooth',
+      'kdjDSmooth',
+      'kdjLine',
+      'kdjCompareTo',
+      'stochRange',
+      'stochUpper',
+      'stochLower',
+    ],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'KDJ',
+      indicatorLength: 9,
+      indicatorValue: '20',
+      indicatorCondition: 'cu',
+      indicatorInterval: '1h',
+      kdjLength: 9,
+      kdjKSmooth: 3,
+      kdjDSmooth: 3,
+      kdjLine: 'k',
+      kdjCompareTo: 'd',
+      indicatorAction: 'startDeal',
+    },
+  },
+  VWAP: {
+    name: 'VWAP (anchored)',
+    description:
+      'Volume-weighted average price that restarts at vwapAnchor (UTC): day (00:00), week (Monday) or month (the 1st), with standard-deviation bands. The close is compared by indicatorCondition (cu/cd/gt/lt) with vwapLine: vwap, upper or lower (vwap ± vwapBandMultiplier standard deviations). cu/cd count only within one anchor period; the first, partial period after the bot subscribes has no value. A long entry on a reclaim of the daily VWAP is vwapAnchor day, vwapLine vwap, indicatorCondition cu.',
+    typeSpecificFields: ['vwapAnchor', 'vwapLine', 'vwapBandMultiplier'],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'VWAP',
+      indicatorLength: 20,
+      indicatorValue: '0',
+      indicatorCondition: 'cu',
+      indicatorInterval: '15m',
+      vwapAnchor: 'day',
+      vwapLine: 'vwap',
+      vwapBandMultiplier: 1,
+      indicatorAction: 'startDeal',
+    },
+  },
+  CANDLE: {
+    name: 'Candle colour (Heikin Ashi)',
+    description:
+      'The colour of closed candles: green = close above open, red = close below open, equal = neither (a doji breaks every run). candleSource heikinAshi (default) reads Heikin Ashi candles, regular the ordinary ones. candleColor (green/red) is required candleCount candles in a row (1-50): candleTrigger streak (default) is true while the last candleCount candles are all that colour, start only on the candleCount-th candle of a run (once per run). indicatorCondition and indicatorValue are not read. Two green Heikin Ashi candles in a row is candleSource heikinAshi, candleColor green, candleCount 2.',
+    typeSpecificFields: [
+      'candleSource',
+      'candleColor',
+      'candleCount',
+      'candleTrigger',
+    ],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'CANDLE',
+      indicatorLength: 1,
+      indicatorValue: '0',
+      indicatorInterval: '1h',
+      candleSource: 'heikinAshi',
+      candleColor: 'green',
+      candleCount: 2,
+      candleTrigger: 'streak',
+      indicatorAction: 'startDeal',
+    },
+  },
+  OB: {
+    name: 'Order Blocks',
+    description:
+      'Smart-money order blocks from breaks of structure (non-repainting). Swings are pivots with obSwingLength bars on both sides (2-50, default 5). A close above the latest unbroken swing high forms a bullish block: the candle with the lowest low between that swing and the breaking candle, zone = its low to high; a close below the latest unbroken swing low forms a bearish block (the highest-high candle). A bullish block is removed when a candle closes below its bottom, a bearish one when a candle closes above its top; only the latest block per side is kept. The close is compared by indicatorCondition (cu/cd/gt/lt) with obLevel (top/middle/bottom) of the obSide (bullish/bearish) block; no active block = false, and a crossing needs the same block on both candles. The retest long is obSide bullish, obLevel top, indicatorCondition cd.',
+    typeSpecificFields: ['obSwingLength', 'obSide', 'obLevel'],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'OB',
+      indicatorLength: 5,
+      indicatorValue: '0',
+      indicatorCondition: 'cd',
+      indicatorInterval: '1h',
+      obSwingLength: 5,
+      obSide: 'bullish',
+      obLevel: 'top',
+      indicatorAction: 'startDeal',
+    },
+  },
+  SQZ: {
+    name: 'Squeeze Momentum',
+    description:
+      "LazyBear Squeeze Momentum: a squeeze is on when the Bollinger Bands (sqzLength, sqzBBMult standard deviations) are inside the Keltner Channels (sqzKCLength, sqzKCMult x the average true range), off when they are outside. Momentum is the linear-regression value of the close against the midpoint of the sqzKCLength range and its average. The condition is sqzSignal AND sqzMomentum: sqzSignal fired (the squeeze released on this candle), on, off or any; sqzMomentum positive, negative, rising, falling, crossUp (through zero), crossDown or any. Both any never fires. indicatorCondition and indicatorValue are not read. Multipliers may have decimals; sqzBBMult defaults to 1.5, as the script TradingView displays (2 = LazyBear's corrected v2).",
+    typeSpecificFields: [
+      'sqzLength',
+      'sqzBBMult',
+      'sqzKCLength',
+      'sqzKCMult',
+      'sqzSignal',
+      'sqzMomentum',
+    ],
+    supportedActions: [
+      'startDeal',
+      'closeDeal',
+      'startDca',
+      'stopBot',
+      'startBot',
+    ],
+    example: {
+      type: 'SQZ',
+      indicatorLength: 20,
+      indicatorValue: '0',
+      indicatorInterval: '1h',
+      sqzLength: 20,
+      sqzBBMult: 1.5,
+      sqzKCLength: 20,
+      sqzKCMult: 1.5,
+      sqzSignal: 'fired',
+      sqzMomentum: 'positive',
       indicatorAction: 'startDeal',
     },
   },

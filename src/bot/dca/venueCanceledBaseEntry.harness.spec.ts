@@ -21,10 +21,12 @@ process.env.NODE_ENV = 'testing'
  *
  * Run: `npm test` (mocha).
  */
-import { describe, it, before } from 'mocha'
+import { describe, it, before, afterEach } from 'mocha'
 import { expect } from 'chai'
 import { createRequire } from 'module'
+import sinon from 'sinon'
 import {
+  canceledBaseEntryDelayMs,
   isUnattributedUnfilledBaseEntryCancel,
   pickRestoreBaseEntry,
   shouldSettlePartialBaseEntry,
@@ -183,8 +185,11 @@ const buildBot = (opts: {
     getDeal(id?: string) {
       return id === DEAL_ID ? deal : undefined
     }
-    getOrdersByStatusAndDealId() {
-      return liveRows ?? (order ? [order] : [])
+    getOrdersByStatusAndDealId(q: { status?: string[] } = {}) {
+      // Honours the status filter, as the real map read does.
+      return (liveRows ?? (order ? [order] : [])).filter(
+        (o: any) => !q.status || q.status.includes(o.status),
+      )
     }
     isOwnCancel(id: string) {
       return ownCancels.includes(id)
@@ -627,6 +632,303 @@ describe('a venue-cancelled base entry is never booked (spec 048)', () => {
         })
         await bot.cancelDealOfCanceledBaseEntry(DEAL_ID, CLIENT_ORDER_ID)
         expect((bot.raised as Raised).replaced).to.have.length(0)
+      })
+
+      describe('spec 203 — while the deal holds reposition timers', () => {
+        const NEWER = {
+          clientOrderId: 'D-BO-newer',
+          typeOrder: TypeOrderEnum.dealStart,
+          status: 'NEW',
+        }
+        const held: any[] = []
+        const timers = () => {
+          const t = {
+            limitTimer: setTimeout(() => undefined, 3_600_000),
+            enterMarketTimer: setTimeout(() => undefined, 3_600_000),
+          }
+          held.push(t.limitTimer, t.enterMarketTimer)
+          return t
+        }
+        afterEach(() => {
+          for (const t of held.splice(0)) clearTimeout(t)
+        })
+
+        it('§4.1 an external cancel arms the deal check and drops the timers', async () => {
+          const bot: any = buildBot({
+            order: unfilled(),
+            timers: timers(),
+            liveRows: [],
+          })
+          await bot.processCanceledOrder(unfilled(), 1789416749994, false)
+          expect(bot.dealTimersMap.has(DEAL_ID), 'timers dropped').to.equal(
+            false,
+          )
+          expect(armed(bot), 'deal check armed').to.equal(true)
+          // …and the check then cancels the deal, as without timers.
+          await bot.cancelDealOfCanceledBaseEntry(DEAL_ID, CLIENT_ORDER_ID)
+          expect((bot.raised as Raised).replaced).to.deep.equal([
+            `cancelled:${DEAL_ID}`,
+          ])
+        })
+
+        it('§4.2 the bot’s own reposition cancel keeps its timers', async () => {
+          const t = timers()
+          const bot: any = buildBot({
+            order: unfilled(),
+            timers: t,
+            liveRows: [],
+            ownCancels: [CLIENT_ORDER_ID],
+          })
+          await bot.processCanceledOrder(unfilled(), 1789416749994, false)
+          expect(bot.dealTimersMap.get(DEAL_ID)).to.equal(t)
+          expect(armed(bot)).to.equal(false)
+        })
+
+        it('§4.3 a newer resting entry keeps its timers', async () => {
+          const t = timers()
+          const bot: any = buildBot({
+            order: unfilled(),
+            timers: t,
+            liveRows: [NEWER],
+          })
+          await bot.processCanceledOrder(unfilled(), 1789416749994, false)
+          expect(bot.dealTimersMap.get(DEAL_ID)).to.equal(t)
+          expect(armed(bot)).to.equal(false)
+        })
+
+        it('§4.4 the reposition tick arms the check for an entry that is gone', async () => {
+          const bot: any = buildBot({
+            order: null,
+            timers: timers(),
+            liveRows: [],
+          })
+          await bot.checkBaseOrder(BOT_ID, SYMBOL, CLIENT_ORDER_ID, DEAL_ID)
+          expect(bot.dealTimersMap.has(DEAL_ID), 'timers dropped').to.equal(
+            false,
+          )
+          expect(armed(bot), 'deal check armed').to.equal(true)
+          expect((bot.raised as Raised).replaced).to.have.length(0)
+        })
+
+        it('§4.4 …but not while a newer entry rests, nor for the bot’s own cancel', async () => {
+          for (const over of [
+            { liveRows: [NEWER] },
+            { liveRows: [], ownCancels: [CLIENT_ORDER_ID] },
+          ]) {
+            const t = timers()
+            const bot: any = buildBot({ order: null, timers: t, ...over })
+            await bot.checkBaseOrder(BOT_ID, SYMBOL, CLIENT_ORDER_ID, DEAL_ID)
+            expect(bot.dealTimersMap.get(DEAL_ID)).to.equal(t)
+            expect(armed(bot)).to.equal(false)
+          }
+        })
+
+        it('§4.5 the restore path, which holds no timers, is unchanged', async () => {
+          const bot: any = buildBot({ order: null, timers: null, liveRows: [] })
+          await bot.checkBaseOrder(BOT_ID, SYMBOL, CLIENT_ORDER_ID, DEAL_ID)
+          expect(armed(bot)).to.equal(false)
+        })
+      })
+
+      describe('spec 205 — the venue says CANCELED in its placement reply', () => {
+        /**
+         * The real `placeBaseOrder` of a MARKET-entry bot, over a venue that
+         * answers the send itself with CANCELED and nothing executed — and
+         * whose user stream then never reports it. Only the rows the order map
+         * holds are visible to `getOrdersByStatusAndDealId`, as in production.
+         */
+        const buildPlacing = (
+          opts: {
+            reply?: Record<string, unknown>
+            startOrderType?: OrderTypeEnum
+            ownCancels?: string[]
+          } = {},
+        ) => {
+          const {
+            reply = {},
+            startOrderType = OrderTypeEnum.market,
+            ownCancels = [],
+          } = opts
+          const closed: string[] = []
+          const sent: any[] = []
+          const rows: any[] = []
+          const deal = {
+            deal: {
+              _id: DEAL_ID,
+              botId: BOT_ID,
+              status: DCADealStatusEnum.start,
+              symbol: { symbol: SYMBOL, baseAsset: 'ETH', quoteAsset: 'EUR' },
+              createTime: 1789416749862,
+              settings: {},
+            },
+          }
+          class PlacingBot extends Helper {
+            exchange = {}
+            slippageRetry = 5
+            enterMarketTimeout = 0
+            dealTimersMap = new Map<string, any>()
+            standingConditionLatch = { clear() {} }
+            data: any = {
+              settings: { type: 'regular', pair: [SYMBOL], futures: true },
+              status: 'open',
+              exchange: ExchangeEnum.bybit,
+              paperContext: false,
+              flags: [],
+            }
+            async getAggregatedSettings() {
+              return { startOrderType, useLimitPrice: false }
+            }
+            getDeal(id?: string) {
+              return id === DEAL_ID ? deal : undefined
+            }
+            getOrdersByStatusAndDealId(
+              q: { status?: string | string[]; defaultStatuses?: boolean } = {},
+            ) {
+              const wanted = q.defaultStatuses
+                ? ['NEW', 'PARTIALLY_FILLED']
+                : q.status === undefined
+                  ? undefined
+                  : ([] as string[]).concat(q.status)
+              return rows.filter((o) => !wanted || wanted.includes(o.status))
+            }
+            async getBaseOrder() {
+              return {
+                clientOrderId: CLIENT_ORDER_ID,
+                type: OrderTypeEnum.market,
+                typeOrder: TypeOrderEnum.dealStart,
+                origQty: '100',
+                price: '0.0066',
+                side: 'BUY',
+                symbol: SYMBOL,
+                dealId: DEAL_ID,
+                status: 'NEW',
+                executedQty: '0',
+              }
+            }
+            /** What `sendOrderToExchange` returns: the row, spread with the answer. */
+            async sendOrderToExchange(order: any) {
+              sent.push({ ...order })
+              const row = {
+                ...order,
+                status: 'CANCELED',
+                executedQty: '0',
+                ...reply,
+              }
+              rows.push(row)
+              return row
+            }
+            isOwnCancel(id: string) {
+              return ownCancels.includes(id)
+            }
+            async closeDealById(_b: string, dealId: string) {
+              closed.push(dealId)
+            }
+            async startDeal(o: any) {
+              throw new Error(`startDeal(${o.clientOrderId}) must not run`)
+            }
+            updateDealLastPrices() {}
+            async saveDeal() {}
+            resetPending() {}
+            async handleErrors() {}
+            async handleOrderErrors() {}
+            handleLog() {}
+            handleDebug() {}
+            handleWarn(log: string) {
+              throw new Error(log)
+            }
+            startMethod() {
+              return '1'
+            }
+            endMethod() {}
+          }
+          const bot: any = new PlacingBot()
+          return { bot, closed, sent, rows }
+        }
+        let clock: sinon.SinonFakeTimers | undefined
+        const fakeTimers = () => {
+          clock = sinon.useFakeTimers({
+            toFake: ['setTimeout', 'clearTimeout'],
+          })
+          return clock
+        }
+        afterEach(() => {
+          clock?.restore()
+          clock = undefined
+        })
+        const drain = async () => {
+          for (let i = 0; i < 5; i++) await Promise.resolve()
+        }
+
+        it('§4.1 a MARKET entry answered CANCELED with nothing filled arms the deal check', async () => {
+          const t = fakeTimers()
+          const { bot, closed, sent } = buildPlacing()
+          await bot.placeBaseOrder(BOT_ID, SYMBOL, DEAL_ID)
+          expect(sent, 'one send, nothing re-placed').to.have.length(1)
+          expect(
+            bot.canceledBaseEntryTimers?.has(DEAL_ID) ?? false,
+            'deal check armed with no queue event',
+          ).to.equal(true)
+          t.tick(canceledBaseEntryDelayMs)
+          await drain()
+          expect(closed, 'deal cancelled').to.deep.equal([DEAL_ID])
+          expect(sent, 'still one send').to.have.length(1)
+        })
+
+        it('§4.2 the stream report arriving after it cancels the deal once', async () => {
+          const t = fakeTimers()
+          const { bot, closed, rows } = buildPlacing()
+          await bot.placeBaseOrder(BOT_ID, SYMBOL, DEAL_ID)
+          // The order queue's own report of the same cancel.
+          await bot.processCanceledOrder({ ...rows[0] }, 1789416749994, false)
+          expect(bot.canceledBaseEntryTimers.size).to.equal(1)
+          t.tick(canceledBaseEntryDelayMs * 2)
+          await drain()
+          expect(closed).to.deep.equal([DEAL_ID])
+        })
+
+        it('§4.3 an answer that carries a fill, a bot cancel, or a resting answer arms nothing', async () => {
+          for (const [over, why] of [
+            [{ reply: { executedQty: '5' } }, 'part filled — spec 048'],
+            [{ reply: { status: 'NEW' } }, 'resting'],
+            [{ reply: { status: 'EXPIRED' } }, 'venue expiry, as the stream path'],
+            [{ ownCancels: [CLIENT_ORDER_ID] }, 'the bot cancelled it'],
+          ] as const) {
+            const { bot } = buildPlacing(over as any)
+            await bot.placeBaseOrder(BOT_ID, SYMBOL, DEAL_ID)
+            expect(
+              bot.canceledBaseEntryTimers?.has(DEAL_ID) ?? false,
+              why,
+            ).to.equal(false)
+          }
+        })
+
+        it('§4.4 a LIMIT entry keeps its reposition timers and arms no check', async () => {
+          const { bot } = buildPlacing({
+            startOrderType: OrderTypeEnum.limit,
+          })
+          bot.getBaseOrder = async () => ({
+            clientOrderId: CLIENT_ORDER_ID,
+            type: OrderTypeEnum.limit,
+            typeOrder: TypeOrderEnum.dealStart,
+            origQty: '100',
+            price: '0.0066',
+            side: 'BUY',
+            symbol: SYMBOL,
+            dealId: DEAL_ID,
+            status: 'NEW',
+            executedQty: '0',
+          })
+          const armedTicks: string[] = []
+          bot.armBaseRepositionTick = (_t: any, dealId: string) =>
+            armedTicks.push(dealId)
+          await bot.placeBaseOrder(BOT_ID, SYMBOL, DEAL_ID)
+          expect(armedTicks, 'reposition tick armed as before').to.deep.equal([
+            DEAL_ID,
+          ])
+          expect(
+            bot.canceledBaseEntryTimers?.has(DEAL_ID) ?? false,
+          ).to.equal(false)
+        })
       })
     })
   })

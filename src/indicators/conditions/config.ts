@@ -9,12 +9,22 @@
  * characterization suite pins the engine's configs per type.
  */
 import {
+  resolveCandleSource,
+  resolveOBSwingLength,
+  resolveSqueezeSettings,
+  resolveVWAPAnchor,
+} from '@gainium/indicators'
+import {
+  ADXModeEnum,
+  CandleSourceEnum,
   ExchangeIntervals,
   IndicatorEnum,
   MAEnum,
+  PCCompareEnum,
   RangeType,
   SessionRuleEnum,
   TradingviewAnalysisConditionEnum,
+  VWAPAnchorEnum,
 } from '../../../types'
 import type { IndicatorConfig, SettingsIndicators } from '../../../types'
 import { smoothingConfig } from './smoothing'
@@ -43,11 +53,121 @@ export const indicatorSubscribeInterval = (
 ): ExchangeIntervals =>
   type === IndicatorEnum.adr ? ExchangeIntervals.oneD : indicatorInterval
 
+/** An ADX condition in DMI mode (+DI against −DI). */
+export const isAdxDmi = (
+  i: Pick<SettingsIndicators, 'type' | 'adxMode'>,
+): boolean => i.type === IndicatorEnum.adx && i.adxMode === ADXModeEnum.dmi
+
+/** A Moving Average condition with the trend filter on. */
+export const isMaTrendFilter = (
+  i: Pick<SettingsIndicators, 'type' | 'trendFilter'>,
+): boolean => i.type === IndicatorEnum.ma && !!i.trendFilter
+
 export function buildIndicatorConfig(i: SettingsIndicators): IndicatorConfig {
   // A smoothable oscillator's smoothing is appended only when it is on, so
   // the room id of an unsmoothed indicator (built from the config's values
   // in key order) is unchanged and a smoothed one gets its own room.
-  return { ...unsmoothedIndicatorConfig(i), ...smoothingConfig(i) }
+  return {
+    ...withIndicatorModes(i, unsmoothedIndicatorConfig(i)),
+    ...smoothingConfig(i),
+  }
+}
+
+/**
+ * Modes added on existing types, appended to that type's config only when
+ * they are on — so with them off the config (and the room id) is exactly the
+ * one before, and with them on the instance gets its own room:
+ *  - Moving Average trend filter: `@gainium/indicators` builds MATrendFilter
+ *    (result `{ value, trend }`) instead of the plain MA;
+ *  - ADX DMI mode: the ADX result also carries +DI / −DI.
+ */
+function withIndicatorModes(
+  i: SettingsIndicators,
+  config: IndicatorConfig,
+): IndicatorConfig {
+  if (config.type === IndicatorEnum.ma && isMaTrendFilter(i))
+    return {
+      ...config,
+      trendFilter: i.trendFilter,
+      trendFilterLookback: i.trendFilterLookback,
+      trendFilterType: i.trendFilterType,
+      trendFilterValue: i.trendFilterValue,
+    }
+  if (config.type === IndicatorEnum.adx && isAdxDmi(i))
+    return { ...config, dmi: true } as IndicatorConfig
+  if (config.type === IndicatorEnum.div) {
+    const pivots = divergencePivotConfig(i)
+    if (Object.keys(pivots).length) return { ...config, ...pivots }
+  }
+  return config
+}
+
+/**
+ * A Divergence whose bars range between two pivots is empty (lower bound not
+ * below the upper one, after the DIV defaults 1 / 60): it never finds a pair.
+ */
+export function divergenceRangeInvalid(
+  i: Pick<SettingsIndicators, 'type' | 'divRangeLower' | 'divRangeUpper'>,
+): boolean {
+  if (i.type !== IndicatorEnum.div) return false
+  const { rangeLower = 1, rangeUpper = 60 } = divergencePivotConfig(i)
+  return !(rangeLower < rangeUpper)
+}
+
+/**
+ * Price Change `bw` (between): why it can never fire, or null. Needs a
+ * second value (pcValue2) with the same sign as pcValue (missing = '5') and
+ * a different absolute value — `priceChangeCondition` returns false
+ * otherwise. Other compares have no cross-field rule.
+ */
+export function priceChangeRangeProblem(
+  i: Pick<SettingsIndicators, 'type' | 'pcCompare' | 'pcValue' | 'pcValue2'>,
+): string | null {
+  if (i.type !== IndicatorEnum.pc || i.pcCompare !== PCCompareEnum.bw)
+    return null
+  const v1 = +(i.pcValue ?? '5')
+  const v2 = setNumber(i.pcValue2) ?? NaN
+  if (!Number.isFinite(v1) || !Number.isFinite(v2))
+    return 'Between needs a second value (pcValue2).'
+  if (!((v1 > 0 && v2 > 0) || (v1 < 0 && v2 < 0)))
+    return 'pcValue and pcValue2 must both be positive (up move) or both negative (down move).'
+  if (Math.abs(v1) === Math.abs(v2))
+    return 'pcValue and pcValue2 must be different.'
+  return null
+}
+
+/** A stored optional number: missing / null / '' is unset (undefined). */
+const setNumber = (
+  v: number | string | null | undefined,
+): number | undefined =>
+  v === undefined || v === null || v === '' ? undefined : +v
+
+/**
+ * Divergence pivot / range settings as the DIV config's `leftBars`,
+ * `rightBars`, `rangeLower`, `rangeUpper` — only the ones that are set, so a
+ * Divergence without them keeps exactly the room it always had (the DIV then
+ * runs on its defaults 3 / 1 / 1 / 60, as before).
+ */
+export function divergencePivotConfig(
+  i: Pick<
+    SettingsIndicators,
+    'divPivotLeft' | 'divPivotRight' | 'divRangeLower' | 'divRangeUpper'
+  >,
+): {
+  leftBars?: number
+  rightBars?: number
+  rangeLower?: number
+  rangeUpper?: number
+} {
+  const fields = {
+    leftBars: setNumber(i.divPivotLeft),
+    rightBars: setNumber(i.divPivotRight),
+    rangeLower: setNumber(i.divRangeLower),
+    rangeUpper: setNumber(i.divRangeUpper),
+  }
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, v]) => v !== undefined),
+  )
 }
 
 function unsmoothedIndicatorConfig(i: SettingsIndicators): IndicatorConfig {
@@ -110,6 +230,16 @@ function unsmoothedIndicatorConfig(i: SettingsIndicators): IndicatorConfig {
     lwThreshold,
     oteLeftBars,
     oteMinLegSize,
+    kdjLength,
+    kdjKSmooth,
+    kdjDSmooth,
+    vwapAnchor,
+    candleSource,
+    obSwingLength,
+    sqzLength,
+    sqzBBMult,
+    sqzKCLength,
+    sqzKCMult,
     sessionDays,
     sessionStart,
     sessionEnd,
@@ -161,6 +291,41 @@ function unsmoothedIndicatorConfig(i: SettingsIndicators): IndicatorConfig {
       sessionStart: sessionStart || '',
       sessionEnd: sessionEnd || '',
       sessionTimezone: sessionTimezone || 'UTC',
+    }
+  // KDJ: the three lengths shape the lines; line, compare-to, level and
+  // zone are read by the decision. VWAP: only the anchor shapes it (the band
+  // multiplier is the decision's), so conditions differing only in line or
+  // multiplier share one room.
+  if (type === IndicatorEnum.kdj)
+    return {
+      type: IndicatorEnum.kdj,
+      kdjLength: +(kdjLength || 9),
+      kdjKSmooth: +(kdjKSmooth || 3),
+      kdjDSmooth: +(kdjDSmooth || 3),
+    }
+  if (type === IndicatorEnum.vwap)
+    return {
+      type: IndicatorEnum.vwap,
+      vwapAnchor: resolveVWAPAnchor(vwapAnchor) as string as VWAPAnchorEnum,
+    }
+  // Candle colour, Order Blocks, Squeeze Momentum: only the math's
+  // parameters, normalised as the indicators package's factory reads them
+  // (so equivalent settings share one room); colour / count / trigger,
+  // side / level and signal / momentum are read by the decision.
+  if (type === IndicatorEnum.candle)
+    return {
+      type: IndicatorEnum.candle,
+      source: resolveCandleSource(candleSource) as string as CandleSourceEnum,
+    }
+  if (type === IndicatorEnum.ob)
+    return {
+      type: IndicatorEnum.ob,
+      swingLength: resolveOBSwingLength(obSwingLength),
+    }
+  if (type === IndicatorEnum.sqz)
+    return {
+      type: IndicatorEnum.sqz,
+      ...resolveSqueezeSettings(sqzLength, sqzBBMult, sqzKCLength, sqzKCMult),
     }
   return type === IndicatorEnum.lw
     ? {

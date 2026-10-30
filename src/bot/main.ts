@@ -117,7 +117,11 @@ import {
 } from './errorRulesCache'
 import QuantRulesGuard, { LEVEL2_VIOLATIONS } from './quantRulesGuard'
 import { poisonedSnapshotProfitField } from './redisSnapshotGuard'
-import { mergeOpenOrdersIntoSnapshot } from './orderSnapshotMerge'
+import {
+  dropOrdersEndedUnfilled,
+  mergeOpenOrdersIntoSnapshot,
+  unconfirmedOpenSnapshotIds,
+} from './orderSnapshotMerge'
 import { isSpentStatus, siblingClientOrderIds } from './clientOrderIdReissue'
 import QtyStepGuard, {
   decimalsToStep,
@@ -140,6 +144,13 @@ import {
 export const QUANT_RULES_RETRY_BUDGET_ASAP = 5
 /** Budget for everything that is not a deal opening (a deferred re-send). */
 const QUANT_RULES_RETRY_BUDGET_DEFAULT = 5
+/**
+ * Grid bots created after this instant reserve a quote-profit sell level at
+ * the buy price one level below it (see `generateGridsOnPrice`). Must not
+ * precede the deploy: a bot created between it and the deploy would have its
+ * running ladder re-sized, and every order replaced, on the next fill.
+ */
+const gridSellReserveFixTime = Date.UTC(2026, 10, 2)
 /** First backoff step; doubles per attempt, capped below. */
 const QUANT_RULES_RETRY_BACKOFF_MS = 60_000
 const QUANT_RULES_RETRY_BACKOFF_CAP_MS = 30 * 60_000
@@ -176,6 +187,7 @@ import GridReduceOnlyGuard, {
 import { isPositionAlreadyClosedReason } from './positionAlreadyClosed'
 import AuthFailureGuard, { isHardAuthFailure, isVenueLockout } from './authGuard'
 import RetryBackoff from './retryBackoff'
+import { wantsUserStreamOpen } from './userStreamReopen'
 import { ConditionLatch, STANDING_CONDITION_REARM_MS } from './conditionLatch'
 import { PriceStreamGapTracker } from './priceStreamGap'
 import { awaitPositionFlat } from './opposingPositionSettle'
@@ -2279,11 +2291,11 @@ class MainBot<T extends IMainBot> {
 
   async processServiceLog(msg: string) {
     try {
-      const service = JSON.parse(msg)?.restart
-      if (service === 'userStream') {
+      const parsed = JSON.parse(msg)
+      if (wantsUserStreamOpen(parsed, this.data?.exchangeUUID)) {
         this.connectRabbitUserStream()
       }
-      return service
+      return parsed?.restart
     } catch (e) {
       this.handleErrors(
         `${(e as Error)?.message ?? e}`,
@@ -5353,8 +5365,45 @@ class MainBot<T extends IMainBot> {
             `Added ${merged.added} open orders from DB missing in redis`,
           )
         }
+        // The open read above can only ADD to the snapshot. A NEW row the bot
+        // cancelled after the last delayed write is still NEW in the snapshot,
+        // so a deal re-pricing its entry at the restart came back holding the
+        // cancelled entry as live, and `placeBaseOrder` refused the new one as
+        // "already have and active base order" — nothing on the venue. Ask
+        // Mongo about only the NEW rows its open read did not confirm, by
+        // `clientOrderId` (unique index); usually there are none. Spec 210.
+        const unconfirmed = unconfirmedOpenSnapshotIds(
+          merged.orders,
+          open.data.result,
+        )
+        if (!unconfirmed.length) {
+          this.endMethod(id)
+          return merged.orders
+        }
+        const ended = await this.ordersDb.readData(
+          {
+            clientOrderId: { $in: unconfirmed },
+            status: { $in: ['CANCELED', 'EXPIRED'] },
+          },
+          { clientOrderId: 1, status: 1, executedQty: 1 },
+          {},
+          true,
+        )
+        if (ended.status === StatusEnum.notok) {
+          this.handleWarn(
+            `Cannot read ended orders to correct the redis snapshot: ${ended.reason}`,
+          )
+          this.endMethod(id)
+          return merged.orders
+        }
+        const kept = dropOrdersEndedUnfilled(merged.orders, ended.data.result)
+        if (kept.dropped.length) {
+          this.handleLog(
+            `Dropped ${kept.dropped.length} orders open in redis but ended unfilled in DB: ${kept.dropped.join(', ')}`,
+          )
+        }
         this.endMethod(id)
-        return merged.orders
+        return kept.orders
       }
     }
     this.handleLog('Load orders start')
@@ -6537,7 +6586,35 @@ class MainBot<T extends IMainBot> {
           if (find.status !== request.data.status) {
             find.status = request.data.status
             find.updateTime = request.data.updateTime
-            find.executedQty = await this.convertOrderExecutedQty(find)
+            // The venue's fill size, not the row's: the row holds whatever
+            // the user stream last reported, so an order whose final fill
+            // event never arrived is still `0.1 of 17.86` here while the venue
+            // says FILLED. Closing a deal on that stale figure sends a market
+            // sweep for coins the take-profit already sold. Price stays local
+            // — Binance answers `0` for a market order's price. A venue that
+            // states no fill size keeps the old reading of the row (and its
+            // FILLED→origQty fallback, which must not run on venue units).
+            const venueRaw = +request.data.executedQty
+            if (Number.isFinite(venueRaw) && venueRaw > 0) {
+              find.executedQty = await this.convertOrderExecutedQty(
+                request.data,
+              )
+              const venueQuote = await this.convertOrderQuoteQty(
+                request.data.symbol,
+                request.data.cummulativeQuoteQty,
+              )
+              // KuCoin futures' own value is rebuilt elsewhere, not trusted.
+              if (
+                !this.kucoinFullFutures &&
+                venueQuote &&
+                Number.isFinite(+venueQuote) &&
+                +venueQuote > 0
+              ) {
+                find.cummulativeQuoteQty = venueQuote
+              }
+            } else {
+              find.executedQty = await this.convertOrderExecutedQty(find)
+            }
             this.ordersDb
               .updateData({ clientOrderId: origId }, find)
               .then((res) => {
@@ -8441,6 +8518,33 @@ class MainBot<T extends IMainBot> {
     return workingShift
   }
   /**
+   * {@link restoreFromRangeOrError} for a placement pass, unless this account's
+   * credential is known dead.
+   *
+   * `error` is a soft status that a placement pass clears before it sends, so
+   * on an account whose key the venue is refusing the badge flickered: cleared
+   * by every attempt, set again by its refusal. Merging deals on a Hyperliquid
+   * account with an expired API wallet showed the error and then hid it as the
+   * merge went on, which read as "it worked". While {@link AuthFailureGuard}
+   * holds the account in its cooldown the refusal is still current, so the
+   * badge stays. Once the cooldown lapses the next pass restores as before, and
+   * a fixed key is picked up then.
+   *
+   * @returns whether the bot was restored.
+   */
+  async restoreFromErrorUnlessAuthDead(): Promise<boolean> {
+    const authUUID = `${this.data?.exchangeUUID ?? ''}`
+    if (authUUID && !this.data?.paperContext) {
+      const cooldown = await AuthFailureGuard.check(authUUID)
+      if (cooldown.failed) {
+        return false
+      }
+    }
+    this.restoreFromRangeOrError()
+    return true
+  }
+
+  /**
    * Restore from range status
    */
 
@@ -10164,8 +10268,30 @@ class MainBot<T extends IMainBot> {
               return settled ?? stillHeld
             }
           }
-          if (this.orders && this.orders.size > 0) {
-            this.deleteOrder(order.clientOrderId)
+          // Spec 206. `stop()` replaces `this.orders` with an empty map, and a
+          // refusal answered after that used to skip the DB write-off below as
+          // well, stranding the write-ahead row at `NEW`/`'-1'`. The row is
+          // retired whenever the refusal is definitive. An ambiguous failure
+          // on a cleared map is still left alone: the venue could not be asked
+          // above, and it may hold the order.
+          const tracked = this.orders && this.orders.size > 0
+          const servedLocally =
+            notEnoughBalanceShortCircuit ||
+            complianceShortCircuit ||
+            authShortCircuit ||
+            riskTierShortCircuit ||
+            gridReduceOnlyShortCircuit
+          if (
+            tracked ||
+            servedLocally ||
+            !(
+              isAmbiguousOrderFailure(request.reason) ||
+              isPlacementReadBackMiss(request.reason)
+            )
+          ) {
+            if (tracked) {
+              this.deleteOrder(order.clientOrderId)
+            }
             // Only persist a CANCELED record for an order that actually
             // reached the venue. When a local guard served the rejection the
             // order never existed anywhere but in this process, so there is
@@ -10193,13 +10319,7 @@ class MainBot<T extends IMainBot> {
             // stream or a reconcile has given this row a real exchange id or a
             // terminal status in the meantime, the order DID reach the venue and
             // the filter matches nothing, so the record survives.
-            if (
-              !notEnoughBalanceShortCircuit &&
-              !complianceShortCircuit &&
-              !authShortCircuit &&
-              !riskTierShortCircuit &&
-              !gridReduceOnlyShortCircuit
-            ) {
+            if (!servedLocally) {
               this.updateOrderOnDb({ ...order, status: 'CANCELED' })
             } else {
               await this.deleteOrderFromDb(order.clientOrderId)
@@ -11869,13 +11989,36 @@ class MainBot<T extends IMainBot> {
           }
         }
         const baseQuote = profitCurrency === 'base' && orderFixedIn === 'quote'
+        /**
+         * Profit in quote: a sell level carries the coin the level below it
+         * bought (`sellQty` below is `quoteAmount / buy[i-1]`), and that coin
+         * is bought at the start price with a fee. Reserving it at the level's
+         * own sell price undercounted every sell by one grid step, so the
+         * start-up committed more than the budget (+0.7% at 20 levels, +2.3%
+         * at 5) and on an exactly funded balance the farthest buy was refused.
+         * Bots created before the fix keep their sizing: `findDiff` matches on
+         * quantity, so re-sizing a running grid would replace every order.
+         */
+        const sellsFromLowerBuy =
+          profitCurrency === 'quote' &&
+          orderFixedIn === 'quote' &&
+          new Date(this.data.created ?? 0).getTime() > gridSellReserveFixTime
+        const sellUnits = (v: InitialGrid['price']) => {
+          if (!sellsFromLowerBuy) {
+            return 1 / v.sell
+          }
+          const k = initialGrids.findIndex((g) => g.price === v)
+          return (
+            (k > 0 ? 1 / initialGrids[k - 1].price.buy : (1 + gs) / v.sell) * f
+          )
+        }
         if (
           (profitCurrency === 'quote' && orderFixedIn === 'quote') ||
           baseQuote
         ) {
           quoteAmount =
             budget /
-            (sells.reduce((acc, v) => (acc += 1 / v.sell), 0) *
+            (sells.reduce((acc, v) => (acc += sellUnits(v)), 0) *
               (sellCount && newSell && baseQuote
                 ? sells.reduce((acc, a) => acc + a.sell, 0) / sellCount
                 : initialPriceStart) +
@@ -11883,7 +12026,7 @@ class MainBot<T extends IMainBot> {
           if (isNaN(quoteAmount) || !isFinite(quoteAmount) || !quoteAmount) {
             quoteAmount =
               budget /
-              (sells.reduce((acc, v) => (acc += 1 / v.sell), 0) *
+              (sells.reduce((acc, v) => (acc += sellUnits(v)), 0) *
                 initialPriceStart +
                 buyCount * f)
           }

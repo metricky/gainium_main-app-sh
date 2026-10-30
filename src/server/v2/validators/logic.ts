@@ -27,6 +27,11 @@ import { findPairBySymbol } from '../../../bot/utils'
 import { singlePositionSettingsError } from '../../../bot/dca/singlePosition'
 import { billableIndicators } from '../../../bot/billableIndicators'
 import { smoothingSettingsGaps } from '../../../indicators/conditions/smoothing'
+import {
+  divergenceRangeInvalid,
+  priceChangeRangeProblem,
+  isAdxDmi,
+} from '../../../indicators/conditions/config'
 
 const indicatorsCheck: {
   condition: (input: DCABotSettings) => boolean
@@ -181,7 +186,8 @@ const betweenConditionErrors = (
   indicators
     .filter((i) => i.indicatorCondition === IndicatorStartConditionEnum.bw)
     .flatMap((i): [string, string][] => {
-      if (!BETWEEN_CAPABLE_INDICATORS.includes(i.type)) {
+      // ADX in DMI mode compares two lines, not a value with bounds
+      if (!BETWEEN_CAPABLE_INDICATORS.includes(i.type) || isAdxDmi(i)) {
         return [
           [
             'indicators',
@@ -210,6 +216,29 @@ const betweenConditionErrors = (
       }
       return []
     })
+
+/** Divergence: divRangeLower must be below divRangeUpper (defaults 1 / 60). */
+const divergenceRangeErrors = (
+  indicators: DCABotSettings['indicators'],
+): [string, string][] =>
+  indicators
+    .filter((i) => divergenceRangeInvalid(i))
+    .map((): [string, string] => [
+      'indicators',
+      'divRangeLower must be below divRangeUpper (defaults 1 and 60)',
+    ])
+
+/**
+ * Price Change `bw` (between): pcValue2 required, the same sign as pcValue
+ * (missing = 5) and a different absolute value.
+ */
+const priceChangeRangeErrors = (
+  indicators: DCABotSettings['indicators'],
+): [string, string][] =>
+  indicators.flatMap((i): [string, string][] => {
+    const problem = priceChangeRangeProblem(i)
+    return problem ? [['indicators', `Price Change: ${problem}`]] : []
+  })
 
 /**
  * Oscillator smoothing: type `none` or an allowed average (case-insensitive),
@@ -250,6 +279,8 @@ export const indicatorConsistencyErrors = (
   errors.push(...requiredIndicatorErrors(input))
   errors.push(...betweenConditionErrors(indicators))
   errors.push(...smoothingErrors(indicators))
+  errors.push(...divergenceRangeErrors(indicators))
+  errors.push(...priceChangeRangeErrors(indicators))
 
   if (
     indicatorsCheck.every((check) => !check.condition(input)) &&

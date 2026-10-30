@@ -35,6 +35,20 @@ import {
   LWValueEnum,
   LWConditionEnum,
   OTELegEnum,
+  ADXModeEnum,
+  KDJLineEnum,
+  KDJCompareToEnum,
+  VWAPAnchorEnum,
+  VWAPLineEnum,
+  CandleSourceEnum,
+  CandleColorEnum,
+  CandleTriggerEnum,
+  OBSideEnum,
+  OBLevelEnum,
+  SqzSignalEnum,
+  SqzMomentumEnum,
+  SessionLevelsActiveEnum,
+  PCCompareEnum,
   SessionLevelEnum,
   SessionRuleEnum,
   STConditionEnum,
@@ -1138,6 +1152,616 @@ export function conditionCases(): ConditionCase[] {
         ),
       )
 
+  // ── VWAP (appended): the close against the VWAP or a band ───────────────
+  // vwap 100, stdev 5: upper/lower 105/95 at multiplier 1, 110/90 at 2
+  const P0 = T - (T % (24 * H))
+  const vwapBar = (
+    price: number | null,
+    vwap: number | null = 100,
+    periodStart: number | null = P0,
+  ) =>
+    ({
+      vwap,
+      stdev: 5,
+      upper: vwap === null ? null : vwap + 5,
+      lower: vwap === null ? null : vwap - 5,
+      price,
+      periodStart,
+    }) as unknown
+  for (const vwapLine of [
+    VWAPLineEnum.vwap,
+    VWAPLineEnum.upper,
+    VWAPLineEnum.lower,
+    undefined,
+  ])
+    for (const vwapBandMultiplier of [2, undefined])
+      for (const indicatorCondition of [
+        C.cd,
+        C.cu,
+        C.gt,
+        C.lt,
+        C.bw,
+        undefined,
+      ])
+        for (const [pp, lp] of [
+          [98, 102],
+          [102, 98],
+          [100, 102],
+          [108, 112],
+          [112, 108],
+          [92, 88],
+          [88, 92],
+          [null, 102],
+        ] as [number | null, number | null][])
+          for (const layout of ['two', 'one'] as Layout[])
+            push(
+              `VWAP|${fmt(vwapLine)}|m=${fmt(vwapBandMultiplier)}|${fmt(indicatorCondition)}|${fmt(pp)}>${fmt(lp)}|${layout}`,
+              base(IndicatorEnum.vwap, {
+                vwapLine,
+                vwapBandMultiplier,
+                indicatorCondition: indicatorCondition as C,
+              }),
+              series(IndicatorEnum.vwap, vwapBar(pp), vwapBar(lp), layout),
+            )
+  // a crossing never counts across the anchor restart; no volume yet = NaN
+  for (const indicatorCondition of [C.cu, C.gt])
+    for (const [label, prevBar, lastBar] of [
+      ['newPeriod', vwapBar(98), vwapBar(102, 100, P0 + 24 * H)],
+      ['noVolume', vwapBar(98), vwapBar(102, null)],
+      ['noPeriod', vwapBar(98, 100, null), vwapBar(102, 100, null)],
+    ] as [string, unknown, unknown][])
+      push(
+        `VWAP|boundary|${label}|${indicatorCondition}`,
+        base(IndicatorEnum.vwap, { indicatorCondition }),
+        series(IndicatorEnum.vwap, prevBar, lastBar),
+      )
+
+  // ── KDJ (appended): a line vs a line or the level, Stochastic's zone ────
+  const kdjBar = (k: number | null, d: number | null, j: number | null) =>
+    ({ k, d, j }) as unknown
+  for (const kdjLine of [
+    KDJLineEnum.k,
+    KDJLineEnum.d,
+    KDJLineEnum.j,
+    undefined,
+  ])
+    for (const kdjCompareTo of [
+      KDJCompareToEnum.k,
+      KDJCompareToEnum.d,
+      KDJCompareToEnum.j,
+      KDJCompareToEnum.custom,
+      undefined,
+    ])
+      for (const indicatorCondition of [C.cd, C.cu, C.gt, C.lt, undefined])
+        for (const [prev, last] of [
+          [kdjBar(10, 15, 0), kdjBar(18, 15, 24)],
+          [kdjBar(90, 85, 100), kdjBar(82, 85, 76)],
+          [kdjBar(50, 50, 50), kdjBar(55, 50, 65)],
+          [kdjBar(10, 15, null), kdjBar(18, null, 24)],
+        ] as [unknown, unknown][])
+          push(
+            `KDJ|${fmt(kdjLine)}|${fmt(kdjCompareTo)}|${fmt(indicatorCondition)}|${JSON.stringify(prev)}>${JSON.stringify(last)}`,
+            base(IndicatorEnum.kdj, {
+              kdjLine,
+              kdjCompareTo,
+              indicatorCondition: indicatorCondition as C,
+              indicatorValue: '20',
+            }),
+            series(IndicatorEnum.kdj, prev, last),
+          )
+  // zones, as stored by the Stochastic form (missing range = no zone)
+  for (const stochRange of [
+    StochRangeEnum.none,
+    StochRangeEnum.lower,
+    StochRangeEnum.upper,
+    StochRangeEnum.both,
+    undefined,
+  ])
+    for (const [stochUpper, stochLower] of [
+      ['80', '20'],
+      ['', '20'],
+    ])
+      for (const [prev, last] of [
+        [kdjBar(10, 15, 0), kdjBar(18, 15, 24)],
+        [kdjBar(5, 12, -9), kdjBar(14, 12, 18)],
+        [kdjBar(82, 88, 70), kdjBar(90, 88, 94)],
+      ] as [unknown, unknown][])
+        for (const layout of ['two', 'one'] as Layout[])
+          push(
+            `KDJ|zone|${fmt(stochRange)}|${stochUpper}/${stochLower}|${JSON.stringify(prev)}>${JSON.stringify(last)}|${layout}`,
+            base(IndicatorEnum.kdj, {
+              indicatorCondition: C.cu,
+              stochRange,
+              stochUpper,
+              stochLower,
+            }),
+            series(IndicatorEnum.kdj, prev, last, layout),
+          )
+
+  // ── ADX DMI mode (appended): +DI against −DI, indicatorValue unread ─────
+  const dmiBar = (value: number, pdi: number | null, mdi: number | null) =>
+    ({ value, pdi, mdi }) as unknown
+  for (const adxMode of [ADXModeEnum.dmi, ADXModeEnum.adx])
+    for (const indicatorCondition of [C.cd, C.cu, C.gt, C.lt, C.bw, undefined])
+      for (const [prev, last] of [
+        [dmiBar(10, 18, 22), dmiBar(30, 24, 20)],
+        [dmiBar(30, 24, 20), dmiBar(10, 18, 22)],
+        [dmiBar(30, 20, 20), dmiBar(10, 24, 20)],
+        [dmiBar(30, 24, 20), dmiBar(60, 25, 20)],
+        [dmiBar(30, null, 20), dmiBar(60, 25, 20)],
+      ] as [unknown, unknown][])
+        for (const layout of ['two', 'one'] as Layout[])
+          push(
+            `ADX|mode=${adxMode}|${fmt(indicatorCondition)}|${JSON.stringify(prev)}>${JSON.stringify(last)}|${layout}`,
+            base(IndicatorEnum.adx, {
+              adxMode,
+              indicatorCondition: indicatorCondition as C,
+              indicatorValue2: '90',
+            }),
+            series(IndicatorEnum.adx, prev, last, layout),
+          )
+
+  // ── Moving Average trend filter (appended): comparison AND trend gate ────
+  for (const trendFilterType of [
+    TrendFilterOperatorEnum.lower,
+    TrendFilterOperatorEnum.higher,
+    TrendFilterOperatorEnum.between,
+    undefined,
+  ])
+    for (const trend of [0, 1, 2, 3, undefined])
+      for (const indicatorCondition of [C.gt, C.lt, C.cu, C.cd])
+        push(
+          `MA|trend|${fmt(trendFilterType)}|t=${fmt(trend)}|${indicatorCondition}`,
+          base(IndicatorEnum.ma, {
+            indicatorCondition,
+            maType: MAEnum.ema,
+            maCrossingValue: MAEnum.price,
+            trendFilter: true,
+            trendFilterLookback: 10,
+            trendFilterType,
+            trendFilterValue: 1,
+          }),
+          series(
+            IndicatorEnum.ma,
+            { ...maBar(90, 100), trend },
+            { ...maBar(110, 100), trend },
+          ),
+        )
+  // the filter off: the stored trend settings are not read
+  for (const trendFilter of [false, undefined])
+    push(
+      `MA|trend|off=${fmt(trendFilter)}`,
+      base(IndicatorEnum.ma, {
+        indicatorCondition: C.cu,
+        maType: MAEnum.ema,
+        maCrossingValue: MAEnum.price,
+        trendFilter,
+        trendFilterType: TrendFilterOperatorEnum.higher,
+      }),
+      series(IndicatorEnum.ma, maBar(90, 100), maBar(110, 100)),
+    )
+  // a leftover trend filter on VWAP, KDJ or DMI keeps the condition false
+  for (const [label, type, extra, prev, last] of [
+    ['VWAP', IndicatorEnum.vwap, {}, vwapBar(98), vwapBar(102)],
+    ['KDJ', IndicatorEnum.kdj, {}, kdjBar(10, 15, 0), kdjBar(18, 15, 24)],
+    [
+      'DMI',
+      IndicatorEnum.adx,
+      { adxMode: ADXModeEnum.dmi },
+      dmiBar(10, 18, 22),
+      dmiBar(30, 24, 20),
+    ],
+  ] as [string, IndicatorEnum, Partial<SettingsIndicators>, unknown, unknown][])
+    for (const trendFilter of [true, false])
+      push(
+        `${label}|leftoverTrendFilter=${trendFilter}`,
+        base(type, {
+          ...extra,
+          indicatorCondition: C.cu,
+          trendFilter,
+          trendFilterType: TrendFilterOperatorEnum.higher,
+        }),
+        series(type, prev, last),
+      )
+
+  // ── Candle colour (appended): N candles of a colour in a row ────────────
+  const candleBar = (color: number | null, streak: number | null) =>
+    ({ color, streak, open: 1, high: 2, low: 0.5, close: 1.5 }) as unknown
+  for (const candleColor of [
+    CandleColorEnum.green,
+    CandleColorEnum.red,
+    undefined,
+  ])
+    for (const candleTrigger of [
+      CandleTriggerEnum.streak,
+      CandleTriggerEnum.start,
+      undefined,
+    ])
+      for (const candleCount of [1, 3, '3', 0, undefined] as (
+        | number
+        | undefined
+      )[])
+        for (const [color, streak] of [
+          [1, 3],
+          [1, 2],
+          [1, 4],
+          [-1, -3],
+          [-1, -1],
+          [0, 0],
+          [1, -3],
+          [null, null],
+        ] as (number | null)[][])
+          for (const layout of ['two', 'one'] as Layout[])
+            push(
+              `CANDLE|${fmt(candleColor)}|${fmt(candleTrigger)}|n=${fmt(candleCount)}|${fmt(color)}/${fmt(streak)}|${layout}`,
+              base(IndicatorEnum.candle, {
+                candleColor,
+                candleTrigger,
+                candleCount,
+              }),
+              series(
+                IndicatorEnum.candle,
+                candleBar(0, 0),
+                candleBar(color, streak),
+                layout,
+              ),
+            )
+
+  // ── Order Blocks (appended): the close against a block level ────────────
+  // bullish block 100..110 (middle 105, id 1), bearish block 104..116
+  // (middle 110, id 2)
+  const obBar = (
+    price: number | null,
+    o: { bullId?: number | null; bearId?: number | null } = {},
+  ) =>
+    ({
+      bullishTop: o.bullId === null ? null : 110,
+      bullishBottom: o.bullId === null ? null : 100,
+      bullishId: o.bullId === undefined ? 1 : o.bullId,
+      bearishTop: o.bearId === null ? null : 116,
+      bearishBottom: o.bearId === null ? null : 104,
+      bearishId: o.bearId === undefined ? 2 : o.bearId,
+      price,
+    }) as unknown
+  for (const obSide of [OBSideEnum.bullish, OBSideEnum.bearish, undefined])
+    for (const obLevel of [
+      OBLevelEnum.top,
+      OBLevelEnum.middle,
+      OBLevelEnum.bottom,
+      undefined,
+    ])
+      for (const indicatorCondition of [
+        C.cd,
+        C.cu,
+        C.gt,
+        C.lt,
+        C.bw,
+        undefined,
+      ])
+        for (const [pp, lp] of [
+          [112, 108],
+          [108, 112],
+          [104, 106],
+          [106, 104],
+          [98, 101],
+          [101, 98],
+          [118, 114],
+          [114, 118],
+          [112, 110],
+          [110, 110],
+          [null, 108],
+        ] as (number | null)[][])
+          for (const layout of ['two', 'one'] as Layout[])
+            push(
+              `OB|${fmt(obSide)}|${fmt(obLevel)}|${fmt(indicatorCondition)}|${fmt(pp)}>${fmt(lp)}|${layout}`,
+              base(IndicatorEnum.ob, {
+                obSide,
+                obLevel,
+                indicatorCondition: indicatorCondition as C,
+              }),
+              series(IndicatorEnum.ob, obBar(pp), obBar(lp), layout),
+            )
+  // a new block is never a crossing; no active block = false
+  for (const indicatorCondition of [C.cd, C.cu, C.gt, C.lt])
+    for (const [label, prevOpts, lastOpts] of [
+      ['newBull', { bullId: 0 }, {}],
+      ['newBear', { bearId: 0 }, {}],
+      ['noBlockLast', {}, { bullId: null, bearId: null }],
+      ['noBlockPrev', { bullId: null, bearId: null }, {}],
+    ] as [string, Parameters<typeof obBar>[1], Parameters<typeof obBar>[1]][])
+      for (const obSide of [OBSideEnum.bullish, OBSideEnum.bearish])
+        push(
+          `OB|boundary|${label}|${obSide}|${indicatorCondition}`,
+          base(IndicatorEnum.ob, { obSide, indicatorCondition }),
+          series(
+            IndicatorEnum.ob,
+            obBar(indicatorCondition === C.cu ? 108 : 118, prevOpts),
+            obBar(indicatorCondition === C.cu ? 118 : 108, lastOpts),
+          ),
+        )
+
+  // ── Squeeze Momentum (appended): squeeze state AND momentum ─────────────
+  const sqzBar = (squeeze: number | null, momentum: number | null) =>
+    ({ squeeze, momentum }) as unknown
+  for (const sqzSignal of [
+    SqzSignalEnum.fired,
+    SqzSignalEnum.on,
+    SqzSignalEnum.off,
+    SqzSignalEnum.any,
+    undefined,
+  ])
+    for (const sqzMomentum of [
+      SqzMomentumEnum.positive,
+      SqzMomentumEnum.negative,
+      SqzMomentumEnum.rising,
+      SqzMomentumEnum.falling,
+      SqzMomentumEnum.crossUp,
+      SqzMomentumEnum.crossDown,
+      SqzMomentumEnum.any,
+      undefined,
+    ])
+      for (const [ps, ls, pm, lm] of [
+        [1, -1, -2, 3],
+        [1, 1, 2, 1],
+        [-1, -1, 1, -2],
+        [1, 0, 0, 0],
+        [0, 1, 5, 5],
+        [1, -1, null, 3],
+        [null, -1, -2, 3],
+      ] as (number | null)[][])
+        for (const layout of ['two', 'one'] as Layout[])
+          push(
+            `SQZ|${fmt(sqzSignal)}|${fmt(sqzMomentum)}|${fmt(ps)}/${fmt(pm)}>${fmt(ls)}/${fmt(lm)}|${layout}`,
+            base(IndicatorEnum.sqz, { sqzSignal, sqzMomentum }),
+            series(IndicatorEnum.sqz, sqzBar(ps, pm), sqzBar(ls, lm), layout),
+          )
+
+  // ── Divergence pivots (appended; new settings on an existing type): the
+  // decision reads the DIV result only, so pivots never change it ─────────
+  for (const pivots of [
+    { divPivotLeft: 5, divPivotRight: 2, divRangeLower: 5, divRangeUpper: 30 },
+    { divPivotLeft: '5', divRangeUpper: '' },
+  ] as Partial<SettingsIndicators>[])
+    for (const r of [
+      [2, 0, 0, 0],
+      [0, 0, 2, 0],
+      [0, 0, 0, 0],
+    ])
+      push(
+        `DIV|pivots|${JSON.stringify(pivots)}|${r.join(',')}`,
+        base(IndicatorEnum.div, {
+          divType: DivTypeEnum.abear,
+          divMinCount: 2,
+          ...pivots,
+        }),
+        series(
+          IndicatorEnum.div,
+          {
+            negdivergence: 0,
+            negdivergencehidden: 0,
+            posdivergence: 0,
+            posdivergencehidden: 0,
+          },
+          {
+            negdivergence: r[0],
+            negdivergencehidden: r[1],
+            posdivergence: r[2],
+            posdivergencehidden: r[3],
+          },
+          'one',
+        ),
+      )
+
+  // ── Session Price levels outside the session (appended; a new setting on
+  // an existing type): sessionLevelsActive session / outside / always ─────
+  for (const sessionLevelsActive of [
+    SessionLevelsActiveEnum.session,
+    SessionLevelsActiveEnum.outside,
+    SessionLevelsActiveEnum.always,
+    undefined,
+    'Outside' as SessionLevelsActiveEnum,
+  ])
+    for (const [a, b] of [
+      [SessionLevelEnum.price, SessionLevelEnum.prevHigh],
+      [SessionLevelEnum.price, SessionLevelEnum.curOpen],
+    ] as SessionLevelEnum[][])
+      for (const cond of [C.cu, C.cd, C.gt, C.lt])
+        for (const [label, prevOpts, lastOpts] of [
+          ['in', {}, {}],
+          ['out', { inSession: 0 }, { inSession: 0 }],
+          ['inToOut', {}, { inSession: 0 }],
+          ['outToIn', { inSession: 0 }, {}],
+          ['outNewPrev', { inSession: 0, prevKey: 20231113 }, { inSession: 0 }],
+          ['outNoPrev', { inSession: 0, prevKey: null }, { inSession: 0 }],
+        ] as [
+          string,
+          Parameters<typeof sessionBar>[1],
+          Parameters<typeof sessionBar>[1],
+        ][])
+          push(
+            `SESSION|levels|active=${fmt(sessionLevelsActive)}|${a}|${b}|${cond}|${label}`,
+            {
+              ...levels(a, b, cond),
+              sessionLevelsActive,
+            },
+            series(
+              IndicatorEnum.session,
+              sessionBar(cond === C.cu || cond === C.gt ? 118 : 122, prevOpts),
+              sessionBar(cond === C.cu || cond === C.gt ? 122 : 118, lastOpts),
+            ),
+          )
+
+  // a leftover trend filter on Candle colour, Order Blocks or Squeeze
+  // Momentum keeps the condition false (as in the backtester)
+  for (const [label, type, extra, prev, last] of [
+    ['CANDLE', IndicatorEnum.candle, {}, candleBar(1, 1), candleBar(1, 2)],
+    [
+      'OB',
+      IndicatorEnum.ob,
+      { indicatorCondition: C.cd },
+      obBar(112),
+      obBar(108),
+    ],
+    ['SQZ', IndicatorEnum.sqz, {}, sqzBar(1, 1), sqzBar(-1, 2)],
+  ] as [string, IndicatorEnum, Partial<SettingsIndicators>, unknown, unknown][])
+    for (const trendFilter of [true, false])
+      push(
+        `${label}|leftoverTrendFilter=${trendFilter}`,
+        base(type, {
+          ...extra,
+          trendFilter,
+          trendFilterType: TrendFilterOperatorEnum.higher,
+        }),
+        series(type, prev, last),
+      )
+
+  // ── Price Change range (appended; a new setting on an existing type):
+  // pcCompare gt / lt / bw and pcValue2, on the open→high / open→low move ──
+  const pcBar = (upPct: number, downPct: number, t = 2) => ({
+    up: upPct > t,
+    down: downPct > t,
+    upPct,
+    downPct,
+  })
+  for (const pcCompare of [
+    undefined,
+    null,
+    PCCompareEnum.gt,
+    PCCompareEnum.lt,
+    PCCompareEnum.bw,
+    'GT' as PCCompareEnum,
+  ])
+    for (const [pcValue, pcValue2] of [
+      ['2', '5'],
+      ['5', '2'],
+      ['-2', '-5'],
+      ['2', '-5'],
+      ['2', undefined],
+      [undefined, '2'],
+      ['0', '3'],
+    ] as (string | undefined)[][])
+      for (const [up, down] of [
+        [1, 6],
+        [2, 0],
+        [3.5, 0],
+        [5, 1],
+        [7, 3.5],
+        [0, 2],
+        [0, 5],
+        [NaN, NaN],
+      ])
+        push(
+          `PC|compare=${fmt(pcCompare)}|${fmt(pcValue)}..${fmt(pcValue2)}|${up},${down}`,
+          base(IndicatorEnum.pc, {
+            pcValue,
+            pcValue2,
+            pcCompare: pcCompare as PCCompareEnum,
+          }),
+          series(IndicatorEnum.pc, pcBar(0, 0), pcBar(up, down)),
+        )
+  // results without the pct fields (stored before the setting existed)
+  for (const pcCompare of [
+    undefined,
+    PCCompareEnum.gt,
+    PCCompareEnum.lt,
+    PCCompareEnum.bw,
+  ])
+    for (const [up, down] of [
+      [true, false],
+      [false, true],
+    ])
+      push(
+        `PC|compare=${fmt(pcCompare)}|noPct|${up},${down}`,
+        base(IndicatorEnum.pc, {
+          pcValue: '2',
+          pcValue2: '5',
+          pcCompare,
+        }),
+        series(IndicatorEnum.pc, { up: false, down: false }, { up, down }),
+      )
+
+  // ── Session Price levels: the first candle after the session (appended;
+  // indicators 1.14.0). `prev` is the session's last candle (inside session
+  // 20231115, levels of 20231114), `last` the first candle after it: that
+  // session is now the previous one, so every prev* level jumped. With
+  // outside / always, price vs a prev* level crosses against the level
+  // `last` sees; every other pairing, and session / missing, stay false.
+  const afterBars = (
+    p0: number,
+    p1: number,
+    completed = true,
+  ): [unknown, unknown] => [
+    {
+      prevOpen: 70,
+      prevHigh: 80,
+      prevMid: 75,
+      prevLow: 70,
+      prevClose: 78,
+      curOpen: 105,
+      price: p0,
+      inSession: 1,
+      sessionKey: 20231115,
+      prevSessionKey: 20231114,
+    },
+    completed
+      ? {
+          prevOpen: 105,
+          prevHigh: 120,
+          prevMid: 110,
+          prevLow: 100,
+          prevClose: p0,
+          curOpen: null,
+          price: p1,
+          inSession: 0,
+          sessionKey: null,
+          prevSessionKey: 20231115,
+        }
+      : {
+          // the session was not seen whole: the previous one is unchanged
+          prevOpen: 70,
+          prevHigh: 80,
+          prevMid: 75,
+          prevLow: 70,
+          prevClose: 78,
+          curOpen: null,
+          price: p1,
+          inSession: 0,
+          sessionKey: null,
+          prevSessionKey: 20231114,
+        },
+  ]
+  for (const sessionLevelsActive of [
+    SessionLevelsActiveEnum.session,
+    SessionLevelsActiveEnum.outside,
+    SessionLevelsActiveEnum.always,
+    undefined,
+  ])
+    for (const [a, b] of [
+      [SessionLevelEnum.price, SessionLevelEnum.prevHigh],
+      [SessionLevelEnum.prevHigh, SessionLevelEnum.price],
+      [SessionLevelEnum.price, SessionLevelEnum.prevLow],
+      [SessionLevelEnum.price, SessionLevelEnum.prevMid],
+      [SessionLevelEnum.price, SessionLevelEnum.prevClose],
+      [SessionLevelEnum.prevHigh, SessionLevelEnum.prevLow],
+      [SessionLevelEnum.price, SessionLevelEnum.curOpen],
+    ] as SessionLevelEnum[][])
+      for (const cond of [C.cu, C.cd, C.gt, C.lt])
+        for (const [label, p0, p1, completed] of [
+          ['breakUp', 119, 122, true],
+          ['breakDown', 101, 98, true],
+          ['crossMid', 108, 112, true],
+          ['inside', 109, 111, true],
+          ['partialSession', 119, 122, false],
+        ] as [string, number, number, boolean][])
+          push(
+            `SESSION|levels|afterSession|active=${fmt(sessionLevelsActive)}|${a}|${b}|${cond}|${label}`,
+            {
+              ...levels(a, b, cond),
+              sessionLevelsActive,
+            },
+            series(IndicatorEnum.session, ...afterBars(p0, p1, completed)),
+          )
+
   return out
 }
 
@@ -1236,7 +1860,19 @@ export function configCases(): { id: string; settings: SettingsIndicators }[] {
           : v,
     ]),
   ) as Partial<SettingsIndicators>
-  for (const type of Object.values(IndicatorEnum)) {
+  // Types added after the golden's per-type configs were recorded are
+  // appended at the end (below), so the recorded entries keep their order.
+  const APPENDED_TYPES: IndicatorEnum[] = [
+    IndicatorEnum.kdj,
+    IndicatorEnum.vwap,
+  ]
+  // the 1.121.0 types, appended after every config recorded before them
+  const APPENDED_TYPES_2: IndicatorEnum[] = [
+    IndicatorEnum.candle,
+    IndicatorEnum.ob,
+    IndicatorEnum.sqz,
+  ]
+  const pushTypeConfigs = (type: IndicatorEnum) => {
     const min = {
       type,
       uuid: 'cond',
@@ -1277,6 +1913,9 @@ export function configCases(): { id: string; settings: SettingsIndicators }[] {
       },
     })
   }
+  for (const type of Object.values(IndicatorEnum))
+    if (!APPENDED_TYPES.includes(type) && !APPENDED_TYPES_2.includes(type))
+      pushTypeConfigs(type)
   // Session Price levels (appended): only the session window is in the room
   const sessionMin = {
     type: IndicatorEnum.session,
@@ -1310,6 +1949,275 @@ export function configCases(): { id: string; settings: SettingsIndicators }[] {
       sessionTimezone: '',
     },
   })
+  // McGinley Dynamic as an MA type (appended): maType reaches the room key
+  const maMin = {
+    type: IndicatorEnum.ma,
+    uuid: 'cond',
+    groupId: 'g1',
+    indicatorAction: IndicatorAction.startDeal,
+    indicatorInterval: ExchangeIntervals.oneH,
+    indicatorCondition: C.cu,
+    indicatorLength: 14,
+    maType: MAEnum.mcginley,
+    maCrossingValue: MAEnum.price,
+  } as unknown as SettingsIndicators
+  out.push({ id: 'MA|mcginley|price', settings: maMin })
+  out.push({
+    id: 'MA|mcginley|crossesEma',
+    settings: {
+      ...maMin,
+      maCrossingValue: MAEnum.ema,
+      maCrossingLength: 50,
+      maCrossingInterval: ExchangeIntervals.oneH,
+      maUUID: 'maref',
+    },
+  })
+  out.push({
+    id: 'MAR|mcginley',
+    settings: {
+      ...maMin,
+      type: IndicatorEnum.mar,
+      mar1type: MAEnum.mcginley,
+      mar1length: 20,
+      mar2type: MAEnum.price,
+    },
+  })
+  // KDJ and VWAP (appended): the per-type configs every type gets
+  for (const type of APPENDED_TYPES) pushTypeConfigs(type)
+  // KDJ: only the three lengths reach the room
+  const kdjMin = {
+    type: IndicatorEnum.kdj,
+    uuid: 'cond',
+    groupId: 'g1',
+    indicatorAction: IndicatorAction.startDeal,
+    indicatorInterval: ExchangeIntervals.oneH,
+    indicatorLength: 9,
+    indicatorCondition: C.cu,
+  } as unknown as SettingsIndicators
+  out.push({
+    id: 'KDJ|lengths',
+    settings: {
+      ...kdjMin,
+      kdjLength: 14,
+      kdjKSmooth: 5,
+      kdjDSmooth: 4,
+      kdjLine: KDJLineEnum.j,
+      kdjCompareTo: KDJCompareToEnum.custom,
+      indicatorValue: '0',
+      stochRange: StochRangeEnum.both,
+    },
+  })
+  out.push({
+    id: 'KDJ|lengthsStrings',
+    settings: {
+      ...kdjMin,
+      kdjLength: '14' as unknown as number,
+      kdjKSmooth: '5' as unknown as number,
+      kdjDSmooth: '' as unknown as number,
+    },
+  })
+  // VWAP: only the (normalised) anchor reaches the room
+  for (const vwapAnchor of [
+    VWAPAnchorEnum.day,
+    VWAPAnchorEnum.week,
+    VWAPAnchorEnum.month,
+    'Week' as VWAPAnchorEnum,
+    '' as VWAPAnchorEnum,
+  ])
+    out.push({
+      id: `VWAP|anchor=${vwapAnchor}`,
+      settings: {
+        ...kdjMin,
+        type: IndicatorEnum.vwap,
+        indicatorLength: 20,
+        vwapAnchor,
+        vwapLine: VWAPLineEnum.upper,
+        vwapBandMultiplier: 2,
+      },
+    })
+  // ADX DMI mode (appended; a new setting on an existing type): dmi joins
+  // the room only in DMI mode
+  const adxMin = {
+    ...kdjMin,
+    type: IndicatorEnum.adx,
+    indicatorLength: 14,
+    indicatorValue: '20',
+  } as SettingsIndicators
+  for (const adxMode of [ADXModeEnum.dmi, ADXModeEnum.adx])
+    out.push({ id: `ADX|mode=${adxMode}`, settings: { ...adxMin, adxMode } })
+  out.push({
+    id: 'ADX|mode=dmi|full',
+    settings: { ...adxMin, ...full, adxMode: ADXModeEnum.dmi },
+  })
+  // Moving Average trend filter (appended; existing settings on an existing
+  // type): the filter settings join the room only when trendFilter is on
+  for (const maType of [MAEnum.ema, MAEnum.sma, MAEnum.vwma, MAEnum.mcginley])
+    out.push({
+      id: `MA|trendFilter|${maType}`,
+      settings: {
+        ...maMin,
+        maType,
+        trendFilter: true,
+        trendFilterLookback: 10,
+        trendFilterType: TrendFilterOperatorEnum.higher,
+        trendFilterValue: 1,
+      },
+    })
+  out.push({
+    id: 'MA|trendFilter|crossesEma',
+    settings: {
+      ...maMin,
+      maCrossingValue: MAEnum.ema,
+      maCrossingLength: 50,
+      maCrossingInterval: ExchangeIntervals.oneH,
+      maUUID: 'maref',
+      trendFilter: true,
+      trendFilterLookback: '10' as unknown as number,
+      trendFilterType: TrendFilterOperatorEnum.lower,
+      trendFilterValue: '0.5' as unknown as number,
+    },
+  })
+  out.push({
+    id: 'MA|trendFilter|off',
+    settings: {
+      ...maMin,
+      trendFilter: false,
+      trendFilterLookback: 10,
+      trendFilterType: TrendFilterOperatorEnum.higher,
+      trendFilterValue: 1,
+    },
+  })
+  // Candle colour, Order Blocks, Squeeze Momentum (appended): the per-type
+  // configs every type gets, then their own math settings
+  for (const type of APPENDED_TYPES_2) pushTypeConfigs(type)
+  for (const candleSource of [
+    CandleSourceEnum.regular,
+    CandleSourceEnum.heikinAshi,
+    'Regular' as CandleSourceEnum,
+    '' as CandleSourceEnum,
+  ])
+    out.push({
+      id: `CANDLE|source=${candleSource}`,
+      settings: {
+        ...kdjMin,
+        type: IndicatorEnum.candle,
+        indicatorLength: 1,
+        candleSource,
+        candleColor: CandleColorEnum.red,
+        candleCount: 3,
+        candleTrigger: CandleTriggerEnum.start,
+      },
+    })
+  for (const obSwingLength of [3, '8', 0, '', undefined] as (
+    | number
+    | undefined
+  )[])
+    out.push({
+      id: `OB|swing=${fmt(obSwingLength)}`,
+      settings: {
+        ...kdjMin,
+        type: IndicatorEnum.ob,
+        indicatorLength: 5,
+        obSwingLength,
+        obSide: OBSideEnum.bearish,
+        obLevel: OBLevelEnum.middle,
+      },
+    })
+  for (const [label, sqz] of [
+    [
+      'custom',
+      { sqzLength: 14, sqzBBMult: 2.5, sqzKCLength: 18, sqzKCMult: 1.25 },
+    ],
+    [
+      'settingsStrings',
+      { sqzLength: '14', sqzBBMult: '1.5', sqzKCLength: '', sqzKCMult: '0' },
+    ],
+    ['tv', { sqzBBMult: 1.5 }],
+  ] as [string, Partial<SettingsIndicators>][])
+    out.push({
+      id: `SQZ|${label}`,
+      settings: {
+        ...kdjMin,
+        type: IndicatorEnum.sqz,
+        indicatorLength: 20,
+        ...sqz,
+        sqzSignal: SqzSignalEnum.on,
+        sqzMomentum: SqzMomentumEnum.rising,
+      },
+    })
+  // Divergence pivots (appended; new settings on an existing type): each
+  // joins the room only when it is set — none set = the room it always had
+  const divMin = {
+    ...kdjMin,
+    type: IndicatorEnum.div,
+    divOscillators: [IndicatorEnum.rsi, IndicatorEnum.macd],
+    divType: DivTypeEnum.abear,
+  } as SettingsIndicators
+  for (const [label, pivots] of [
+    ['none', {}],
+    [
+      'allEmpty',
+      { divPivotLeft: '', divPivotRight: null, divRangeLower: undefined },
+    ],
+    [
+      'all',
+      {
+        divPivotLeft: 5,
+        divPivotRight: 2,
+        divRangeLower: 3,
+        divRangeUpper: 90,
+      },
+    ],
+    ['strings', { divPivotLeft: '5', divRangeUpper: '90' }],
+    ['rightOnly', { divPivotRight: 1 }],
+  ] as [string, Record<string, unknown>][])
+    out.push({
+      id: `DIV|pivots|${label}`,
+      settings: { ...divMin, ...pivots } as SettingsIndicators,
+    })
+  // Session Price levels active (appended): a decision setting, never in
+  // the room
+  for (const sessionLevelsActive of [
+    SessionLevelsActiveEnum.session,
+    SessionLevelsActiveEnum.outside,
+    SessionLevelsActiveEnum.always,
+  ])
+    out.push({
+      id: `SESSION|levels|active=${sessionLevelsActive}`,
+      settings: { ...sessionMin, sessionLevelsActive },
+    })
+  // Price Change compare / second value (appended): decision settings, never
+  // in the room
+  for (const [label, extra] of [
+    ['gt', { pcValue: '2', pcCompare: PCCompareEnum.gt }],
+    ['lt', { pcValue: '-2', pcCompare: PCCompareEnum.lt }],
+    ['bw', { pcValue: '2', pcValue2: '5', pcCompare: PCCompareEnum.bw }],
+    ['bwDown', { pcValue: '-5', pcValue2: '-2', pcCompare: PCCompareEnum.bw }],
+  ] as [string, Partial<SettingsIndicators>][])
+    out.push({
+      id: `PC|compare=${label}`,
+      settings: { ...kdjMin, type: IndicatorEnum.pc, ...extra },
+    })
+  // Squeeze BB multiplier (appended; indicators 1.14.0 defaults a missing
+  // one to 1.5): a stored value keeps its room
+  for (const [label, sqzBBMult] of [
+    ['2', 2],
+    ['2string', '2'],
+    ['1.5', 1.5],
+    ['empty', ''],
+    ['null', null],
+  ] as [string, unknown][])
+    out.push({
+      id: `SQZ|bbMult=${label}`,
+      settings: {
+        ...kdjMin,
+        type: IndicatorEnum.sqz,
+        indicatorLength: 20,
+        sqzBBMult: sqzBBMult as number,
+        sqzSignal: SqzSignalEnum.fired,
+        sqzMomentum: SqzMomentumEnum.positive,
+      },
+    })
   return out
 }
 

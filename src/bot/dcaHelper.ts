@@ -392,6 +392,7 @@ import { botMonitor, CalculateDCALiveStatsParams } from './botMonitor'
 import { getSubTypeBehavior } from './errorRulesCache'
 import { capLadderPlacements } from './ladderPlacementCap'
 import { priceMovedSince } from './priceStreamGap'
+import { wantsUserStreamOpen } from './userStreamReopen'
 import {
   ConditionLatch,
   limitOnlyEntryFallback,
@@ -632,6 +633,22 @@ const positionGoneReadings = new RetryBackoff({
  * shortfall that clears is picked up by the close itself; this only bounds the
  * fallback behind it. Any restore that does rest an order clears the window.
  */
+/**
+ * Waits before each re-send of a take profit that is missing after a placement
+ * pass (`noteTpCoverageAfterPlacement`). The cause this answers (balance a
+ * cancel has not freed yet) clears in seconds to minutes, so the re-sends stop
+ * after the last one: a take profit still refused ~23 minutes on is refused for
+ * a lasting reason (a dead key, coins moved off the account), and re-sending it
+ * forever only writes a refused order row every 15 minutes.
+ */
+const MISSING_TP_REARM_DELAYS_MS = [
+  30 * 1000,
+  60 * 1000,
+  2 * 60 * 1000,
+  5 * 60 * 1000,
+  15 * 60 * 1000,
+]
+
 const uncoveredCloseBackoff = new RetryBackoff({
   namespace: 'ucr',
   minMs: 5 * 60 * 1000,
@@ -836,8 +853,19 @@ function createDCABotHelper<
     closeSweeps: Map<string, number> = new Map()
     /** Spec `182`. The sweeps running in THIS process. */
     closeSweepsInFlight: Set<string> = new Set()
+    /**
+     * Open deals whose take profit is not on the exchange after a placement
+     * pass sent one, with how many re-sends they have had. See
+     * `noteTpCoverageAfterPlacement`.
+     */
+    missingTpRearm: Map<
+      string,
+      { attempt: number; timer?: ReturnType<typeof setTimeout> }
+    > = new Map()
     /** Close after TP filled */
     closeAfterTpFilled: boolean
+    /** Spec `202`. `stop()` calls still running on this bot. */
+    stopsInFlight = 0
     /** Timer for time base trigger */
     timer: NodeJS.Timeout | null
     /** Timeout first time */
@@ -1665,6 +1693,161 @@ function createDCABotHelper<
       }
       await uncoveredCloseBackoff.record([this.botId, dealId], reason)
       await this.reportUncoveredAfterRefusal(dealId, symbol, reason)
+    }
+
+    /** The deal's own resting take profit(s), reduce-funds orders excluded. */
+    protected restingTakeProfits(dealId: string) {
+      return this.getOrdersByStatusAndDealId({
+        dealId,
+        status: ['NEW', 'PARTIALLY_FILLED'],
+      }).filter(
+        (o) => o.typeOrder === TypeOrderEnum.dealTP && !isComboFundsOrderRow(o),
+      )
+    }
+
+    /**
+     * After a placement pass that sent a take profit: if the deal still has
+     * none resting, re-send it a few times.
+     *
+     * A take profit is placed as a side effect of something else — a fill, an
+     * add funds, a merge — and when the venue refused it nothing ever asked
+     * again: the refusal was reported as "Not enough balance" and the deal sat
+     * open with no take profit until the next fill. The common cause is
+     * transient. Spot balance freed by a cancel that has not settled yet, or
+     * held by orders being torn down, as when a merge's source deals still had
+     * their take profits resting: Hyperliquid held 6.5 SOL behind them for 15
+     * minutes while the merged deal's take profit was refused three times and
+     * never re-sent once the coins were free.
+     *
+     * Spot only: a futures take profit is reduce-only and has its own refusal
+     * windows (spec `143`). The re-send goes through `getTPOrder` +
+     * `placeOrders`, like `restoreCloseAfterRefusal`, so it is sized from the
+     * deal's own position, never from the wallet. Each re-send that is refused
+     * again comes back through here and waits longer, up to the last delay.
+     *
+     * Deliberately no bot message: the refusal itself is already reported, and
+     * the deals table says when an open deal has no take profit on the
+     * exchange. A message here reached every long-uncovered deal on the first
+     * pass after a worker restart, most of them refused for good (dead keys,
+     * coins moved off the account, bots already in error).
+     */
+    protected async noteTpCoverageAfterPlacement(dealId: string) {
+      const live = this.getDeal(dealId)
+      if (
+        !live ||
+        live.deal.status !== DCADealStatusEnum.open ||
+        this.data?.status !== BotStatusEnum.open ||
+        // A MARKET close never rests a take profit: `placeOrders` skips it and
+        // the TP level check closes at market instead.
+        (await this.isDealForTPLevelCheck(live))
+      ) {
+        this.clearMissingTpRearm(dealId)
+        return
+      }
+      if (this.restingTakeProfits(dealId).length) {
+        this.clearMissingTpRearm(dealId)
+        return
+      }
+      const pending = this.missingTpRearm.get(dealId)
+      if (pending?.timer) {
+        return
+      }
+      const deal = live.deal
+      const tpOrders = await this.getTPOrder(
+        deal.symbol.symbol,
+        deal.lastPrice,
+        live.initialOrders,
+        deal.avgPrice,
+        deal.initialPrice,
+        dealId,
+        deal,
+      )
+      if (!tpOrders?.length) {
+        // Nothing to rest (no take profit configured, or it closes another way).
+        this.clearMissingTpRearm(dealId)
+        return
+      }
+      const attempt = pending ? pending.attempt + 1 : 0
+      if (attempt >= MISSING_TP_REARM_DELAYS_MS.length) {
+        // Given up; the entry stays so later passes do not start over.
+        if (attempt === MISSING_TP_REARM_DELAYS_MS.length) {
+          this.missingTpRearm.set(dealId, { attempt })
+          this.handleLog(
+            `Missing TP | deal ${dealId} (${live.deal.symbol.symbol}) still has no take profit after ${attempt} re-sends, not re-sending again`,
+          )
+        }
+        return
+      }
+      const delay = MISSING_TP_REARM_DELAYS_MS[attempt]
+      const timer = setTimeout(() => {
+        const entry = this.missingTpRearm.get(dealId)
+        if (entry) {
+          entry.timer = undefined
+        }
+        this.rearmMissingTp(dealId).catch((e: unknown) =>
+          this.handleWarn(
+            `Missing TP | deal ${dealId} re-send failed: ${
+              (e as Error)?.message ?? e
+            }`,
+          ),
+        )
+      }, delay)
+      timer.unref?.()
+      this.missingTpRearm.set(dealId, { attempt, timer })
+      this.handleLog(
+        `Missing TP | deal ${dealId} (${deal.symbol.symbol}) has no take profit on the exchange, re-send ${
+          attempt + 1
+        } in ${delay / 1000}s`,
+      )
+    }
+
+    protected clearMissingTpRearm(dealId: string) {
+      const entry = this.missingTpRearm.get(dealId)
+      if (entry?.timer) {
+        clearTimeout(entry.timer)
+      }
+      this.missingTpRearm.delete(dealId)
+    }
+
+    /** Re-send a missing take profit; see `noteTpCoverageAfterPlacement`. */
+    protected async rearmMissingTp(dealId: string) {
+      // Live state only: the take profit may have landed, or the deal closed,
+      // since the refusal.
+      const live = this.getDeal(dealId)
+      if (
+        !this.shouldProceed() ||
+        !live ||
+        live.deal.status !== DCADealStatusEnum.open ||
+        this.restingTakeProfits(dealId).length
+      ) {
+        this.clearMissingTpRearm(dealId)
+        return
+      }
+      const deal = live.deal
+      const tpOrders = await this.getTPOrder(
+        deal.symbol.symbol,
+        deal.lastPrice,
+        live.initialOrders,
+        deal.avgPrice,
+        deal.initialPrice,
+        dealId,
+        deal,
+      )
+      if (!tpOrders?.length) {
+        this.clearMissingTpRearm(dealId)
+        return
+      }
+      this.handleLog(
+        `Missing TP | deal ${dealId} (${deal.symbol.symbol}) re-sending take profit ${tpOrders
+          .map((o) => o.qty)
+          .join(', ')}`,
+      )
+      // The guarded `placeOrders`: a timer holds no deal lock. Its coverage
+      // check schedules the next re-send if this one is refused too.
+      await this.placeOrders(this.botId, deal.symbol.symbol, dealId, {
+        new: tpOrders,
+        cancel: [],
+      })
     }
 
     getDealsByStatusAndSymbol({
@@ -3587,13 +3770,35 @@ function createDCABotHelper<
               false,
               'send',
             )
+            const refusal =
+              sweep && typeof sweep.result === 'string'
+                ? sweep.result
+                : undefined
+            // Spec `211`. A take-profit of this deal still resting holds the
+            // coins the sweep needs, so the venue refuses it for balance. That
+            // refusal is our own order in the way, not a remainder that is not
+            // there (§1.5 of spec `157` keeps closing on the latter): keep the
+            // deal open, and the re-close below cancels that take-profit first.
+            const ownTpHoldsBalance =
+              !!refusal &&
+              this.isErrorNotEnoughBalance(refusal) &&
+              this.getOrdersByStatusAndDealId({
+                dealId,
+                status: ['NEW', 'PARTIALLY_FILLED'],
+              }).some(
+                (o) =>
+                  o.typeOrder === TypeOrderEnum.dealTP &&
+                  o.clientOrderId !== tpOrder.clientOrderId,
+              )
             if (
               sweep &&
-              typeof sweep.result === 'string' &&
-              isLimitOnlyReason(sweep.result)
+              refusal &&
+              (isLimitOnlyReason(refusal) || ownTpHoldsBalance)
             ) {
               this.handleLog(
-                `${tpOrder.symbol} book is in limit only mode, cannot sell the remaining ${sweep.qty} of deal ${dealId} at market. Deal stays open, closing the rest by limit`,
+                ownTpHoldsBalance
+                  ? `Cannot sell the remaining ${sweep.qty} of deal ${dealId} at market, a resting take-profit of the deal holds the balance. Deal stays open, closing the rest by limit`
+                  : `${tpOrder.symbol} book is in limit only mode, cannot sell the remaining ${sweep.qty} of deal ${dealId} at market. Deal stays open, closing the rest by limit`,
               )
               // This fill is a partial take profit like any other; the next
               // close counts it from here, once.
@@ -4304,6 +4509,31 @@ function createDCABotHelper<
       }
       this.endMethod(_id)
     }
+
+    /**
+     * The bot-controller auto-stop of `checkClosedDeals`. That method's only
+     * caller is `processDealClose`, so this always runs holding the bot's
+     * close lock, and says so to `stop` — see `processDealCloseHoldingLock`.
+     * Spec `202`.
+     *
+     * While a stop is already cancelling this bot's start deals, a second one
+     * started here would re-enter the same cancels one level deeper per deal;
+     * the stop that is running finishes the job, so none is started. With no
+     * start deal left this is the plain inline `stop(leave)` it always was.
+     */
+    private async stopFromDealClose() {
+      if (
+        this.stopsInFlight > 0 &&
+        this.getOpenDeals().some(
+          (d) => d.deal.status === DCADealStatusEnum.start,
+        )
+      ) {
+        this.handleLog('Bot is already stopping')
+        return
+      }
+      await this.stop(CloseDCATypeEnum.leave, false, false, true)
+    }
+
     /** Check closed deals */
 
     async checkClosedDeals() {
@@ -4364,7 +4594,7 @@ function createDCABotHelper<
           this.handleLog(
             `Close deal after X profit accumulated, profit: ${val}, trigger: ${closeAfterXprofitValue}`,
           )
-          await this.stop(CloseDCATypeEnum.leave)
+          await this.stopFromDealClose()
         }
       }
       if (useCloseAfterX && closeAfterX && checkNumber(closeAfterX)) {
@@ -4389,7 +4619,7 @@ function createDCABotHelper<
           this.handleLog(
             `Close deal after X trigger, closed: ${deals.data.result}, trigger: ${closeAfterX}`,
           )
-          await this.stop(CloseDCATypeEnum.leave)
+          await this.stopFromDealClose()
         }
       }
       if (
@@ -4419,7 +4649,7 @@ function createDCABotHelper<
           this.handleLog(
             `Close deal after X loss trigger, closed in loss: ${deals.data.result}, trigger: ${closeAfterXloss}`,
           )
-          await this.stop(CloseDCATypeEnum.leave)
+          await this.stopFromDealClose()
         }
       }
       if (useCloseAfterXwin && closeAfterXwin && checkNumber(closeAfterXwin)) {
@@ -4445,7 +4675,7 @@ function createDCABotHelper<
           this.handleLog(
             `Close deal after X win trigger, closed in profit: ${deals.data.result}, trigger: ${closeAfterXwin}`,
           )
-          await this.stop(CloseDCATypeEnum.leave)
+          await this.stopFromDealClose()
         }
       }
       const consecutiveWinTarget =
@@ -4474,14 +4704,14 @@ function createDCABotHelper<
           this.handleLog(
             `Close deal after X consecutive wins trigger, trigger: ${consecutiveWinTarget}`,
           )
-          await this.stop(CloseDCATypeEnum.leave)
+          await this.stopFromDealClose()
         } else if (
           hasConsecutiveStreak(outcomes, false, consecutiveLossTarget)
         ) {
           this.handleLog(
             `Close deal after X consecutive losses trigger, trigger: ${consecutiveLossTarget}`,
           )
-          await this.stop(CloseDCATypeEnum.leave)
+          await this.stopFromDealClose()
         }
       }
     }
@@ -4698,7 +4928,27 @@ function createDCABotHelper<
      * `leave`. Reporting that as "Deal closed" is what let an abandoned short
      * sit unwatched until the venue liquidated it, so name the outcome instead.
      */
-    dealCloseEventDescription(deal: ExcludeDoc<Deal>): string {
+    async dealCloseEventDescription(deal: ExcludeDoc<Deal>): Promise<string> {
+      // A merge flags its sources in the database before it cancels them, but
+      // a source owned by another bot's process never saw the flag in memory
+      // (see `isMergedAway`), so a canceled deal without it is checked there.
+      if (
+        deal.status === DCADealStatusEnum.canceled &&
+        !(deal.child && deal.parentId)
+      ) {
+        const read = await this.dealsDb.readData({ _id: deal._id } as any, {
+          child: 1,
+          parentId: 1,
+        })
+        const stored = read.data?.result
+        if (stored?.child && stored.parentId) {
+          return dealCloseEventDescription({
+            ...deal,
+            child: true,
+            parentId: `${stored.parentId}`,
+          })
+        }
+      }
       return dealCloseEventDescription(deal)
     }
 
@@ -4965,6 +5215,42 @@ function createDCABotHelper<
       cancel = true,
       order?: Order,
     ): Promise<boolean> {
+      return this.processDealCloseHoldingLock(
+        _botId,
+        dealId,
+        profit,
+        reopen,
+        cancel,
+        order,
+      )
+    }
+
+    /**
+     * `processDealClose`, for a caller that ALREADY holds
+     * `` `${botId}processDealClose` `` — the same key on the same module-level
+     * `IdMutex`, which is not reentrant and has no lock timeout.
+     *
+     * The one such caller is the bot-controller auto-stop: `checkClosedDeals`
+     * runs inside this method, and when a close-after-X limit is met it stops
+     * the bot, which cancels every deal still in `start` through
+     * `closeDealById` → here. Through `processDealClose` that cancel waited on
+     * the lock its own call chain was holding, forever: the close never
+     * returned, every later close and stop of the bot queued behind it, and
+     * the bot stayed `open` until the worker restarted. Spec `202`.
+     *
+     * The bot's close path stays serialised: the caller holds exactly the lock
+     * this would have taken. Do NOT call it from anywhere that does not already
+     * hold that key — those callers must keep using `processDealClose`.
+     * Subclasses extend THIS method, not the wrapper, so both entries run them.
+     */
+    protected async processDealCloseHoldingLock(
+      _botId: string,
+      dealId: string,
+      profit: { total: number; totalUsd: number },
+      reopen = true,
+      cancel = true,
+      order?: Order,
+    ): Promise<boolean> {
       this.removeDealFromStopLossMethods(dealId)
       // Spec 050: the deal is finished, so a retry timer still pointed at it
       // has nothing left to retry. Deliberately here and not in
@@ -5144,7 +5430,7 @@ function createDCABotHelper<
               botId: this.botId,
               event: 'Deal',
               botType: this.botType,
-              description: this.dealCloseEventDescription(deal.deal),
+              description: await this.dealCloseEventDescription(deal.deal),
               paperContext: !!this.data?.paperContext,
               deal: deal.deal._id,
               symbol: deal.deal.symbol.symbol,
@@ -7096,6 +7382,17 @@ function createDCABotHelper<
       }
     }
 
+    /**
+     * How a close-by-timer closes the deal. DCA: its own close type, always at
+     * market. Combo overrides it with its deal close type (spec 204 §1.4).
+     */
+    protected timerCloseOrder(settings: {
+      closeDealType?: CloseDCATypeEnum
+      comboTpLimit?: boolean
+    }): { closeType?: CloseDCATypeEnum; forceMarket: boolean } {
+      return { closeType: settings.closeDealType, forceMarket: true }
+    }
+
     async closeByTimer(d: ExcludeDoc<Deal>) {
       const oldTimer = this.closeDealTimer.get(d._id)
       if (oldTimer) {
@@ -7109,12 +7406,13 @@ function createDCABotHelper<
         settings.useTp
       ) {
         this.handleDebug(`Timer | Close by timer deal ${d._id}`)
+        const { closeType, forceMarket } = this.timerCloseOrder(settings)
         this.closeDealById(
           this.botId,
           d._id,
-          settings.closeDealType,
+          closeType,
           undefined,
-          true,
+          forceMarket,
           false,
           false,
           undefined,
@@ -7226,6 +7524,9 @@ function createDCABotHelper<
      *
      * @param {string} dealId Id of the deal
      * @param {CloseDCATypeEnum} [closeType] Close type. Default = leave
+     * @param {boolean} [holdingCloseLock] the caller already holds this bot's
+     * `processDealClose` lock — only a `stop` started inside a deal close.
+     * Spec `202`.
      */
     @IdMute(
       mutex,
@@ -7244,8 +7545,10 @@ function createDCABotHelper<
       sl = false,
       closeTrigger?: DCACloseTriggerEnum,
       count = 0,
+      holdingCloseLock = false,
     ) {
       if (!this.loadingComplete) {
+        // Not `holdingCloseLock`: the replay runs later, outside any lock.
         this.runAfterLoadingQueue.push(() =>
           this.closeDealById.bind(this)(
             this.botId,
@@ -7357,7 +7660,14 @@ function createDCABotHelper<
           commission: findDeal.deal.commission,
           closeTrigger: findDeal.deal.closeTrigger,
         })
-        stop = await this.processDealClose(
+        // Spec `202`: a stop started inside a deal close already holds the
+        // close lock; waiting on it here would never return.
+        stop = await (
+          holdingCloseLock
+            ? this.processDealCloseHoldingLock
+            : this.processDealClose
+        ).call(
+          this,
           this.botId,
           dealId,
           { total: 0, totalUsd: 0 },
@@ -9631,6 +9941,27 @@ function createDCABotHelper<
             return await this.settlePartialBaseEntry(find, find.dealId)
           }
           if (
+            !find &&
+            dealId &&
+            this.dealTimersMap.has(dealId) &&
+            this.getDeal(dealId)?.deal.status === DCADealStatusEnum.start &&
+            !this.isOwnCancel(id) &&
+            this.liveBaseEntries(dealId) === 0
+          ) {
+            // The reposition tick of an entry that left the order map: the
+            // venue ended it unfilled (the queue drops such rows), and this
+            // tick is the last check coming — it used to return here without
+            // a word. Hand the deal to the cancelled-entry check, as the
+            // cancel report would have. Not on the restore path, which holds
+            // no timers and re-places a missing entry itself. Spec 203 §4.4.
+            this.handleLog(
+              `Base order ${id} of deal ${dealId} is no longer on the exchange and was not canceled by the bot. Checking the deal in ${canceledBaseEntryDelayMs / 1000}s`,
+            )
+            this.dropBaseEntryTimers(dealId)
+            this.armCanceledBaseEntryDealCancel(dealId, id)
+            return
+          }
+          if (
             find &&
             find.status !== 'FILLED' &&
             find.status !== 'PARTIALLY_FILLED'
@@ -10207,6 +10538,34 @@ function createDCABotHelper<
       const before = +settled.executedQty
       const booked =
         (await this.fillPartiallyFilledOrder(settled, true)) ?? settled
+      if (+booked.executedQty > before) {
+        await this.updateOrderOnDb(booked, true)
+      }
+      return booked
+    }
+
+    /**
+     * The row to open the deal on when the venue answers the base-order
+     * placement with `FILLED` short of what was asked.
+     *
+     * The user stream runs every `FILLED` report through
+     * `fillPartiallyFilledOrder`, and that is where the remainder top-up is
+     * sent and merged into this row. The answer used to open the deal on the
+     * part-fill without going there, so when the stream's top-up was still in
+     * flight the merge landed on a deal already `open`, which `startDeal`
+     * ignores: the deal never counted what the top-up bought. Going through the
+     * same method takes its per-order mutex and `partiallyFilledFilledSet`: an
+     * in-flight top-up is waited for and its merged row returned, otherwise the
+     * top-up runs here and the stream's later report adds nothing. One top-up
+     * per order either way, sized as before. The growth is written as the
+     * stream consumer writes it. Spec `208`.
+     */
+    async completeFilledBaseEntry(answer: Order): Promise<Order> {
+      const before = +answer.executedQty
+      if (!(before < +answer.origQty)) {
+        return answer
+      }
+      const booked = (await this.fillPartiallyFilledOrder(answer)) ?? answer
       if (+booked.executedQty > before) {
         await this.updateOrderOnDb(booked, true)
       }
@@ -11821,10 +12180,20 @@ function createDCABotHelper<
                 }
               }
             } else if (result.status === 'FILLED') {
-              await this.startDeal(result)
+              await this.startDeal(await this.completeFilledBaseEntry(result))
             } else {
               if (baseOrder.clientOrderId !== result.clientOrderId) {
                 baseOrder.clientOrderId = result.clientOrderId
+              }
+              if (sentType === OrderTypeEnum.market) {
+                // A market entry arms no timer below, so a venue that answers
+                // the send itself with CANCELED left the order queue's report
+                // as the only thing that could free the deal — and when the
+                // user stream lost that report the deal sat in `start` until
+                // the old-start-deals cron. The answer is a report of the
+                // same cancel; the check is one per deal, so the queue's later
+                // report just replaces it. Spec 205.
+                this.checkUnfilledBaseEntryCancel(result)
               }
               if (
                 (startOrderType === OrderTypeEnum.limit ||
@@ -13037,6 +13406,21 @@ function createDCABotHelper<
             noteVenueAnswer(o, false)
             continue
           }
+          // Spec `211`. `toCheck` is read once, and a paced pass can take a
+          // minute or more to reach its end. An order this bot ended itself
+          // meanwhile — a take-profit cancelled as a re-size, a base remainder
+          // cancelled to be re-placed — is no longer one we hold as open, and
+          // `getOrder` answers any CANCELED order that filled at all as
+          // FILLED. Acting on that answer counted the fill a second time and,
+          // for a take-profit, closed the deal on it. Ask the map, not the
+          // snapshot.
+          const held = this.getOrderFromMap(o.clientOrderId)
+          if (!held || !this.orderStatuses.includes(held.status)) {
+            this.handleDebug(
+              `${o.typeOrder} order ${o.clientOrderId} is ${held?.status ?? 'no longer held'} locally since this check started, venue answer ${getOrder.data.status} not applied`,
+            )
+            continue
+          }
           const mergedOrder = await this.mergeCommonOrderWithOrder(
             getOrder.data,
             o,
@@ -14080,8 +14464,9 @@ function createDCABotHelper<
     }
 
     override async processServiceLog(msg: string) {
-      const service = JSON.parse(msg)?.restart
-      if (service === 'userStream') {
+      const parsed = JSON.parse(msg)
+      const service = parsed?.restart
+      if (wantsUserStreamOpen(parsed, this.data?.exchangeUUID)) {
         this.connectRabbitUserStream()
       }
       if (service === 'indicators') {
@@ -16013,6 +16398,20 @@ function createDCABotHelper<
         const reserved = this.isLong
           ? await this.reservedFundingQuote(ed.quoteAsset.name)
           : await this.reservedFundingBase(ed.baseAsset.name)
+        if (reserved === null) {
+          // What they hold could not be read — not "nothing": like an
+          // unreadable balance, the deal is not opened this cycle.
+          this.handleDebug(
+            'Cannot read what bot-funded deals hold, bypass check balance',
+          )
+          return {
+            status: false,
+            required: 0,
+            available: 0,
+            price: 0,
+            unknown: true,
+          }
+        }
         if (reserved > 0) {
           available = Math.max(0, available - reserved)
         }
@@ -17339,6 +17738,16 @@ function createDCABotHelper<
       trigger?: NewDealTrigger,
       signalOverrides?: SignalDealOverrides | null,
     ) {
+      // Spec `202` §4.5. The bot reads `open` until its stop has closed every
+      // deal, so the start paths that check the status still fire mid-stop —
+      // and a deal opened then is one the stop never saw.
+      if (this.stopsInFlight > 0) {
+        this.handleLog(`Bot is stopping. Not opening a new deal on ${symbol}`)
+        if (cbIfNotOpened) {
+          cbIfNotOpened()
+        }
+        return
+      }
       if (!this.loadingComplete || !this.singlePositionActive) {
         return this.openNewDealBody(
           _botId,
@@ -18213,6 +18622,15 @@ function createDCABotHelper<
       signalOverrides?: SignalDealOverrides | null,
     ) {
       this.handleLog('Open new deal by signal')
+      // Spec `202`. The bot reads `open` until its stop has closed every deal,
+      // and the worker runs this call outside the bot's method queue, so a
+      // signal landing mid-stop used to open a deal the stop never saw.
+      if (this.stopsInFlight > 0) {
+        return this.reportIgnoredWebhookSignal(
+          'A start deal webhook signal was ignored: the bot is stopping',
+          _symbol,
+        )
+      }
       if (!this.loadingComplete) {
         this.runAfterLoadingQueue.push(() =>
           this.openDealBySignal.bind(this)(
@@ -18630,7 +19048,7 @@ function createDCABotHelper<
         return
       }
       if (this.data?.status === BotStatusEnum.error) {
-        this.restoreFromRangeOrError()
+        await this.restoreFromErrorUnlessAuthDead()
       }
       if (this.exchange && this.data) {
         /**
@@ -19233,6 +19651,19 @@ function createDCABotHelper<
           }
         }
 
+        if (
+          !this.futures &&
+          orders.new.some((o) => o.type === TypeOrderEnum.dealTP)
+        ) {
+          // Never let the coverage check break the order path.
+          await this.noteTpCoverageAfterPlacement(dealId).catch((e: unknown) =>
+            this.handleWarn(
+              `Missing TP | coverage check failed for deal ${dealId}: ${
+                (e as Error)?.message ?? e
+              }`,
+            ),
+          )
+        }
         const dealAfter = this.getDeal(dealId)
         const tpAfter = this.getOrdersByStatusAndDealId({
           dealId,
@@ -20863,6 +21294,20 @@ function createDCABotHelper<
       if (!balances) {
         return refuse(`Cannot fund this hedge leg: balances could not be read`)
       }
+      // Fresh: the other leg may have just saved its reservation.
+      const reservedQuote = await this.reservedFundingQuote(
+        ed.quoteAsset.name,
+        true,
+      )
+      const reservedBase = await this.reservedFundingBase(
+        ed.baseAsset.name,
+        true,
+      )
+      if (reservedQuote === null || reservedBase === null) {
+        return refuse(
+          `Cannot fund this hedge leg: what other bot-funded deals hold could not be read`,
+        )
+      }
       const fee = await this.getUserFee(symbol)
       const useDca = !!deal.deal.settings?.useDca
       const extra = useDca
@@ -20887,19 +21332,18 @@ function createDCABotHelper<
         price,
         freeBase: balances.get(ed.baseAsset.name)?.free ?? 0,
         freeQuote: balances.get(ed.quoteAsset.name)?.free ?? 0,
-        // Fresh: the other leg may have just saved its reservation. A
-        // restored deal's own hold is for exactly these orders: not counted
-        // against itself.
+        // A restored deal's own hold is for exactly these orders: not
+        // counted against itself.
         reservedQuote: Math.max(
           0,
-          (await this.reservedFundingQuote(ed.quoteAsset.name, true)) -
+          reservedQuote -
             (deal.deal.fundingHold?.asset === 'quote'
               ? deal.deal.fundingHold.remaining
               : 0),
         ),
         reservedBase: Math.max(
           0,
-          (await this.reservedFundingBase(ed.baseAsset.name, true)) -
+          reservedBase -
             (deal.deal.fundingHold?.asset === 'base'
               ? deal.deal.fundingHold.remaining
               : 0),
@@ -21428,6 +21872,18 @@ function createDCABotHelper<
       if (!ed || !balances) {
         return null
       }
+      const reservedQuote = await this.reservedFundingQuote(
+        ed.quoteAsset.name,
+        fresh,
+      )
+      const reservedBase = await this.reservedFundingBase(
+        ed.baseAsset.name,
+        fresh,
+      )
+      if (reservedQuote === null || reservedBase === null) {
+        // Unknown, like an unreadable balance: no plan this cycle.
+        return null
+      }
       const fee = await this.getUserFee(symbol)
       return planShortSpotDealFunding({
         mode,
@@ -21436,11 +21892,8 @@ function createDCABotHelper<
         price,
         freeBase: balances.get(ed.baseAsset.name)?.free ?? 0,
         freeQuote: balances.get(ed.quoteAsset.name)?.free ?? 0,
-        reservedQuote: await this.reservedFundingQuote(
-          ed.quoteAsset.name,
-          fresh,
-        ),
-        reservedBase: await this.reservedFundingBase(ed.baseAsset.name, fresh),
+        reservedQuote,
+        reservedBase,
         feeRate: fee?.taker ?? 0,
         buyHeadroom: this.fundingBuyHeadroom(),
         minNotional: ed.quoteAsset.minAmount,
@@ -23665,8 +24118,15 @@ function createDCABotHelper<
           orderStatus: order.status,
           executedQty: order.executedQty,
           dealStatus: this.getDeal(order.dealId)?.deal.status,
-          hasPendingCheck: this.dealTimersMap.has(order.dealId),
+          // Every cancel the engine sends goes through `cancelOrderOnExchange`,
+          // which records it first, so `ownCancel` already tells a reposition
+          // from a venue cancel. Deferring to the deal's timers as well left a
+          // LIMIT entry the venue cancelled to a reposition tick that finds no
+          // order and returns, so the deal sat in `start` with nothing on the
+          // book until the old-start-deals cron. Spec 203 §4.1.
+          hasPendingCheck: false,
           ownCancel: this.isOwnCancel(order.clientOrderId),
+          liveEntries: this.liveBaseEntries(order.dealId),
         })
       ) {
         return
@@ -23674,7 +24134,27 @@ function createDCABotHelper<
       this.handleLog(
         `Base order ${order.clientOrderId} of deal ${order.dealId} was canceled on the exchange with nothing filled, not by the bot. Checking the deal in ${canceledBaseEntryDelayMs / 1000}s`,
       )
+      this.dropBaseEntryTimers(order.dealId)
       this.armCanceledBaseEntryDealCancel(order.dealId, order.clientOrderId)
+    }
+
+    /** `dealStart` rows of the deal still resting on the venue. */
+    liveBaseEntries(dealId: string) {
+      return this.getOrdersByStatusAndDealId({
+        dealId,
+        status: ['NEW', 'PARTIALLY_FILLED'],
+      }).filter((o) => o.typeOrder === TypeOrderEnum.dealStart).length
+    }
+
+    /**
+     * Stop the reposition and enter-market timers of a deal whose entry is
+     * gone, so the cancelled-entry check owns the deal. The entry is deleted,
+     * not left nulled as `clearDealTimer` leaves it: timer state the check
+     * finds again later means a new entry was placed since.
+     */
+    dropBaseEntryTimers(dealId: string) {
+      void this.clearDealTimer(dealId)
+      this.dealTimersMap.delete(dealId)
     }
 
     /** One pending check per deal; a newer cancel replaces it. */
@@ -23712,10 +24192,7 @@ function createDCABotHelper<
           dealStatus: deal?.deal.status,
           hasPendingCheck: this.dealTimersMap.has(dealId),
           ownCancel: this.isOwnCancel(clientOrderId),
-          liveEntries: this.getOrdersByStatusAndDealId({
-            dealId,
-            status: ['NEW', 'PARTIALLY_FILLED'],
-          }).filter((o) => o.typeOrder === TypeOrderEnum.dealStart).length,
+          liveEntries: this.liveBaseEntries(dealId),
         })
       ) {
         return
@@ -26139,13 +26616,17 @@ function createDCABotHelper<
      * Unsubscribe from {@link DCABotHelper#ioUser} & {@link DCABotHelper#ioPrice}
      *
      * @param {CloseDCATypeEnum} [closeType] Close type
+     * @param {boolean} [holdingCloseLock] the caller already holds this bot's
+     * `processDealClose` lock — only `stopFromDealClose`. Spec `202`.
      */
 
     async stop(
       closeType?: CloseDCATypeEnum,
       forceClose = false,
       ignoreErrors = false,
+      holdingCloseLock = false,
     ): Promise<void> {
+      this.stopsInFlight += 1
       try {
         this.ignoreErrors = ignoreErrors
         if (closeType) {
@@ -26199,6 +26680,8 @@ function createDCABotHelper<
             undefined,
             undefined,
             DCACloseTriggerEnum.bot,
+            undefined,
+            holdingCloseLock,
           )
         }
         if (closeType && openDeals.length > 0) {
@@ -26317,6 +26800,8 @@ function createDCABotHelper<
         await this.reportUserRefusal(
           stopFailedMessage((e as Error)?.message ?? `${e}`),
         )
+      } finally {
+        this.stopsInFlight -= 1
       }
     }
 
@@ -28232,6 +28717,9 @@ function createDCABotHelper<
         // +26.417 base on one deal against the -0.145 its fills support, and
         // `closeDeal` marked the difference at `lastPrice` and booked it as
         // realised profit.
+        const partialTp = new Set(
+          (findDeal.deal.tpHistory ?? []).map((h) => h.id),
+        )
         const filled = this.getOrdersByStatusAndDealId({
           dealId: findDeal.deal._id,
           status: ['FILLED', 'CANCELED'],
@@ -28259,6 +28747,22 @@ function createDCABotHelper<
             (o) =>
               !skipUnbooked ||
               !this.ordersInBetweenUpdates.has(o.clientOrderId),
+          )
+          // Spec `212`. A take-profit fill carried in `tpHistory` is a partial
+          // take profit, and on an open DCA deal `tpHistory` is its only
+          // owner: the fill path never moves `currentBalances` for it, and
+          // `closeDeal` subtracts all of `tpHistory` from this ledger when the
+          // deal closes. Counting its row here as well subtracted those sales
+          // twice — the remainder sweep was sized short and the close booked
+          // the difference as base the deal no longer held. Combo sizes its
+          // take-profit straight off this rebuilt ledger, and a closed deal
+          // has already had `tpHistory` booked, so both keep every row.
+          .filter(
+            (o) =>
+              this.combo ||
+              findDeal.deal.status === DCADealStatusEnum.closed ||
+              o.typeOrder !== TypeOrderEnum.dealTP ||
+              !partialTp.has(o.clientOrderId),
           )
         const filledBase =
           filled.reduce(
@@ -28622,16 +29126,16 @@ function createDCABotHelper<
       const own = findDeal.deal.fundingHold
       const ownHold = (asset: 'base' | 'quote') =>
         own?.asset === asset ? Math.max(0, own.remaining ?? 0) : 0
-      const reservedQuote = Math.max(
-        0,
-        (await this.reservedFundingQuote(ed.quoteAsset.name, fresh)) -
-          ownHold('quote'),
+      const allQuote = await this.reservedFundingQuote(
+        ed.quoteAsset.name,
+        fresh,
       )
-      const reservedBase = Math.max(
-        0,
-        (await this.reservedFundingBase(ed.baseAsset.name, fresh)) -
-          ownHold('base'),
-      )
+      const allBase = await this.reservedFundingBase(ed.baseAsset.name, fresh)
+      if (allQuote === null || allBase === null) {
+        return null
+      }
+      const reservedQuote = Math.max(0, allQuote - ownHold('quote'))
+      const reservedBase = Math.max(0, allBase - ownHold('base'))
       const freeBase = balances.get(ed.baseAsset.name)?.free ?? 0
       const freeQuote = balances.get(ed.quoteAsset.name)?.free ?? 0
       const availableBase = Math.max(0, freeBase - reservedBase)
@@ -29701,6 +30205,24 @@ function createDCABotHelper<
           false,
         )
       }
+      // A merge writes the merged deal and retires its sources whatever the
+      // venue answers, so on an account whose key is refused it "succeeded"
+      // in the database while every cancel and take profit behind it failed.
+      // Refuse it up front while the account is known to be refused.
+      if (!this.data?.paperContext && this.data?.exchangeUUID) {
+        const auth = await AuthFailureGuard.check(`${this.data.exchangeUUID}`)
+        if (auth.failed) {
+          return this.handleErrors(
+            `Deals were not merged: the exchange is refusing this account's API key (${auth.reason}). Fix the key, then merge again.`,
+            'mergeDeals()',
+            'auth',
+            false,
+            true,
+            true,
+            true,
+          )
+        }
+      }
       const _id = this.startMethod('mergeDeals')
       const prefix = `Merge Deals | `
       if (this.data) {
@@ -30133,6 +30655,20 @@ function createDCABotHelper<
             // the pair's position.
             ...(this.singlePositionActive ? { positionEntries: 1 } : {}),
           }
+          const refused = await this.cancelMergeSourceTakeProfits(deals)
+          if (refused) {
+            this.endMethod(_id)
+            return this.handleErrors(
+              `Deals were not merged: ${refused}`,
+              'mergeDeals()',
+              'cancel source take profits',
+              false,
+              true,
+              true,
+              true,
+              pair,
+            )
+          }
           const newDeal = await this.dealsDb.createData(mergedDeals as any)
           if (newDeal.status === StatusEnum.notok) {
             this.endMethod(_id)
@@ -30233,6 +30769,16 @@ function createDCABotHelper<
           this.setDeal(full)
           this.emit('bot deal update', dealData)
           await this.setCloseByTimer(full.deal)
+          this.botEventDb.createData({
+            userId: this.userId,
+            botId: this.botId,
+            botType: this.botType,
+            event: 'Merge DCA deals',
+            description: `DCA deals merged into deal ${dealData._id}: ${_deals.join(
+              ' ',
+            )}`,
+            paperContext: !!this.data.paperContext,
+          })
           this.reloadBot(this.botId)
         } else {
           this.handleErrors(
@@ -30246,6 +30792,57 @@ function createDCABotHelper<
         }
       }
       this.endMethod(_id)
+    }
+
+    /**
+     * Pull the merge's source take profits off the exchange before the merged
+     * deal exists.
+     *
+     * The merged deal places one take profit for the whole position, and on
+     * spot the sources' resting take profits HOLD that position: until they
+     * are gone the new one cannot be funded. The sources used to be cancelled
+     * after the merged deal was written, by a close whose refused cancels are
+     * retried in the background, so a refusal left the old take profits live
+     * on the venue while the merged deal's own was refused for balance.
+     *
+     * Stops at the first cancel the venue refuses and puts back the take
+     * profits already pulled, so a refused merge leaves every source deal as
+     * it was. Only the sources this process holds; one owned by another bot's
+     * process is still cancelled by its own close, as before.
+     *
+     * @returns why the merge must not go ahead, or undefined.
+     */
+    protected async cancelMergeSourceTakeProfits(
+      deals: { _id: unknown }[],
+    ): Promise<string | undefined> {
+      const pulled: string[] = []
+      for (const d of deals) {
+        const dealId = `${d._id}`
+        if (!this.getDeal(dealId)) {
+          continue
+        }
+        for (const tp of this.restingTakeProfits(dealId)) {
+          // A re-size, not a close: a partly filled take profit's fills are
+          // already in the orders the merge has read.
+          const result = await this.cancelOrderOnExchange(tp, false, true, false)
+          if (result?.status === 'FILLED') {
+            this.handleUnknownOrder(result)
+          }
+          const stillResting = this.restingTakeProfits(dealId).some(
+            (o) => o.clientOrderId === tp.clientOrderId,
+          )
+          if (stillResting || result?.status === 'FILLED') {
+            for (const id of new Set(pulled)) {
+              await this.rearmMissingTp(id)
+            }
+            return result?.status === 'FILLED'
+              ? `the take profit of deal ${dealId} filled while the merge was cancelling it`
+              : `the exchange refused to cancel the take profit of deal ${dealId}, so the deals would hold the same coins twice. Nothing was changed.`
+          }
+          pulled.push(dealId)
+        }
+      }
+      return undefined
     }
 
     /**

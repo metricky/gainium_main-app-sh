@@ -518,10 +518,8 @@ export const UserSchema = /* GraphQL */ `
     _id: String
     username: String
     bigAccount: Boolean
-    password: String
     updated: Date
     created: Date
-    tokens: [tokenType]
     timezone: String
     theme: ThemeMode
     weekStart: String
@@ -914,6 +912,9 @@ export const BotSchema = /* GraphQL */ `
     comboDealList(input: getDcaDealListInput): getComboDealsResponse
     hedgeComboDealList(input: getDcaDealListInput): getComboDealsResponse
     hedgeDcaDealList(input: getDcaDealListInput): getDCADealsResponse
+    # Closed deals of every kind and stopped grid bots as one server-paged
+    # list (spec 200).
+    closedTradeList(input: closedTradeListInput): closedTradeListResponse
     getBot(input: getBotInput!): getBotResponse
     getDCABot(input: getBotInput!): getDCABotResponse
     getComboBot(input: getBotInput!): getComboBotResponse
@@ -3506,6 +3507,8 @@ export const BotSchema = /* GraphQL */ `
     pcDown: String
     pcCondition: String
     pcValue: String
+    pcCompare: String
+    pcValue2: String
     ppHighLeft: Float
     ppHighRight: Float
     ppLowLeft: Float
@@ -3539,6 +3542,33 @@ export const BotSchema = /* GraphQL */ `
     oteMinLegSize: StringOrNumber
     oteLevel: StringOrNumber
     oteLeg: String
+    adxMode: String
+    kdjLength: StringOrNumber
+    kdjKSmooth: StringOrNumber
+    kdjDSmooth: StringOrNumber
+    kdjLine: String
+    kdjCompareTo: String
+    vwapAnchor: String
+    vwapLine: String
+    vwapBandMultiplier: StringOrNumber
+    candleSource: String
+    candleColor: String
+    candleCount: StringOrNumber
+    candleTrigger: String
+    obSwingLength: StringOrNumber
+    obSide: String
+    obLevel: String
+    sqzLength: StringOrNumber
+    sqzBBMult: StringOrNumber
+    sqzKCLength: StringOrNumber
+    sqzKCMult: StringOrNumber
+    sqzSignal: String
+    sqzMomentum: String
+    divPivotLeft: StringOrNumber
+    divPivotRight: StringOrNumber
+    divRangeLower: StringOrNumber
+    divRangeUpper: StringOrNumber
+    sessionLevelsActive: String
   }
   enum MAEnum {
     sma
@@ -3550,6 +3580,7 @@ export const BotSchema = /* GraphQL */ `
     vwma
     hma
     rma
+    mcginley
   }
   enum OrderSizeTypeEnum {
     base
@@ -4916,6 +4947,27 @@ export const BotSchema = /* GraphQL */ `
     totalResults: Int
     result: [comboDeal]
   }
+  input closedTradeListInput {
+    dataGridInput: DataGridFilterInput
+  }
+  type closedTradeRef {
+    kind: String
+    id: String
+  }
+  type closedTradeListResult {
+    # The page in display order; rows are in the per-kind lists below.
+    order: [closedTradeRef]
+    dca: [dcaDeal]
+    terminal: [dcaDeal]
+    combo: [comboDeal]
+    grid: [fullBot]
+  }
+  type closedTradeListResponse implements BasicResponse {
+    status: Status
+    reason: String
+    data: closedTradeListResult
+    total: Float
+  }
   type getDCADealsResponse implements BasicResponse {
     status: Status
     reason: String
@@ -5207,6 +5259,11 @@ export const BotSchema = /* GraphQL */ `
     LW
     SESSION
     OTE
+    KDJ
+    VWAP
+    CANDLE
+    OB
+    SQZ
   }
   enum BBCrossingEnum {
     middle
@@ -5312,6 +5369,8 @@ export const BotSchema = /* GraphQL */ `
     pcDown: String
     pcCondition: String
     pcValue: String
+    pcCompare: String
+    pcValue2: String
     ppHighLeft: Float
     ppHighRight: Float
     ppLowLeft: Float
@@ -5345,6 +5404,33 @@ export const BotSchema = /* GraphQL */ `
     oteMinLegSize: StringOrNumber
     oteLevel: StringOrNumber
     oteLeg: String
+    adxMode: String
+    kdjLength: StringOrNumber
+    kdjKSmooth: StringOrNumber
+    kdjDSmooth: StringOrNumber
+    kdjLine: String
+    kdjCompareTo: String
+    vwapAnchor: String
+    vwapLine: String
+    vwapBandMultiplier: StringOrNumber
+    candleSource: String
+    candleColor: String
+    candleCount: StringOrNumber
+    candleTrigger: String
+    obSwingLength: StringOrNumber
+    obSide: String
+    obLevel: String
+    sqzLength: StringOrNumber
+    sqzBBMult: StringOrNumber
+    sqzKCLength: StringOrNumber
+    sqzKCMult: StringOrNumber
+    sqzSignal: String
+    sqzMomentum: String
+    divPivotLeft: StringOrNumber
+    divPivotRight: StringOrNumber
+    divRangeLower: StringOrNumber
+    divRangeUpper: StringOrNumber
+    sessionLevelsActive: String
   }
   enum IndicatorSection {
     sl
