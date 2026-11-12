@@ -90,7 +90,7 @@ describe('deal stats survive the deal close (spec 064 §4.3)', () => {
     comboWrites = []
   })
 
-  /** Opens a window and records a 10 % drawdown inside it, writing nothing. */
+  /** Keep the loss inside the 30 s window: this tests flushing on close. */
   const trackALoss = async (id: string) => {
     const deal = makeDeal(id)
     await monitor.addDealStats(
@@ -102,7 +102,7 @@ describe('deal stats survive the deal close (spec 064 §4.3)', () => {
     )
     await monitor.addDealStats(
       false,
-      { symbol: 'X-USDT', price: AVG_PRICE * 0.9, time: T0 + 31_000 } as any,
+      { symbol: 'X-USDT', price: AVG_PRICE * 0.9, time: T0 + 20_000 } as any,
       1,
       deal,
       0,
@@ -142,7 +142,9 @@ describe('deal stats survive the deal close (spec 064 §4.3)', () => {
     )
     await monitor.addDealStats(
       true,
-      { symbol: 'X-USDT', price: AVG_PRICE * 0.9, time: T0 + 31_000 } as any,
+      // After 30 s upstream may already persist the window on this sample.
+      // Stay inside it so the close, not the sampling timer, owns the write.
+      { symbol: 'X-USDT', price: AVG_PRICE * 0.9, time: T0 + 20_000 } as any,
       1,
       deal,
       0,
