@@ -1840,6 +1840,13 @@ export interface DCADealsSchema extends SchemaI {
     qty: number
   }[]
   ignoreLevels?: number[]
+  /**
+   * Spec 233: ladder levels the market ran past while they were not resting,
+   * which the engine will not place (they lie on the near side of the last
+   * fill). Recorded so the user is told and can execute one by hand
+   * (`executeNextDcaLevel` with `missedLevel`). Absent or empty = none.
+   */
+  missedLevels?: { level: number; price: number; qty: number }[]
   isDeleted?: boolean
   feeBalance?: number
   moveSlActivated?: boolean
@@ -2236,7 +2243,11 @@ export type CleanDCADealsSchema = ExcludeDoc<DCADealsSchema>
 
 export type CleanComboDealsSchema = ExcludeDoc<ComboDealsSchema>
 export type UserToken = {
-  token: string
+  // The session token itself. Absent on rows written with
+  // SESSION_TOKEN_WRITE_PLAINTEXT off; match rows through sessionTokenHash.ts.
+  token?: string
+  // Hex SHA-256 of the session token. Absent on rows written before it existed.
+  tokenHash?: string
   expiredAt: number
   createdAt: number
   // Login method that minted this token ('web' | 'email' | OAuth type | 'admin'
@@ -2245,6 +2256,9 @@ export type UserToken = {
   // Device context captured at login, for the user's session list.
   ip?: string
   userAgent?: string
+  // Session version stamped on a row that survived a "sign out the others"
+  // write; overrides the token's own `tv` claim (see sessionVersion.ts).
+  tv?: number
   // Mongoose stamps an ObjectId on each array sub-document at runtime; used as
   // the stable id when listing / revoking an individual session.
   _id?: { toString(): string }
@@ -2448,6 +2462,8 @@ export interface UserSchema extends SchemaI {
     paper?: LargeAccountContextStatsDoc
   }
   tokens: UserToken[]
+  // Per-user session version; absent = 0 (see sessionVersion.ts).
+  tokenVersion?: number
   exchanges: ExchangeInUser[]
   timezone: string
   weekStart?: string
@@ -3097,6 +3113,11 @@ export interface DCABotSchema<
   hodlIgnoreAt?: boolean
   indicatorsData?: IndicatorsData[]
   feeBalance?: number
+  /**
+   * Combo SHORT spot only (spec 222): base, per symbol, that earlier closes
+   * skipped below the venue minimum and the next close buys back.
+   */
+  shortCloseCarry?: { symbol: string; base: number }[]
   stats?: BotStats
   symbolStats?: BotSymbolsStats[]
   ignoreStats?: boolean
@@ -4148,6 +4169,16 @@ export type CommonOrder = {
  * again — a fill, a cancel, a successful lookup — the order is rebuilt from
  * that truth and the quarantine goes with it.
  */
+/** @see Order.refusal */
+export type OrderRefusal = {
+  /** The venue's (or connector's) own words, truncated. */
+  reason: string
+  /** `getErrorSubType(reason)`, e.g. `Not enough balance`, `Uncategorized`. */
+  subType: string
+  /** ms epoch the write-off was made. */
+  at: number
+}
+
 export type OrderQuarantine = {
   /** Definitive not-founds seen, at most one per order-check run. */
   strikes: number
@@ -4179,6 +4210,14 @@ export type Order = CommonOrder & {
   typeOrder: TypeOrder
   /** @see OrderQuarantine — absent for every order that behaves normally. */
   quarantine?: OrderQuarantine
+  /**
+   * Why a placement was written off (status CANCELED, orderId -1). Absent on
+   * every order the venue accepted, and on write-offs made before this was
+   * recorded. `subType` is the bot-error class (`getErrorSubType`), so a
+   * reader can tell a user-owned refusal (balance, keys) from a platform one
+   * by its owner in `boterrorsubtypes`.
+   */
+  refusal?: OrderRefusal
   botId: string
   userId: string
   dealId?: string
@@ -4202,6 +4241,13 @@ export type Order = CommonOrder & {
   ackAt?: number
   tpSlTarget?: string
   dcaLevel?: number
+  /**
+   * Spec 233: the DCA ladder level (1-based `levelNumber`) a `dealRegular`
+   * order was sent for, so its fill names its level even when it filled away
+   * from that level's price. Absent on orders sent before it was recorded and
+   * on every non-ladder order.
+   */
+  ladderLevel?: number
   minigridId?: string
   addFundsId?: string
   reduceFundsId?: string
@@ -5248,7 +5294,42 @@ export interface DCABacktestingResult extends SchemaI {
   multiPairs?: number
   symbolStats?: SymbolStats[]
   periodicStats?: PeriodicStats[]
+  dealStats?: DealStats
+  randomEdge?: RandomEdge
   messages?: string[]
+}
+/**
+ * Fixed-size summary of a backtest's closed deals (@gainium/backtester
+ * 1.29.0, helper/dealStats). Kept in place of the deal list, which has no
+ * upper bound. Returns are each deal's profit %; durations are ms.
+ */
+export type DealStats = {
+  closed: number
+  winners: number
+  mean: number
+  sd: number
+  min: number
+  max: number
+  p5: number
+  p25: number
+  p50: number
+  p75: number
+  p95: number
+  histogram: { from: number; step: number; counts: number[] }
+  duration: { mean: number; p50: number; p95: number; max: number }
+}
+/**
+ * Strategy vs random entries, run server-side on request: the same settings
+ * and period with random entries (the engine's `edge: random`). Only these
+ * summaries are kept; neither run's deals are.
+ */
+export type RandomEdge = {
+  time: number
+  strategy: { n: number; mean: number; sd: number }
+  random: { n: number; mean: number; sd: number }
+  /** Welch's t of strategy − random; absent under two deals a side. */
+  t?: number
+  verdict?: 'beats' | 'worse' | 'same'
 }
 export type PeriodicStats = {
   period: string
@@ -5386,6 +5467,8 @@ export interface ComboBacktestingResult extends SchemaI {
   multiPairs?: number
   symbolStats?: SymbolStats[]
   periodicStats?: PeriodicStats[]
+  dealStats?: DealStats
+  randomEdge?: RandomEdge
   messages?: string[]
 }
 
@@ -5501,6 +5584,8 @@ export type DCABacktestingResultShort = {
   multiPairs?: number
   symbolStats?: SymbolStats[]
   periodicStats?: PeriodicStats[]
+  dealStats?: DealStats
+  randomEdge?: RandomEdge
   messages?: string[]
 }
 
@@ -6067,6 +6152,13 @@ export type ServerSideBacktestPayload =
         exchangeUUID: string
       }
       config: BacktestingSettings & { periodName?: string }
+      /**
+       * Strategy vs random for a saved backtest of this user: the run uses
+       * random entries (`edge: random`) and writes only `randomEdge` (and
+       * `dealStats` when the backtest has none) onto that backtest. No new
+       * backtest is saved and no deals are kept.
+       */
+      edge?: { type: 'random'; backtestId: string }
     }
   | {
       type: BotType.grid

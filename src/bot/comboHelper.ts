@@ -74,9 +74,13 @@ import { IdMute, IdMutex } from '../utils/mutex'
 import utils from '../utils'
 const { sleep } = utils
 import { RunWithDelay } from '../utils/delay'
-import { DealStats } from './worker/statsService'
 import createDCABotHelper from './dcaHelper'
 import { isDefinitiveOrderNotFound } from './main'
+import {
+  marketEntryNeedsRecheck,
+  marketEntryRecheckDelayMs,
+  marketEntryRecheckMaxAttempts,
+} from './marketEntryFill'
 import {
   comboPercentAtPrice,
   comboPnlAtPrice,
@@ -183,6 +187,11 @@ function createComboBotHelper<
     private closeRequested: Set<string> = new Set()
     /** Spec `175`: deals whose venue position is being asked about right now. */
     private flatProbeRunning: Set<string> = new Set()
+    /**
+     * Spec `235`: pending re-checks of a MARKET base entry whose placement
+     * answer was not FILLED, one per deal. Cleared by `clearClassProperties`.
+     */
+    private marketEntryRecheckTimers: Map<string, NodeJS.Timeout> = new Map()
     private feeOrderReasons: Map<string, string[]> = new Map()
     private lastFilledOrderMap: Map<string, Order> = new Map()
     private comboTtpPersistAt: Map<string, number> = new Map()
@@ -630,9 +639,18 @@ function createComboBotHelper<
         (baseOrder
           ? price * (+(settings.baseStep ?? settings.step) / 100)
           : price * (+settings.step / 100)) * stepVal
+      /**
+       * Main-app spec 218. A base minigrid is laid around the price the base
+       * order FILLED at (`price`), whatever type the fill came back labelled
+       * with. `origPrice` is only the request: Hyperliquid's market order is
+       * a padded limit, and when it rests for a moment the placement answer
+       * books it as a LIMIT at the un-padded request price, a price the deal
+       * never traded at. A safety-order minigrid keeps its level price.
+       */
+      const basePrice = +order.price
       const startPrice = baseOrder
-        ? order.type === OrderTypeEnum.market
-          ? +order.price
+        ? Number.isFinite(basePrice) && basePrice > 0
+          ? basePrice
           : +order.origPrice
         : +order.origPrice
       const initialPrice = _initialPrice ?? startPrice
@@ -1383,21 +1401,35 @@ function createComboBotHelper<
         )
         deal.closeBySl = true
         this.saveDeal(deal)
-        this.closeDealById(
-          this.botId,
-          deal.deal._id,
-          CloseDCATypeEnum.closeByMarket,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          DCACloseTriggerEnum.base,
-        )
+        this.closeDealAfterBaseMinigrid(deal.deal._id)
       }
       this.endMethod(_id)
+    }
+    /**
+     * Spec 219 §3.2. A completed base minigrid closes the deal like its take
+     * profit does: with the deal close type the user chose (`comboTpLimit`),
+     * as a close by timer does (spec 204 §1.4), and labelled `base`. It used
+     * to be sent at market whatever the bot was set to.
+     */
+    private async closeDealAfterBaseMinigrid(dealId: string) {
+      const deal = this.getDeal(dealId)
+      const settings = deal
+        ? await this.getAggregatedSettings(deal.deal)
+        : this.data?.settings
+      const { closeType, forceMarket } = this.dealCloseOrder(settings ?? {})
+      return this.closeDealById(
+        this.botId,
+        dealId,
+        closeType,
+        undefined,
+        forceMarket,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        DCACloseTriggerEnum.base,
+      )
     }
     override async loadOrders(): Promise<void> {
       const _id = this.startMethod('loadOrders')
@@ -3147,6 +3179,7 @@ function createComboBotHelper<
         // callback is the only report of a venue cancel. One that ended part
         // filled is a position the account holds: open the deal on it, exactly
         // as the DCA callback does. Spec 101 §4.1.
+        this.noteRepositionCancelReport(order)
         if (
           order.dealId &&
           shouldSettlePartialBaseEntry({
@@ -3723,19 +3756,7 @@ function createComboBotHelper<
               deal.closeBySl = true
               this.handleLog(`Close deal ${dealId} after base minigrid close`)
               this.endMethod(_id)
-              return this.closeDealById(
-                this.botId,
-                dealId,
-                CloseDCATypeEnum.closeByMarket,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                DCACloseTriggerEnum.base,
-              )
+              return this.closeDealAfterBaseMinigrid(dealId)
             }
             this.endMethod(_id)
             return this.handleDebug(`Deal ${dealId} already closing`)
@@ -4155,7 +4176,88 @@ function createComboBotHelper<
       this.usedOrderId = new Map()
       this.closesRunning = new Map()
       this.closeRequested = new Set()
+      for (const timer of (this.marketEntryRecheckTimers ?? new Map()).values()) {
+        clearTimeout(timer)
+      }
+      this.marketEntryRecheckTimers = new Map()
     }
+
+    /**
+     * Ask the venue about a MARKET base entry `marketEntryRecheckDelayMs`
+     * after its placement answer, if the row is still live then. One pending
+     * check per deal. Spec 235 §4.3.
+     */
+    armMarketEntryRecheck(order: Order, attempt = 1) {
+      const dealId = order.dealId
+      if (
+        !dealId ||
+        attempt > marketEntryRecheckMaxAttempts ||
+        !marketEntryNeedsRecheck({
+          order,
+          dealStatus: this.getDeal(dealId)?.deal.status,
+        })
+      ) {
+        return
+      }
+      const timers = (this.marketEntryRecheckTimers ??= new Map())
+      const pending = timers.get(dealId)
+      if (pending) {
+        clearTimeout(pending)
+      }
+      const timer = setTimeout(() => {
+        timers.delete(dealId)
+        this.recheckMarketEntry(
+          order.clientOrderId,
+          order.symbol,
+          dealId,
+          attempt,
+        ).catch((e) =>
+          this.handleWarn(
+            `Cannot re-check base order ${order.clientOrderId} of deal ${dealId}: ${(e as Error)?.message ?? e}`,
+          ),
+        )
+      }, marketEntryRecheckDelayMs)
+      timers.set(dealId, timer)
+    }
+
+    /**
+     * The re-check itself: read the order from the venue through the
+     * unknown-order lookup (`justPlaced`, so a lookup that gets no answer
+     * never writes the order off) and book a FILLED answer through the
+     * ordinary fill path. Places, cancels and re-places nothing. Spec 235 §4.3.
+     */
+    async recheckMarketEntry(
+      clientOrderId: string,
+      symbol: string,
+      dealId: string,
+      attempt: number,
+    ) {
+      if (!this.shouldProceed()) {
+        return
+      }
+      const held = this.getOrderFromMap(clientOrderId)
+      if (
+        !held ||
+        !marketEntryNeedsRecheck({
+          order: held,
+          dealStatus: this.getDeal(dealId)?.deal.status,
+        })
+      ) {
+        return
+      }
+      this.handleLog(
+        `Base order ${clientOrderId} of deal ${dealId} is still ${held.status} ${marketEntryRecheckDelayMs / 1000}s after placement with no fill report. Asking the exchange (${attempt}/${marketEntryRecheckMaxAttempts})`,
+      )
+      const filled = await this._handleUnknownOrder(clientOrderId, symbol, true)
+      if (filled?.status === 'FILLED') {
+        return await this.handleUnknownOrder(filled)
+      }
+      const now = this.getOrderFromMap(clientOrderId)
+      if (now) {
+        this.armMarketEntryRecheck(now, attempt + 1)
+      }
+    }
+
     override async afterBotStop() {
       // super handles stopPriceTimer / stopReconcileSweep /
       // stopQuantRulesRetries — combo bots arm the price timer + reconcile
@@ -4187,6 +4289,10 @@ function createComboBotHelper<
       this.handleLog(
         `Processing ${order.clientOrderId} ${order.typeOrder} ${order.dcaLevel}`,
       )
+      if (order.typeOrder === TypeOrderEnum.dealStart) {
+        // Spec `228` §4.4: the pair's book took an entry.
+        this.clearRefusedBaseEntries(order.symbol)
+      }
       if (
         +(this.lastFilledOrderMap.get(order.symbol)?.updateTime ?? '0') <
         +order.updateTime
@@ -4227,6 +4333,10 @@ function createComboBotHelper<
         : new Set<string>()
       if (dealId && !getSet.has(clientOrderId)) {
         this.processedFilled.set(dealId, getSet.add(clientOrderId))
+        // Spec `225`: a remainder sweep re-placed as LIMIT on a closed deal.
+        if (await this.bookLimitRemainderSweep(order)) {
+          return
+        }
         if (
           order.typeOrder === TypeOrderEnum.dealTP &&
           (order.clientOrderId.indexOf('D-SR') === -1 ||
@@ -7993,6 +8103,10 @@ function createComboBotHelper<
               // to the send is a report of the venue's cancel the deal must
               // not wait on the order queue for. Spec 205.
               this.checkUnfilledBaseEntryCancel(result)
+              // Nor does it arm one for a MARKET entry the venue accepted
+              // without reporting it filled, so a user stream that stays silent
+              // left the deal in `start` until it reconnected. Spec 235 §4.3.
+              this.armMarketEntryRecheck(result)
             }
           }
         }
@@ -8051,7 +8165,19 @@ function createComboBotHelper<
       }
       const ed = await this.getExchangeInfo(symbol)
       if (
-        await this.refuseNewDealNearDelivery(symbol, ed, skip, dynamic, trigger)
+        (await this.refuseNewDealNearDelivery(
+          symbol,
+          ed,
+          skip,
+          dynamic,
+          trigger,
+        )) ||
+        (await this.refuseNewDealAfterRefusedEntries(
+          symbol,
+          skip,
+          dynamic,
+          trigger,
+        ))
       ) {
         this.endMethod(_id)
         if (cbIfNotOpened) {
@@ -8395,6 +8521,10 @@ function createComboBotHelper<
     }
     /** Spec 204 §1.4: a timer close uses the deal close type, as the TP does. */
     protected override timerCloseOrder(settings: { comboTpLimit?: boolean }) {
+      return this.dealCloseOrder(settings)
+    }
+    /** The combo deal close type (`comboTpLimit`) as a close order. */
+    private dealCloseOrder(settings: { comboTpLimit?: boolean }) {
       return settings.comboTpLimit
         ? { closeType: CloseDCATypeEnum.closeByLimit, forceMarket: false }
         : { closeType: CloseDCATypeEnum.closeByMarket, forceMarket: true }
@@ -8977,6 +9107,56 @@ function createComboBotHelper<
       return { ...diff, new: place }
     }
 
+    /** Combo's stats payload (spec 230: shared by the load seed). */
+    override async sendDealStats(
+      d: Parameters<InstanceType<typeof ActualBaseClass>['sendDealStats']>[0],
+      msg: PriceMessage,
+    ) {
+      if (!this.data) {
+        return
+      }
+      this.dealsStatsSampled.add(`${d.deal._id}`)
+      const data: BotParentProcessStatsEventDtoDcaCombo = {
+        event: 'processStats',
+        botId: this.botId,
+        botType: this.botType === BotType.combo ? BotType.combo : BotType.dca,
+        payload: {
+          combo: this.botType === BotType.combo,
+          data: msg,
+          deal: {
+            _id: d.deal._id,
+            settings: {
+              futures: d.deal.settings.futures,
+              marginType: d.deal.settings.marginType,
+              leverage: d.deal.settings.leverage,
+              comboTpBase: d.deal.settings.comboTpBase,
+              coinm: d.deal.settings.coinm,
+              profitCurrency: d.deal.settings.profitCurrency,
+            },
+            currentBalances: d.deal.currentBalances,
+            initialBalances: d.deal.initialBalances,
+            profit: {
+              total: d.deal.profit.total,
+              pureBase: d.deal.profit.pureBase,
+              pureQuote: d.deal.profit.pureQuote,
+            },
+            feePaid: d.deal.feePaid,
+            avgPrice: d.deal.avgPrice,
+            strategy: d.deal.strategy,
+            usage: d.deal.usage,
+            stats: d.deal.stats,
+            flags: d.deal.flags,
+            tpFilledHistory: d.deal.tpFilledHistory,
+            reduceFunds: d.deal.reduceFunds,
+            botId: this.botId,
+          },
+          fee: (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0,
+          usdRate: (await this.getUsdRate(d.deal.symbol.symbol)) ?? 0,
+        },
+      }
+      this.dispatchDealStats(d, data)
+    }
+
     @IdMute(
       mutex,
       (botId: string, msg: PriceMessage) => `${botId}price${msg.symbol}`,
@@ -9051,59 +9231,7 @@ function createComboBotHelper<
       ) {
         this.lastCheckPerSymbol.set(msg.symbol, +new Date())
         for (const d of this.getOpenDeals(false, msg.symbol)) {
-          if (this.data) {
-            const data: BotParentProcessStatsEventDtoDcaCombo = {
-              event: 'processStats',
-              botId: this.botId,
-              botType:
-                this.botType === BotType.combo ? BotType.combo : BotType.dca,
-              payload: {
-                combo: this.botType === BotType.combo,
-                data: msg,
-                deal: {
-                  _id: d.deal._id,
-                  settings: {
-                    futures: d.deal.settings.futures,
-                    marginType: d.deal.settings.marginType,
-                    leverage: d.deal.settings.leverage,
-                    comboTpBase: d.deal.settings.comboTpBase,
-                    coinm: d.deal.settings.coinm,
-                    profitCurrency: d.deal.settings.profitCurrency,
-                  },
-                  currentBalances: d.deal.currentBalances,
-                  initialBalances: d.deal.initialBalances,
-                  profit: {
-                    total: d.deal.profit.total,
-                    pureBase: d.deal.profit.pureBase,
-                    pureQuote: d.deal.profit.pureQuote,
-                  },
-                  feePaid: d.deal.feePaid,
-                  avgPrice: d.deal.avgPrice,
-                  strategy: d.deal.strategy,
-                  usage: d.deal.usage,
-                  stats: d.deal.stats,
-                  flags: d.deal.flags,
-                  tpFilledHistory: d.deal.tpFilledHistory,
-                  reduceFunds: d.deal.reduceFunds,
-                  botId: this.botId,
-                },
-                fee: (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0,
-                usdRate: (await this.getUsdRate(d.deal.symbol.symbol)) ?? 0,
-              },
-            }
-            try {
-              DealStats.getInstance().updateStats(data)
-            } catch (e) {
-              this.handleErrors(
-                `Cannot send deal ${d.deal._id} stats to parent process ${e}`,
-                'priceUpdateCallback',
-                '',
-                false,
-                false,
-                false,
-              )
-            }
-          }
+          await this.sendDealStats(d, msg)
         }
         this.checkMinigridRange(msg.price, msg.symbol)
 

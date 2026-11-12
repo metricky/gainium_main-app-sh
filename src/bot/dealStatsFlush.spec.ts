@@ -54,6 +54,10 @@ const makeDeal = (id: string) =>
       unrealizedProfit: 0,
       usage: 0,
       maxUsage: 0,
+      // a deal stored before, at its current value (spec 229 writes a
+      // never-stored deal, or a changed one past its window, at once)
+      unrealizedProfitNet: 0,
+      updatedAt: new Date(T0 - 3_600_000),
     },
     flags: [],
     tpFilledHistory: [],

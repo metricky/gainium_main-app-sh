@@ -32,6 +32,8 @@ import type {
   SymbolStats,
   FavoriteIndicatorsSchema,
   PeriodicStats,
+  DealStats,
+  RandomEdge,
   StoreFilesSchema,
   BacktestRequestSchema,
   BotStats,
@@ -406,7 +408,9 @@ const userSchema: Schema<UserSchema> = new Schema({
   password: RequiredString,
   tokens: [
     {
-      token: RequiredString,
+      // Not required: a row may hold only `tokenHash` (sessionTokenHash.ts).
+      token: String,
+      tokenHash: String,
       createdAt: {
         type: Date,
         default: Date.now,
@@ -419,8 +423,12 @@ const userSchema: Schema<UserSchema> = new Schema({
       // Device context captured at login, for the user's session list.
       ip: String,
       userAgent: String,
+      // Session version of a row kept by a "sign out the others" write.
+      tv: Number,
     },
   ],
+  // Per-user session version. No default on purpose: absent reads as 0.
+  tokenVersion: Number,
   exchanges: [
     {
       provider: { ...RequiredString, enum: ExchangeEnum },
@@ -499,6 +507,9 @@ const userSchema: Schema<UserSchema> = new Schema({
   videos: [{ id: String, watch80: Boolean, closed: Boolean }],
   licenseKey: String,
 })
+// Session lookup by token hash (utils/sessionTokenHash.ts). Sparse: a user
+// with no hashed session is not in it.
+userSchema.index({ 'tokens.tokenHash': 1 }, { sparse: true })
 
 const workingShift = [{ start: RequiredNumber, end: Number }]
 
@@ -939,6 +950,8 @@ const orderSchema: Schema<OrderSchema> = new Schema({
   paperContext: Boolean,
   tpSlTarget: String,
   dcaLevel: Number,
+  // Spec 233: DCA ladder level a dealRegular order was sent for.
+  ladderLevel: Number,
   minigridId: String,
   addFundsId: String,
   reduceFundsId: String,
@@ -962,6 +975,17 @@ const orderSchema: Schema<OrderSchema> = new Schema({
       reason: String,
       runId: String,
       since: Number,
+    },
+    required: false,
+    default: undefined,
+  },
+  // Why a placement was written off — see `OrderRefusal` in core/types.ts.
+  // Additive, absent on every accepted order and on older write-offs.
+  refusal: {
+    type: {
+      reason: String,
+      subType: String,
+      at: Number,
     },
     required: false,
     default: undefined,
@@ -2097,6 +2121,8 @@ const comboBotSchema: Schema<ComboBotSchema> = new Schema({
     },
   ],
   feeBalance: Number,
+  // Spec 222: base owed by combo SHORT closes skipped below the venue minimum.
+  shortCloseCarry: [{ _id: false, symbol: String, base: Number }],
   stats: botStats,
   symbolStats: [botSymbolsStats],
   resetStatsAfter: Number,
@@ -2406,6 +2432,11 @@ const dcaDealSchema: Schema<DCADealsSchema> = new Schema({
       displacedPrice: Number,
     },
   ],
+  // Spec 233: ladder levels the engine will not place (see core/types.ts).
+  missedLevels: {
+    type: [{ _id: false, level: Number, price: Number, qty: Number }],
+    default: undefined,
+  },
   paperContext: Boolean,
   type: { type: String, enum: DCATypeEnum },
   strategy: {
@@ -2775,6 +2806,38 @@ const periodicStats: Schema<PeriodicStats> = new Schema({
   runup: Number,
 })
 
+const returnStatsShape = { n: Number, mean: Number, sd: Number }
+
+const dealStatsSchema: Schema<DealStats> = new Schema(
+  {
+    closed: Number,
+    winners: Number,
+    mean: Number,
+    sd: Number,
+    min: Number,
+    max: Number,
+    p5: Number,
+    p25: Number,
+    p50: Number,
+    p75: Number,
+    p95: Number,
+    histogram: { from: Number, step: Number, counts: [Number] },
+    duration: { mean: Number, p50: Number, p95: Number, max: Number },
+  },
+  { _id: false },
+)
+
+const randomEdgeSchema: Schema<RandomEdge> = new Schema(
+  {
+    time: Number,
+    strategy: returnStatsShape,
+    random: returnStatsShape,
+    t: Number,
+    verdict: String,
+  },
+  { _id: false },
+)
+
 const backtestRequest: Schema<BacktestRequestSchema> = new Schema({
   cost: Number,
   symbols: [
@@ -2946,6 +3009,8 @@ const backtestCommon = {
   multiPairs: Number,
   symbolStats: [symbolStats],
   periodicStats: [periodicStats],
+  dealStats: dealStatsSchema,
+  randomEdge: randomEdgeSchema,
   messages: [String],
 }
 
@@ -2977,6 +3042,7 @@ const hedgeBacktestCommon = {
   multiPairs: Number,
   symbolStats: [symbolStats],
   periodicStats: [periodicStats],
+  dealStats: dealStatsSchema,
   messages: [String],
 }
 
@@ -3437,6 +3503,13 @@ export const snapshotMongoTtlSeconds = (): number => {
 }
 
 export const registerIndexes = () => {
+  // Session lookup: every authenticated request finds its user by
+  // `tokens.token`. Sparse: a user holding no session is not in it.
+  userSchema.index({ 'tokens.token': 1 }, { sparse: true })
+  // Session lookup by token hash (utils/sessionTokenHash.ts). Sparse: a user
+  // with no hashed session is not in it.
+  userSchema.index({ 'tokens.tokenHash': 1 }, { sparse: true })
+
   brokerCodes.index({ exchange: 1, zone: 1 }, { unique: true })
 
   reconcileSweepSchema.index({ created: -1 })
@@ -3485,6 +3558,20 @@ export const registerIndexes = () => {
   // {userId, exchangeUUID, asset}; with only the userId index each such op
   // scans every doc the user owns (1.5k+ for dust-heavy accounts).
   balancesSchema.index({ userId: 1, exchangeUUID: 1, asset: 1 })
+  // One row per connection and asset. Every insert site upserts on exactly
+  // these three fields after a read that found nothing; concurrent refreshes
+  // of one connection (adding an exchange starts several) all read "nothing"
+  // and, without a unique index, each inserted its own row. Later writes
+  // reach only the first, and Portfolio kept summing the stale copies. With
+  // this index the server retries the losing upsert as an update.
+  // Different key order and name on purpose: it sits ALONGSIDE the index
+  // above instead of replacing it, so while existing duplicates still block
+  // this build (main-app migration v53 removes them) boot-time syncIndexes
+  // has nothing to drop and the writes keep their index.
+  balancesSchema.index(
+    { exchangeUUID: 1, asset: 1, userId: 1 },
+    { unique: true, name: 'balance_identity_unique' },
+  )
   // Backs the account-wide balances listing (no connection filter), which sorts
   // on {asset, _id}. Neither index above can serve that order — {userId} has no
   // asset component and the compound one is ordered by exchangeUUID first — so
@@ -3703,6 +3790,10 @@ export const registerIndexes = () => {
 
   comboDealSchema.index({ userId: 1 })
   comboDealSchema.index({ botId: 1 })
+  // `GET /api/v2/deals/combo` pages with sort {createTime:-1, _id:-1} — see the
+  // matching dcaDealSchema pair (spec 228).
+  comboDealSchema.index({ userId: 1, status: 1, createTime: -1, _id: -1 })
+  comboDealSchema.index({ userId: 1, createTime: -1, _id: -1 })
   // Spec 044 §8.13 reservation reads (FundingReservation): only deals stamped
   // `baseFundingBeta` ever hold funds, and both reads carry that stamp and the
   // user, so this index holds beta deals only.
@@ -3785,6 +3876,16 @@ export const registerIndexes = () => {
   // absence of options exactly as they are, or `syncIndexes()` drops and
   // rebuilds it on the next start.
   dcaDealSchema.index({ userId: 1, status: 1, createTime: -1 })
+  // `GET /api/v2/deals/:dealType` pages with sort {createTime:-1, _id:-1}: the
+  // `_id` tiebreaker (spec 065) makes page boundaries stable, but no index above
+  // ends in `_id`, so the planner read every matching deal the user has, sorted
+  // them in memory and then applied skip/limit — the whole history for one
+  // 20-row page, on every page. These two deliver that exact order straight off
+  // the index (with and without the status filter), so a page costs
+  // skip + limit keys. All keys are write-once except `status`, which moves
+  // once, on open -> closed. Spec 228.
+  dcaDealSchema.index({ userId: 1, status: 1, createTime: -1, _id: -1 })
+  dcaDealSchema.index({ userId: 1, createTime: -1, _id: -1 })
   // Spec 044 §8.13 reservation reads (FundingReservation): only deals stamped
   // `baseFundingBeta` ever hold funds, and both reads carry that stamp and the
   // user, so this index holds beta deals only.
@@ -3901,6 +4002,12 @@ export const registerIndexes = () => {
   transactionSchema.index({ userId: 1 })
   // Bot-engine per-bot transaction load (botId far more selective than userId).
   transactionSchema.index({ botId: 1, userId: 1 })
+
+  // API-key lookup: every signed API request finds its user by the key id.
+  // Sparse: a user with no API key is not in it.
+  userSchema.index({ 'apiKeys._id': 1 }, { sparse: true })
+  // Balance-stream events find the account's owner by the exchange uuid.
+  userSchema.index({ 'exchanges.uuid': 1 }, { sparse: true })
 
   userPeriod.index({ userId: 1 })
 

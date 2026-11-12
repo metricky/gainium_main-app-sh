@@ -197,6 +197,7 @@ import {
   limitOnlyEntryReplaced,
   orderBelowExchangeMinSubType,
   positionLeftOpen,
+  refusedBaseEntrySubType,
   trailingCloseFailed,
 } from './utils'
 import {
@@ -229,6 +230,10 @@ import {
 import { grossEntryVolume, resolveBaseOrderQty } from './dca/baseOrderQty'
 import { bookReduceFundsFill } from './dca/reduceFundsFill'
 import { executedFillQty } from './dca/executedFill'
+import {
+  isDatedCanceledRegularFill,
+  shouldBookCanceledRegularFill,
+} from './dca/canceledRegularFill'
 import { closeOrderQuoteMinimum } from './closeOrderMinValue'
 import {
   baseEntryCancelSettleAttempts,
@@ -237,6 +242,8 @@ import {
   isSettledBaseEntryAnswer,
   isUnattributedUnfilledBaseEntryCancel,
   pickRestoreBaseEntry,
+  refusedBaseEntryMessage,
+  refusedBaseEntryPauses,
   settledBaseEntryFill,
   shouldSettlePartialBaseEntry,
   shouldTopUpSettledBaseEntry,
@@ -280,15 +287,28 @@ import {
   isDisplacementInLadder,
   isLevelFilled,
   percentageLadderEnd,
+  toleratedLadderEnd,
 } from './dca/gridBreakpoints'
 import { resolveLevelClientOrderId } from './clientOrderIdReissue'
 import { splitPendingFunds } from './dca/pendingFundsResend'
+import {
+  missedLadderLevels,
+  resolveLadderLevels,
+  sameMissedLevels,
+  type MissedLevel,
+} from './dca/missedLevels'
 import { isComboFundsOrderRow } from './combo/comboDealFunds'
 import {
   pendingReduceQty,
   type PendingReduceEntry,
 } from './dca/pendingReduceQty'
 import { backedFeeDust } from './dca/comboFeeDust'
+import {
+  carriedBase,
+  setCarriedBase,
+  carryAfterSkippedClose,
+  carryAfterFilledClose,
+} from './dca/comboShortCloseCarry'
 import {
   tpPriceDisplacement,
   worstFee,
@@ -300,6 +320,7 @@ import {
   carryForwardBenchmark,
 } from './dca/buyAndHoldBenchmark'
 import {
+  closeTriggerForFilledClose,
   dealCloseEventDescription,
   dealLeftOpenSize,
   leftOpenPositionMessage,
@@ -363,7 +384,7 @@ import {
   type TpCoverageProbe,
 } from './dca/tpCoverageReconcile'
 import RetryBackoff from './retryBackoff'
-import AuthFailureGuard from './authGuard'
+import AuthFailureGuard, { isKeyPermissionRefusal } from './authGuard'
 import Bot from './index'
 import { getIntersection } from '../utils/set'
 import { removePaperFormExchangeName } from '../exchange/helpers'
@@ -403,6 +424,7 @@ import {
   notEnoughBalanceNewDeal,
   orderBelowExchangeMin,
   newDealNearDelivery,
+  refusedBaseEntry,
   standingConditionKey,
   tpCoverageDrift,
 } from './conditionLatch'
@@ -618,6 +640,48 @@ const positionGoneReadings = new RetryBackoff({
 })
 
 /**
+ * Spec `225`. A first "position gone" reading schedules its own second probe
+ * instead of waiting for the next price tick, grid refusal or reload to ask —
+ * those can be hours apart. Fires this long after both windows have passed,
+ * so the throttle above lets it through.
+ */
+const POSITION_REPROBE_MARGIN_MS = 5 * 1000
+/** Spec `225` §1.1.5. Unanswered re-probes in a row before giving up. */
+const POSITION_REPROBE_MAX_MISSES = 3
+
+/**
+ * Spec `226` §3.1. How long a close waits for its remainder sweep to finish on
+ * the venue before it opens the next deal anyway, and how often it looks.
+ */
+const REMAINDER_SWEEP_WAIT_MS = 5 * 1000
+const REMAINDER_SWEEP_POLL_MS = 100
+/** Spec `226`. A tracked sweep nobody reported on for this long is dropped. */
+const REMAINDER_SWEEP_MEMORY_MS = 60 * 60 * 1000
+
+/**
+ * Spec `226`. A take-profit remainder sweep sent by the close path, and how
+ * much of it the closed deal has booked so far (cumulative, as the venue
+ * reports it).
+ */
+type RemainderSweep = {
+  dealId: string
+  symbol: string
+  /** Quantity sent. */
+  origQty: number
+  /** Cumulative base already booked onto the deal. */
+  qty: number
+  /** Cumulative quote already booked onto the deal. */
+  quote: number
+  /** Last status reported for the order. */
+  status: string
+  /** This sweep is the one re-send §1.1.3 allows; it is not re-sent again. */
+  resent: boolean
+  /** The deal write of the booking that created this entry. */
+  ready: Promise<unknown>
+  at: number
+}
+
+/**
  * How often one deal may re-arm its own close after the venue refused it
  * (spec `074` §4.2).
  *
@@ -655,6 +719,29 @@ const uncoveredCloseBackoff = new RetryBackoff({
   minMs: 5 * 60 * 1000,
   maxMs: 60 * 60 * 1000,
 })
+
+/**
+ * Consecutive base orders the venue cancelled with nothing filled, per bot and
+ * pair (spec `228`). `attempt` is the run length; from
+ * `refusedBaseEntryPauseAfter` on, the window is the pause on new deals. An
+ * ASAP bot refuses ~every 85 s, so 5 min → 1 h turns a thousand doomed orders a
+ * day into about two dozen. `memoryMs` is a day, as for `dpg`: the pause is
+ * restored from this key when a worker restarts (§4.6), and restarts come hours
+ * apart, so a two-hour memory let every restart begin a fresh run and spend
+ * three more doomed orders. A filled base order clears it.
+ */
+const refusedBaseEntryBackoff = new RetryBackoff({
+  namespace: 'rbe',
+  minMs: 5 * 60 * 1000,
+  maxMs: 60 * 60 * 1000,
+  memoryMs: 24 * 60 * 60 * 1000,
+})
+
+/**
+ * Spec `228` §4.7. The ASAP start re-armed by a paused pair fires this long
+ * after the pause ends, so the gate it meets has already lifted.
+ */
+const REFUSED_BASE_ENTRY_RESTART_MARGIN_MS = 1000
 
 /**
  * How long a futures deal stops re-sending its RESTING take-profit after the
@@ -863,6 +950,22 @@ function createDCABotHelper<
       string,
       { attempt: number; timer?: ReturnType<typeof setTimeout> }
     > = new Map()
+    /**
+     * Spec `225`. Deals with a self-scheduled position re-probe pending, and
+     * how many re-probes in a row the venue left unanswered. See
+     * `armPositionReprobe`.
+     */
+    positionReprobes: Map<
+      string,
+      { misses: number; timer?: ReturnType<typeof setTimeout> }
+    > = new Map()
+    /**
+     * Spec `226`. Close-path remainder sweeps still being reported on, by
+     * client order id. See `trackRemainderSweep`.
+     */
+    remainderSweeps: Map<string, RemainderSweep> = new Map()
+    /** Spec `226` §3.1. */
+    remainderSweepWaitMs = REMAINDER_SWEEP_WAIT_MS
     /** Close after TP filled */
     closeAfterTpFilled: boolean
     /** Spec `202`. `stop()` calls still running on this bot. */
@@ -945,6 +1048,11 @@ function createDCABotHelper<
     sessionCheckTimer: NodeJS.Timeout | null = null
     statsTimer: NodeJS.Timeout | null = null
     lastStatsCheck = 0
+    /**
+     * Open deals given a stats sample since this bot loaded. `priceTimerFn`
+     * seeds the rest once from the price already held (spec 230 §1.1.2).
+     */
+    dealsStatsSampled: Set<string> = new Set()
     indicatorCheckTimers: { [x: string]: NodeJS.Timeout | null | undefined } =
       {}
     indicatorCheckTimersFired: {
@@ -996,6 +1104,15 @@ function createDCABotHelper<
      */
     canceledBaseEntryTimers: Map<string, NodeJS.Timeout> = new Map()
     /**
+     * Pairs whose new deals are paused after repeated unfilled venue cancels
+     * of their base order: symbol → until (ms). Spec `228`. In memory so the
+     * per-minute start loop never reads Redis; a restarted worker restores it
+     * once per pair from the Redis run counter (§4.6).
+     */
+    refusedBaseEntryPausedUntil: Map<string, number> = new Map()
+    /** Pairs {@link restoreRefusedBaseEntryPause} has already read. */
+    refusedBaseEntryRestored: Set<string> = new Set()
+    /**
      * Reposition ticks of a resting base-order remainder, one per deal
      * (spec `111` §4.3). Cleared by `clearClassProperties`.
      */
@@ -1017,6 +1134,12 @@ function createDCABotHelper<
      * even while the deal still holds entry timers. Spec 125 §4.2.
      */
     unsettledBaseEntries: Set<string> = new Set()
+    /**
+     * Base rows the reposition arm of `checkBaseOrder` is cancelling right
+     * now, with the venue's own end-of-order report for each when the user
+     * stream delivered one that states a fill meanwhile. Spec 217 §4.1.
+     */
+    repositionCancelReports: Map<string, Order | undefined> = new Map()
     /** Trailing guard mode as last read from Redis, and when. */
     trailingGuardModeRead: { mode: TrailingGuardMode; at: number } | null = null
     /** When each deal's trailing lag was last reported, to rate-limit it. */
@@ -1039,6 +1162,35 @@ function createDCABotHelper<
     private afterIndicatorsConnected: (() => void | Promise<void>)[] = []
     ordersInBetweenUpdates: Set<string> = new Set()
     private pendingClose: Set<string> = new Set()
+    /**
+     * Spec `225`. Client order id -> what `sellRemainder` needs to book a
+     * remainder sweep that a limit-only book made us re-place as LIMIT, once
+     * it fills. In memory only: a restart before the fill still sells the
+     * coins, it just leaves that fill unbooked on the closed deal.
+     */
+    private limitRemainderSweeps: Map<
+      string,
+      {
+        dealId: string
+        qty: number
+        price: number
+        sellNotByOrder: boolean
+        updateBalances: boolean
+      }
+    > = new Map()
+    /**
+     * Spec `222`. Deal id -> its own buy-back shortfall, written when
+     * `getTPOrder` skipped a combo SHORT close (sized by `prepareTpOrder`)
+     * below the venue minimum. `closeDealById` reads it to add that base to
+     * the bot's `shortCloseCarry`.
+     */
+    private shortCloseBelowMinimum: Map<string, number> = new Map()
+    /**
+     * Spec `222` §1.3. Deal id -> carried base added to the close order
+     * `getTPOrder` last sized for it on the close path. `closeDeal` repays the
+     * carry by this amount when that order fills.
+     */
+    private shortCloseCarryInOrder: Map<string, number> = new Map()
     /**
      * Prepare DB instaces
      *
@@ -1431,25 +1583,16 @@ function createDCABotHelper<
       sendOptions: OrderAdditionalParams,
       ed: ClearPairsSchema,
     ): Promise<Order | string | void | undefined> {
-      const balances = await this.checkAssets(true)
-      const asset = ed.baseAsset.name
-      const find = balances?.get(asset)
-      if (!find) {
-        this.handleDebug(`Asset ${asset} not found in user balances`)
+      const sized = await this.adaptiveCloseQty(
+        findDeal,
+        tpOrder,
+        tpOrder.price,
+        ed,
+      )
+      if (!sized) {
         return
       }
-      // Same three-way minimum as the market close: the wallet's free base
-      // (shared with every other bot on this account), the TP itself, and
-      // what this deal still holds — so it can only ever sell LESS.
-      const toPlace = Math.min(
-        this.math.round(
-          find.free,
-          await this.baseAssetPrecision(ed.pair),
-          true,
-        ),
-        tpOrder.qty,
-        this.dealOwnBasePosition(findDeal),
-      )
+      const { toPlace, asset } = sized
       if (toPlace >= tpOrder.qty) {
         return
       }
@@ -1478,6 +1621,48 @@ function createDCABotHelper<
         ed,
         true,
       )
+    }
+
+    /**
+     * The amount adaptive close re-sends a refused close at — shared by the
+     * resting TP (`sendTpAtFreeBalance`) and the market close
+     * (`closeDealById`), so the two cannot size differently.
+     *
+     * Spec `053` §4.3/§4.6/§4.7. A three-way minimum, so it can only ever
+     * close LESS: what the wallet can fund, the TP itself, and what this deal
+     * still holds. The wallet term is in the asset that PAYS for the close: a
+     * SELL (long) spends base; a BUY (short spot) spends quote, converted at
+     * `price`. The result is floored to the base step, because `deal.size` is
+     * a running float sum (`245.60000000000002`) that the venue refuses as
+     * "too much precision" — the retry then failed for a reason of its own.
+     * `undefined` when the funding asset is not in the balances.
+     */
+    protected async adaptiveCloseQty(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      tpOrder: Pick<Grid, 'qty' | 'side'>,
+      price: number,
+      ed: ClearPairsSchema,
+    ): Promise<{ toPlace: number; asset: string; free: number } | undefined> {
+      const balances = await this.checkAssets(true)
+      const buy = tpOrder.side === OrderSideEnum.buy
+      const asset = buy ? ed.quoteAsset.name : ed.baseAsset.name
+      const find = balances?.get(asset)
+      if (!find) {
+        this.handleDebug(`Asset ${asset} not found in user balances`)
+        return
+      }
+      const precision = await this.baseAssetPrecision(ed.pair)
+      const fundable = buy
+        ? price > 0
+          ? find.free / price
+          : 0
+        : find.free
+      const toPlace = this.math.round(
+        Math.min(fundable, tpOrder.qty, this.dealOwnBasePosition(findDeal)),
+        precision,
+        true,
+      )
+      return { toPlace, asset, free: find.free }
     }
 
     protected dealOwnBasePosition(
@@ -3927,6 +4112,7 @@ function createDCABotHelper<
               qty * price * (tpOrder.side === OrderSideEnum.sell ? 1 : -1),
           }
           findDeal.deal.updateTime = tpOrder.updateTime
+          this.settleShortCloseCarry(findDeal, tpOrder)
           const commDeal = await this.getCommDeal(findDeal.deal)
           let feeBaseFull = 0
           let feeQuoteFull = 0
@@ -4095,13 +4281,10 @@ function createDCABotHelper<
               (this.combo ? findDeal.deal.profit.totalUsd : 0) + totalUsd,
           }
           findDeal.deal.feeBalance = 0
-          findDeal.deal.closeTrigger =
-            findDeal.deal.closeTrigger &&
-            findDeal.deal.closeTrigger !== DCACloseTriggerEnum.base
-              ? findDeal.deal.closeTrigger
-              : tpOrder.sl
-                ? DCACloseTriggerEnum.sl
-                : DCACloseTriggerEnum.tp
+          findDeal.deal.closeTrigger = closeTriggerForFilledClose(
+            findDeal.deal.closeTrigger,
+            !!tpOrder.sl,
+          )
           const usdUpdate = this.combo
             ? findDeal.deal.profit.totalUsd
             : totalUsd
@@ -5500,6 +5683,10 @@ function createDCABotHelper<
           this.handleDebug(`Not reopen after ${dealId}`)
         }
         if (reopen) {
+          // Spec `226` §1.1.1: the next deal's entry must not sit in the way of
+          // this deal's remainder sweep, or the venue cancels the sweep as a
+          // self trade and its coins stay in the account, tracked by no deal.
+          await this.settleRemainderSweeps(dealId)
           const settings = await this.getAggregatedSettings(deal.deal)
           const inRange = await this.checkInRange(deal.deal.symbol.symbol)
           if (inRange) {
@@ -7320,6 +7507,76 @@ function createDCABotHelper<
       return isPositionAlreadyClosedReason(text)
     }
 
+    /** Spec `222`: persist the bot's per-symbol `shortCloseCarry`. */
+    private writeShortCloseCarry(symbol: string, base: number) {
+      if (!this.data) {
+        return
+      }
+      const shortCloseCarry = setCarriedBase(
+        this.data.shortCloseCarry,
+        symbol,
+        base,
+      )
+      this.data.shortCloseCarry = shortCloseCarry
+      this.updateData({ shortCloseCarry })
+    }
+
+    /**
+     * Spec `222` §1.1. The close `closeDealById` is about to book without an
+     * order was skipped below the venue minimum: carry the base it did not buy
+     * back to this bot's next close on the same symbol. Any other reason for
+     * closing without an order leaves the carry alone.
+     */
+    protected carrySkippedShortClose(findDeal: FullDeal<ExcludeDoc<Deal>>) {
+      const dealId = `${findDeal.deal._id}`
+      const owed = this.shortCloseBelowMinimum.get(dealId)
+      this.shortCloseBelowMinimum.delete(dealId)
+      if (owed === undefined || !this.data) {
+        return
+      }
+      const symbol = findDeal.deal.symbol.symbol
+      const carried = carriedBase(this.data.shortCloseCarry, symbol)
+      const next = carryAfterSkippedClose(carried, owed)
+      if (next === carried) {
+        return
+      }
+      this.handleLog(
+        `Close of deal ${dealId} is below the exchange minimum, base ${owed} not bought back. Carried to the next close: ${next} ${findDeal.deal.symbol.baseAsset} (was ${carried})`,
+      )
+      this.writeShortCloseCarry(symbol, next)
+    }
+
+    /**
+     * Spec `222` §1.3. A combo SHORT close order filled: the carried base that
+     * was sized into it repays the carry, in proportion to how much of it
+     * executed.
+     */
+    protected settleShortCloseCarry(
+      findDeal: FullDeal<ExcludeDoc<Deal>>,
+      order: Order,
+    ) {
+      const dealId = `${findDeal.deal._id}`
+      const inOrder = this.shortCloseCarryInOrder.get(dealId)
+      this.shortCloseCarryInOrder.delete(dealId)
+      if (!inOrder || !this.data) {
+        return
+      }
+      const symbol = findDeal.deal.symbol.symbol
+      const carried = carriedBase(this.data.shortCloseCarry, symbol)
+      const next = carryAfterFilledClose(
+        carried,
+        inOrder,
+        +order.executedQty / +order.origQty,
+      )
+      if (next === carried) {
+        return
+      }
+      this.handleLog(
+        `Close of deal ${dealId} bought back ${carried - next} carried ${findDeal.deal.symbol.baseAsset}. Still carried: ${next}`,
+      )
+      this.writeShortCloseCarry(symbol, next)
+    }
+
     async prepareTpOrder(
       findDeal: FullDeal<ExcludeDoc<Deal>>,
       slSource = false,
@@ -7352,6 +7609,14 @@ function createDCABotHelper<
           slSource,
           priceRequest,
           forceFullFeeSizing,
+          // Spec `222`. `getTPOrder` applies it only to combo SHORT spot
+          // closes with profit in quote.
+          this.combo
+            ? carriedBase(
+                this.data?.shortCloseCarry,
+                findDeal.deal.symbol.symbol,
+              )
+            : undefined,
         )
       )?.sort((a, b) =>
         this.isLong ? b.price - a.price : a.price - b.price,
@@ -7509,6 +7774,24 @@ function createDCABotHelper<
           this.closeDealTimer.set(d._id, null)
         }
       }
+    }
+
+    /**
+     * A DCA base entry is topped up at market only on a bot that may enter at
+     * market. One that may not rests the remainder from `startDeal` instead
+     * (spec `111` §1.1.6: it never sends a MARKET order on its own), so a
+     * venue `FILLED`-short report — KuCoin ends a cancelled part-fill that way
+     * — must not also buy it. Combo deals rest nothing and keep the top-up.
+     * Spec `235`.
+     */
+    protected override async remainderMayGoToMarket(order: Order) {
+      if (this.combo || order.typeOrder !== TypeOrderEnum.dealStart) {
+        return true
+      }
+      const settings = await this.getAggregatedSettings(
+        this.getDeal(order.dealId)?.deal,
+      )
+      return this.baseEntryMayEnterAtMarket(settings)
     }
 
     override allowToProcessBr(id: string, type?: TypeOrderEnum) {
@@ -7778,6 +8061,8 @@ function createDCABotHelper<
           ) {
             await sleep(500)
           }
+          this.shortCloseBelowMinimum.delete(dealId)
+          this.shortCloseCarryInOrder.delete(dealId)
           const tpOrder = await this.prepareTpOrder(findDeal, slSource, sl)
           if (tpOrder) {
             if (tpOrder.qty <= 0) {
@@ -7912,36 +8197,25 @@ function createDCABotHelper<
                   this.handleDebug(
                     `TP order got not enough balance, but adaptive close is on`,
                   )
-                  const balances = await this.checkAssets(true)
-                  const asset = symbol.baseAsset.name
-                  const find = balances?.get(asset)
-                  if (!find) {
+                  // Spec 053 §4.3. The wallet's free balance is shared with
+                  // every other bot and deal the user runs on this asset; a bot
+                  // accounts against its OWN isolated allocation (§3.4), so the
+                  // close is also capped at what this deal still holds — a
+                  // third term of a `Math.min`, so it can only close LESS.
+                  // §4.6/§4.7: floored to the base step, funded in the asset
+                  // the close spends (see `adaptiveCloseQty`).
+                  const sized = await this.adaptiveCloseQty(
+                    findDeal,
+                    tpOrder,
+                    price
+                      ? this.math.round(+price, symbol.priceAssetPrecision)
+                      : tpOrder.price,
+                    symbol,
+                  )
+                  if (sized) {
+                    const { toPlace, asset } = sized
                     this.handleDebug(
-                      `Asset ${asset} not found in user balances`,
-                    )
-                  } else {
-                    const toPlace = Math.min(
-                      this.math.round(
-                        find.free,
-                        await this.baseAssetPrecision(symbol.pair),
-                        true,
-                      ),
-                      tpOrder.qty,
-                      // Spec 053 §4.3. `find.free` is the WHOLE wallet's free
-                      // base, which on a spot account is shared with every other
-                      // bot and deal the user runs on this asset. A bot accounts
-                      // against its OWN isolated allocation (§3.4), so the close
-                      // is capped at what this deal still holds even when the
-                      // wallet — or a take-profit drifted oversized by the
-                      // #694/#696 family — would allow more. Being a third term
-                      // of a `Math.min` it can only ever close LESS, so it
-                      // cannot refuse a close that is fundable today, and it
-                      // subtracts nothing belonging to a sibling deal: the
-                      // measure is deal-local and never looks at the account.
-                      this.dealOwnBasePosition(findDeal),
-                    )
-                    this.handleDebug(
-                      `Found free ${find.free}, to place ${toPlace}`,
+                      `Found free ${sized.free} ${asset}, to place ${toPlace}`,
                     )
                     if (
                       toPlace < symbol.baseAsset.minAmount ||
@@ -8242,6 +8516,7 @@ function createDCABotHelper<
               await closeBuy()
             }
             this.handleDebug(`No tp order. Close without order`)
+            this.carrySkippedShortClose(findDeal)
             return this.closeDeal(this.botId, dealId)
           }
         } else {
@@ -8838,6 +9113,77 @@ function createDCABotHelper<
       }
       this.endMethod(_id)
     }
+    /**
+     * Spec `225`. Re-place a remainder sweep the venue refused because the book
+     * is limit-only, as a reduce-only LIMIT at the latest price under a new
+     * client id (spec `221`: a refused id is never re-sent). Returns the order
+     * only when it already FILLED, for `sellRemainder` to book now; otherwise
+     * the fill is booked by `processFilledOrder` when it arrives. A refusal of
+     * this LIMIT is reported by the send itself.
+     */
+    private async sweepRemainderByLimit(
+      marketGrid: Grid,
+      marketAdditional: OrderAdditionalParams,
+      ed: ClearPairsSchema,
+      booking: {
+        dealId: string
+        qty: number
+        price: number
+        sellNotByOrder: boolean
+        updateBalances: boolean
+      },
+    ): Promise<Order | void> {
+      this.handleLog(
+        `${marketGrid.newClientOrderId} refused, ${ed.pair} book is in limit only mode. Selling the remaining ${marketGrid.qty} of closed deal ${booking.dealId} by limit`,
+      )
+      const grid: Grid = {
+        ...marketGrid,
+        newClientOrderId: this.getOrderId(`D-SR`),
+      }
+      const additional: OrderAdditionalParams = {
+        ...marketAdditional,
+        type: OrderTypeEnum.limit,
+      }
+      this.limitRemainderSweeps.set(grid.newClientOrderId, booking)
+      const result = await this.sendGridToExchange(grid, additional, ed)
+      // Whoever takes the entry out of the map books the fill, so a fill the
+      // stream already handed to `processFilledOrder` is not booked twice.
+      const unbooked = this.limitRemainderSweeps.has(grid.newClientOrderId)
+      if (!result || result.status === 'FILLED') {
+        this.limitRemainderSweeps.delete(grid.newClientOrderId)
+      }
+      if (unbooked && result && result.status === 'FILLED') {
+        return result
+      }
+    }
+    /**
+     * Spec `225`. Book the fill of a remainder sweep `sweepRemainderByLimit`
+     * placed, through the same `sellRemainder` booking an accepted MARKET sweep
+     * gets. Returns whether `order` was one; whoever takes the entry out of
+     * the map books it, so it is booked once. Call it only for a fill not yet
+     * in `processedFilled`.
+     */
+    protected async bookLimitRemainderSweep(order: Order): Promise<boolean> {
+      const limitSweep = this.limitRemainderSweeps.get(order.clientOrderId)
+      if (!limitSweep) {
+        return false
+      }
+      this.limitRemainderSweeps.delete(order.clientOrderId)
+      await this.sellRemainder(
+        limitSweep.dealId,
+        limitSweep.qty,
+        limitSweep.price,
+        limitSweep.sellNotByOrder,
+        undefined,
+        limitSweep.updateBalances,
+        // The status gate was passed when the sweep was placed.
+        true,
+        // Bypasses only the deal-level "already sold" flag.
+        true,
+        { result: order },
+      )
+      return true
+    }
     /** Sell remainder for deal */
     @IdMute(mutex, (dealId: string) => `${dealId}sellRemainder`)
     async sellRemainder(
@@ -8990,27 +9336,47 @@ function createDCABotHelper<
           if (sweep && sweep !== 'send') {
             result = sweep.result
           } else {
-            const grid: Grid = {
-              price: this.math.round(price, ed.priceAssetPrecision),
-              number: 0,
-              side: !long ? OrderSideEnum.buy : OrderSideEnum.sell,
-              qty: sellQty,
-              type: TypeOrderEnum.dealTP,
-              newClientOrderId: this.getOrderId(`D-SR`),
+            const { grid, additional } = this.remainderSweepOrder(
               dealId,
-            }
-            const additional: OrderAdditionalParams = {
-              dealId,
-              type: OrderTypeEnum.market,
-              reduceOnly: true,
-              positionSide: this.hedge
-                ? this.isLong
-                  ? PositionSide.LONG
-                  : PositionSide.SHORT
-                : PositionSide.BOTH,
-            }
+              sellQty,
+              price,
+              ed,
+            )
             if (sweep !== 'send') {
-              result = await this.sendGridToExchange(grid, additional, ed)
+              // `returnError` so a limit-only refusal can be told apart; the
+              // report the send would have made is made here instead, same
+              // call as the `'send'` branch below.
+              result = await this.sendGridToExchange(grid, additional, ed, true)
+              if (typeof result === 'string') {
+                const order = this.convertGridToOrder(grid, additional, ed)
+                if (order) {
+                  await this.handleOrderErrors(
+                    result,
+                    order,
+                    'limitOrders()',
+                    `Send new order request ${order.clientOrderId}, qty ${order.origQty}, price ${order.price}, side ${order.side}`,
+                    false,
+                    false,
+                  )
+                }
+                // Spec `225`. The deal is already closed, so unlike `closeDeal`
+                // (spec `157`) there is no deal to keep open: sell the coins
+                // with a LIMIT instead, and book it when it fills.
+                if (isLimitOnlyReason(result)) {
+                  result = await this.sweepRemainderByLimit(
+                    grid,
+                    additional,
+                    ed,
+                    {
+                      dealId,
+                      qty: _qty,
+                      price: orderPrice,
+                      sellNotByOrder,
+                      updateBalances,
+                    },
+                  )
+                }
+              }
             } else {
               // `returnError` so the caller can read the reason. That also
               // skips the report the send makes for everyone else, so make it
@@ -9162,8 +9528,9 @@ function createDCABotHelper<
                 }
               : dealData.assets.required
 
+            let written: Promise<unknown> = Promise.resolve()
             if (this.shouldProceed()) {
-              this.dealsDb
+              written = this.dealsDb
                 .updateData({ _id: dealId } as any, {
                   $set: {
                     commission: dealData.commission,
@@ -9183,6 +9550,21 @@ function createDCABotHelper<
                   }
                 })
             }
+            // Spec `226` §3.2: the close path's sweep of a spot LONG deal. What
+            // the venue reports for it after this answer is booked by
+            // `bookRemainderSweepReport`, on top of what was booked here.
+            if (
+              updateBalances &&
+              sellNotByOrder &&
+              long &&
+              !this.futures &&
+              // `comboHelper` handles its own filled and cancelled reports, so
+              // a combo sweep's later reports would never reach the booking.
+              !this.combo &&
+              !(await this.profitBase(dealData))
+            ) {
+              this.trackRemainderSweep(dealId, symbol, sellQty, result, written)
+            }
           }
           const getDeal = this.deals.get(`${dealId}`)
           if (getDeal && getDeal.deal.status === DCADealStatusEnum.open) {
@@ -9201,6 +9583,282 @@ function createDCABotHelper<
         }
       }
       this.endMethod(_id)
+    }
+
+    /** The market order `sellRemainder` sends for `qty` of a deal's remainder. */
+    protected remainderSweepOrder(
+      dealId: string,
+      qty: number,
+      price: number,
+      ed: ClearPairsSchema,
+    ): { grid: Grid; additional: OrderAdditionalParams } {
+      return {
+        grid: {
+          price: this.math.round(price, ed.priceAssetPrecision),
+          number: 0,
+          side: !this.isLong ? OrderSideEnum.buy : OrderSideEnum.sell,
+          qty,
+          type: TypeOrderEnum.dealTP,
+          newClientOrderId: this.getOrderId(`D-SR`),
+          dealId,
+        },
+        additional: {
+          dealId,
+          type: OrderTypeEnum.market,
+          reduceOnly: true,
+          positionSide: this.hedge
+            ? this.isLong
+              ? PositionSide.LONG
+              : PositionSide.SHORT
+            : PositionSide.BOTH,
+        },
+      }
+    }
+
+    /**
+     * Spec `226` §1.1.2. Remember a close-path remainder sweep, and what its
+     * booking has already counted, so that the reports the venue sends after
+     * the deal has closed are booked onto it. `ready` is that booking's deal
+     * write: the later `$inc`s must land after its `$set`.
+     */
+    protected trackRemainderSweep(
+      dealId: string,
+      symbol: string,
+      origQty: number,
+      answer: Order,
+      ready: Promise<unknown>,
+      resent = false,
+    ) {
+      const now = Date.now()
+      this.remainderSweeps ??= new Map()
+      for (const [id, s] of this.remainderSweeps) {
+        if (now - s.at > REMAINDER_SWEEP_MEMORY_MS) {
+          this.remainderSweeps.delete(id)
+        }
+      }
+      const qty = +answer.executedQty
+      const price = +answer.price
+      const booked = Number.isFinite(qty) && qty > 0 ? qty : 0
+      this.remainderSweeps.set(answer.clientOrderId, {
+        dealId,
+        symbol,
+        origQty,
+        qty: booked,
+        // The same quote `sellRemainder` booked for that quantity.
+        quote: booked && Number.isFinite(price) ? booked * price : 0,
+        status: answer.status,
+        resent,
+        ready,
+        at: now,
+      })
+    }
+
+    /**
+     * Spec `226` §1.1.2. Book a stream report of a tracked remainder sweep onto
+     * its closed deal: the part of the order's cumulative fill not booked yet,
+     * with the same arithmetic `sellRemainder` uses for the close-path sweep.
+     * Returns whether `order` was such a sweep; the caller then has nothing
+     * left to do with it, because the deal is closed.
+     */
+    protected async bookRemainderSweepReport(order: Order): Promise<boolean> {
+      const sweep = this.remainderSweeps?.get(order.clientOrderId)
+      if (!sweep) {
+        return false
+      }
+      await sweep.ready
+      const qty = +order.executedQty
+      const reportedQuote = +(order.cummulativeQuoteQty ?? NaN)
+      const quote =
+        Number.isFinite(reportedQuote) && reportedQuote > 0
+          ? reportedQuote
+          : qty * +order.price
+      if (
+        !Number.isFinite(qty) ||
+        !Number.isFinite(quote) ||
+        qty <= sweep.qty ||
+        quote <= sweep.quote
+      ) {
+        sweep.status = order.status
+        return true
+      }
+      const dq = qty - sweep.qty
+      const dQuote = quote - sweep.quote
+      // Counted before any await, so a second report of the same cumulative
+      // fill finds it booked.
+      sweep.qty = qty
+      sweep.quote = quote
+      const { dealId, symbol } = sweep
+      const read = await this.dealsDb.readData({ _id: dealId } as any, {
+        avgPrice: 1,
+        closeTime: 1,
+      })
+      const avgPrice = +(read.data?.result?.avgPrice ?? NaN)
+      if (
+        read.status === StatusEnum.notok ||
+        !Number.isFinite(avgPrice) ||
+        !(avgPrice > 0)
+      ) {
+        this.handleWarn(
+          `Sell remainder | ${order.clientOrderId} sold ${dq} more of deal ${dealId}, cannot book it: deal not readable`,
+        )
+        sweep.status = order.status
+        return true
+      }
+      const fee = dQuote * ((await this.getUserFee(symbol))?.taker ?? 0)
+      const total = dQuote - dq * avgPrice - fee
+      const totalUsd = total * (await this.getUsdRate(symbol))
+      this.handleLog(
+        `Sell remainder | ${order.clientOrderId} ${order.status}: booking ${dq} more sold for ${dQuote} onto closed deal ${dealId} (${qty} of ${sweep.origQty} sold)`,
+      )
+      if (this.shouldProceed()) {
+        const res = await this.dealsDb.updateData({ _id: dealId } as any, {
+          $inc: {
+            'currentBalances.base': -dq,
+            'currentBalances.quote': dQuote,
+            'profit.total': total,
+            'profit.totalUsd': totalUsd,
+            'profit.pureBase': -dq,
+            'profit.pureQuote': dQuote - fee,
+            commission: fee,
+          },
+          $set: { lastPrice: dQuote / dq, updateTime: order.updateTime },
+        })
+        if (res.status === StatusEnum.notok) {
+          this.handleWarn(`Error saving deal: ${dealId}. Reason: ${res.reason}`)
+        }
+      }
+      if (this.data) {
+        this.data.profit = {
+          ...this.data.profit,
+          total: this.data.profit.total + total,
+          totalUsd: this.data.profit.totalUsd + totalUsd,
+          freeTotal: 0,
+          freeTotalUsd: 0,
+          pureBase: (this.data.profit.pureBase ?? 0) - dq,
+          pureQuote: (this.data.profit.pureQuote ?? 0) + dQuote - fee,
+        }
+        this.saveProfitToDb(
+          totalUsd,
+          read.data?.result?.closeTime ?? +new Date(),
+        )
+        this.updateData({ profit: { ...this.data.profit } })
+        this.emit('bot settings update', { profit: this.data.profit })
+      }
+      sweep.status = order.status
+      return true
+    }
+
+    /**
+     * Spec `226` §1.1.1 / §1.1.3. Wait, at most `remainderSweepWaitMs`, until
+     * every remainder sweep of the closed deal `dealId` has ended on the venue,
+     * so the next deal's orders are not in its way. A sweep the venue ended
+     * with quantity unsold, without being asked to, is sent once more for that
+     * quantity, inside the same wait.
+     */
+    protected async settleRemainderSweeps(dealId: string) {
+      const ofDeal = () =>
+        [...(this.remainderSweeps ?? new Map<string, RemainderSweep>())].filter(
+          ([, s]) => s.dealId === dealId,
+        )
+      if (!ofDeal().length) {
+        return
+      }
+      const terminal = ['FILLED', 'CANCELED', 'EXPIRED']
+      // `??`: a bot built off the prototype has no field initialisers, and a
+      // NaN deadline would never pass.
+      const waitMs = this.remainderSweepWaitMs ?? REMAINDER_SWEEP_WAIT_MS
+      const deadline = Date.now() + waitMs
+      for (;;) {
+        const sweeps = ofDeal()
+        const live = sweeps.filter(([, s]) => !terminal.includes(s.status))
+        if (live.length) {
+          if (Date.now() >= deadline) {
+            this.handleLog(
+              `Sell remainder | ${live
+                .map(([id]) => id)
+                .join(', ')} of deal ${dealId} still working after ${waitMs}ms, opening the next deal`,
+            )
+            return
+          }
+          // A real timer, not the shared `sleep`: this loop must yield to the
+          // order reports it is waiting for, whatever replaces `sleep`.
+          await new Promise((r) => setTimeout(r, REMAINDER_SWEEP_POLL_MS))
+          continue
+        }
+        const unsold = sweeps.find(
+          ([id, s]) =>
+            s.status !== 'FILLED' &&
+            !s.resent &&
+            s.origQty - s.qty > 0 &&
+            !this.isOwnCancel(id),
+        )
+        for (const [id] of sweeps) {
+          this.remainderSweeps.delete(id)
+        }
+        if (!unsold || Date.now() >= deadline) {
+          return
+        }
+        if (!(await this.resendRemainderSweep(unsold[0], unsold[1]))) {
+          return
+        }
+      }
+    }
+
+    /** Spec `226` §1.1.3. The one re-send of a sweep the venue ended unsold. */
+    protected async resendRemainderSweep(
+      clientOrderId: string,
+      sweep: RemainderSweep,
+    ): Promise<boolean> {
+      const { dealId, symbol } = sweep
+      const ed = await this.getExchangeInfo(symbol)
+      if (!ed) {
+        return false
+      }
+      const price = await this.getLatestPrice(symbol)
+      const qty = this.math.round(
+        sweep.origQty - sweep.qty,
+        await this.baseAssetPrecision(symbol),
+        true,
+      )
+      if (
+        !(qty > 0) ||
+        qty < ed.baseAsset.minAmount ||
+        qty * price <
+          closeOrderQuoteMinimum(
+            this.data?.exchange,
+            this.hedge,
+            ed.quoteAsset.minAmount,
+          )
+      ) {
+        this.handleLog(
+          `Sell remainder | ${clientOrderId} of deal ${dealId} ended ${sweep.status} with ${qty} unsold, below the minimums, not sent again`,
+        )
+        return false
+      }
+      this.handleLog(
+        `Sell remainder | ${clientOrderId} of deal ${dealId} ended ${sweep.status} with ${qty} unsold, sending it once more`,
+      )
+      const { grid, additional } = this.remainderSweepOrder(
+        dealId,
+        qty,
+        price,
+        ed,
+      )
+      const answer = await this.sendGridToExchange(grid, additional, ed)
+      if (!answer) {
+        return false
+      }
+      // Tracked as unbooked, then its own answer is booked like any report.
+      this.trackRemainderSweep(
+        dealId,
+        symbol,
+        qty,
+        { ...answer, executedQty: '0', cummulativeQuoteQty: '0' },
+        Promise.resolve(),
+        true,
+      )
+      await this.bookRemainderSweepReport(answer)
+      return true
     }
 
     /**
@@ -9228,13 +9886,17 @@ function createDCABotHelper<
       // spent by this average to get `deal.size`. Left out here, the size
       // over-states the position and the take profit asks for coins the deal
       // does not hold. Spec 128 §4.2.
+      // A safety or add-funds order the venue cancelled part filled is booked
+      // by `bookCanceledRegularFill`, so its fill is an entry too. Spec 216
+      // §1.2.
       const entryRows = this.getOrdersByStatusAndDealId({
         status: ['FILLED', 'CANCELED'],
         dealId,
       }).filter(
         (o) =>
           o.status === 'FILLED' ||
-          (o.typeOrder === TypeOrderEnum.dealStart && +o.executedQty > 0),
+          (o.typeOrder === TypeOrderEnum.dealStart && +o.executedQty > 0) ||
+          isDatedCanceledRegularFill(o),
       )
       if (this.futures) {
         let filledDealOrder = entryRows.filter(
@@ -10008,25 +10670,47 @@ function createDCABotHelper<
               price: find.price,
               updateTime: find.updateTime,
             }
-            const cancelBase = await this.cancelOrderOnExchange(find)
-            // A cancel that raced a fill ends the way a settle does, so the
-            // deal opens on what traded and the rest is put back on the book —
-            // and a venue that still lists the order live (OKX reads it back
-            // before its asynchronous cancel lands) is waited out instead of
-            // re-placed on top of. Spec 133 §4.1–§4.3.
-            if (cancelBase && find.dealId) {
-              const outcome = await this.bookCanceledBaseEntry(
-                find,
-                cancelBase,
-                observed,
-                find.dealId,
-                true,
-              )
-              if (outcome.booked) {
-                return
+            // The venue's own end-of-order report can reach the stream while
+            // this cancel is in flight, and the cancel puts `find` back over
+            // it in the order map. Record it on the way. Spec 217 §4.1.
+            this.repositionCancelReports ??= new Map()
+            this.repositionCancelReports.set(find.clientOrderId, undefined)
+            let reported: Order | undefined
+            try {
+              const cancelBase = await this.cancelOrderOnExchange(find)
+              // A cancel that raced a fill ends the way a settle does, so the
+              // deal opens on what traded and the rest is put back on the
+              // book — and a venue that still lists the order live (OKX reads
+              // it back before its asynchronous cancel lands) is waited out
+              // instead of re-placed on top of. Spec 133 §4.1–§4.3.
+              if (cancelBase && find.dealId) {
+                const outcome = await this.bookCanceledBaseEntry(
+                  find,
+                  cancelBase,
+                  observed,
+                  find.dealId,
+                  true,
+                )
+                if (outcome.booked) {
+                  return
+                }
+              } else if (cancelBase?.status === 'FILLED') {
+                return this.handleUnknownOrder(cancelBase)
               }
-            } else if (cancelBase?.status === 'FILLED') {
-              return this.handleUnknownOrder(cancelBase)
+            } finally {
+              reported = this.repositionCancelReports.get(find.clientOrderId)
+              this.repositionCancelReports.delete(find.clientOrderId)
+            }
+            // The answer booked nothing — it stated no fill, still listed the
+            // order live, or the cancel failed — but the venue reported the
+            // order ended with a fill. Open the deal on that, never buy the
+            // entry again on top of it. Spec 217 §4.2/§4.4.
+            if (
+              reported &&
+              find.dealId &&
+              this.getDeal(find.dealId)?.deal.status === DCADealStatusEnum.start
+            ) {
+              return await this.settlePartialBaseEntry(reported, find.dealId)
             }
             if (deal?.deal.status === DCADealStatusEnum.start) {
               this.placeBaseOrder(
@@ -10666,6 +11350,12 @@ function createDCABotHelper<
         this.settledBaseEntries?.delete(orderBo.clientOrderId) ?? false
       const dealId = orderBo.dealId
       if (this.combo || !dealId) {
+        return
+      }
+      // `buyRemainder` already sent this entry's remainder at market. The row
+      // handed in can predate its merge (a venue re-read overwrites it), so
+      // its shortfall is not left to buy. Spec `235`.
+      if (this.partiallyFilledFilledSet?.has(orderBo.clientOrderId)) {
         return
       }
       const deal = this.getDeal(dealId)
@@ -13419,7 +14109,7 @@ function createDCABotHelper<
           defaultStatuses: true,
         })
         await this.primeReconcileBatch(toCheck)
-        for (const o of toCheck) {
+        for (const [i, o] of toCheck.entries()) {
           let attemptsForOrder = 0
           const getOrder = await this.getOrderForReconcile(o, {
             onAttempts: (n) => (attemptsForOrder = n),
@@ -13429,6 +14119,19 @@ function createDCABotHelper<
             unresolved.push(o.clientOrderId)
             unresolvedLookupAttempts += attemptsForOrder
             noteVenueAnswer(o, false)
+            // Spec 237: the key may not read orders, so every remaining lookup
+            // would be refused the same way. Leave them unread, untouched.
+            if (isKeyPermissionRefusal(getOrder?.reason)) {
+              const rest = toCheck.slice(i + 1)
+              for (const r of rest) {
+                unresolved.push(r.clientOrderId)
+                noteVenueAnswer(r, false)
+              }
+              this.handleWarn(
+                `Reconcile stopped after a key refusal (${getOrder?.reason}); ${rest.length} order(s) not asked`,
+              )
+              break
+            }
             continue
           }
           if (getOrder.status === StatusEnum.notok) {
@@ -13480,6 +14183,15 @@ function createDCABotHelper<
             }
             if (mergedOrder.status === 'PARTIALLY_FILLED') {
               partiallyFilledOrders.push(mergedOrder)
+            }
+            // Spec 227: when the stream lost the cancel report, this answer is
+            // the only one the bot gets. The row is already out of the map, so
+            // it does not count as a live entry of its own deal.
+            if (
+              mergedOrder.status === 'CANCELED' &&
+              mergedOrder.typeOrder === TypeOrderEnum.dealStart
+            ) {
+              this.checkUnfilledBaseEntryCancel(mergedOrder)
             }
           } else {
             this.handleDebug(
@@ -13924,7 +14636,12 @@ function createDCABotHelper<
           // Take-profits dropped below as never sent. They are not resting, so
           // the grid comparison further down must not count them. Spec 172.
           const unsentTPs = new Set<string>()
-          if (activeTPSLOrders.length && deal && !forTPCheck) {
+          // A deal that closes at MARKET rests no take-profit, but it can hold
+          // one it SENT moments before the restart, whose fill report the old
+          // process never handled. Ask the venue about it too, and act only on
+          // a fill: for such a deal nothing below re-places or retires a
+          // take-profit — the TP level check owns that. Spec 234.
+          if (activeTPSLOrders.length && deal) {
             for (const activeTPSLOrder of activeTPSLOrders) {
               if (this.isOrderQuarantined(activeTPSLOrder)) continue
               if (this.restartProbeExhausted()) continue
@@ -13945,6 +14662,9 @@ function createDCABotHelper<
                 this.handleWarn(
                   `Order ${activeTPSLOrder.clientOrderId} not found on exchange: ${tpslOrderData?.reason}`,
                 )
+                if (forTPCheck) {
+                  continue
+                }
                 // A take-profit restored from the Redis snapshot that was
                 // never sent: the process stopped inside `startDeal` after the
                 // snapshot had it and before its write-ahead row. Waiting out
@@ -13986,7 +14706,11 @@ function createDCABotHelper<
                   tpslOrderData.data,
                   activeTPSLOrder,
                 )
-                if (updatedOrder.status === 'CANCELED') {
+                if (updatedOrder.status === 'CANCELED' && forTPCheck) {
+                  this.handleDebug(
+                    `TP/SL order ${updatedOrder.clientOrderId} is CANCELED on a market-close deal, left to the TP level check.`,
+                  )
+                } else if (updatedOrder.status === 'CANCELED') {
                   this.deleteOrder(updatedOrder.clientOrderId)
                   this.handleDebug(
                     `TP/SL order ${updatedOrder.clientOrderId} is CANCELED.`,
@@ -17245,6 +17969,24 @@ function createDCABotHelper<
      * every other pair. Same shape as {@link reportLimitOnlyEntryReplaced}.
      */
     async reportOrderBelowExchangeMin(symbol: string, message: string) {
+      await this.reportPerPairWarning(
+        orderBelowExchangeMinSubType,
+        symbol,
+        message,
+      )
+    }
+
+    /**
+     * A per-pair standing warning: a `Bot warning` event plus a bot message
+     * under `subType`, which must be per-symbol (`isPerSymbolSubType`) so the
+     * notification's pair tag is the pair in the text. `force`: the caller's
+     * {@link ConditionLatch} is the rate limit.
+     */
+    async reportPerPairWarning(
+      subType: string,
+      symbol: string,
+      message: string,
+    ) {
       this.botEventDb.createData({
         userId: this.userId,
         botId: this.botId,
@@ -17257,7 +17999,7 @@ function createDCABotHelper<
       })
       await this.processError(
         this.botId,
-        orderBelowExchangeMinSubType,
+        subType,
         false,
         false,
         true,
@@ -18147,7 +18889,19 @@ function createDCABotHelper<
       }
       const ed = await this.getExchangeInfo(symbol)
       if (
-        await this.refuseNewDealNearDelivery(symbol, ed, skip, dynamic, trigger)
+        (await this.refuseNewDealNearDelivery(
+          symbol,
+          ed,
+          skip,
+          dynamic,
+          trigger,
+        )) ||
+        (await this.refuseNewDealAfterRefusedEntries(
+          symbol,
+          skip,
+          dynamic,
+          trigger,
+        ))
       ) {
         this.endMethod(_id)
         if (cbIfNotOpened) {
@@ -18825,10 +19579,15 @@ function createDCABotHelper<
         return
       }
       const reissued = (this.reissuedClientOrderIds ??= new Map())
+      // An id the venue refused is written off and dropped from the map, but
+      // it is as spent as a CANCELED one it still holds. Spec 221.
+      const statusOf = (id: string) =>
+        this.getOrderFromMap(id)?.status ??
+        (this.isWrittenOffClientOrderId?.(id) ? 'CANCELED' : undefined)
       const resolution = resolveLevelClientOrderId(
         order.newClientOrderId,
         reissued,
-        (id) => this.getOrderFromMap(id)?.status,
+        statusOf,
       )
       if (resolution.action === 'adopt') {
         this.handleLog(
@@ -18841,7 +19600,7 @@ function createDCABotHelper<
         const fresh = this.getOrderId(this.combo ? 'CMB-RO' : 'D-RO')
         this.handleLog(
           `Order ${resolution.spent} is ${
-            this.getOrderFromMap(resolution.spent)?.status ?? 'gone'
+            statusOf(resolution.spent) ?? 'gone'
           }, re-place its level as ${fresh}`,
         )
         reissued.set(order.newClientOrderId, fresh)
@@ -19823,6 +20582,10 @@ function createDCABotHelper<
       // without first writing 'confirmed' (that only happens if this resend
       // succeeds).
       forceFullFeeSizing = false,
+      // Spec `222`. Base this bot still owes from earlier combo SHORT closes
+      // skipped below the venue minimum. Only `prepareTpOrder` (the close
+      // path) passes it; `undefined` everywhere else leaves sizing unchanged.
+      shortCloseCarry?: number,
     ) {
       if (this.data) {
         const ed = await this.getExchangeInfo(_symbol)
@@ -20215,6 +20978,39 @@ function createDCABotHelper<
                 _deal?.symbol?.quoteAsset,
               )
           qty -= f
+          // Spec `222`: a combo SHORT spot close with profit in quote also buys
+          // back what earlier closes of this bot skipped below the minimum.
+          // Added before the minimum check, so small shortfalls that together
+          // clear it are bought by whichever close gets them over.
+          const carryShortfall =
+            shortCloseCarry !== undefined &&
+            !this.isLong &&
+            !this.futures &&
+            !(await this.profitBase(_deal))
+          const ownQty = qty
+          let carriedInOrder = 0
+          if (carryShortfall) {
+            // Only what this deal's quote can pay for. `prepareTpOrder` caps a
+            // SHORT spot buy-back at that quote anyway, and a cap that cut the
+            // order back under the minimum would send one the venue refuses.
+            // What does not fit stays carried (§1.3).
+            const fundable =
+              ((_deal?.currentBalances.quote ?? 0) * (1 - (fee.taker ?? 0))) /
+                tpPrice -
+              ownQty
+            carriedInOrder = Math.max(
+              0,
+              Math.min(shortCloseCarry, Number.isFinite(fundable) ? fundable : 0),
+            )
+            qty += carriedInOrder
+          }
+          const belowMinimum =
+            !this.futures &&
+            (qty < symbol.baseAsset.minAmount ||
+              qty * tpPrice < symbol.quoteAsset.minAmount)
+          if (belowMinimum && carryShortfall && dealId) {
+            this.shortCloseBelowMinimum.set(dealId, ownQty)
+          }
           if (qty < symbol.baseAsset.minAmount && !this.futures) {
             this.handleDebug(
               `Order amount less than base min amount. ${qty} qty, ${symbol.baseAsset.minAmount} base min`,
@@ -20228,6 +21024,9 @@ function createDCABotHelper<
               } quote min`,
             )
             return []
+          }
+          if (carryShortfall && dealId) {
+            this.shortCloseCarryInOrder.set(dealId, carriedInOrder)
           }
         }
         // Spec `023` (#714). Nothing below can notice a non-finite size: every
@@ -20465,7 +21264,7 @@ function createDCABotHelper<
           // copy would overstate what is left the moment the two differ, and
           // overstating is the direction that oversells.
           const heldDeal = findDeal?.deal ?? deal
-          const heldQty = this.math.round(
+          const heldFromSize = this.math.round(
             trackedPosition({
               size: dealSize,
               tpHistory: heldDeal?.tpHistory ?? [],
@@ -20476,6 +21275,28 @@ function createDCABotHelper<
             precision,
             true,
           )
+          // Spec `224`. The base-fill handler sizes this close BEFORE
+          // `updateUsage` writes `deal.size`, so on a fresh fill the size still
+          // reads 0 while the entry rows this method sizes from already hold
+          // the fill. Read as 0, the holding took the settle exit below as a
+          // "transition", and on a base-order fill no later build ever comes
+          // to repair it: the deal stayed open with no take-profit. Fall back
+          // to the EXECUTED entry rows (never `origQty` or the nominal
+          // stopgap), net of closes, reduce-funds and the base fee the rows
+          // report — what the size reads once it catches up. One-way: only a
+          // size-derived holding of zero or less is replaced, so a real
+          // transition (nothing executed, or the close already filled) still
+          // reads 0.
+          const heldFromRows = this.math.round(
+            (parseFloat(`${bo?.executedQty ?? 0}`) || 0) +
+              filledQty +
+              add -
+              entryBaseFee,
+            precision,
+            true,
+          )
+          const heldQty =
+            heldFromSize <= 0 && heldFromRows > 0 ? heldFromRows : heldFromSize
           const qtyForFloor = this.math.round(
             symbol.quoteAsset.minAmount / tpOrder.price,
             precision,
@@ -22655,21 +23476,28 @@ function createDCABotHelper<
           let balanceUseQty = 0
 
           const ordersCount = this.dcaLadderSize(settings)
-          // Spec `164`: a stored breakpoint beyond this ladder's deepest level
-          // (a wick past the deal's whole DCA coverage) is not applied. Only a
-          // percentage ladder has a closed-form depth; on every other ladder
-          // a breakpoint must still be a positive finite price.
+          // Spec `164`: a stored breakpoint far beyond this ladder's deepest
+          // level (a wick past the deal's whole DCA coverage) is not applied.
+          // Only a percentage ladder has a closed-form depth; on every other
+          // ladder a breakpoint must still be a positive finite price. The
+          // bound is widened by `LADDER_END_SLACK`: a ladder whose step shrinks
+          // below one tick runs past its closed-form depth, and its real
+          // breakpoints lie there.
           const ladderEnd =
             settings.dcaCondition === DCAConditionEnum.percentage && !scaleAr
-              ? this.math.round(
-                  percentageLadderEnd(
-                    latestPrice,
-                    gridStep,
-                    stepScale,
-                    ordersCount ?? 0,
-                    long,
+              ? toleratedLadderEnd(
+                  latestPrice,
+                  this.math.round(
+                    percentageLadderEnd(
+                      latestPrice,
+                      gridStep,
+                      stepScale,
+                      ordersCount ?? 0,
+                      long,
+                    ),
+                    symbol.priceAssetPrecision,
                   ),
-                  symbol.priceAssetPrecision,
+                  long,
                 )
               : undefined
           const useVolumeChange =
@@ -23043,6 +23871,68 @@ function createDCABotHelper<
       return []
     }
     /**
+     * Spec 233: record the ladder levels this deal skipped (`deal.missedLevels`).
+     *
+     * Bookkeeping only. It never places, cancels or moves an order: the levels
+     * it names are the ones `createCurrentDealOrders` already leaves out, on the
+     * near side of the last fill. Writes the deal only when the list changed,
+     * and tells the user once per newly skipped level.
+     */
+    recordMissedLevels(
+      deal: ExcludeDoc<Deal>,
+      ladder: Grid[],
+      dealId: string,
+    ): MissedLevel[] {
+      const rows = this.getOrdersByStatusAndDealId({
+        status: ['FILLED', 'PARTIALLY_FILLED', 'NEW'],
+        dealId,
+      })
+      const missed = missedLadderLevels(
+        ladder,
+        rows,
+        +(deal.lastPrice ?? 0),
+        this.isLong,
+        deal.missedLevels,
+        deal.gridBreakpoints ?? [],
+      )
+      if (sameMissedLevels(deal.missedLevels, missed)) {
+        return missed
+      }
+      const known = new Set((deal.missedLevels ?? []).map((m) => m.level))
+      const added = missed.filter((m) => !known.has(m.level))
+      deal.missedLevels = missed
+      const findDeal = this.getDeal(dealId)
+      if (findDeal) {
+        findDeal.deal.missedLevels = missed
+        this.saveDeal(findDeal, { missedLevels: missed })
+      }
+      if (added.length && this.shouldProceed()) {
+        this.handleLog(
+          `Deal ${dealId}: DCA level(s) ${added.map((m) => m.level).join(', ')} were skipped: the market passed them before they could rest`,
+        )
+        this.botEventDb.createData({
+          userId: this.userId,
+          botId: this.botId,
+          event: 'Deal',
+          botType: this.botType,
+          description: `DCA level${added.length > 1 ? 's' : ''} ${added.map((m) => m.level).join(', ')} ${added.length > 1 ? 'were' : 'was'} skipped: the price moved past ${added.length > 1 ? 'them' : 'it'} before ${added.length > 1 ? 'they' : 'it'} could be placed. The bot will not buy ${added.length > 1 ? 'them' : 'it'} at market by itself; you can execute ${added.length > 1 ? 'them' : 'it'} from the deal.`,
+          paperContext: !!this.data?.paperContext,
+          deal: dealId,
+          symbol: deal.symbol?.symbol,
+          type: MessageTypeEnum.info,
+        })
+      }
+      return missed
+    }
+    /** Spec 233: is this slice entry one of the deal's skipped levels? */
+    isMissedLevelOrder(o: Grid, missed: Set<number>): boolean {
+      return (
+        o.type === TypeOrderEnum.dealRegular &&
+        typeof o.levelNumber === 'number' &&
+        missed.has(o.levelNumber)
+      )
+    }
+    /**
      * Create current deal orders
      *
      * @param {number} price Price from which to start
@@ -23179,6 +24069,34 @@ function createDCABotHelper<
               (o) => !isLevelFilled(o, filledLevels),
             )
           }
+          // Spec 233: name the levels this slice leaves behind the last fill,
+          // and keep them out of it — before the gap path below picks its
+          // first level, so a skipped level is never moved to the market. A
+          // skipped level stays out until it fills (the user executes it): a
+          // later fill moves the last fill price, and must not put a skipped
+          // level back on the far side of it to be bought by the bot. This
+          // only ever removes orders from the slice.
+          // An unchecked rebuild (an order cancel, a merge) records nothing but
+          // still keeps the recorded levels out.
+          const missedSet = new Set<number>()
+          if (
+            !all &&
+            deal &&
+            !this.combo &&
+            settings.dcaCondition !== DCAConditionEnum.indicators
+          ) {
+            const missed = !noCheck
+              ? this.recordMissedLevels(deal, orders, dealId)
+              : (deal.missedLevels ?? [])
+            for (const m of missed) {
+              missedSet.add(m.level)
+            }
+            if (missedSet.size) {
+              currentOrders = currentOrders.filter(
+                (o) => !this.isMissedLevelOrder(o, missedSet),
+              )
+            }
+          }
           const [firstOrder] = currentOrders
           if (!noCheck) {
             if (
@@ -23198,13 +24116,25 @@ function createDCABotHelper<
                 latestPrice !== 0 &&
                 ((latestPrice < firstOrder.price && this.isLong) ||
                   (latestPrice > firstOrder.price && !this.isLong))
-              // Spec `164` §1.2: a market past the ladder's deepest level is a
-              // wick, not a place to rest one level. The level keeps its price.
+              // Spec `164` §1.2: a market far past the ladder's deepest level
+              // is a wick, not a place to rest one level. The level keeps its
+              // price. Widened by `LADDER_END_SLACK`, as in the build: a market
+              // a few ticks past a converging ladder's last level is where its
+              // remaining levels must be bought, not a wick.
               const ladderEnd = long
                 ? Math.min(...orders.map((o) => o.price))
                 : Math.max(...orders.map((o) => o.price))
               const beyondLadder =
-                gapped && !isDisplacementInLadder(latestPrice, ladderEnd, long)
+                gapped &&
+                !isDisplacementInLadder(
+                  latestPrice,
+                  toleratedLadderEnd(
+                    deal?.initialPrice || boPrice || price,
+                    ladderEnd,
+                    long,
+                  ),
+                  long,
+                )
               if (beyondLadder) {
                 this.handleLog(
                   `Deal ${dealId}: no breakpoint for level ${firstOrder.price} at market ${latestPrice}: beyond the ladder's deepest level ${ladderEnd}`,
@@ -23249,6 +24179,12 @@ function createDCABotHelper<
             }
           }
 
+          if (missedSet.size) {
+            // The gap path above may have rebuilt the slice unfiltered.
+            currentOrders = currentOrders.filter(
+              (o) => !this.isMissedLevelOrder(o, missedSet),
+            )
+          }
           if (!all && useSmartOrders) {
             currentOrders = currentOrders.slice(
               0,
@@ -23647,6 +24583,14 @@ function createDCABotHelper<
           )
         }
       }
+      if (order.typeOrder === TypeOrderEnum.dealStart) {
+        // Spec `228` §4.4: the pair's book took an entry.
+        this.clearRefusedBaseEntries(order.symbol)
+      }
+      // Spec `226` §1.1.2: a remainder sweep of a deal that already closed.
+      if (await this.bookRemainderSweepReport(order)) {
+        return
+      }
       const { dealId, clientOrderId } = order
       const getSet = dealId
         ? (this.processedFilled.get(dealId) ?? new Set<string>())
@@ -23659,6 +24603,9 @@ function createDCABotHelper<
         }
         if (order.typeOrder === TypeOrderEnum.dealTP && order.reduceFundsId) {
           return this.updateDeal(this.botId, order)
+        }
+        if (await this.bookLimitRemainderSweep(order)) {
+          return
         }
         if (
           order.typeOrder === TypeOrderEnum.dealTP &&
@@ -23766,6 +24713,10 @@ function createDCABotHelper<
      */
 
     async processPartiallyFilledOrder(order: Order): Promise<void> {
+      // Spec `226` §1.1.2: a remainder sweep of a deal that already closed.
+      if (await this.bookRemainderSweepReport(order)) {
+        return
+      }
       if (order.typeOrder === TypeOrderEnum.dealTP) {
         this.updatePartiallyFilledTP(order)
       }
@@ -23966,6 +24917,7 @@ function createDCABotHelper<
       // executed is a position no deal is tracking and nothing will ever close.
       // Spec 048 §1.2.
       if (order.typeOrder === TypeOrderEnum.dealStart) {
+        this.noteRepositionCancelReport(order)
         if (
           order.dealId &&
           shouldSettlePartialBaseEntry({
@@ -23993,7 +24945,15 @@ function createDCABotHelper<
         }
         return
       }
+      if (order.typeOrder === TypeOrderEnum.dealRegular) {
+        await this.bookCanceledRegularFill(order)
+        return
+      }
       if (order.typeOrder !== TypeOrderEnum.dealTP) {
+        return
+      }
+      // Spec `226` §1.1.2: a remainder sweep of a deal that already closed.
+      if (await this.bookRemainderSweepReport(order)) {
         return
       }
       if (
@@ -24041,6 +25001,47 @@ function createDCABotHelper<
         return
       }
       await this.updatePartiallyFilledTP(order)
+    }
+
+    /**
+     * A safety or add-funds order (`dealRegular`) that ended CANCELED with part
+     * of it executed, and not by this bot's request. Spec `216`.
+     *
+     * The executed part is a position the account holds, and no other event
+     * reports it: the venue's cancel is the last word on the order. It is
+     * booked through the same `updateDeal` branch a fill of this order takes —
+     * an add-funds order into `deal.funds`, settling its `pendingAddFunds`
+     * entry, a safety order into the deal's balances — and only once, keyed on
+     * `processedFilled` like a fill. A cancel the bot asked for is left to the
+     * engine's cancel path (spec 156 §3), and a deal that is not open is left
+     * alone: `updateDeal` would sell the quantity at market there.
+     */
+    private async bookCanceledRegularFill(order: Order) {
+      const { dealId, clientOrderId } = order
+      if (
+        !dealId ||
+        !shouldBookCanceledRegularFill({
+          order,
+          dealStatus: this.getDeal(dealId)?.deal.status,
+          ownCancel: this.isOwnCancel(clientOrderId),
+          alreadyProcessed: !!this.processedFilled
+            .get(dealId)
+            ?.has(clientOrderId),
+        })
+      ) {
+        return
+      }
+      this.processedFilled.set(
+        dealId,
+        (this.processedFilled.get(dealId) ?? new Set<string>()).add(
+          clientOrderId,
+        ),
+      )
+      this.handleLog(
+        `${order.addFundsId ? 'Add funds' : 'Regular'} order ${clientOrderId} of deal ${dealId} was ${order.status} with ${order.executedQty} of ${order.origQty} filled. Booking the filled part`,
+      )
+      this.ordersInBetweenUpdates.add(clientOrderId)
+      await this.updateDeal(this.botId, order)
     }
 
     /**
@@ -24138,6 +25139,30 @@ function createDCABotHelper<
     }
 
     /**
+     * Record the venue's end-of-order report of a base entry the reposition
+     * arm of `checkBaseOrder` is cancelling right now, when it states a fill,
+     * for that arm to settle on. Shared by the DCA and Combo cancel callbacks.
+     * Spec 217 §4.1.
+     */
+    noteRepositionCancelReport(order: Order) {
+      if (
+        this.repositionCancelReports?.has(order.clientOrderId) &&
+        terminalEntryHoldsAFill(
+          order.status,
+          order.executedQty,
+          order.updateTime,
+        ) &&
+        +order.executedQty >
+          +(
+            this.repositionCancelReports.get(order.clientOrderId)
+              ?.executedQty ?? 0
+          )
+      ) {
+        this.repositionCancelReports.set(order.clientOrderId, { ...order })
+      }
+    }
+
+    /**
      * A base order someone else cancelled before any of it traded: schedule
      * the deal's cancel. Shared by the DCA and Combo cancel callbacks.
      */
@@ -24230,6 +25255,14 @@ function createDCABotHelper<
       this.handleLog(
         `Deal ${dealId} has no base order on the exchange after an external cancel. Cancelling the deal`,
       )
+      // Counted before the close (spec `228` §4.8): an ASAP bot starts the
+      // next deal from inside the close, and that start must already see the
+      // pause this refusal opens, or it sends one more doomed order.
+      await this.noteRefusedBaseEntry(deal?.deal.symbol?.symbol).catch((e) =>
+        this.handleWarn(
+          `Cannot count the refused base entry of deal ${dealId}: ${(e as Error)?.message ?? e}`,
+        ),
+      )
       await this.closeDealById(
         this.botId,
         dealId,
@@ -24243,6 +25276,161 @@ function createDCABotHelper<
         false,
         DCACloseTriggerEnum.auto,
       )
+    }
+
+    /** The run counter of spec `228`. A method so a harness can replace it. */
+    refusedBaseEntryLedger(): Pick<RetryBackoff, 'record' | 'clear' | 'peek'> {
+      return refusedBaseEntryBackoff
+    }
+
+    /**
+     * Once per pair per worker: pick up a run of refusals a previous worker
+     * recorded (spec `228` §4.6). The pause and the "user was told" latch live
+     * in memory, the run counter in Redis; without this a restart forgot the
+     * pause and warned again. The latch is restored for any run already past
+     * the threshold — even one whose window has ended — because the user was
+     * told about that run.
+     */
+    async restoreRefusedBaseEntryPause(symbol: string): Promise<void> {
+      const restored = (this.refusedBaseEntryRestored ??= new Set())
+      if (restored.has(symbol)) {
+        return
+      }
+      restored.add(symbol)
+      const state = await this.refusedBaseEntryLedger().peek([
+        this.botId,
+        symbol,
+      ])
+      if (!state || !refusedBaseEntryPauses(state.attempt)) {
+        return
+      }
+      this.standingConditionLatch.shouldReport(
+        standingConditionKey(refusedBaseEntry, symbol),
+        +new Date(),
+      )
+      if (
+        state.until > +new Date() &&
+        !this.refusedBaseEntryPausedUntil?.has(symbol)
+      ) {
+        ;(this.refusedBaseEntryPausedUntil ??= new Map()).set(
+          symbol,
+          state.until,
+        )
+        this.handleLog(
+          `${state.attempt} base orders on ${symbol} in a row were cancelled by the exchange with nothing filled. New deals on ${symbol} stay paused until ${new Date(state.until).toISOString()}`,
+        )
+      }
+    }
+
+    /**
+     * Count one more unfilled venue cancel of a base order on `symbol`. From
+     * `refusedBaseEntryPauseAfter` in a row on, pause automatic new deals on
+     * the pair for the backoff window and tell the user once per run. Spec
+     * `228` §4.1/§4.2.
+     */
+    async noteRefusedBaseEntry(symbol?: string): Promise<void> {
+      if (!symbol) {
+        return
+      }
+      await this.restoreRefusedBaseEntryPause(symbol)
+      const state = await this.refusedBaseEntryLedger().record(
+        [this.botId, symbol],
+        'base order cancelled by the exchange with nothing filled',
+      )
+      if (!refusedBaseEntryPauses(state.attempt)) {
+        return
+      }
+      ;(this.refusedBaseEntryPausedUntil ??= new Map()).set(symbol, state.until)
+      this.handleLog(
+        `${state.attempt} base orders on ${symbol} in a row were cancelled by the exchange with nothing filled. New deals on ${symbol} paused until ${new Date(state.until).toISOString()}`,
+      )
+      if (
+        this.standingConditionLatch.shouldReport(
+          standingConditionKey(refusedBaseEntry, symbol),
+          +new Date(),
+        )
+      ) {
+        await this.reportPerPairWarning(
+          refusedBaseEntrySubType,
+          symbol,
+          refusedBaseEntryMessage(symbol, state.attempt, state.until),
+        )
+      }
+    }
+
+    /**
+     * Refuse an automatic new deal on a pair paused by
+     * {@link noteRefusedBaseEntry}. A manual open and a terminal deal go
+     * through, like {@link refuseNewDealNearDelivery}. Spec `228` §4.3.
+     *
+     * @returns {boolean} true when the deal was refused
+     */
+    async refuseNewDealAfterRefusedEntries(
+      symbol: string,
+      skip: boolean,
+      dynamic: boolean,
+      trigger?: NewDealTrigger,
+    ): Promise<boolean> {
+      await this.restoreRefusedBaseEntryPause(symbol)
+      const until = this.refusedBaseEntryPausedUntil?.get(symbol)
+      if (!until) {
+        return false
+      }
+      if (until <= +new Date()) {
+        this.refusedBaseEntryPausedUntil.delete(symbol)
+        return false
+      }
+      const settings = await this.getAggregatedSettings()
+      if (
+        (settings as { type?: DCATypeEnum }).type === DCATypeEnum.terminal ||
+        resolveNewDealTrigger(
+          skip,
+          dynamic,
+          settings.startCondition,
+          trigger,
+        ) === 'manual'
+      ) {
+        return false
+      }
+      this.handleDebug(
+        `New deal on ${symbol} paused until ${new Date(until).toISOString()}: the exchange keeps cancelling its base orders with nothing filled`,
+      )
+      // Spec `228` §4.7. Refusing is the end of this start; an ASAP bot has
+      // no other trigger that would ask again, so without this the pair stayed
+      // quiet until the next worker restart, not until `until`. Other start
+      // conditions ask again on their own signal.
+      if (settings.startCondition === StartConditionEnum.asap) {
+        const prev = this.openNewDealTimer.get(symbol)
+        if (prev) {
+          clearTimeout(prev)
+        }
+        this.openNewDealTimer.set(
+          symbol,
+          setTimeout(
+            () => {
+              this.openNewDealTimer.delete(symbol)
+              void this.openDealAfterTimer()
+            },
+            until - +new Date() + REFUSED_BASE_ENTRY_RESTART_MARGIN_MS,
+          ),
+        )
+      }
+      return true
+    }
+
+    /**
+     * A base order on `symbol` traded: the run of refusals is over. Spec
+     * `228` §4.4. Cheap when there was no run (one Redis DEL per base fill).
+     */
+    clearRefusedBaseEntries(symbol?: string): void {
+      if (!symbol) {
+        return
+      }
+      this.refusedBaseEntryPausedUntil?.delete(symbol)
+      this.standingConditionLatch?.clear(
+        standingConditionKey(refusedBaseEntry, symbol),
+      )
+      void this.refusedBaseEntryLedger().clear([this.botId, symbol])
     }
 
     /** One pending restore per deal; a newer cancel replaces it. Spec 095 §4.7. */
@@ -27179,6 +28367,108 @@ function createDCABotHelper<
 
       this.lockSLCheck = false
     }
+    /**
+     * Send one stats sample of an open deal to the deal monitor, and record
+     * that this load has sampled it. Combo overrides the payload.
+     */
+    async sendDealStats(d: FullDeal<ExcludeDoc<Deal>>, msg: PriceMessage) {
+      if (!this.data) {
+        return
+      }
+      this.dealsStatsSampled.add(`${d.deal._id}`)
+      const data: BotParentProcessStatsEventDtoDcaCombo = {
+        event: 'processStats',
+        botId: this.botId,
+        botType: this.combo ? BotType.combo : BotType.dca,
+        payload: {
+          combo: this.combo,
+          data: msg,
+          deal: {
+            _id: d.deal._id,
+            settings: {
+              futures: d.deal.settings.futures,
+              marginType: d.deal.settings.marginType,
+              leverage: d.deal.settings.leverage,
+              comboTpBase: d.deal.settings.comboTpBase,
+              coinm: d.deal.settings.coinm,
+              profitCurrency: d.deal.settings.profitCurrency,
+            },
+            currentBalances: d.deal.currentBalances,
+            initialBalances: d.deal.initialBalances,
+            profit: {
+              total: d.deal.profit.total,
+              pureBase: 0,
+              pureQuote: 0,
+            },
+            feePaid: d.deal.feePaid,
+            avgPrice: d.deal.avgPrice,
+            strategy: d.deal.strategy,
+            usage: d.deal.usage,
+            stats: d.deal.stats,
+            flags: d.deal.flags,
+            tpFilledHistory: d.deal.tpFilledHistory,
+            reduceFunds: d.deal.reduceFunds,
+            botId: this.botId,
+          },
+          fee: (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0,
+          usdRate: (await this.getUsdRate(d.deal.symbol.symbol)) ?? 0,
+        },
+      }
+      this.dispatchDealStats(d, data)
+    }
+
+    protected dispatchDealStats(
+      d: FullDeal<ExcludeDoc<Deal>>,
+      data: BotParentProcessStatsEventDtoDcaCombo,
+    ) {
+      try {
+        DealStats.getInstance().updateStats(data)
+      } catch (e) {
+        this.handleErrors(
+          `Cannot send deal ${d.deal._id} stats to parent process ${e}`,
+          'priceUpdateCallback',
+          '',
+          false,
+          false,
+          false,
+        )
+      }
+    }
+
+    /**
+     * Give every open deal not yet sampled since this bot loaded one stats
+     * sample, priced from the latest price the bot already holds for its pair.
+     * A deal is otherwise sampled only when its pair's price changes, so after
+     * a restart a deal on a pair that has not traded kept the uPnL stored
+     * before it indefinitely (the REST fallback poll stops at an unchanged
+     * price). No exchange request: a pair with no held price is sampled by the
+     * REST poll in the same timer run. Spec 230 §1.1.2.
+     */
+    async seedDealStats() {
+      const open = this.getOpenDeals(false)
+      const openIds = new Set(open.map((d) => `${d.deal._id}`))
+      for (const id of this.dealsStatsSampled) {
+        if (!openIds.has(id)) {
+          this.dealsStatsSampled.delete(id)
+        }
+      }
+      for (const d of open) {
+        if (this.dealsStatsSampled.has(`${d.deal._id}`)) {
+          continue
+        }
+        const symbol = d.deal.symbol.symbol
+        const price = this.getLastStreamData(symbol)?.price
+        if (!price) {
+          continue
+        }
+        await this.sendDealStats(d, {
+          symbol,
+          price,
+          time: +new Date(),
+          volume: 0,
+        })
+      }
+    }
     /** Set price timer */
 
     startPriceTimer() {
@@ -27207,6 +28497,11 @@ function createDCABotHelper<
         )}priceTimerFn`,
     )
     async priceTimerFn(_exchange?: ExchangeEnum) {
+      // Not awaited: this method holds a per-exchange mutex shared by every
+      // bot in the worker. Spec 230 §1.1.3.
+      this.seedDealStats().catch((e) =>
+        this.handleDebug(`seedDealStats failed: ${(e as Error)?.message ?? e}`),
+      )
       const symbols: Set<string> = new Set()
       // Stream health is per symbol, not per deal: the tracker's "did we serve
       // this last run" memory assumes one observation per symbol per run. Two
@@ -27835,7 +29130,7 @@ function createDCABotHelper<
       if (probeCooldown.suppressed) {
         return false
       }
-      await positionProbeBackoff.record(
+      const probeWindow = await positionProbeBackoff.record(
         [this.botId, dealId],
         outcome,
       )
@@ -27877,6 +29172,18 @@ function createDCABotHelper<
           // stale, so this cannot slide forward forever.
           await positionProbeBackoff.clear([this.botId, dealId])
           await positionGoneReadings.clear([this.botId, dealId])
+          this.clearPositionReprobe(dealId)
+        } else {
+          // Spec `225` §1.1.5: only continues a re-probe chain already armed
+          // by a first reading; an unanswered first probe arms nothing.
+          this.armPositionReprobe(
+            dealId,
+            outcome,
+            trigger,
+            settle,
+            probeWindow.until,
+            true,
+          )
         }
         this.handleDebug(
           `Deal ${dealId} TP level close ${outcome}; ${verdict.verdict} — leaving the deal open`,
@@ -27897,6 +29204,16 @@ function createDCABotHelper<
         // seen again, so a real divergence still converges on the next window.
         this.handleLog(
           `Deal ${dealId} TP level close ${outcome} and ${verdict.verdict} on ${this.data?.exchange} — waiting for a second reading before closing the deal`,
+        )
+        // Spec `225`: take that reading ourselves once both windows pass,
+        // rather than waiting for the next price tick or ladder re-placement.
+        this.armPositionReprobe(
+          dealId,
+          outcome,
+          trigger,
+          settle,
+          Math.max(probeWindow.until, reading.until),
+          false,
         )
         return false
       }
@@ -27923,6 +29240,7 @@ function createDCABotHelper<
       }
       await positionProbeBackoff.clear([this.botId, dealId])
       await positionGoneReadings.clear([this.botId, dealId])
+      this.clearPositionReprobe(dealId)
       if (settle) {
         await settle()
         return true
@@ -27932,6 +29250,93 @@ function createDCABotHelper<
       // no closing order — there is nothing to send one for.
       await this.closeDeal(this.botId, dealId)
       return true
+    }
+
+    /**
+     * Spec `225`. Schedule this bot's own re-probe of a deal whose venue
+     * position read as gone, so the second reading `reconcileDealPosition`
+     * needs does not wait for an unrelated event. It is one more probe through
+     * the same throttle and readings count — it cannot settle on one answer.
+     *
+     * @param until when the windows that would suppress the re-probe end.
+     * @param miss the probe that asked was not answered: continue an armed
+     *   chain (bounded by `POSITION_REPROBE_MAX_MISSES`), never start one.
+     */
+    protected armPositionReprobe(
+      dealId: string,
+      outcome: string,
+      trigger: string | undefined,
+      settle: (() => Promise<unknown>) | undefined,
+      until: number,
+      miss: boolean,
+    ) {
+      const prev = this.positionReprobes.get(dealId)
+      if (miss && !prev) {
+        return
+      }
+      const misses = miss ? (prev?.misses ?? 0) + 1 : 0
+      if (prev?.timer) {
+        clearTimeout(prev.timer)
+      }
+      if (misses > POSITION_REPROBE_MAX_MISSES) {
+        this.positionReprobes.delete(dealId)
+        this.handleLog(
+          `Deal ${dealId} position re-probe left unanswered ${POSITION_REPROBE_MAX_MISSES} times — no longer re-probing on a timer`,
+        )
+        return
+      }
+      const delay =
+        Math.max(until - Date.now(), 0) + POSITION_REPROBE_MARGIN_MS
+      const entry: { misses: number; timer?: ReturnType<typeof setTimeout> } =
+        { misses }
+      entry.timer = setTimeout(() => {
+        entry.timer = undefined
+        void this.runPositionReprobe(dealId, outcome, trigger, settle).catch(
+          (e: unknown) =>
+            this.handleWarn(
+              `Deal ${dealId} position re-probe failed: ${(e as Error)?.message ?? e}`,
+            ),
+        )
+      }, delay)
+      entry.timer.unref?.()
+      this.positionReprobes.set(dealId, entry)
+      this.handleDebug(
+        `Deal ${dealId} position re-probe in ${Math.round(delay / 1000)}s`,
+      )
+    }
+
+    protected clearPositionReprobe(dealId: string) {
+      const entry = this.positionReprobes.get(dealId)
+      if (entry?.timer) {
+        clearTimeout(entry.timer)
+      }
+      this.positionReprobes.delete(dealId)
+    }
+
+    /** Spec `225` §1.1.4. Live state only: the deal may have moved on. */
+    private async runPositionReprobe(
+      dealId: string,
+      outcome: string,
+      trigger: string | undefined,
+      settle: (() => Promise<unknown>) | undefined,
+    ) {
+      const live = this.getDeal(dealId)
+      if (
+        !this.shouldProceed() ||
+        !live ||
+        live.deal.status !== DCADealStatusEnum.open ||
+        live.closeBySl
+      ) {
+        this.clearPositionReprobe(dealId)
+        return
+      }
+      await this.reconcileDealPosition(live, outcome, trigger, settle)
+      const entry = this.positionReprobes.get(dealId)
+      if (entry && !entry.timer) {
+        // Neither re-armed (unanswered) nor cleared (found / settled): another
+        // probe owns the deal now, e.g. one that ran inside our window.
+        this.positionReprobes.delete(dealId)
+      }
     }
 
     @IdMute(mutex, (botId: string) => `${botId}checkTPLevel`)
@@ -28242,59 +29647,7 @@ function createDCABotHelper<
           const _activeDeals = this.getOpenDeals(false, msg.symbol)
           this.lastCheckPerSymbol.set(msg.symbol, +new Date())
           for (const d of _activeDeals) {
-            if (this.data) {
-              const data: BotParentProcessStatsEventDtoDcaCombo = {
-                event: 'processStats',
-                botId: this.botId,
-                botType: this.combo ? BotType.combo : BotType.dca,
-                payload: {
-                  combo: this.combo,
-                  data: msg,
-                  deal: {
-                    _id: d.deal._id,
-                    settings: {
-                      futures: d.deal.settings.futures,
-                      marginType: d.deal.settings.marginType,
-                      leverage: d.deal.settings.leverage,
-                      comboTpBase: d.deal.settings.comboTpBase,
-                      coinm: d.deal.settings.coinm,
-                      profitCurrency: d.deal.settings.profitCurrency,
-                    },
-                    currentBalances: d.deal.currentBalances,
-                    initialBalances: d.deal.initialBalances,
-                    profit: {
-                      total: d.deal.profit.total,
-                      pureBase: 0,
-                      pureQuote: 0,
-                    },
-                    feePaid: d.deal.feePaid,
-                    avgPrice: d.deal.avgPrice,
-                    strategy: d.deal.strategy,
-                    usage: d.deal.usage,
-                    stats: d.deal.stats,
-                    flags: d.deal.flags,
-                    tpFilledHistory: d.deal.tpFilledHistory,
-                    reduceFunds: d.deal.reduceFunds,
-                    botId: this.botId,
-                  },
-                  fee:
-                    (await this.getUserFee(d.deal.symbol.symbol))?.maker ?? 0,
-                  usdRate: (await this.getUsdRate(d.deal.symbol.symbol)) ?? 0,
-                },
-              }
-              try {
-                DealStats.getInstance().updateStats(data)
-              } catch (e) {
-                this.handleErrors(
-                  `Cannot send deal ${d.deal._id} stats to parent process ${e}`,
-                  'priceUpdateCallback',
-                  '',
-                  false,
-                  false,
-                  false,
-                )
-              }
-            }
+            await this.sendDealStats(d, msg)
           }
           await this.checkDynamic(this.botId, msg.symbol, +msg.price)
         }
@@ -31111,7 +32464,7 @@ function createDCABotHelper<
     async executeNextDcaLevel(
       _botId: string,
       dealId: string,
-      opts?: { expectedLevel?: number },
+      opts?: { expectedLevel?: number; missedLevel?: number },
     ) {
       const _id = this.startMethod('executeNextDcaLevel')
       this.handleDebug(
@@ -31155,13 +32508,62 @@ function createDCABotHelper<
       // IS `levels.complete`, MINUS the add-funds fills that also incremented
       // it (spec `031` §5). `deal.funds` records exactly those, and is the same
       // correction `getDealDCAByMarketToCheck` applies to the same two fields.
-      const level = nextLadderLevel(deal.deal)
+      // Spec 233: `missedLevel` executes one of the deal's skipped levels (a
+      // level the market ran past, which the bot will not buy by itself)
+      // instead of the next one. It must still be skipped right now: the
+      // ladder is re-resolved here, not taken from the dashboard.
+      const missedLevel =
+        typeof opts?.missedLevel === 'number' && Number.isInteger(opts.missedLevel)
+          ? opts.missedLevel
+          : undefined
+      const level = missedLevel ?? nextLadderLevel(deal.deal)
       if (!ladderSize || level > ladderSize) {
         return fail(
           `This deal has no DCA levels left to execute (${level - 1}/${ladderSize} used)`,
         )
       }
+      {
+        const ladder = await this.createInitialDealOrders(
+          deal.deal.symbol.symbol,
+          deal.deal.initialPrice,
+          dealId,
+          deal.deal,
+        )
+        const rows = this.getOrdersByStatusAndDealId({
+          status: ['FILLED', 'PARTIALLY_FILLED', 'NEW'],
+          dealId,
+        })
+        if (missedLevel !== undefined) {
+          const skipped = missedLadderLevels(
+            ladder,
+            rows,
+            +(deal.deal.lastPrice ?? 0),
+            this.isLong,
+            deal.deal.missedLevels,
+            deal.deal.gridBreakpoints ?? [],
+          )
+          if (!skipped.some((m) => m.level === missedLevel)) {
+            return fail(
+              `DCA level ${missedLevel} is not a skipped level of this deal any more — nothing was executed.`,
+            )
+          }
+        } else if (
+          resolveLadderLevels(
+            ladder,
+            rows,
+            deal.deal.gridBreakpoints ?? [],
+          ).filled.has(level)
+        ) {
+          // The count says "next", but this level has already filled: the
+          // deal skipped a level before it (spec 233). Executing it would
+          // fill the same level twice.
+          return fail(
+            `DCA level ${level} has already filled on this deal — nothing was executed. Its skipped levels can be executed one by one.`,
+          )
+        }
+      }
       if (
+        missedLevel === undefined &&
         typeof opts?.expectedLevel === 'number' &&
         opts.expectedLevel !== level
       ) {
@@ -31229,7 +32631,7 @@ function createDCABotHelper<
           }).filter(
             (o) =>
               o.typeOrder === TypeOrderEnum.dealRegular &&
-              +o.price === ladderPrice,
+              (+o.price === ladderPrice || o.ladderLevel === level),
           )
           for (const o of resting) {
             const canceled = await this.cancelOrderOnExchange(o)
@@ -31297,9 +32699,11 @@ function createDCABotHelper<
             event: 'Deal',
             botType: this.botType,
             description:
-              settings.dcaCondition === DCAConditionEnum.indicators
-                ? `DCA level ${level} was executed manually at ${price} without waiting for its signal`
-                : `DCA level ${level} was executed manually at ${price} instead of waiting for ${ladderPrice}`,
+              missedLevel !== undefined
+                ? `Skipped DCA level ${level} was executed manually at ${price}`
+                : settings.dcaCondition === DCAConditionEnum.indicators
+                  ? `DCA level ${level} was executed manually at ${price} without waiting for its signal`
+                  : `DCA level ${level} was executed manually at ${price} instead of waiting for ${ladderPrice}`,
             paperContext: !!this.data?.paperContext,
             deal: dealId,
             symbol,

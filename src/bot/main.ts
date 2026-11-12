@@ -72,6 +72,7 @@ import {
   canRecoverReduceOnlyRemainder,
   isKrakenUsdmUnderfilledReduceOnlyClose,
 } from './reduceOnlyRemainder'
+import { isFullyExecutedMarketPartial } from './marketEntryFill'
 import {
   isBelowVenueMinOrderValue,
   isCancelledLimitSafetyOrder,
@@ -185,7 +186,11 @@ import GridReduceOnlyGuard, {
   type GridReduceOnlyLevel,
 } from './gridReduceOnlyGuard'
 import { isPositionAlreadyClosedReason } from './positionAlreadyClosed'
-import AuthFailureGuard, { isHardAuthFailure, isVenueLockout } from './authGuard'
+import AuthFailureGuard, {
+  isHardAuthFailure,
+  isKeyPermissionRefusal,
+  isVenueLockout,
+} from './authGuard'
 import RetryBackoff from './retryBackoff'
 import { wantsUserStreamOpen } from './userStreamReopen'
 import { ConditionLatch, STANDING_CONDITION_REARM_MS } from './conditionLatch'
@@ -415,6 +420,12 @@ const proberStaleMs = 3 * 60_000
  * CANCELED arrives within seconds; an hour only bounds the map. Spec 095 §4.1.
  */
 const ownCancelTtlMs = 60 * 60_000
+/**
+ * How many written-off client order ids a bot remembers (spec 221). A level
+ * keeps its id only until the ladder is rebuilt, so the oldest entries are
+ * the ones no level can still carry.
+ */
+const writtenOffIdsCap = 2048
 
 type AllowedMethods =
   | 'checkClosedDeals'
@@ -789,7 +800,9 @@ export function isRetirableNeverPlacedOrder(
  * skipped the order. A rate limit is retried even though it carries the
  * transport marker: the window it is waiting on is the account's, and it does
  * open again within seconds, which is not true of a connector that has just
- * failed six transport attempts in a row.
+ * failed six transport attempts in a row. *
+ * A refusal of the key itself ({@link isKeyPermissionRefusal}) is `stop`: it
+ * is a property of the account, not of the request, so no re-ask can succeed.
  */
 export function reconcileRetryDecision(res?: {
   status: StatusEnum
@@ -799,6 +812,9 @@ export function reconcileRetryDecision(res?: {
   if (res?.status === StatusEnum.ok && res.data) return 'done'
   if (isDefinitiveOrderNotFound(res)) return 'stop'
   if (isReconcileDeferred(res ?? undefined)) return 'stop'
+  // The KEY may not make this call (spec 237): every re-ask with it is refused
+  // the same way, and on Kraken each refusal counts toward the account lockout.
+  if (isKeyPermissionRefusal(res?.reason)) return 'stop'
   if (isRateLimitReason(res?.reason ?? undefined)) return 'retry'
   if (isTransportRetryExhausted(res?.reason)) return 'stop'
   return 'retry'
@@ -1206,6 +1222,14 @@ class MainBot<T extends IMainBot> {
    * Spec `095` §4.1.
    */
   protected ownCancels: Map<string, number> = new Map()
+  /**
+   * Client ids this bot wrote off as CANCELED after the venue refused them, so
+   * dropped from {@link MainBot#orders}. The id is spent all the same: re-sent,
+   * the venue accepts it, but its row stays CANCELED and the order is lost on
+   * the next reload. The placement loop reads this to give the level a fresh
+   * id. In memory only, capped by count. Spec `221`.
+   */
+  protected writtenOffClientOrderIds?: Set<string>
   /**
    * The coalescer for the burst of placements currently running, or null.
    * Installed by a burst loop around its own orders and removed in that loop's
@@ -2021,6 +2045,28 @@ class MainBot<T extends IMainBot> {
   isOwnCancel(clientOrderId: string | undefined) {
     const at = clientOrderId ? this.ownCancels?.get(clientOrderId) : undefined
     return at !== undefined && Date.now() - at <= ownCancelTtlMs
+  }
+
+  /** Record that the venue refused `clientOrderId` and it was written off. Spec 221. */
+  protected noteWrittenOffClientOrderId(clientOrderId: string | undefined) {
+    if (!clientOrderId) {
+      return
+    }
+    // `??=`: a bot built off the prototype has no field initialisers.
+    const ids = (this.writtenOffClientOrderIds ??= new Set())
+    ids.delete(clientOrderId)
+    ids.add(clientOrderId)
+    if (ids.size > writtenOffIdsCap) {
+      const oldest = ids.values().next().value
+      if (oldest !== undefined) {
+        ids.delete(oldest)
+      }
+    }
+  }
+
+  /** Did this bot write `clientOrderId` off after a venue refusal? Spec 221. */
+  isWrittenOffClientOrderId(clientOrderId: string | undefined) {
+    return !!clientOrderId && !!this.writtenOffClientOrderIds?.has(clientOrderId)
   }
 
   /**
@@ -6606,8 +6652,33 @@ class MainBot<T extends IMainBot> {
         this.canceledMap.delete(origId)
         let find = this.getOrderFromMap(origId)
         if (!find) {
-          find = (await this.ordersDb.readData({ clientOrderId: id })).data
+          // By the CLIENT order id: on a by-id venue `id` now holds the
+          // exchange order id, which no row is keyed by. Asking with it lost
+          // the venue's answer for any order the map had already dropped — a
+          // take-profit that filled on the stream and closed its deal while
+          // the placement read-back was still missing it. Spec 223.
+          find = (await this.ordersDb.readData({ clientOrderId: origId })).data
             ?.result
+        }
+        if (find && this.partiallyFilledFilledSet?.has(origId)) {
+          // A part-filled order already topped up at market by `buyRemainder`
+          // holds the WHOLE entry: book fill + remainder, status FILLED. The
+          // venue only knows the book order, so it answers that order's own
+          // end state (KuCoin: CANCELED with the part fill). Copying that over
+          // the row loses the remainder from the map and from Mongo, and the
+          // deal undercounts what it bought. Same guard as spec `088` in
+          // `fillPartiallyFilledOrder`. Spec `235`.
+          const venueRaw = +request.data.executedQty
+          const venueQty =
+            Number.isFinite(venueRaw) && venueRaw > 0
+              ? +(await this.convertOrderExecutedQty(request.data))
+              : 0
+          if (find.status === 'FILLED' && +find.executedQty > venueQty) {
+            this.handleLog(
+              `Order ${origId} venue reports ${request.data.status} ${venueQty}, keeping merged remainder ${find.executedQty} FILLED`,
+            )
+            return find
+          }
         }
         if (find) {
           if (find.status !== request.data.status) {
@@ -7265,6 +7336,16 @@ class MainBot<T extends IMainBot> {
     return true
   }
 
+  /**
+   * Whether `buyRemainder` may buy this order's unfilled rest at MARKET.
+   * Always, here; the DCA engine says no for the base entry of a bot that may
+   * not enter at market, whose remainder rests as a LIMIT instead (spec `111`).
+   * Spec `235`.
+   */
+  protected async remainderMayGoToMarket(_order: Order): Promise<boolean> {
+    return true
+  }
+
   private async buyRemainder(order: Order, count = 1): Promise<Order> {
     if (count >= 20) {
       return order
@@ -7335,6 +7416,15 @@ class MainBot<T extends IMainBot> {
       if (isCancelledLimitSafetyOrder(order)) {
         this.handleLog(
           `Order ${order.clientOrderId} not ${order.side} full qty: executed - ${order.executedQty}, total - ${order.origQty}, the rest was cancelled on the exchange — no remainder order sent, count ${count}`,
+        )
+        return order
+      }
+      // A LIMIT-only entry rests its remainder (spec `111`); buying it here as
+      // well bought it twice. Before the set below, so nothing is marked as
+      // topped up. Spec `235`.
+      if (!(await this.remainderMayGoToMarket(order))) {
+        this.handleLog(
+          `Order ${order.clientOrderId} not ${order.side} full qty: executed - ${order.executedQty}, total - ${order.origQty}, the bot does not enter at market — no remainder order sent, count ${count}`,
         )
         return order
       }
@@ -7737,6 +7827,11 @@ class MainBot<T extends IMainBot> {
           ) {
             order.status = 'FILLED'
           }
+        }
+        // Every venue, not only Bybit: a market order executed in full is
+        // filled even when the report still says PARTIALLY_FILLED. Spec 235 §4.2.
+        if (!this.coinm && isFullyExecutedMarketPartial(order)) {
+          order.status = 'FILLED'
         }
         const origExecutedQty = +order.executedQty
         order = await this.fillPartiallyFilledOrder(order)
@@ -8689,6 +8784,11 @@ class MainBot<T extends IMainBot> {
       minigridId: order.minigridId,
       minigridBudget: order.minigridBudget,
       sl: order.sl,
+      // Spec 233: a ladder order carries its level, so its fill names it.
+      ...(order.type === TypeOrderEnum.dealRegular &&
+      typeof order.levelNumber === 'number'
+        ? { ladderLevel: order.levelNumber }
+        : {}),
       ...additionalParams,
     }
     if (response.price.indexOf('e') !== -1) {
@@ -10347,7 +10447,22 @@ class MainBot<T extends IMainBot> {
             // terminal status in the meantime, the order DID reach the venue and
             // the filter matches nothing, so the record survives.
             if (!servedLocally) {
-              this.updateOrderOnDb({ ...order, status: 'CANCELED' })
+              // The venue saw this id and refused it; it must not be re-sent
+              // under the same id, which would land on this CANCELED row and
+              // leave the accepted order untracked. Spec 221.
+              this.noteWrittenOffClientOrderId(order.clientOrderId)
+              // Record WHY, so a written-off safety order the platform should
+              // have retried can be told apart from one the user's balance or
+              // keys refused (sentinel `deals.safety-order-written-off`).
+              this.updateOrderOnDb({
+                ...order,
+                status: 'CANCELED',
+                refusal: {
+                  reason: `${request.reason ?? ''}`.slice(0, 300),
+                  subType: this.getErrorSubType(`${request.reason ?? ''}`),
+                  at: Date.now(),
+                },
+              })
             } else {
               await this.deleteOrderFromDb(order.clientOrderId)
             }
@@ -10650,6 +10765,16 @@ class MainBot<T extends IMainBot> {
         if (answerFee) {
           Object.assign(orderToPush, answerFee)
         }
+        // A market order answered PARTIALLY_FILLED for its whole size has
+        // filled, and the venue owes no further report for it — a Combo entry
+        // saved this way waited in `start` for hours on a silent user stream.
+        // Spec 235 §4.1.
+        if (!this.coinm && isFullyExecutedMarketPartial(orderToPush)) {
+          this.handleLog(
+            `Order ${order.clientOrderId} placement answer is PARTIALLY_FILLED with ${orderToPush.executedQty} of ${orderToPush.origQty} executed. Saving it as FILLED`,
+          )
+          orderToPush.status = 'FILLED'
+        }
         // Retired as CANCELED while it still had no exchange id, so no cancel
         // ever reached the venue — yet the venue just accepted it. Spec 155 §4.4.
         if (
@@ -10783,6 +10908,26 @@ class MainBot<T extends IMainBot> {
    */
   protected cancelIsTeardown(order: Order): boolean {
     return this.blockPriceCheck || this.cancelRetryWanted(order)
+  }
+
+  /**
+   * A cancel the venue refused reached the generic "report it" branch of
+   * {@link MainBot#cancelOrderOnExchange}. The base bot does nothing more; the
+   * grid helper uses it to stop a close sweep on a key that may not cancel.
+   * Spec `232`.
+   */
+  protected noteCancelRefused(_order: Order, _reason: string): void {
+    return
+  }
+
+  /**
+   * Whether a cancel the venue accepted but still answers as NEW keeps the
+   * order tracked, so the venue's own report can finish it. The base bot says
+   * no (unchanged behaviour); the grid helper says yes during a close sweep.
+   * Spec `231`.
+   */
+  protected keepsUnconfirmedCancelTracked(_order: Order): boolean {
+    return false
   }
 
   /** Back-off before the single re-send of a refused teardown cancel. Spec `180`. */
@@ -11114,6 +11259,7 @@ class MainBot<T extends IMainBot> {
             promotePartialToFilled,
           ])
         }
+        this.noteCancelRefused(order, request.reason)
         this.handleErrors(
           request.reason,
           'limitOrders()',
@@ -11124,6 +11270,23 @@ class MainBot<T extends IMainBot> {
       }
       if (request.status === StatusEnum.ok) {
         if (this.orders) {
+          // Spec `220`. Taken before the copy below overwrites `order`: the
+          // fills already known for this order. That is the row as it was
+          // before the cancel, or the user stream's end-of-order report.
+          // `processOrderQueue` puts that report into the map as a new
+          // object, so `order` cannot see it.
+          // Spec `231`. Whether the bot still holds the order as resting now
+          // that the answer is in — `processOrderQueue` drops it from the map
+          // once the venue's own report has finished it.
+          const heldWhenAnswered = this.getOrderFromMap(order.clientOrderId)
+          const known = [order, heldWhenAnswered]
+            .filter((o): o is Order => !!o && +o.executedQty > 0)
+            .map((o) => ({
+              executedQty: o.executedQty,
+              cummulativeQuoteQty: o.cummulativeQuoteQty,
+              price: o.price,
+            }))
+            .sort((a, b) => +b.executedQty - +a.executedQty)[0]
           Object.keys(order).map((key) => {
             if (Object.prototype.hasOwnProperty.call(request.data, key)) {
               if (
@@ -11173,6 +11336,20 @@ class MainBot<T extends IMainBot> {
             }
             order.executedQty = await this.convertOrderExecutedQty(order)
           }
+          // Spec `220`. An order's executed quantity never decreases
+          // (spec `059` §1.1). A cancel answer can state less than the bot
+          // already knows: Hyperliquid's answer is a read-back of the venue's
+          // fill history, and that history can lag the stream. Without this,
+          // the answer's 0 replaced the stream's report in the map and the
+          // delete below dropped the row. A combo close then sized its
+          // buy-back without that fill. Applied after the promotion and the
+          // unit conversion, which are still decided from the answer, because
+          // `known` is already in the map's units.
+          if (known && +known.executedQty > +order.executedQty) {
+            order.executedQty = known.executedQty
+            order.cummulativeQuoteQty = known.cummulativeQuoteQty
+            order.price = known.price
+          }
           if (order.updateTime === -1) {
             order.updateTime = request.data.updateTime
           }
@@ -11181,7 +11358,23 @@ class MainBot<T extends IMainBot> {
           }
           this.emit('bot update', order)
           this.setOrder(order)
-          if (removeFromLocal && +request.data.executedQty === 0) {
+          // Spec `231`. A cancel the venue accepted whose answer still says
+          // NEW is not finished: a read-back answer (Hyperliquid) can lag the
+          // cancel. Dropping it here unregisters the id, so the venue's own
+          // report a moment later is discarded and the row stays NEW for good.
+          // Kept tracked only where the caller asks for it (a grid close sweep);
+          // everywhere else the delete below is unchanged.
+          const unconfirmed =
+            order.status === 'NEW' &&
+            !!heldWhenAnswered &&
+            ['NEW', 'PARTIALLY_FILLED'].includes(heldWhenAnswered.status) &&
+            this.keepsUnconfirmedCancelTracked(order)
+          if (
+            removeFromLocal &&
+            +request.data.executedQty === 0 &&
+            !(+order.executedQty > 0) &&
+            !unconfirmed
+          ) {
             this.deleteOrder(order.clientOrderId)
           }
           this.updateOrderOnDb(order)

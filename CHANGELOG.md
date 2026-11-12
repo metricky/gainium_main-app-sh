@@ -1,5 +1,260 @@
 # Changelog
 
+## [1.126.14] - 2026-11-12
+
+### Fixed
+
+- Moving a deal or grid to the terminal twice no longer creates a second terminal deal holding the same coins
+
+## [1.126.13] - 2026-11-11
+
+### Fixed
+
+- An order check after a user-stream reconnect stops on the first lookup the exchange refuses because the API key may not read orders, instead of asking about every order three times; the orders stay as they were
+
+## [1.126.12] - 2026-11-11
+
+### Added
+
+- A session is now stored with a SHA-256 of its token and found by that hash, or by the stored token for sessions created before this release. An index for the hash lookup is created on the users collection at the next start
+
+## [1.126.11] - 2026-11-11
+
+### Added
+
+- Each account now has a session version that every new session is issued at. Changing the password, "Log out all other sessions" and the password reset command raise it, so sessions issued earlier are no longer accepted; the session that made the change stays signed in. Existing sessions are unaffected until one of those actions is taken
+
+## [1.126.10] - 2026-11-11
+
+### Changed
+
+- The live-update connection and the backtest details download now resolve the session through one shared check, the same one the rest of the API applies, so an ended session is treated the same everywhere
+
+## [1.126.9] - 2026-11-11
+
+### Fixed
+
+- A Combo deal whose market entry filled no longer waits for an exchange stream update to open
+
+## [1.126.8] - 2026-11-11
+
+### Fixed
+
+- Searching bot notifications or bot names for text containing characters such as `(`, `.` or `*` now matches that text literally; search text is limited to 100 characters
+
+## [1.126.7] - 2026-11-11
+
+### Changed
+
+- Start-up index maintenance on the users collection only creates missing indexes and no longer removes ones the core schema does not declare; a failed index build is logged and no longer stops the remaining collections from being checked
+
+## [1.126.6] - 2026-11-11
+
+### Changed
+
+- Signed API requests find their account through a database index on the API key id; the index is created on the users collection at the next start
+- Balance updates from an exchange stream find the account's owner through a database index on the exchange connection id
+
+## [1.126.5] - 2026-11-11
+
+### Changed
+
+- Signed-in requests find their account through a database index on the session token; the index is created on the users collection at the next start
+
+## [1.126.4] - 2026-11-10
+
+### Fixed
+
+- A part-filled LIMIT base entry on a bot that does not enter at market no longer buys its remainder at market as well as resting it as a LIMIT order
+- A grid bot that stops itself (take profit or stop loss with the stop action, liquidation, a filled close order, missing exchange info) now cancels part-filled levels too, instead of leaving them resting on the exchange
+
+## [1.126.3] - 2026-11-10
+
+### Fixed
+
+- An order lookup no longer shrinks a part-filled entry that was already topped up at market back to its book fill
+
+## [1.126.2] - 2026-11-10
+
+### Fixed
+
+- Concurrent balance refreshes of one exchange connection no longer create duplicate balance rows that inflate the portfolio total
+
+## [1.126.1] - 2026-11-09
+
+### Fixed
+
+- A market take-profit that filled while its bot worker restarted is now recognised by the restart check, so the deal closes instead of staying open
+
+## [1.126.0] - 2026-11-09
+
+### Added
+
+- DCA deals now record the ladder levels the price moved past before they could be placed. The bot never buys them at market by itself; each one can be executed from the deal, and "Execute next DCA" no longer re-executes a level that already filled.
+
+## [1.125.6] - 2026-11-09
+
+### Fixed
+
+- DCA: a ladder whose step shrinks below one price tick (step scale under 1 over many levels) no longer stops placing its safety orders after the market gaps through its last levels; a moved level may now sit past the ladder's computed depth by up to a tenth of that depth, while a flash wick far beyond the ladder is still refused.
+
+## [1.125.5] - 2026-11-09
+
+### Added
+
+- Bot engine: an order written off after the exchange refuses it now records why (refusal reason and error class), so refusals the platform should have retried can be told apart from balance or key problems.
+
+## [1.125.4] - 2026-11-09
+
+### Fixed
+
+- The public API's deal list (`GET /api/v2/deals/:dealType`) sorted every matching deal the account owns in memory to return one page, because no index matched its `createTime`, `_id` order. The DCA and combo deal collections now declare indexes in that exact order, with and without the status filter, so a page is read straight off the index. Results and their order are unchanged.
+
+## [1.125.3] - 2026-11-08
+
+### Fixed
+
+- A pair paused after the exchange kept cancelling its base orders unfilled now stays paused across a bot restart without warning again, and an ASAP bot retries it by itself when the pause ends
+
+## [1.125.2] - 2026-11-08
+
+### Fixed
+
+- Grid close: an order whose cancel the exchange accepted, but whose cancel answer still described it as open, was dropped from tracking, so the exchange's own cancel confirmation was ignored and the order stayed open in the bot's records after the bot closed. During a close the order now stays tracked until the exchange confirms it, and one still unconfirmed when the close sweep ends is cancelled once more to settle its state.
+
+## [1.125.1] - 2026-11-08
+
+### Fixed
+
+- Grid close on an API key that is not allowed to cancel orders: the close no longer sends a cancel for every order once the exchange has refused one for the key's permissions (on Kraken each further attempt extended a lockout of the whole key), and the user now gets a bot error naming the orders that remain on the exchange, instead of the bot closing with no message.
+
+## [1.125.0] - 2026-11-08
+
+### Added
+
+- Saved DCA and combo backtests keep `dealStats`, a fixed-size summary of the deal returns (count, winners, mean, spread, quantiles, a 20-bin histogram and deal durations), in place of the deal list, which has no upper bound. Hedge sides accept it as well.
+- Strategy vs random for a saved DCA or combo backtest can run server-side: a server-side request with `edge: { type: 'random', backtestId }` reruns the backtest's settings and period with random entries and writes `randomEdge` (both sides' count, mean and spread of the deal return %, Welch's t and a verdict) onto that backtest. When the backtest has no `dealStats`, its original run is repeated first to get it. Neither run's deals are stored.
+
+## [1.124.9] - 2026-11-07
+
+### Fixed
+
+- Open deals' stored unrealized P&L (before fees) could be written as 0, or as an older value, when the deal's fee-inclusive value was refreshed. Totals built on it, such as the dashboard's Unrealized PnL when the fee-inclusive total was unavailable, showed 0. Every stats write now carries the unrealized P&L, usage and max usage of the sample that writes it.
+
+## [1.124.8] - 2026-11-07
+
+### Fixed
+
+- After a restart, an open deal on a pair that had not traded since kept the unrealized P&L stored before the restart, so sorting open deals by unrealized P&L could still place it out of order. Each open deal now gets one price sample when its bot loads, from the latest price the bot already holds, and a stored value that is out of date is written by that first sample.
+
+## [1.124.7] - 2026-11-07
+
+### Fixed
+
+- Sorting open deals by unrealized P&L ($ or %) could put them out of order compared with the numbers on screen. The stored value the sort uses was written from the price sample before the one that saved it, so on a pair that trades rarely it could be hours behind the live value, and a newly opened deal needed three price changes before it had a stored value at all. The stored value is now taken from the sample that saves it, and a new deal is stored on its first price sample.
+
+## [1.124.6] - 2026-11-06
+
+### Fixed
+
+- When the exchange kept cancelling a DCA or combo bot's base order with nothing filled (for example, no liquidity within the exchange's price limit), the bot opened a new deal after every cancel, indefinitely and without telling the user. After three such cancels in a row on a pair, the bot now posts a message naming the pair, pauses automatic new deals on it for a window that grows up to an hour, and resumes as soon as a base order fills.
+
+## [1.124.5] - 2026-11-06
+
+### Fixed
+
+- When the exchange cancelled a DCA or combo deal's first order before anything traded, and the bot only found out by re-checking its orders after its user-stream connection came back, the deal stayed in "start" with nothing on the exchange for up to a day. It is now cancelled within seconds, as it already was when the exchange's cancel message arrived directly.
+
+## [1.124.4] - 2026-11-06
+
+### Fixed
+
+- With adaptive close on, a spot take-profit refused for balance is re-sent at a smaller amount. That amount could carry more decimals than the exchange's quantity step allows, so the exchange refused the retry too and the take-profit stayed off the book until the next attempt. The re-sent amount is now rounded down to the pair's quantity step. For a short spot deal the close is a buy, so the re-sent amount is now sized from the free quote balance at the close price instead of the free base balance. The first close attempt is unchanged.
+
+## [1.124.3] - 2026-11-06
+
+### Fixed
+
+- When a DCA deal closed on a take-profit that sold only part of the position, the bot opened the next deal while the market sale of the leftover coins was still running. The new deal's buy order could then sit in that sale's way, and the exchange cancelled the sale as a trade against the user's own order, leaving the coins unsold and tracked by no deal. The closed deal also missed what the sale did sell when the exchange reported the fills after the close. The bot now waits up to a few seconds for the sale to finish before opening the next deal. It books every fill of the sale onto the closed deal, and if the exchange cancels the sale with coins left, it sends that rest once more.
+
+## [1.124.2] - 2026-11-06
+
+### Fixed
+
+- When an entry order of a DCA deal filled just after the deal had closed, and the exchange book only accepted limit orders, the market order that sells those coins back was refused and nothing else sold them. The coins are now sold with a limit order at the latest price, and its fill is booked to the closed deal. A market order is still tried first.
+
+## [1.124.1] - 2026-11-06
+
+### Fixed
+
+- A combo or DCA deal whose position the exchange shows as gone could stay open for hours after the first "no position" reading. The second reading needed to close it was taken only when the price came back to the take-profit or the bot re-placed its ladders. The bot now takes that second reading itself once the five-minute window has passed. Two agreeing readings are still required before a deal is closed.
+
+## [1.124.0] - 2026-11-06
+
+### Added
+
+- Missed-fill failsafe, available to self-hosted installs (`npm run failsafe`, enabled with `FF_ENABLED=true`). On a live exchange a bot only learns that a resting limit order filled from the exchange's user stream; if that event is lost, the bot keeps waiting on an order that is already gone — a grid stops shifting and a DCA deal stops averaging. The failsafe watches resting limit orders against the live trade feed and, when price has clearly crossed one that the bot still holds as open, tells the bot to re-check its orders with the exchange so the fill is booked. It also checks that every bot is still receiving its user stream and asks a deaf bot to resubscribe.
+
+## [1.123.22] - 2026-11-05
+
+### Fixed
+
+- A DCA deal whose base order filled close to the exchange's minimum order size, with the fee taken in the coin bought, could be left open with no take-profit and no message. The take-profit was sized before the deal's position had been updated from the fill, so the position read as empty and the close was skipped as a passing state. It is now sized from the filled entry, and placed exactly as it would be a moment later.
+
+## [1.123.21] - 2026-11-05
+
+### Fixed
+
+- On Kraken spot, Coinbase and KuCoin futures, an order whose placement answer arrived after the order had already filled and closed its deal was reported to the user as "Order not found", even though the exchange, when asked again, confirmed it filled. The confirmation was looked up under the exchange's order id instead of the bot's own id and was lost. It is now found, and no warning is raised.
+
+## [1.123.20] - 2026-11-04
+
+### Fixed
+
+- A combo SHORT deal on spot, with profit in quote, whose closing buy-back is below the exchange's minimum order still closes without an order, but the base it did not buy back is now remembered and added to the bot's next close on the same pair. It used to be forgotten, so the bot's base shrank a little with every such close. Only the bot's last deal can now be left short, by less than one minimum order. The carried amount is limited to what the next deal's own quote balance can pay for; the rest keeps carrying.
+
+## [1.123.19] - 2026-11-03
+
+### Fixed
+
+- A safety order the exchange refused (for example for lack of balance) is now placed again under a new order id. It used to be re-sent under the refused id; the exchange accepted it, but the bot's record of that id stayed cancelled, so after the next bot reload the order was no longer tracked. The bot then placed a second order at the same price, and a deal restart or close never cancelled the first one.
+
+## [1.123.18] - 2026-11-02
+
+### Fixed
+
+- When the bot cancels an order that part-filled, the filled part is kept even if the exchange's answer to the cancel reports no fill. The exchange's own "cancelled, part filled" report could reach the bot while the cancel was in flight, and the later answer then erased that fill from the bot's working copy of the order. A combo deal closing at that moment bought back (or sold) less than it held, leaving the difference open on the account.
+
+## [1.123.17] - 2026-11-02
+
+### Fixed
+
+- A combo deal closed because its base grid completed is now always labelled "Base Minigrid". It was relabelled "take profit" whenever a closing order had to be sent, whatever that order's result. That close now also uses the deal close type set on the bot (limit or market) instead of always closing at market.
+
+## [1.123.16] - 2026-11-01
+
+### Fixed
+
+- A combo deal's base grid is now laid around the price the base order actually filled at. On Hyperliquid a market base order is sent as a padded limit, and when it rested for a moment before filling it was recorded as a limit order at the requested price; the base grid was then centred on that requested price instead of the fill. On a thin book this put the grid's buy-backs (of a short) or sells (of a long) on the wrong side of the entry, where they could fill at once and close the deal at a loss.
+
+## [1.123.15] - 2026-11-01
+
+### Fixed
+
+- A LIMIT base order that part-fills just before the bot re-prices it now opens the deal on what filled. When the exchange's own "cancelled, part filled" report arrived while the bot's cancel was still in flight, and the cancel answer itself showed no fill (or the cancel failed), the bot placed the whole entry again on top of the coins it already held, and the deal left the first fill out of its size, average price and take profit. The report is now kept for the cancel to settle on. Entries that filled nothing are still cancelled and re-placed at the new price.
+
+## [1.123.14] - 2026-11-01
+
+### Fixed
+
+- A DCA safety order or add-funds order that the exchange cancels after part of it filled now adds what it bought to the deal. Before, only take-profit and base-order cancels were booked, so those coins were left out of the deal's size, average price and take profit, and an add-funds request stayed pending. The executed part is now booked once, like a fill of that order, and the deal's average counts it. Cancels the bot asked for itself, cancels with nothing or everything filled, and deals that are no longer open are handled as before.
+
+## [1.123.13] - 2026-11-01
+
+### Fixed
+
+- A grid bot whose stop loss or take profit closes it while it is still placing its starting orders now stops placing them at once. Before, the start-up placement kept going after the close had cancelled the orders that existed at that moment. Every level placed after that rested on the exchange for a bot that was already closed. An order the exchange accepts after the close began is now cancelled as soon as its placement returns.
+
 ## [1.123.12] - 2026-10-31
 
 ### Fixed

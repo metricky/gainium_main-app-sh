@@ -132,6 +132,7 @@ import {
   hedgeDcaBacktestDb,
   brokerCodesDb,
 } from '../db/dbInit'
+import { withTerminalMoveGuard } from './handlers/terminalMove'
 import { backtestNotFound, dealNotFound, errorAccess } from './errorResponse'
 import {
   createPaperUser,
@@ -163,8 +164,11 @@ import {
   verifyPassword as verifyPasswordHash,
 } from '../utils/password'
 import { createOrUpdateUser, findUser as _findUser } from './handlers/user'
+import { isSessionRow, keepSessions } from '../utils/sessionVersion'
+import { sessionRowPull } from '../utils/sessionTokenHash'
 import { resetUser } from '../utils/user'
 import {
+  literalSearchPattern,
   mapBacktestListOptions,
   mapDataGridOptionsToMongoOptions,
 } from '../db/utils'
@@ -714,7 +718,7 @@ const resolvers = <
           location: locationForIp(t.ip),
           createdAt: t.createdAt ? new Date(t.createdAt).toISOString() : null,
           expiredAt: t.expiredAt ? new Date(t.expiredAt).toISOString() : null,
-          current: t.token === token,
+          current: isSessionRow(t, token),
         }))
         .sort((a, b) => {
           // Current session first, then most-recently created.
@@ -1446,8 +1450,9 @@ const resolvers = <
         paperContext: paperContext ? { $eq: true } : { $ne: true },
         'settings.name': { $exists: true, $ne: '' },
       }
-      if (search) {
-        s['settings.name'] = { $regex: search, $options: 'i' }
+      const searchText = literalSearchPattern(search)
+      if (searchText) {
+        s['settings.name'] = { $regex: searchText, $options: 'i' }
       }
       const f: ProjectionFields<MainBot> = {
         id: '$_id',
@@ -4999,30 +5004,37 @@ const resolvers = <
         importFrom: dealId,
         skipBalanceCheck: true,
       }
-      const newBot = await Bot.createDCABot(
-        user.data._id.toString(),
-        { ...newBotData, vars: { list: [], paths: [] } },
-        paperContext,
-        async () =>
-          combo
-            ? await Bot.closeComboDeal(
-                `${user.data._id}`,
-                `${dcaBot._id}`,
-                dealId,
-                CloseDCATypeEnum.cancel,
-                true,
-                paperContext,
-                DCACloseTriggerEnum.auto,
-              )
-            : await Bot.closeDCADeal(
-                `${user.data._id}`,
-                `${dcaBot._id}`,
-                dealId,
-                CloseDCATypeEnum.cancel,
-                true,
-                paperContext,
-                DCACloseTriggerEnum.auto,
-              ),
+      const newBot = await withTerminalMoveGuard(
+        `${user.data._id}`,
+        `${dealId}`,
+        dcaDeal.status === DCADealStatusEnum.closed ||
+          dcaDeal.status === DCADealStatusEnum.canceled,
+        () =>
+          Bot.createDCABot(
+            user.data._id.toString(),
+            { ...newBotData, vars: { list: [], paths: [] } },
+            paperContext,
+            async () =>
+              combo
+                ? await Bot.closeComboDeal(
+                    `${user.data._id}`,
+                    `${dcaBot._id}`,
+                    dealId,
+                    CloseDCATypeEnum.cancel,
+                    true,
+                    paperContext,
+                    DCACloseTriggerEnum.auto,
+                  )
+                : await Bot.closeDCADeal(
+                    `${user.data._id}`,
+                    `${dcaBot._id}`,
+                    dealId,
+                    CloseDCATypeEnum.cancel,
+                    true,
+                    paperContext,
+                    DCACloseTriggerEnum.auto,
+                  ),
+          ),
       )
       if (newBot.status === StatusEnum.notok) {
         return newBot
@@ -5227,23 +5239,29 @@ const resolvers = <
         importFrom: gridBot._id,
         indicatorGroups: [],
       }
-      const newBot = await Bot.createDCABot(
-        user.data._id.toString(),
-        { ...newBotData, vars: { list: [], paths: [] } },
-        paperContext,
-        async () =>
-          await Bot.changeStatus(
-            `${user.data._id}`,
-            {
-              status: BotStatusEnum.closed,
-              id: `${gridBot._id}`,
-              cancelPartiallyFilled: true,
-              type: BotType.grid,
-              closeGridType: CloseGRIDTypeEnum.cancel,
-            },
+      const newBot = await withTerminalMoveGuard(
+        `${user.data._id}`,
+        `${gridBot._id}`,
+        gridBot.status === BotStatusEnum.closed || !!gridBot.isDeleted,
+        () =>
+          Bot.createDCABot(
+            user.data._id.toString(),
+            { ...newBotData, vars: { list: [], paths: [] } },
             paperContext,
-            false,
-            true,
+            async () =>
+              await Bot.changeStatus(
+                `${user.data._id}`,
+                {
+                  status: BotStatusEnum.closed,
+                  id: `${gridBot._id}`,
+                  cancelPartiallyFilled: true,
+                  type: BotType.grid,
+                  closeGridType: CloseGRIDTypeEnum.cancel,
+                },
+                paperContext,
+                false,
+                true,
+              ),
           ),
       )
       if (newBot.status === StatusEnum.notok) {
@@ -5634,6 +5652,7 @@ const resolvers = <
           dealId: string
           botId: string
           expectedLevel?: number
+          missedLevel?: number
         }
       },
       { token, req, paperContext }: InputRequest,
@@ -5645,13 +5664,13 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
-      const { botId, dealId, expectedLevel } = input
+      const { botId, dealId, expectedLevel, missedLevel } = input
       return await Bot.executeNextDcaLevel(
         botId,
         dealId,
         user.data._id.toString(),
         paperContext,
-        { expectedLevel },
+        { expectedLevel, missedLevel },
       )
     },
     reduceDealFunds: async (
@@ -7570,10 +7589,11 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      const own = (user.data.tokens ?? []).find((t) => isSessionRow(t, token))
       const saveDataRequest = await userDb.updateData(
         { _id: user.data._id },
         {
-          $pull: { tokens: { token } },
+          $pull: { tokens: sessionRowPull(own ?? {}, token) },
         },
         true,
       )
@@ -7638,11 +7658,18 @@ const resolvers = <
       if (user.status === StatusEnum.notok) {
         return user
       }
+      // Raises the session version as well, and stamps the kept rows with
+      // it: a session issued before this moment is refused from here on even
+      // if its row is written back.
       const saveDataRequest = await userDb.updateData(
         { _id: user.data._id },
         {
-          $pull: {
-            tokens: { token: { $ne: token }, source: { $ne: 'admin' } },
+          $inc: { tokenVersion: 1 },
+          $set: {
+            tokens: keepSessions(
+              user.data,
+              (t) => isSessionRow(t, token) || t.source === 'admin',
+            ),
           },
         },
         true,
@@ -9797,12 +9824,16 @@ const resolvers = <
       // survived the very reset performed to get rid of it. The caller's own
       // token is retained so changing your password does not sign you out of
       // the tab you did it from.
-      const remainingTokens = (user.data.tokens ?? []).filter(
-        (t) => t.token === token,
+      // The session version is raised in the same write and the kept row is
+      // stamped with it, so anything issued before this moment is refused
+      // even if its row comes back.
+      const remainingTokens = keepSessions(user.data, (t) =>
+        isSessionRow(t, token),
       )
       const result = await userDb.updateData(
         { _id: user.data._id.toString() },
         {
+          $inc: { tokenVersion: 1 },
           $set: {
             password: await hashPassword(password),
             tokens: remainingTokens,

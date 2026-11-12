@@ -1427,6 +1427,8 @@ export const BotSchema = /* GraphQL */ `
     dealId: String!
     botId: String!
     expectedLevel: Int
+    "Spec 233: execute this skipped level (deal.missedLevels) instead of the next one."
+    missedLevel: Int
   }
   """
   Cancel and re-place one deal's orders (safety orders and take profit)
@@ -2459,7 +2461,47 @@ export const BotSchema = /* GraphQL */ `
     multiPairs: Float
     symbolStats: [SymbolStats]
     periodicStats: [PeriodicStats]
+    dealStats: BacktestDealStats
+    randomEdge: BacktestRandomEdge
     messages: [String]
+  }
+  type BacktestDealStatsHistogram {
+    from: Float
+    step: Float
+    counts: [Float]
+  }
+  type BacktestDealStatsDuration {
+    mean: Float
+    p50: Float
+    p95: Float
+    max: Float
+  }
+  type BacktestDealStats {
+    closed: Float
+    winners: Float
+    mean: Float
+    sd: Float
+    min: Float
+    max: Float
+    p5: Float
+    p25: Float
+    p50: Float
+    p75: Float
+    p95: Float
+    histogram: BacktestDealStatsHistogram
+    duration: BacktestDealStatsDuration
+  }
+  type BacktestReturnStats {
+    n: Float
+    mean: Float
+    sd: Float
+  }
+  type BacktestRandomEdge {
+    time: Float
+    strategy: BacktestReturnStats
+    random: BacktestReturnStats
+    t: Float
+    verdict: String
   }
   type PeriodicStats {
     period: String
@@ -2502,6 +2544,8 @@ export const BotSchema = /* GraphQL */ `
     multiPairs: Float
     symbolStats: [SymbolStats]
     periodicStats: [PeriodicStats]
+    dealStats: BacktestDealStats
+    randomEdge: BacktestRandomEdge
     messages: [String]
   }
   type hedgeComboBacktestHedgeResult {
@@ -2526,6 +2570,7 @@ export const BotSchema = /* GraphQL */ `
     multiPairs: Float
     symbolStats: [SymbolStats]
     periodicStats: [PeriodicStats]
+    dealStats: BacktestDealStats
     messages: [String]
   }
   type hedgeComboBacktestSideConfig {
@@ -2776,7 +2821,34 @@ export const BotSchema = /* GraphQL */ `
     multiPairs: Float
     symbolStats: [SymbolStatsInput]
     periodicStats: [PeriodicStatsInput]
+    dealStats: BacktestDealStatsInput
     messages: [String]
+  }
+  input BacktestDealStatsHistogramInput {
+    from: Float
+    step: Float
+    counts: [Float]
+  }
+  input BacktestDealStatsDurationInput {
+    mean: Float
+    p50: Float
+    p95: Float
+    max: Float
+  }
+  input BacktestDealStatsInput {
+    closed: Float
+    winners: Float
+    mean: Float
+    sd: Float
+    min: Float
+    max: Float
+    p5: Float
+    p25: Float
+    p50: Float
+    p75: Float
+    p95: Float
+    histogram: BacktestDealStatsHistogramInput
+    duration: BacktestDealStatsDurationInput
   }
   input PeriodicStatsInput {
     period: String
@@ -2810,6 +2882,7 @@ export const BotSchema = /* GraphQL */ `
     multiPairs: Float
     symbolStats: [SymbolStatsInput]
     periodicStats: [PeriodicStatsInput]
+    dealStats: BacktestDealStatsInput
     messages: [String]
   }
   input hedgeComboBacktestInputHedgeResult {
@@ -2834,6 +2907,7 @@ export const BotSchema = /* GraphQL */ `
     multiPairs: Float
     symbolStats: [SymbolStatsInput]
     periodicStats: [PeriodicStatsInput]
+    dealStats: BacktestDealStatsInput
     messages: [String]
   }
   input hedgeComboBacktestInputSideConfig {
@@ -4783,6 +4857,8 @@ export const BotSchema = /* GraphQL */ `
     assets: botAssets
     dcaBot: [dcaDealBot]
     gridBreakpoints: [gridBreakpoint]
+    "Spec 233: ladder levels the bot skipped and will not place by itself."
+    missedLevels: [dcaMissedLevel]
     strategy: StrategyEnum
     exchange: String
     exchangeUUID: String
@@ -4926,6 +5002,11 @@ export const BotSchema = /* GraphQL */ `
   type gridBreakpoint {
     price: Float
     displacedPrice: Float
+  }
+  type dcaMissedLevel {
+    level: Int
+    price: Float
+    qty: Float
   }
   type dcaDealBot {
     settings: DCABotSettings

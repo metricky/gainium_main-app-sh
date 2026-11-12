@@ -1,6 +1,7 @@
 import { model } from 'mongoose'
 import schema, { registerIndexes } from './schema'
 import { collections } from './config'
+import logger from '../utils/logger'
 
 import {
   BalancesSchema,
@@ -200,7 +201,16 @@ export const syncIndexes = async (user = true) => {
   await models.reconcileSweep.syncIndexes()
   await models.fundingLot.syncIndexes()
   await models.quantRulesEvent.syncIndexes()
-  await models.balance.syncIndexes()
+  // Fails while duplicate balance rows predate the unique identity index
+  // (schema.ts). Logged rather than thrown so it cannot skip the sync of
+  // every collection after it; main-app migration v53 removes the duplicates.
+  await models.balance
+    .syncIndexes()
+    .catch((e) =>
+      logger.error(
+        `syncIndexes | balances: ${(e as Error)?.message ?? e} — duplicate rows block the unique identity index until they are removed`,
+      ),
+    )
   await models.backtest.syncIndexes()
   await models.gridBacktest.syncIndexes()
   await models.comboBacktest.syncIndexes()
@@ -220,7 +230,18 @@ export const syncIndexes = async (user = true) => {
   await models.snapshot.syncIndexes()
   await models.transaction.syncIndexes()
   if (user && SYNC_USER === 'true') {
-    await models.user.syncIndexes()
+    // Create-only, never a full sync: an edition built on core may register
+    // its own, wider model on `users`, and a full sync from this schema would
+    // drop every index that model declares and this one does not, unique ones
+    // included. A failed build (duplicate values under a unique index) is
+    // logged rather than thrown so it cannot skip the collections after it.
+    await models.user
+      .createIndexes()
+      .catch((e) =>
+        logger.error(
+          `syncIndexes | users: ${(e as Error)?.message ?? e} — an index on users could not be created; uniqueness on its field is NOT enforced until it is`,
+        ),
+      )
   }
   await models.userFiles.syncIndexes()
   await models.dcaBacktestRequest.syncIndexes()

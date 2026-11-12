@@ -1,8 +1,10 @@
 import type DB from '../db'
 import {
+  closeCancelRefusedMessage,
   exchangeInfoMissingStopMessage,
   startFailedMessage,
 } from './userNotice'
+import { isKeyPermissionRefusal } from './authGuard'
 import {
   OrderSideEnum,
   StatusEnum,
@@ -19,6 +21,7 @@ import {
   FuturesStrategyEnum,
   BotType,
   BotFlags,
+  MessageTypeEnum,
 } from '../../types'
 import MainBot, {
   isDefinitiveOrderNotFound,
@@ -1323,7 +1326,7 @@ function createBotHelper<
           defaultStatuses: true,
         })
         await this.primeReconcileBatch(toCheck)
-        for (const o of toCheck) {
+        for (const [i, o] of toCheck.entries()) {
           let attemptsForOrder = 0
           const getOrder = await this.getOrderForReconcile(o, {
             pace: true,
@@ -1332,6 +1335,16 @@ function createBotHelper<
           if (!getOrder || !getOrder.data) {
             unresolved.push(o.clientOrderId)
             unresolvedLookupAttempts += attemptsForOrder
+            // Spec 237: the key may not read orders, so every remaining lookup
+            // would be refused the same way. Leave them unread, untouched.
+            if (isKeyPermissionRefusal(getOrder?.reason)) {
+              const rest = toCheck.slice(i + 1)
+              unresolved.push(...rest.map((r) => r.clientOrderId))
+              this.handleWarn(
+                `Reconcile stopped after a key refusal (${getOrder?.reason}); ${rest.length} order(s) not asked`,
+              )
+              break
+            }
             continue
           }
           if (getOrder.status === StatusEnum.notok) {
@@ -2026,6 +2039,12 @@ function createBotHelper<
         // that shares its pre-send section with others must carry its own
         // number rather than read whatever the counter has reached by then.
         const placeOne = async (order: Grid) => {
+          // Spec 215 §4.1: a close that started while this ladder is being
+          // placed (stop-loss, take-profit or a user stop) ends it here. The
+          // stop path cancels only what exists when it takes its snapshot.
+          if (this.isGridClosing()) {
+            return
+          }
           const stage = ++i
           const get = this.getOrderFromMap(order.newClientOrderId)
           if (get && get.status !== 'CANCELED') {
@@ -2033,6 +2052,14 @@ function createBotHelper<
             return
           }
           const result = await this.placeRegularOrder(order, ed)
+          if (
+            result &&
+            (result.status === 'NEW' || result.status === 'PARTIALLY_FILLED') &&
+            this.isGridClosing()
+          ) {
+            await this.cancelPlacedAfterClose(result)
+            return
+          }
           if (result) {
             await this.countBalances(lastPrice)
             if (result.status === 'FILLED') {
@@ -2127,6 +2154,38 @@ function createBotHelper<
       }
       this.endMethod(_id)
     }
+    /**
+     * A close is under way or done: the stop/take-profit close is running
+     * (`blockLimit`, set before its cancel snapshot), the closing order filled
+     * (`stopFilled`, spec 189), or the bot is closed. Reset only by a fresh
+     * start. Spec 215 §4.1.
+     */
+    protected isGridClosing() {
+      return (
+        this.stopFilled ||
+        this.blockLimit ||
+        this.data?.status === BotStatusEnum.closed
+      )
+    }
+    /**
+     * A ladder order the venue accepted after the close began. If a cancel of
+     * the bot's own already claimed it (the stop's snapshot held its
+     * write-ahead row), that cancel finishes the job. Otherwise nothing will
+     * ever cancel it, so cancel it now. Spec 215 §4.2.
+     */
+    protected async cancelPlacedAfterClose(order: Order) {
+      if (this.isOwnCancel(order.clientOrderId)) {
+        return
+      }
+      this.handleLog(
+        `Order ${order.clientOrderId} was placed after the bot began closing, cancelling it`,
+      )
+      const held = this.getOrderFromMap(order.clientOrderId) ?? order
+      const cancel = await this.cancelOrderOnExchange(held, false)
+      if (cancel?.status === 'FILLED') {
+        await this.handleUnknownOrder(cancel)
+      }
+    }
     async processLiquidationOrder(order: Order): Promise<void> {
       if (!this.futures) {
         return
@@ -2190,7 +2249,7 @@ function createBotHelper<
           )
           this.resetPosition()
 
-          this.stop()
+          this.stop(true)
         }
       }
     }
@@ -2542,6 +2601,15 @@ function createBotHelper<
       return a.orderTime - b.orderTime
     }
     /**
+     * Spec `231`. Set for the duration of a close sweep (`closing` below):
+     * a cancel the venue accepted but still answers as NEW keeps the order
+     * tracked until the venue's own report finishes it.
+     */
+    protected closingSweep = false
+    protected override keepsUnconfirmedCancelTracked(_order: Order): boolean {
+      return this.closingSweep
+    }
+    /**
      * Cancel all orders<br />
      *
      * Update data in {@link BotHelper#orders}, save to orders collection in db, emit via {@link BotHelper#ioUpdate}<br />
@@ -2549,12 +2617,57 @@ function createBotHelper<
      * After each request run {@link BotHelper#countBalances}<br />
      *
      * @param {boolean} [cancelPartiallyFilled] cancel order with status PARTIALLY FILLED. Default = false
+     * @param {boolean} [closing] the bot is closing (stop, close by limit/market,
+     *   stop and sell) — not a `start`/`reloadBot` clean-up. Spec `231`.
      */
+    /**
+     * The first refusal of the running {@link BotHelper#cancelAllOrder} sweep
+     * that said the KEY may not cancel. Spec `232`.
+     */
+    private sweepKeyRefusal?: string | null
+
+    protected override noteCancelRefused(_order: Order, reason: string) {
+      if (!this.sweepKeyRefusal && isKeyPermissionRefusal(reason)) {
+        this.sweepKeyRefusal = reason
+      }
+    }
+
+    /**
+     * After a close sweep the key was not allowed to finish, tell the user
+     * which orders are still on the exchange. They stay tracked as the
+     * exchange has them; only the user can cancel them. Spec `232` §4.3.
+     */
+    private async reportCloseCancelRefused(refusal: string | void) {
+      if (!refusal) {
+        return
+      }
+      const left = this.getOrdersByStatusAndDealId({
+        status: this.orderStatuses,
+      })
+      if (!left.length) {
+        return
+      }
+      await this.reportUserRefusal(
+        closeCancelRefusedMessage(
+          left.map((o) =>
+            o.orderId && `${o.orderId}` !== '-1'
+              ? `${o.orderId}`
+              : o.clientOrderId,
+          ),
+          refusal,
+        ),
+        this.data?.settings.pair,
+        MessageTypeEnum.error,
+      )
+    }
+
     async cancelAllOrder(
       cancelPartiallyFilled = false,
       setErrors = true,
-    ): Promise<void> {
+      closing = false,
+    ): Promise<string | void> {
       let lastPrice = 0
+      let keyRefusal: string | null = null
       if (this.exchange && this.data && this.orders) {
         const lastPriceRequest = await this.getLatestPrice(
           this.data.settings.pair,
@@ -2570,13 +2683,29 @@ function createBotHelper<
         // this loop returns early, so every order the batch cancels is also
         // reached by the loop and written down locally.
         await this.primeCancelBatch(newOrders)
+        this.sweepKeyRefusal = null
+        let skipped = 0
+        // Spec `231`. Cancels the venue accepted but whose answer still said
+        // NEW: they stay tracked, and are asked again once the loop is done.
+        const unconfirmed: string[] = []
+        this.closingSweep = closing
         try {
           for (const order of newOrders) {
             i++
+            // Spec `232` §4.2: the key may not cancel, so every further
+            // cancel is refused the same way — and on Kraken each one extends
+            // a lockout of the whole key. The order stays as it is.
+            if (this.sweepKeyRefusal) {
+              skipped++
+              continue
+            }
             const cancel = await this.cancelOrderOnExchange(order, setErrors)
 
             if (cancel?.status === 'FILLED') {
               await this.handleUnknownOrder(cancel)
+            }
+            if (closing && cancel?.status === 'NEW') {
+              unconfirmed.push(order.clientOrderId)
             }
             await this.countBalances(lastPrice)
             if (!this.firstRun) {
@@ -2589,11 +2718,40 @@ function createBotHelper<
               this.updateProgress(progress)
             }
           }
+          // Spec `231` §4.2. Still held as resting means the venue's report
+          // has not arrived; a second cancel makes the venue state it
+          // ("already cancelled" goes to the unknown-order lookup) before the
+          // caller closes the user stream.
+          for (const id of unconfirmed) {
+            if (this.sweepKeyRefusal) {
+              break
+            }
+            const held = this.getOrderFromMap(id)
+            if (!held || !['NEW', 'PARTIALLY_FILLED'].includes(held.status)) {
+              continue
+            }
+            this.handleLog(
+              `Cancel of ${id} was accepted but the exchange still reports it open. Cancelling again to confirm`,
+            )
+            const again = await this.cancelOrderOnExchange(held, setErrors)
+            if (again?.status === 'FILLED') {
+              await this.handleUnknownOrder(again)
+            }
+          }
         } finally {
+          this.closingSweep = false
           this.clearCancelBatch()
+          keyRefusal = this.sweepKeyRefusal ?? null
+          this.sweepKeyRefusal = null
+        }
+        if (keyRefusal) {
+          this.handleWarn(
+            `Cancel sweep stopped: the key may not cancel orders (${keyRefusal}). ${skipped} cancel(s) not sent`,
+          )
         }
         this.sendEndProcess(true)
       }
+      return keyRefusal ?? undefined
     }
     protected async checkPriceToStart() {
       if (!this.data) {
@@ -2891,7 +3049,7 @@ function createBotHelper<
           )
           this.ignoreErrors = true
           this.serviceRestart = false
-          await this.stop()
+          await this.stop(true)
           if (this.data) {
             this.data.status = BotStatusEnum.closed
             await this.updateData({ status: this.data.status })
@@ -3274,7 +3432,9 @@ function createBotHelper<
         }).find((o) => o.typeOrder === TypeOrderEnum.stop)
         if (!findTP && !this.stopFilled) {
           const price = await this.getLatestPrice(pair)
-          await this.cancelAllOrder(true)
+          await this.reportCloseCancelRefused(
+            await this.cancelAllOrder(true, true, true),
+          )
           const progress = {
             text: BotProgressCodeEnum.placeStop,
             stage: 0,
@@ -3503,7 +3663,7 @@ function createBotHelper<
           await this.profitAfterPositionClosed(order)
           this.resetPosition()
         }
-        this.stop()
+        this.stop(true)
       }
     }
     /**
@@ -3539,7 +3699,9 @@ function createBotHelper<
         return await this.processSellAtStop(close)
       }
       this.blockLimit = true
-      await this.cancelAllOrder(cancelPartiallyFilled, false)
+      await this.reportCloseCancelRefused(
+        await this.cancelAllOrder(cancelPartiallyFilled, false, true),
+      )
       this.lockTpSlCheck = true
       if (this.exchange && this.data) {
         if (this.swapAssetData && this.swapAssetData.status !== 'FILLED') {
@@ -5129,7 +5291,7 @@ function createBotHelper<
             result === TpSlReturn.tp) ||
           (this.data.settings.slAction === 'stop' && result === TpSlReturn.sl)
         ) {
-          this.stop()
+          this.stop(true)
         } else if (
           (this.data.settings.tpSlAction === 'stopAndSell' &&
             result === TpSlReturn.tp) ||
@@ -5137,7 +5299,7 @@ function createBotHelper<
             result === TpSlReturn.sl)
         ) {
           this.blockLimit = true
-          await this.cancelAllOrder(true)
+          await this.cancelAllOrder(true, true, true)
           const payload: { grid?: Grid; additional?: OrderAdditionalParams } =
             {}
           const price = !oldTpSl

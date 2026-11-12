@@ -5,6 +5,12 @@ import {
   LOGIN_SESSION_TTL_SECONDS,
 } from '../../utils/sessionTtl'
 import { hashPassword } from '../../utils/password'
+import {
+  isSessionCurrent,
+  sessionVersionClaim,
+} from '../../utils/sessionVersion'
+import logger from '../../utils/logger'
+import { sessionLookup, sessionRowToken } from '../../utils/sessionTokenHash'
 import type { ClearUserSchema, UserSchema } from '../../../types'
 import { getFullLocationByIp } from './ip'
 import { JWT_SECRET } from '../../config'
@@ -58,6 +64,7 @@ export const createOrUpdateUser = async (
     {
       username: email,
       authorized: true,
+      ...sessionVersionClaim(findUser.data.result),
     },
     JWT_SECRET,
     LOGIN_SESSION_TTL_SECONDS,
@@ -68,7 +75,7 @@ export const createOrUpdateUser = async (
       $push: {
         tokens: [
           {
-            token: jwtToken,
+            ...sessionRowToken(jwtToken),
             createdAt: +sessionCreatedAt,
             expiredAt: expire,
             ip,
@@ -126,7 +133,7 @@ export const createOrUpdateUser = async (
       password: await hashPassword(password),
       tokens: [
         {
-          token: jwtToken,
+          ...sessionRowToken(jwtToken),
           createdAt: +new Date(),
           expiredAt: expire,
           ip,
@@ -185,11 +192,20 @@ export const findUser = async <T extends UserSchema>(
         ? await userDb.readData({
             demo: true,
           })
-        : await userDb.readData({
-            tokens: { $elemMatch: { token } },
-          })
+        : await userDb.readData(
+            sessionLookup(token) as Parameters<DB<T>['readData']>[0],
+          )
     if (userFind.status === StatusEnum.ok) {
-      if (userFind.data && userFind.data.result) {
+      if (
+        token !== 'demo' &&
+        userFind.data?.result &&
+        !isSessionCurrent(token, userFind.data.result)
+      ) {
+        // Same answer as a session that is no longer in `tokens[]`.
+        logger.warn(
+          `Session rejected | findUser | revoked | user ${userFind.data.result._id}`,
+        )
+      } else if (userFind.data && userFind.data.result) {
         return {
           status: StatusEnum.ok as typeof StatusEnum.ok,
           reason: null,
