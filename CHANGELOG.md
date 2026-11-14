@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.126.18] - 2026-11-13
+
+### Fixed
+
+- Hedge legs on spot: a funding buy raised to the exchange minimum is judged against what the safety orders need, so a slightly short market fill no longer cancels the deal and strands the bought coins
+
+## [1.126.17] - 2026-11-13
+
+### Fixed
+
+- Closing a futures grid at market or limit with no open position now stops the bot instead of sending a zero-size close and leaving it open with no orders; a refused close order is retried
+
+## [1.126.16] - 2026-11-13
+
+### Added
+
+- DCA bots accept an out-of-band correction to their realized-profit total from the bot host, applied to the running bot's own copy and persisted with an id so a repeat is a no-op
+
+## [1.126.15] - 2026-11-13
+
+### Fixed
+
+- A DCA take-profit that closed the whole position while several safety-order fills from the same exchange message were still being booked no longer sends market orders to "close the rest" of those fills, and the closed deal books them at their own fill price
+
 ## [1.126.14] - 2026-11-12
 
 ### Fixed

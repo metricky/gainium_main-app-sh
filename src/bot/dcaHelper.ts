@@ -190,8 +190,14 @@ import {
 } from '../../types'
 import { ExchangeIntervals } from '../../types'
 import {
+  addProfitCorrection,
+  invalidProfitCorrection,
+  type ProfitCorrectionDelta,
+} from './profitCorrection'
+import {
   closeNotActioned,
   convertDCABot,
+  convertDCABotToObject,
   convertComboBot,
   futuresPosition,
   limitOnlyEntryReplaced,
@@ -3831,6 +3837,41 @@ function createDCABotHelper<
       return { feeByAsset, feePaid: { base: feeBaseFull, quote: feeQuoteFull } }
     }
     /**
+     * Spec `238`. Entry fills of a deal the venue already reported FILLED whose
+     * `updateDeal` is still queued, and what they add to `currentBalances`.
+     * The take-profit is sized from FILLED rows, so a close has to count them
+     * too. Add-funds fills move `initialBalances` as well and are left to
+     * `updateDeal`; a combo books from its own rebuilt ledger.
+     */
+    private queuedEntryFills(dealId: string) {
+      const booked = this.dealUpdateOrders.get(dealId)
+      const orders = this.combo
+        ? []
+        : this.getOrdersByStatusAndDealId({
+            dealId,
+            status: ['FILLED', 'CANCELED'],
+          }).filter(
+            (o) =>
+              o.typeOrder === TypeOrderEnum.dealRegular &&
+              this.ordersInBetweenUpdates.has(o.clientOrderId) &&
+              !booked?.has(o.clientOrderId) &&
+              !isAddFundsOrder(o) &&
+              executedFillQty(o) > 0,
+          )
+      return orders.reduce(
+        (acc, o) => {
+          const buy = o.side === OrderSideEnum.buy
+          const q = executedFillQty(o)
+          return {
+            orders: acc.orders,
+            base: acc.base + q * (buy ? 1 : -1),
+            quote: acc.quote + q * +o.price * (buy ? -1 : 1),
+          }
+        },
+        { orders, base: 0, quote: 0 },
+      )
+    }
+    /**
      * Close deal when TP is filled
      *
      * @param {Order} tpOrder Order which close the deal
@@ -3918,8 +3959,11 @@ function createDCABotHelper<
           let sweep: { result: Order | string | void; qty: number } | void =
             undefined
           const preLedger = findDeal.deal.currentBalances
+          // Spec `238`: the position includes fills still queued for booking.
+          const preQueued = this.queuedEntryFills(dealId)
           const preBase =
             (preLedger?.base ?? NaN) +
+            preQueued.base +
             qty * (tpOrder.side === OrderSideEnum.buy ? 1 : -1)
           const preRemainder = this.isLong
             ? preBase
@@ -4048,6 +4092,33 @@ function createDCABotHelper<
             !Number.isFinite(ledger?.base) ||
             !Number.isFinite(ledger?.quote) ||
             (ledger.base === 0 && ledger.quote === 0)
+          // Spec `238` §4.2: the close is committed, so the fills still queued
+          // for booking are booked here, once — re-read, as a queued
+          // `updateDeal` may have booked one meanwhile — and their queued
+          // `updateDeal` returns "already processed" instead of buying or
+          // selling them again as late fills. A lost ledger is rebuilt from
+          // every filled row below and needs none of this (§4.3).
+          if (!ledgerLost) {
+            const queued = this.queuedEntryFills(dealId)
+            if (queued.orders.length) {
+              const booked =
+                this.dealUpdateOrders.get(dealId) ?? new Set<string>()
+              for (const o of queued.orders) {
+                booked.add(o.clientOrderId)
+                this.ordersInBetweenUpdates.delete(o.clientOrderId)
+              }
+              this.dealUpdateOrders.set(dealId, booked)
+              findDeal.deal.currentBalances = {
+                base: ledger.base + queued.base,
+                quote: ledger.quote + queued.quote,
+              }
+              this.handleLog(
+                `Deal ${dealId} closes with ${queued.orders.length} entry fill(s) not booked yet (${queued.orders
+                  .map((o) => o.clientOrderId)
+                  .join(', ')}), booked at close`,
+              )
+            }
+          }
           if (
             ledgerLost &&
             Number.isFinite(findDeal.deal.initialBalances?.base) &&
@@ -15237,6 +15308,78 @@ function createDCABotHelper<
       }
     }
 
+    /**
+     * Add an out-of-band correction to this bot's realized-profit aggregate
+     * (core spec 239). Internal-API method, reached by bot id through
+     * `callBotFunctionFromMeta` on the DCA bot host.
+     *
+     * The worker owns `data.profit` while it runs (it `$set`s the whole object
+     * on every booking and restores it from the Redis snapshot on a service
+     * restart), so a correction written to the database alone is overwritten
+     * at the next booking. This adds the delta to the in-memory copy, then
+     * persists it like a booking does, plus the id in `profitCorrections` so a
+     * repeat of the same correction is a no-op.
+     *
+     * Returns `applied`, `duplicate`, or `refused: <why>`. Never throws: a
+     * throw inside a worker method leaves the caller's RPC without a reply.
+     */
+    public async applyProfitCorrection(
+      delta: ProfitCorrectionDelta,
+      reason: string,
+      correctionId: string,
+    ): Promise<string> {
+      let added = false
+      try {
+        const invalid = invalidProfitCorrection(delta, correctionId)
+        if (invalid) {
+          return `refused: ${invalid}`
+        }
+        if (this.botType !== BotType.dca || this.combo) {
+          return 'refused: only a DCA bot keeps profitCorrections'
+        }
+        if (!this.loadingComplete || !this.data?.profit) {
+          // loadData() would replace `data` from the snapshot after us.
+          return 'refused: bot data not loaded yet'
+        }
+        const applied: string[] =
+          (this.data as { profitCorrections?: string[] }).profitCorrections ??
+          []
+        if (applied.includes(correctionId)) {
+          this.handleLog(`Profit correction ${correctionId} already applied`)
+          return 'duplicate'
+        }
+        const before = this.data.profit
+        const profitCorrections = [...applied, correctionId]
+        this.data.profit = addProfitCorrection(this.data.profit, delta)
+        ;(this.data as { profitCorrections?: string[] }).profitCorrections =
+          profitCorrections
+        added = true
+        this.handleLog(
+          `Profit correction ${correctionId} (${reason}): total ${before.total} -> ${this.data.profit.total}, totalUsd ${before.totalUsd} -> ${this.data.profit.totalUsd}, pureBase ${before.pureBase ?? 0} -> ${this.data.profit.pureBase}, pureQuote ${before.pureQuote ?? 0} -> ${this.data.profit.pureQuote}`,
+        )
+        await this.updateData({
+          profit: { ...this.data.profit },
+          profitCorrections,
+        })
+        // updateData schedules the Redis snapshot with a delay; a restart
+        // inside that window would restore the uncorrected profit, so write
+        // the snapshot now.
+        await this.setToRedis(
+          'botData',
+          //@ts-ignore
+          convertDCABotToObject(this.data),
+        )
+        this.emit('bot settings update', { profit: this.data.profit })
+        return 'applied'
+      } catch (e) {
+        const why = (e as Error)?.message ?? `${e}`
+        this.handleWarn(`Profit correction ${correctionId} failed: ${why}`)
+        // Once added in memory the correction stays: the next booking
+        // persists it, and a repeat must still be a no-op.
+        return added ? `applied, persist failed: ${why}` : `refused: ${why}`
+      }
+    }
+
     public async startIndicatorInit(
       serviceRestart: boolean,
       activeDeals: number,
@@ -22242,7 +22385,7 @@ function createDCABotHelper<
         )
         return 'held'
       }
-      this.handleDebug(
+      this.handleLog(
         `Hedge funding ${action}: ${decision.mode}, safety orders need ${decision.required} ${decision.needAsset}, held ${decision.held}, used ${decision.heldUsed}, price ${price}`,
       )
       const entryPrice = +this.math.round(price, ed.priceAssetPrecision)
@@ -22890,16 +23033,26 @@ function createDCABotHelper<
       const lotId =
         executed > 0 ? await this.recordFundingLot(symbol, dealId, r, price) : ''
       // (b) A fill short within the tolerance funds the deal as executed.
+      // A quantity raised to the exchange minimum buys more than the deal
+      // needs: judge the fill against the need, not the raised order.
       const step = ed?.baseAsset.step ?? 0
-      const shortfall = Math.max(0, trade.baseQty - executed)
-      if (shortfall > trade.baseQty * FUNDING_FILL_TOLERANCE + step + 1e-12) {
+      const need =
+        trade.raisedToMin && trade.needQty > 0
+          ? Math.min(trade.needQty, trade.baseQty)
+          : trade.baseQty
+      const needNote =
+        need < trade.baseQty
+          ? `, raised to the exchange minimum; needed ${need}`
+          : ''
+      const shortfall = Math.max(0, need - executed)
+      if (shortfall > need * FUNDING_FILL_TOLERANCE + step + 1e-12) {
         return report(
-          `the order filled ${executed} of ${trade.baseQty}${lotId ? ` (recorded in funding lot ${lotId})` : ''}`,
+          `the order filled ${executed} of ${trade.baseQty}${needNote}${lotId ? ` (recorded in funding lot ${lotId})` : ''}`,
         )
       }
-      if (shortfall > 1e-12) {
+      if (executed < trade.baseQty - 1e-12) {
         this.handleLog(
-          `Funding trade ${id} filled ${executed} of ${trade.baseQty} ${ed?.baseAsset.name ?? ''} (short ${this.math.round(shortfall, 12)}, within tolerance): the deal is funded with what executed`,
+          `Funding trade ${id} filled ${executed} of ${trade.baseQty} ${ed?.baseAsset.name ?? ''}${needNote} (short ${this.math.round(shortfall, 12)} of the need, within tolerance): the deal is funded with what executed`,
         )
       }
       return { lotId, executed }
